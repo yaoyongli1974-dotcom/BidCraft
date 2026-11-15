@@ -1258,6 +1258,135 @@
   line-height: 1.7;
 }
 
+/* 摘要条里的税额与含税合计 */
+.boq-quote-total--tax {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--ink-2);
+}
+
+.boq-tax-tag {
+  padding: 0 5px;
+  border: 1px solid rgba(156, 115, 40, 0.22);
+  border-radius: 3px;
+  background: var(--brass-soft);
+  color: var(--brass);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  line-height: 1.7;
+}
+
+/* ------------------------------------------------------------------ 报价版本 */
+
+.boq-version-save {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px 16px;
+  flex-wrap: wrap;
+  padding-bottom: 11px;
+  margin-bottom: 11px;
+  border-bottom: 1px dotted var(--line);
+}
+
+.boq-version-save .price-policy-field {
+  flex: 1 1 240px;
+}
+
+.boq-version-save > button {
+  flex: 0 0 auto;
+}
+
+.boq-version-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.boq-version-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.boq-version-item:last-child {
+  border-bottom: 0;
+}
+
+.boq-version-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.boq-version-main > strong {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.boq-version-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 3px 10px;
+  flex-wrap: wrap;
+  color: var(--faint);
+  font-size: 9px;
+}
+
+.boq-version-meta .mono {
+  color: var(--ink-2);
+}
+
+.boq-version-note {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.boq-version-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.boq-version-actions.is-busy {
+  opacity: 0.72;
+}
+
+@media (max-width: 760px) {
+  .boq-version-save > button {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .boq-version-item {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .boq-version-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .price-policy-body {
     animation: none;

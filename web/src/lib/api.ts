@@ -16,9 +16,11 @@ import type {
   BoqLedgerSummary,
   BoqPayload,
   BoqPrice,
+  BoqQuoteVersion,
   BoqRow,
   BoqSnapshot,
   BoqSummary,
+  BoqVersionDeleteResult,
   ChapterConflict,
   CreditAdjustResult,
   KnowledgeBase,
@@ -51,6 +53,7 @@ import type {
   PluginInput,
   PluginTestResult,
   PricePolicy,
+  PriceCurrency,
   Project,
   ProjectDetail,
   QuotaFillResult,
@@ -1440,7 +1443,12 @@ function boqNumber(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
 }
 
-function normalizeBoqSummary(value: unknown): BoqSummary {
+/** 可空数值字段：缺失、null 或非有限数一律视为 null（旧后端不带该字段）。 */
+function nullableNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+export function normalizeBoqSummary(value: unknown): BoqSummary {
   const source = value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
   return {
     boq_rows: boqNumber(source.boq_rows),
@@ -1462,6 +1470,9 @@ function normalizeBoqSummary(value: unknown): BoqSummary {
       typeof source.adjusted_total === 'number' && Number.isFinite(source.adjusted_total)
         ? source.adjusted_total
         : null,
+    // 税额与含税合计仅在税率为正时由后端返回；缺失时保持 null，避免误显 0。
+    tax_amount: nullableNumber(source.tax_amount),
+    total_with_tax: nullableNumber(source.total_with_tax),
   }
 }
 
@@ -1593,6 +1604,123 @@ export const deleteBoq = (ref: string, packageId?: string | null) =>
     { method: 'DELETE' },
   )
 
+// ---------------------------------------------------------------- 报价版本
+
+/**
+ * 归一化一个报价版本。列表接口不含 prices，详情接口才带回单价快照，
+ * 因此 prices 缺失时保持 undefined 而不是空对象（便于区分「没有单价」与「未返回」）。
+ */
+export function normalizeBoqQuoteVersion(value: unknown): BoqQuoteVersion | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const source = value as Record<string, unknown>
+  const id = asText(source.id).trim()
+  if (!id) return null
+  const rawPrices = source.prices
+  let prices: Record<string, number> | undefined
+  if (rawPrices && typeof rawPrices === 'object' && !Array.isArray(rawPrices)) {
+    prices = {}
+    for (const [key, raw] of Object.entries(rawPrices as Record<string, unknown>)) {
+      if (typeof raw === 'number' && Number.isFinite(raw)) prices[key] = raw
+    }
+  }
+  const packageId = asText(source.package_id).trim()
+  return {
+    id,
+    name: asText(source.name),
+    note: asText(source.note),
+    package_id: packageId || null,
+    summary: normalizeBoqSummary(source.summary),
+    created_at: typeof source.created_at === 'string' ? source.created_at : null,
+    price_count: boqNumber(source.price_count),
+    ...(prices ? { prices } : {}),
+  }
+}
+
+/** 列出项目（或指定包件）的报价版本，最新的在前。 */
+export async function listBoqVersions(
+  ref: string,
+  packageId?: string | null,
+): Promise<BoqQuoteVersion[]> {
+  const data = await request<unknown>(
+    `/projects/${encodeURIComponent(ref)}/boq/versions${boqPackageQuery(packageId)}`,
+  )
+  const list = Array.isArray(data) ? data : asArray<unknown>(data, 'versions')
+  return list
+    .map(normalizeBoqQuoteVersion)
+    .filter((item): item is BoqQuoteVersion => item !== null)
+}
+
+/** 把当前清单单价与汇总保存为一个版本。 */
+export async function createBoqVersion(
+  ref: string,
+  input: { name: string; note?: string; package_id?: string | null },
+): Promise<BoqQuoteVersion> {
+  const packageId = (input.package_id || '').trim()
+  const note = (input.note || '').trim()
+  const data = await request<unknown>(
+    `/projects/${encodeURIComponent(ref)}/boq/versions`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        name: input.name.trim(),
+        ...(note ? { note } : {}),
+        ...(packageId ? { package_id: packageId } : {}),
+      }),
+    },
+  )
+  return (
+    normalizeBoqQuoteVersion(data) ?? {
+      id: '',
+      name: input.name.trim(),
+      note,
+      package_id: packageId || null,
+      summary: normalizeBoqSummary(null),
+      created_at: null,
+      price_count: 0,
+    }
+  )
+}
+
+/** 读取版本详情（含单价快照）。 */
+export async function getBoqVersion(
+  ref: string,
+  versionId: string,
+): Promise<BoqQuoteVersion> {
+  const data = await request<unknown>(
+    `/projects/${encodeURIComponent(ref)}/boq/versions/${encodeURIComponent(versionId)}`,
+  )
+  const version = normalizeBoqQuoteVersion(data)
+  if (!version) throw new ApiError(0, null, '报价版本返回了无法识别的数据。')
+  return version
+}
+
+/** 把版本单价写回当前清单，返回最新的 BOQ payload。 */
+export async function restoreBoqVersion(
+  ref: string,
+  versionId: string,
+): Promise<BoqPayload> {
+  const data = await request<unknown>(
+    `/projects/${encodeURIComponent(ref)}/boq/versions/${encodeURIComponent(versionId)}/restore`,
+    { method: 'POST' },
+  )
+  return normalizeBoqPayload(data)
+}
+
+export async function deleteBoqVersion(
+  ref: string,
+  versionId: string,
+): Promise<BoqVersionDeleteResult> {
+  const data = await request<unknown>(
+    `/projects/${encodeURIComponent(ref)}/boq/versions/${encodeURIComponent(versionId)}`,
+    { method: 'DELETE' },
+  )
+  const source = data && typeof data === 'object' ? (data as Record<string, unknown>) : {}
+  return {
+    deleted: asBool(source.deleted),
+    id: asText(source.id) || versionId,
+  }
+}
+
 export async function exportBoq(
   ref: string,
   packageId?: string | null,
@@ -1678,6 +1806,17 @@ export const DEFAULT_PRICE_POLICY: PricePolicy = {
   enabled: false,
   factor: 1,
   round_digits: 2,
+  tax_rate: 0,
+  currency: 'CNY',
+}
+
+const PRICE_CURRENCIES: readonly PriceCurrency[] = ['CNY', 'USD', 'EUR', 'HKD']
+
+function normalizeCurrency(value: unknown): PriceCurrency {
+  const text = typeof value === 'string' ? value.trim().toUpperCase() : ''
+  return (PRICE_CURRENCIES as readonly string[]).includes(text)
+    ? (text as PriceCurrency)
+    : 'CNY'
 }
 
 function clampNumber(value: number, min: number, max: number): number {
@@ -1707,6 +1846,9 @@ export function normalizePricePolicy(value: unknown): PricePolicy {
     enabled: asLooseBool(source.enabled, false),
     factor,
     round_digits: Math.round(clampNumber(asNumber(source.round_digits, 2), 0, 4)),
+    // 税率按后端 0–0.5 的区间 clamp；非法值回退到 0（免税）。
+    tax_rate: Math.round(clampNumber(asNumber(source.tax_rate, 0), 0, 0.5) * 10000) / 10000,
+    currency: normalizeCurrency(source.currency),
   }
 }
 

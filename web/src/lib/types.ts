@@ -810,6 +810,10 @@ export interface BoqSummary {
    * 启用调价策略后按系数与小数位四舍五入的合计；策略未启用（或旧后端不返回）时为 null。
    */
   adjusted_total: number | null
+  /** 按税率计算的税额；税率为 0 或旧后端不返回时为 null。 */
+  tax_amount: number | null
+  /** 含税合计（total + tax_amount）；total 缺失时为 null。 */
+  total_with_tax: number | null
 }
 
 export interface BoqLedgerSummary {
@@ -822,6 +826,26 @@ export interface BoqPayload {
   rows: BoqRow[]
   summary: BoqSummary
   ledger_summary?: BoqLedgerSummary
+}
+
+/** 报价版本：某一时点该包件清单的单价与汇总快照。 */
+export interface BoqQuoteVersion {
+  id: string
+  name: string
+  note: string
+  package_id: string | null
+  summary: BoqSummary
+  created_at: string | null
+  /** 快照中已录入单价的条目数。 */
+  price_count: number
+  /** 仅详情接口返回：按清单行 key 保存的单价。 */
+  prices?: Record<string, number> | null
+}
+
+/** 删除版本的响应。 */
+export interface BoqVersionDeleteResult {
+  deleted: boolean
+  id: string
 }
 
 // ---------------------------------------------------------------- 企业定额库
@@ -878,11 +902,17 @@ export interface QuotaFillResult {
 
 // ---------------------------------------------------------------- 调价策略
 
-/** 项目级调价策略；factor 0.1–10，round_digits 0–4。 */
+/** 报价币种，与后端的枚举保持一致。 */
+export type PriceCurrency = 'CNY' | 'USD' | 'EUR' | 'HKD'
+
+/** 项目级调价策略；factor 0.1–10，round_digits 0–4，tax_rate 0–0.5。 */
 export interface PricePolicy {
   enabled: boolean
   factor: number
   round_digits: number
+  /** 税率（小数形式，例如 0.09 表示 9%）；0–0.5。 */
+  tax_rate: number
+  currency: PriceCurrency
 }
 
 // ---------------------------------------------------------------- 协作与审计

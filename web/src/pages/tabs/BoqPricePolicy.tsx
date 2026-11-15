@@ -5,7 +5,7 @@ import {
   Save,
   TrendingUp,
 } from 'lucide-react'
-import type { BoqPayload, PricePolicy } from '../../lib/types'
+import type { BoqPayload, PriceCurrency, PricePolicy } from '../../lib/types'
 import {
   adjustBoq,
   messageOf,
@@ -23,6 +23,8 @@ function clampPolicy(policy: PricePolicy): PricePolicy {
     enabled: policy.enabled,
     factor: policy.factor,
     round_digits: policy.round_digits,
+    tax_rate: policy.tax_rate,
+    currency: policy.currency,
   })
 }
 
@@ -30,14 +32,25 @@ function samePolicy(left: PricePolicy, right: PricePolicy): boolean {
   return (
     left.enabled === right.enabled &&
     left.factor === right.factor &&
-    left.round_digits === right.round_digits
+    left.round_digits === right.round_digits &&
+    left.tax_rate === right.tax_rate &&
+    left.currency === right.currency
   )
 }
 
+const CURRENCY_OPTIONS: Array<{ value: PriceCurrency; label: string }> = [
+  { value: 'CNY', label: '人民币 CNY' },
+  { value: 'USD', label: '美元 USD' },
+  { value: 'EUR', label: '欧元 EUR' },
+  { value: 'HKD', label: '港币 HKD' },
+]
+
 function policySummary(policy: PricePolicy, adjusted: number | null): string {
   const factor = formatMoney(policy.factor, 2)
-  if (!policy.enabled) return `已保存系数 ×${factor}，当前按原价合计`
-  return `×${factor} · ${policy.round_digits} 位小数${
+  const tax = policy.tax_rate > 0 ? ` · 含税 ${formatMoney(policy.tax_rate * 100, 2)}%` : ' · 免税'
+  const currency = policy.currency === 'CNY' ? '' : ` · ${policy.currency}`
+  if (!policy.enabled) return `已保存系数 ×${factor}${tax}${currency}，当前按原价合计`
+  return `×${factor} · ${policy.round_digits} 位小数${tax}${currency}${
     adjusted === null ? '' : ` · 调整后合计 ¥${formatMoney(adjusted, policy.round_digits)}`
   }`
 }
@@ -240,6 +253,52 @@ export function PricePolicyPanel({
                 </select>
                 <small>调整后合计与导出汇总按此四舍五入</small>
               </label>
+
+              <label className="price-policy-field">
+                <span>税率（%）</span>
+                <input
+                  className="input input--sm input--number"
+                  type="number"
+                  min={0}
+                  max={50}
+                  step={0.5}
+                  inputMode="decimal"
+                  value={Math.round(draft.tax_rate * 1000) / 10}
+                  disabled={!canWrite || saving || adjusting}
+                  onChange={(event) => {
+                    const percent =
+                      event.target.value === '' ? 0 : Number(event.target.value)
+                    if (!Number.isFinite(percent)) return
+                    // 界面按百分比输入，保存时换算为后端使用的小数税率。
+                    patch({
+                      tax_rate: Math.min(50, Math.max(0, percent)) / 100,
+                    })
+                  }}
+                  onBlur={() =>
+                    setDraft((current) => (current ? clampPolicy(current) : current))
+                  }
+                />
+                <small>0 – 50%，0.5% 为一档；0 表示免税</small>
+              </label>
+
+              <label className="price-policy-field">
+                <span>币种</span>
+                <select
+                  className="select select--sm"
+                  value={draft.currency}
+                  disabled={!canWrite || saving || adjusting}
+                  onChange={(event) =>
+                    patch({ currency: event.target.value as PriceCurrency })
+                  }
+                >
+                  {CURRENCY_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <small>用于导出汇总与含税合计的币种标注</small>
+              </label>
             </div>
 
             <div className={className('price-policy-preview', !draft.enabled && 'is-off')}>
@@ -265,7 +324,7 @@ export function PricePolicyPanel({
 
             <div className="price-policy-foot">
               <span className="price-policy-note">
-                「保存策略」只影响摘要与导出；「按系数调价」会把该包件已录入的单价直接乘以系数并覆盖写回，无法撤销。
+                「保存策略」只影响摘要与导出；税率与币种随策略保存，税额按合计计算。「按系数调价」会把该包件已录入的单价直接乘以系数并覆盖写回，无法撤销。
               </span>
               <div className="price-policy-actions">
                 {dirty && <span className="price-policy-dirty">未保存</span>}

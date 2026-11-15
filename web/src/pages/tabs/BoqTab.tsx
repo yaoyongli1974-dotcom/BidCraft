@@ -45,6 +45,7 @@ import {
 } from './BoqPackages'
 import { loadBoqPackageState } from './boqPackageState'
 import { PricePolicyPanel } from './BoqPricePolicy'
+import { QuoteVersionsPanel } from './BoqVersions'
 import { QuotaFillModal } from './BoqQuotaFill'
 
 type BoqFilter =
@@ -447,6 +448,11 @@ export function BoqTab() {
     setStale(null)
   }
 
+  const handleVersionRestored = (payload: BoqPayload) => {
+    boqQuery.setData(payload)
+    setStale(null)
+  }
+
   const retry = () => boqQuery.refresh()
 
   const matchPercent = summary ? Math.round((summary.match_rate || 0) * 100) : 0
@@ -646,6 +652,14 @@ export function BoqTab() {
                 onRetry={policyQuery.refresh}
                 onSaved={handlePolicySaved}
                 onAdjusted={handleAdjusted}
+              />
+
+              <QuoteVersionsPanel
+                projectRef={ref}
+                packageId={packageId}
+                packageName={currentPackage?.name}
+                canWrite={canWrite}
+                onRestored={handleVersionRestored}
               />
 
               <section className="ledger-card">
@@ -1066,6 +1080,8 @@ function SummaryStrip({
     unpriced: number
     quantity_missing: number
     total_amount: number
+    tax_amount?: number | null
+    total_with_tax?: number | null
   }
   matchPercent: number
   policy: PricePolicy | null
@@ -1075,6 +1091,14 @@ function SummaryStrip({
   const aligned = s ? s.matched + s.total_diffs : 0
   const quoted = s ? s.priced + s.unpriced : 0
   const showAdjusted = Boolean(policy?.enabled) && adjustedTotal !== null
+  // 税率来自策略；税额/含税合计以后端 summary 为准，旧后端缺字段时按税率本地推算。
+  const taxRate = policy?.tax_rate ?? 0
+  const taxAmount =
+    s?.tax_amount ?? (s && taxRate > 0 ? roundTo(s.total_amount * taxRate, 2) : null)
+  const totalWithTax =
+    s?.total_with_tax ??
+    (s && taxAmount !== null ? roundTo(s.total_amount + taxAmount, 2) : null)
+  const showTax = taxRate > 0 && taxAmount !== null && totalWithTax !== null
   return (
     <section className="ledger-summary boq-summary">
       <div className="ledger-summary-main">
@@ -1143,6 +1167,21 @@ function SummaryStrip({
               ¥{formatMoney(adjustedTotal, policy.round_digits)}
             </strong>
           </span>
+        )}
+        {showTax && (
+          <>
+            <span className="boq-quote-total boq-quote-total--tax">
+              税额
+              <strong className="mono">¥{money(taxAmount)}</strong>
+            </span>
+            <span className="boq-quote-total boq-quote-total--tax">
+              <span className="boq-tax-tag">
+                {formatMoney(taxRate * 100, 2)}%
+              </span>
+              含税合计
+              <strong className="mono">¥{money(totalWithTax)}</strong>
+            </span>
+          </>
         )}
       </div>
     </section>

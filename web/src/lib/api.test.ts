@@ -5,11 +5,18 @@ import {
   DEFAULT_PRICE_POLICY,
   UNAUTHORIZED_EVENT,
   apiFetch,
+  createBoqVersion,
+  deleteBoqVersion,
   errorDetailText,
+  getBoqVersion,
+  listBoqVersions,
   messageOf,
+  normalizeBoqQuoteVersion,
+  normalizeBoqSummary,
   normalizeImagePolicy,
   normalizePricePolicy,
   reindexKnowledgeBase,
+  restoreBoqVersion,
   roundTo,
   uploadForm,
 } from './api'
@@ -76,7 +83,13 @@ describe('normalizePricePolicy', () => {
   it('reads the nested price_policy wrapper used by the API', () => {
     expect(
       normalizePricePolicy({ price_policy: { enabled: 'true', factor: 1.15, round_digits: 1 } }),
-    ).toEqual({ enabled: true, factor: 1.15, round_digits: 1 })
+    ).toEqual({
+      enabled: true,
+      factor: 1.15,
+      round_digits: 1,
+      tax_rate: 0,
+      currency: 'CNY',
+    })
   })
 
   it('clamps the factor and rounding digits into the contract range', () => {
@@ -89,6 +102,175 @@ describe('normalizePricePolicy', () => {
   it('treats explicit falsey strings as disabled', () => {
     expect(normalizePricePolicy({ enabled: 'off' }).enabled).toBe(false)
     expect(normalizePricePolicy({ enabled: 0 }).enabled).toBe(false)
+  })
+
+  it('clamps the tax rate and normalises the currency enum', () => {
+    expect(normalizePricePolicy({ tax_rate: 0.09 }).tax_rate).toBe(0.09)
+    expect(normalizePricePolicy({ tax_rate: 0.6 }).tax_rate).toBe(0.5)
+    expect(normalizePricePolicy({ tax_rate: -1 }).tax_rate).toBe(0)
+    expect(normalizePricePolicy({ tax_rate: '0.13' }).tax_rate).toBe(0.13)
+    expect(normalizePricePolicy({ tax_rate: 'not-a-number' }).tax_rate).toBe(0)
+    expect(normalizePricePolicy({ currency: 'usd' }).currency).toBe('USD')
+    expect(normalizePricePolicy({ currency: 'GBP' }).currency).toBe('CNY')
+    expect(normalizePricePolicy({ currency: null }).currency).toBe('CNY')
+  })
+})
+
+describe('normalizeBoqSummary', () => {
+  it('keeps the tax fields from the backend summary', () => {
+    const summary = normalizeBoqSummary({
+      total_amount: 1000,
+      tax_amount: 90,
+      total_with_tax: 1090,
+    })
+    expect(summary.total_amount).toBe(1000)
+    expect(summary.tax_amount).toBe(90)
+    expect(summary.total_with_tax).toBe(1090)
+  })
+
+  it('returns null tax fields when the backend omits them', () => {
+    const summary = normalizeBoqSummary({ total_amount: 1000 })
+    expect(summary.tax_amount).toBeNull()
+    expect(summary.total_with_tax).toBeNull()
+  })
+
+  it('treats non-numeric tax fields as missing', () => {
+    const summary = normalizeBoqSummary({
+      tax_amount: '90',
+      total_with_tax: Number.NaN,
+    })
+    expect(summary.tax_amount).toBeNull()
+    expect(summary.total_with_tax).toBeNull()
+  })
+})
+
+describe('boq quote versions', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const jsonResponse = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+  it('normalizes a version payload and filters invalid prices', () => {
+    const version = normalizeBoqQuoteVersion({
+      id: 'v-1',
+      name: '版本 1',
+      note: '含税报价',
+      package_id: 'pkg-1',
+      summary: { total_amount: 100, tax_amount: 9, total_with_tax: 109 },
+      created_at: '2026-11-16T08:30:00+08:00',
+      price_count: 3,
+      prices: { 'sheet!2': 12.5, 'sheet!3': 'oops', 'sheet!4': null },
+    })
+    expect(version).toMatchObject({
+      id: 'v-1',
+      name: '版本 1',
+      note: '含税报价',
+      package_id: 'pkg-1',
+      created_at: '2026-11-16T08:30:00+08:00',
+      price_count: 3,
+    })
+    expect(version?.summary.total_with_tax).toBe(109)
+    expect(version?.prices).toEqual({ 'sheet!2': 12.5 })
+    expect(normalizeBoqQuoteVersion({ name: '缺少 id' })).toBeNull()
+    expect(normalizeBoqQuoteVersion(null)).toBeNull()
+  })
+
+  it('lists versions for the current package and fills missing fields', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse([
+        {
+          id: 'v-2',
+          name: '版本 2',
+          summary: { total_amount: 88 },
+          price_count: 2,
+        },
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const versions = await listBoqVersions('p/1', 'pkg-1')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      '/projects/p%2F1/boq/versions?package_id=pkg-1',
+    )
+    expect(versions).toHaveLength(1)
+    expect(versions[0]).toMatchObject({
+      id: 'v-2',
+      name: '版本 2',
+      note: '',
+      package_id: null,
+      created_at: null,
+      price_count: 2,
+    })
+    expect(versions[0].summary.total_with_tax).toBeNull()
+  })
+
+  it('posts a new version with the package id', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({ id: 'v-3', name: '版本 3', note: '下浮', price_count: 0 }, 201),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const created = await createBoqVersion('proj-1', {
+      name: ' 版本 3 ',
+      note: '下浮',
+      package_id: 'pkg-9',
+    })
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(fetchMock.mock.calls[0][0]).toBe('/projects/proj-1/boq/versions')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({
+      name: '版本 3',
+      note: '下浮',
+      package_id: 'pkg-9',
+    })
+    expect(created.id).toBe('v-3')
+    expect(created.created_at).toBeNull()
+  })
+
+  it('reads version detail and restores it into a normalized BOQ payload', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({ id: 'v-4', name: '版本 4', prices: { 'sheet!2': 9 } }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          snapshot: { id: 's1', filename: 'a.xlsx', sheet: 'Sheet1', header_row: 2, item_count: 1 },
+          rows: [{ key: 'sheet!2', name: '管材', price: { unit_price: 9 } }],
+          summary: { total_amount: 90, tax_amount: 8.1, total_with_tax: 98.1 },
+        }),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const detail = await getBoqVersion('proj-1', 'v/4')
+    expect(fetchMock.mock.calls[0][0]).toBe('/projects/proj-1/boq/versions/v%2F4')
+    expect(detail.prices).toEqual({ 'sheet!2': 9 })
+
+    const payload = await restoreBoqVersion('proj-1', 'v/4')
+    const init = fetchMock.mock.calls[1][1] as RequestInit
+    expect(fetchMock.mock.calls[1][0]).toBe(
+      '/projects/proj-1/boq/versions/v%2F4/restore',
+    )
+    expect(init.method).toBe('POST')
+    expect(payload.rows[0].price?.unit_price).toBe(9)
+    expect(payload.summary.total_with_tax).toBe(98.1)
+  })
+
+  it('normalizes the delete response', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({ deleted: true, id: 'v-5' }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(deleteBoqVersion('proj-1', 'v-5')).resolves.toEqual({
+      deleted: true,
+      id: 'v-5',
+    })
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.method).toBe('DELETE')
   })
 })
 

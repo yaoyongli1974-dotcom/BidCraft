@@ -21,11 +21,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .config import settings
-from .models import BidPackage, BoqSnapshot, Material, Project, QuotaItem, SourceFile
+from .models import (
+    BidPackage,
+    BoqQuoteVersion,
+    BoqSnapshot,
+    Material,
+    Project,
+    QuotaItem,
+    SourceFile,
+)
 from .pipeline import add_source
 
 logger = logging.getLogger("bidcraft.boq")
@@ -444,6 +452,8 @@ EMPTY_SUMMARY: dict[str, Any] = {
     "unpriced": 0,
     "quantity_missing": 0,
     "total_amount": 0.0,
+    "tax_amount": 0.0,
+    "total_with_tax": 0.0,
 }
 
 
@@ -639,6 +649,7 @@ def build_payload(
     if snapshot is None:
         summary = dict(EMPTY_SUMMARY)
         summary["adjusted_total"] = _adjusted_total(summary, policy)
+        _apply_tax(summary, policy)
         return {
             "snapshot": None,
             "rows": [],
@@ -660,6 +671,7 @@ def build_payload(
     )
     summary = _summarize(rows, len(items))
     summary["adjusted_total"] = _adjusted_total(summary, policy)
+    _apply_tax(summary, policy)
     ledger_summary = {
         "materials": len(materials),
         "matched": len(materials) - summary["missing_in_boq"],
@@ -672,6 +684,128 @@ def build_payload(
         "ledger_summary": ledger_summary,
         "price_policy": policy,
     }
+
+
+MAX_QUOTE_VERSIONS = 20
+QUOTE_VERSION_NAME_MAX = 80
+QUOTE_VERSION_NOTE_MAX = 200
+
+
+def version_payload(version: BoqQuoteVersion, *, include_prices: bool = False) -> dict[str, Any]:
+    """Serialize one quote version; the detail payload additionally carries prices."""
+    prices = dict(version.prices or {})
+    payload: dict[str, Any] = {
+        "id": version.id,
+        "name": version.name,
+        "note": version.note or "",
+        "package_id": version.package_id,
+        "summary": dict(version.summary or {}),
+        "created_at": version.created_at.isoformat() if version.created_at else None,
+        "price_count": len(prices),
+    }
+    if include_prices:
+        payload["prices"] = prices
+    return payload
+
+
+def _version_statement(project_id: str, package_id: str | None):
+    statement = select(BoqQuoteVersion).where(BoqQuoteVersion.project_id == project_id)
+    if package_id is None:
+        statement = statement.where(BoqQuoteVersion.package_id.is_(None))
+    else:
+        statement = statement.where(BoqQuoteVersion.package_id == package_id)
+    return statement
+
+
+def count_versions(db: Session, project_id: str, package_id: str | None = None) -> int:
+    statement = select(func.count()).select_from(BoqQuoteVersion).where(
+        BoqQuoteVersion.project_id == project_id
+    )
+    if package_id is None:
+        statement = statement.where(BoqQuoteVersion.package_id.is_(None))
+    else:
+        statement = statement.where(BoqQuoteVersion.package_id == package_id)
+    return int(db.scalar(statement) or 0)
+
+
+def list_versions(
+    db: Session, project: Project, package_id: str | None = None
+) -> list[dict[str, Any]]:
+    """List saved versions of one package, newest first (without prices)."""
+    package = resolve_package(db, project, package_id)
+    resolved = package.id if package else None
+    rows = db.scalars(
+        _version_statement(project.id, resolved).order_by(
+            BoqQuoteVersion.created_at.desc(), BoqQuoteVersion.id.desc()
+        )
+    )
+    return [version_payload(row) for row in rows]
+
+
+def get_version(
+    db: Session, project_id: str, version_id: str
+) -> BoqQuoteVersion | None:
+    version = db.get(BoqQuoteVersion, version_id)
+    if version is None or version.project_id != project_id:
+        return None
+    return version
+
+
+def save_version(
+    db: Session,
+    project: Project,
+    name: str,
+    note: str = "",
+    package_id: str | None = None,
+) -> dict[str, Any]:
+    """Freeze the package's current prices and summary as a new version."""
+    clean_name = (name or "").strip()
+    if not clean_name:
+        raise ValueError("版本名称不能为空")
+    if len(clean_name) > QUOTE_VERSION_NAME_MAX:
+        raise ValueError(f"版本名称不能超过 {QUOTE_VERSION_NAME_MAX} 个字符")
+    package = resolve_package(db, project, package_id)
+    resolved = package.id if package else None
+    snapshot = get_snapshot(db, project.id, resolved)
+    if snapshot is None:
+        raise BoqConflictError("尚未上传工程量清单，请先导入清单文件")
+    if count_versions(db, project.id, resolved) >= MAX_QUOTE_VERSIONS:
+        raise BoqConflictError(f"版本数已达上限（{MAX_QUOTE_VERSIONS}）")
+    payload = build_payload(db, project.id, resolved)
+    version = BoqQuoteVersion(
+        project_id=project.id,
+        package_id=resolved,
+        name=clean_name,
+        note=(note or "").strip()[:QUOTE_VERSION_NOTE_MAX],
+        prices=dict(snapshot.prices or {}),
+        summary=dict(payload.get("summary") or {}),
+    )
+    db.add(version)
+    db.flush()
+    return version_payload(version)
+
+
+def restore_version(
+    db: Session, project: Project, version_id: str
+) -> dict[str, Any]:
+    """Write one version's prices back onto its package's active snapshot."""
+    version = get_version(db, project.id, version_id)
+    if version is None:
+        raise LookupError("版本不存在")
+    snapshot = get_snapshot(db, project.id, version.package_id)
+    if snapshot is None:
+        raise BoqConflictError("尚未上传工程量清单，请先导入清单文件")
+    snapshot.prices = dict(version.prices or {})
+    db.flush()
+    return build_payload(db, project.id, version.package_id)
+
+
+def delete_version(db: Session, project: Project, version_id: str) -> None:
+    version = get_version(db, project.id, version_id)
+    if version is None:
+        raise LookupError("版本不存在")
+    db.delete(version)
+    db.flush()
 
 
 def find_row(rows: list[dict[str, Any]], boq_row: int) -> dict[str, Any] | None:
@@ -796,11 +930,18 @@ DEFAULT_PRICE_POLICY: dict[str, Any] = {
     "enabled": False,
     "factor": 1.0,
     "round_digits": 2,
+    "tax_rate": 0.0,
+    "currency": "CNY",
 }
 FACTOR_MIN = 0.1
 FACTOR_MAX = 10.0
 ROUND_DIGITS_MIN = 0
 ROUND_DIGITS_MAX = 4
+TAX_RATE_MIN = 0.0
+TAX_RATE_MAX = 0.5
+DEFAULT_TAX_RATE = 0.0
+CURRENCIES = ("CNY", "USD", "EUR", "HKD")
+DEFAULT_CURRENCY = "CNY"
 
 
 def _clamp_factor(value: Any, default: float = 1.0) -> float:
@@ -823,6 +964,25 @@ def _clamp_round_digits(value: Any, default: int = 2) -> int:
     return min(max(number, ROUND_DIGITS_MIN), ROUND_DIGITS_MAX)
 
 
+def _clamp_tax_rate(value: Any, default: float = DEFAULT_TAX_RATE) -> float:
+    if isinstance(value, bool):
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(number):
+        return default
+    return min(max(number, TAX_RATE_MIN), TAX_RATE_MAX)
+
+
+def _normalize_currency(value: Any, default: str = DEFAULT_CURRENCY) -> str:
+    if not isinstance(value, str):
+        return default
+    code = value.strip().upper()
+    return code if code in CURRENCIES else default
+
+
 def get_price_policy(project: Project | None) -> dict[str, Any]:
     """Return the project's price policy with defaults and range clamping."""
     raw = (project.meta or {}).get("price_policy") if project is not None else None
@@ -834,6 +994,8 @@ def get_price_policy(project: Project | None) -> dict[str, Any]:
         policy["round_digits"] = _clamp_round_digits(
             raw.get("round_digits"), policy["round_digits"]
         )
+        policy["tax_rate"] = _clamp_tax_rate(raw.get("tax_rate"), policy["tax_rate"])
+        policy["currency"] = _normalize_currency(raw.get("currency"), policy["currency"])
     return policy
 
 
@@ -851,6 +1013,10 @@ def set_price_policy(
         candidate["round_digits"] = _clamp_round_digits(
             updates["round_digits"], current["round_digits"]
         )
+    if updates.get("tax_rate") is not None:
+        candidate["tax_rate"] = _clamp_tax_rate(updates["tax_rate"], DEFAULT_TAX_RATE)
+    if updates.get("currency") is not None:
+        candidate["currency"] = _normalize_currency(updates["currency"], DEFAULT_CURRENCY)
     meta = dict(project.meta or {})
     meta["price_policy"] = candidate
     project.meta = meta
@@ -864,6 +1030,20 @@ def _adjusted_total(summary: dict[str, Any], policy: dict[str, Any]) -> float | 
         return None
     total = float(summary.get("total_amount") or 0.0)
     return round(total * float(policy.get("factor", 1.0)), int(policy.get("round_digits", 2)))
+
+
+def _apply_tax(summary: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
+    """Add tax_amount / total_with_tax; both stay ``None`` without a total."""
+    total = summary.get("total_amount")
+    if total is None:
+        summary["tax_amount"] = None
+        summary["total_with_tax"] = None
+        return summary
+    rate = float(policy.get("tax_rate") or 0.0)
+    tax = round(float(total) * rate, 2)
+    summary["tax_amount"] = tax
+    summary["total_with_tax"] = round(float(total) + tax, 2)
+    return summary
 
 
 # ------------------------------------------------------------------- quotas

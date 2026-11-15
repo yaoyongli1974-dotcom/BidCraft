@@ -303,7 +303,13 @@ def test_price_policy_clamp_and_adjusted_total(db, tmp_path):
     client = _client()
     project_id = _seed_boq(client, tmp_path)
     policy = client.get(f"/projects/{project_id}/price-policy").json()
-    assert policy == {"enabled": False, "factor": 1.0, "round_digits": 2}
+    assert policy == {
+        "enabled": False,
+        "factor": 1.0,
+        "round_digits": 2,
+        "tax_rate": 0.0,
+        "currency": "CNY",
+    }
 
     client.post(
         f"/projects/{project_id}/boq/price", json={"boq_row": 2, "unit_price": 10}
@@ -320,12 +326,24 @@ def test_price_policy_clamp_and_adjusted_total(db, tmp_path):
         json={"enabled": True, "factor": 99, "round_digits": 9},
     )
     assert clamped.status_code == 200, clamped.text
-    assert clamped.json() == {"enabled": True, "factor": 10.0, "round_digits": 4}
+    assert clamped.json() == {
+        "enabled": True,
+        "factor": 10.0,
+        "round_digits": 4,
+        "tax_rate": 0.0,
+        "currency": "CNY",
+    }
     low = client.put(
         f"/projects/{project_id}/price-policy",
         json={"factor": 0.001, "round_digits": -3},
     ).json()
-    assert low == {"enabled": True, "factor": 0.1, "round_digits": 0}
+    assert low == {
+        "enabled": True,
+        "factor": 0.1,
+        "round_digits": 0,
+        "tax_rate": 0.0,
+        "currency": "CNY",
+    }
 
     client.put(
         f"/projects/{project_id}/price-policy",

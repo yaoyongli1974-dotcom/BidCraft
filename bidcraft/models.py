@@ -151,6 +151,26 @@ class BoqSnapshot(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class BoqQuoteVersion(Base):
+    """A named snapshot of one package's entered unit prices and quote summary.
+
+    Versions are immutable history: restoring one copies its ``prices`` back
+    onto the active :class:`BoqSnapshot` of the same package. ``package_id`` is
+    NULL for projects that never enabled bid packages.
+    """
+
+    __tablename__ = "boq_quote_versions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    package_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    note: Mapped[str] = mapped_column(String(200), default="")
+    prices: Mapped[dict] = mapped_column(JSON, default=dict)
+    summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class QuotaItem(Base):
     """Enterprise quota entry (企业定额) maintained by a super administrator.
 
@@ -346,6 +366,21 @@ class AuthSession(Base):
     user_agent: Mapped[str] = mapped_column(String(255), default="")
     ip: Mapped[str] = mapped_column(String(64), default="")
     revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class LoginRateLimit(Base):
+    """Persisted failed-login counter so throttling survives process restarts.
+
+    ``hits`` counts failures inside one fixed window starting at
+    ``window_start``; a successful login deletes the row and expired rows are
+    purged on every login attempt.
+    """
+
+    __tablename__ = "login_rate_limits"
+
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    hits: Mapped[int] = mapped_column(Integer, default=0)
+    window_start: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class ModelConfig(Base):

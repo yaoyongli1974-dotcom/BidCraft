@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import func, select
 
 from .config import settings
-from .models import AuthSession, Project, User, utcnow
+from .models import AuthSession, LoginRateLimit, Project, User, utcnow
 from .security import hash_password, new_session_token, token_hash, verify_password
 
 logger = logging.getLogger("bidcraft.auth")
@@ -31,7 +31,6 @@ ROLE_HINTS = {
     ROLE_VIEWER: "只读查看项目、台账、正文与核对结果",
 }
 
-_FAILURES: dict[str, list[float]] = {}
 _FAILURE_WINDOW = 300.0
 _FAILURE_LIMIT = 8
 
@@ -168,11 +167,50 @@ def _throttle_key(username: str) -> str:
     return username.strip().lower()[:80]
 
 
-def _recent_failures(key: str) -> list[float]:
-    now = datetime.now(UTC).timestamp()
-    rows = [value for value in _FAILURES.get(key, []) if now - value < _FAILURE_WINDOW]
-    _FAILURES[key] = rows
-    return rows
+def _failure_count(db, key: str, *, now: datetime | None = None) -> int:
+    """Failures still inside the current window (expired counters count as 0)."""
+    row = db.get(LoginRateLimit, key)
+    if row is None or row.window_start is None:
+        return 0
+    moment = now or utcnow()
+    if (moment - row.window_start).total_seconds() >= _FAILURE_WINDOW:
+        return 0
+    return int(row.hits or 0)
+
+
+def purge_expired_rate_limits(db, *, now: datetime | None = None) -> int:
+    """Delete counters whose window has fully elapsed; returns the row count."""
+    moment = now or utcnow()
+    cutoff = moment - timedelta(seconds=_FAILURE_WINDOW)
+    rows = list(
+        db.scalars(select(LoginRateLimit).where(LoginRateLimit.window_start <= cutoff))
+    )
+    for row in rows:
+        db.delete(row)
+    db.flush()
+    return len(rows)
+
+
+def _record_failure(db, key: str, *, now: datetime | None = None) -> int:
+    moment = now or utcnow()
+    purge_expired_rate_limits(db, now=moment)
+    row = db.get(LoginRateLimit, key)
+    if row is None:
+        row = LoginRateLimit(key=key, hits=1, window_start=moment)
+        db.add(row)
+    else:
+        row.hits = int(row.hits or 0) + 1
+    db.flush()
+    return int(row.hits)
+
+
+def clear_rate_limit(db, key: str) -> bool:
+    row = db.get(LoginRateLimit, key)
+    if row is None:
+        return False
+    db.delete(row)
+    db.flush()
+    return True
 
 
 def create_session(db, user: User, *, user_agent: str = "", ip: str = "") -> str:
@@ -191,14 +229,23 @@ def create_session(db, user: User, *, user_agent: str = "", ip: str = "") -> str
 
 
 def login(db, username: str, password: str, *, user_agent: str = "", ip: str = "") -> tuple[User, str]:
+    from .db import session_scope
+
     key = _throttle_key(username)
-    if len(_recent_failures(key)) >= _FAILURE_LIMIT:
+    # Throttling lives in its own committed session: the request session below
+    # rolls back on a bad password, and counters must survive that.
+    with session_scope() as limits:
+        purge_expired_rate_limits(limits)
+        blocked = _failure_count(limits, key) >= _FAILURE_LIMIT
+    if blocked:
         raise PermissionError("尝试次数过多，请 5 分钟后再试")
     user = db.scalar(select(User).where(func.lower(User.username) == key).limit(1))
     if user is None or not user.active or not verify_password(password, user.password_hash):
-        _recent_failures(key).append(datetime.now(UTC).timestamp())
+        with session_scope() as limits:
+            _record_failure(limits, key)
         raise PermissionError("用户名或密码不正确")
-    _FAILURES.pop(key, None)
+    with session_scope() as limits:
+        clear_rate_limit(limits, key)
     return user, create_session(db, user, user_agent=user_agent, ip=ip)
 
 

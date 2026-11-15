@@ -199,6 +199,12 @@ class BoqPriceRequest(BaseModel):
     package_id: str | None = None
 
 
+class BoqVersionCreate(BaseModel):
+    name: str
+    note: str = ""
+    package_id: str | None = None
+
+
 class BoqQuotaFillRequest(BaseModel):
     package_id: str | None = None
     only_missing: bool = True
@@ -213,6 +219,8 @@ class PricePolicyUpdate(BaseModel):
     enabled: bool | None = None
     factor: float | None = None
     round_digits: int | None = None
+    tax_rate: float | None = None
+    currency: str | None = None
 
 
 class ImagePolicyUpdate(BaseModel):
@@ -1635,6 +1643,9 @@ def create_app():
                     password=payload.password,
                     display_name=payload.display_name,
                 )
+                # Commit the new account before auth.login opens its own session
+                # for the persistent login-throttle counter (SQLite single writer).
+                db.commit()
                 user, token = auth.login(
                     db,
                     user.username,
@@ -4316,6 +4327,84 @@ def create_app():
                 },
             )
             return result
+
+    @app.get("/projects/{ref}/boq/versions")
+    def boq_version_list(
+        ref: str, package_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        with session_scope() as db:
+            project, _role = _project(db, ref)
+            try:
+                return boq.list_versions(db, project, package_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/projects/{ref}/boq/versions", status_code=201)
+    def boq_version_create(ref: str, payload: BoqVersionCreate) -> dict[str, Any]:
+        with session_scope() as db:
+            project, _role = _project(db, ref)
+            _require_write(_role)
+            try:
+                version = boq.save_version(
+                    db,
+                    project,
+                    payload.name,
+                    payload.note,
+                    package_id=payload.package_id,
+                )
+            except boq.BoqConflictError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            audit(
+                db,
+                project.id,
+                "boq.version_save",
+                {
+                    "version_id": version["id"],
+                    "name": version["name"],
+                    "package_id": version["package_id"],
+                },
+            )
+            return version
+
+    @app.get("/projects/{ref}/boq/versions/{version_id}")
+    def boq_version_detail(ref: str, version_id: str) -> dict[str, Any]:
+        with session_scope() as db:
+            project, _role = _project(db, ref)
+            version = boq.get_version(db, project.id, version_id)
+            if version is None:
+                raise LookupError("版本不存在")
+            return boq.version_payload(version, include_prices=True)
+
+    @app.post("/projects/{ref}/boq/versions/{version_id}/restore")
+    def boq_version_restore(ref: str, version_id: str) -> dict[str, Any]:
+        with session_scope() as db:
+            project, _role = _project(db, ref)
+            _require_write(_role)
+            try:
+                result = boq.restore_version(db, project, version_id)
+            except boq.BoqConflictError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            snapshot = result.get("snapshot") or {}
+            audit(
+                db,
+                project.id,
+                "boq.version_restore",
+                {"version_id": version_id, "package_id": snapshot.get("package_id")},
+            )
+            return result
+
+    @app.delete("/projects/{ref}/boq/versions/{version_id}")
+    def boq_version_delete(ref: str, version_id: str) -> dict[str, Any]:
+        with session_scope() as db:
+            project, _role = _project(db, ref)
+            _require_write(_role)
+            boq.delete_version(db, project, version_id)
+            audit(db, project.id, "boq.version_delete", {"version_id": version_id})
+            return {"deleted": True, "id": version_id}
 
     @app.get("/projects/{ref}/price-policy")
     def price_policy_get(ref: str) -> dict[str, Any]:

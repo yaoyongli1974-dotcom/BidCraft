@@ -128,6 +128,9 @@ def _quote_rows(payload: dict[str, Any]) -> list[list[Any]]:
     if policy.get("enabled"):
         rows.append(["调价系数", policy.get("factor", 1.0)])
         rows.append(["调整后合计（元）", summary.get("adjusted_total")])
+    rows.append(["税率", policy.get("tax_rate", 0.0)])
+    rows.append(["税额（元）", summary.get("tax_amount")])
+    rows.append(["含税合计（元）", summary.get("total_with_tax")])
     return rows
 
 
@@ -154,8 +157,15 @@ def export_boq_xlsx(path: str | Path, payload: dict[str, Any]) -> Path:
 
     _add_sheet(workbook, "报价汇总", ["指标", "数值"], _quote_rows(payload))
     quote = workbook["报价汇总"]
+    money_labels = {
+        "报价合计（元）",
+        "调整后合计（元）",
+        "税率",
+        "税额（元）",
+        "含税合计（元）",
+    }
     for row in quote.iter_rows(min_row=2):
-        if row[0].value in {"报价合计（元）", "调整后合计（元）"}:
+        if row[0].value in money_labels:
             row[1].number_format = "#,##0.00"
 
     _add_sheet(workbook, "差异汇总", ["指标", "数量"], _summary_rows(payload))
