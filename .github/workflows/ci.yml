@@ -41,6 +41,9 @@ jobs:
       - name: Test (pytest)
         run: uv run --frozen pytest -q
 
+      - name: Calibration regression (six industry fixtures)
+        run: uv run --frozen bidcraft calibrate tests/fixtures/regression
+
   web:
     name: web (lint + test + build)
     runs-on: ubuntu-latest

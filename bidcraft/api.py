@@ -221,6 +221,7 @@ class PricePolicyUpdate(BaseModel):
     round_digits: int | None = None
     tax_rate: float | None = None
     currency: str | None = None
+    exchange_rate: float | None = None
 
 
 class ImagePolicyUpdate(BaseModel):

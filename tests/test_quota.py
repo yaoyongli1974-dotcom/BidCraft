@@ -309,6 +309,7 @@ def test_price_policy_clamp_and_adjusted_total(db, tmp_path):
         "round_digits": 2,
         "tax_rate": 0.0,
         "currency": "CNY",
+        "exchange_rate": 1.0,
     }
 
     client.post(
@@ -332,6 +333,7 @@ def test_price_policy_clamp_and_adjusted_total(db, tmp_path):
         "round_digits": 4,
         "tax_rate": 0.0,
         "currency": "CNY",
+        "exchange_rate": 1.0,
     }
     low = client.put(
         f"/projects/{project_id}/price-policy",
@@ -343,6 +345,7 @@ def test_price_policy_clamp_and_adjusted_total(db, tmp_path):
         "round_digits": 0,
         "tax_rate": 0.0,
         "currency": "CNY",
+        "exchange_rate": 1.0,
     }
 
     client.put(

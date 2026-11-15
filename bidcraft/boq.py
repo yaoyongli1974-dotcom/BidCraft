@@ -454,6 +454,7 @@ EMPTY_SUMMARY: dict[str, Any] = {
     "total_amount": 0.0,
     "tax_amount": 0.0,
     "total_with_tax": 0.0,
+    "cny_total_with_tax": 0.0,
 }
 
 
@@ -932,6 +933,7 @@ DEFAULT_PRICE_POLICY: dict[str, Any] = {
     "round_digits": 2,
     "tax_rate": 0.0,
     "currency": "CNY",
+    "exchange_rate": 1.0,
 }
 FACTOR_MIN = 0.1
 FACTOR_MAX = 10.0
@@ -940,6 +942,9 @@ ROUND_DIGITS_MAX = 4
 TAX_RATE_MIN = 0.0
 TAX_RATE_MAX = 0.5
 DEFAULT_TAX_RATE = 0.0
+EXCHANGE_RATE_MIN = 0.0001
+EXCHANGE_RATE_MAX = 10000.0
+DEFAULT_EXCHANGE_RATE = 1.0
 CURRENCIES = ("CNY", "USD", "EUR", "HKD")
 DEFAULT_CURRENCY = "CNY"
 
@@ -983,6 +988,28 @@ def _normalize_currency(value: Any, default: str = DEFAULT_CURRENCY) -> str:
     return code if code in CURRENCIES else default
 
 
+def _clamp_exchange_rate(
+    value: Any, default: float = DEFAULT_EXCHANGE_RATE
+) -> float:
+    """1 unit of the quote currency = X CNY; clamp to a sane range."""
+    if isinstance(value, bool):
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(number):
+        return default
+    return min(max(number, EXCHANGE_RATE_MIN), EXCHANGE_RATE_MAX)
+
+
+def _resolve_exchange_rate(currency: str, value: Any, default: float) -> float:
+    """CNY is the base currency, so its exchange rate is always exactly 1."""
+    if currency == DEFAULT_CURRENCY:
+        return DEFAULT_EXCHANGE_RATE
+    return _clamp_exchange_rate(value, default)
+
+
 def get_price_policy(project: Project | None) -> dict[str, Any]:
     """Return the project's price policy with defaults and range clamping."""
     raw = (project.meta or {}).get("price_policy") if project is not None else None
@@ -996,6 +1023,9 @@ def get_price_policy(project: Project | None) -> dict[str, Any]:
         )
         policy["tax_rate"] = _clamp_tax_rate(raw.get("tax_rate"), policy["tax_rate"])
         policy["currency"] = _normalize_currency(raw.get("currency"), policy["currency"])
+        policy["exchange_rate"] = _resolve_exchange_rate(
+            policy["currency"], raw.get("exchange_rate"), policy["exchange_rate"]
+        )
     return policy
 
 
@@ -1017,6 +1047,12 @@ def set_price_policy(
         candidate["tax_rate"] = _clamp_tax_rate(updates["tax_rate"], DEFAULT_TAX_RATE)
     if updates.get("currency") is not None:
         candidate["currency"] = _normalize_currency(updates["currency"], DEFAULT_CURRENCY)
+    if updates.get("exchange_rate") is not None:
+        candidate["exchange_rate"] = _resolve_exchange_rate(
+            candidate["currency"], updates["exchange_rate"], current["exchange_rate"]
+        )
+    if candidate["currency"] == DEFAULT_CURRENCY:
+        candidate["exchange_rate"] = DEFAULT_EXCHANGE_RATE
     meta = dict(project.meta or {})
     meta["price_policy"] = candidate
     project.meta = meta
@@ -1033,16 +1069,29 @@ def _adjusted_total(summary: dict[str, Any], policy: dict[str, Any]) -> float | 
 
 
 def _apply_tax(summary: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
-    """Add tax_amount / total_with_tax; both stay ``None`` without a total."""
+    """Add tax_amount / total_with_tax / cny_total_with_tax.
+
+    The CNY figure converts the tax-inclusive total at the policy exchange rate;
+    all of them stay ``None`` without a total.
+    """
     total = summary.get("total_amount")
     if total is None:
         summary["tax_amount"] = None
         summary["total_with_tax"] = None
+        summary["cny_total_with_tax"] = None
         return summary
     rate = float(policy.get("tax_rate") or 0.0)
     tax = round(float(total) * rate, 2)
     summary["tax_amount"] = tax
     summary["total_with_tax"] = round(float(total) + tax, 2)
+    exchange_rate = _resolve_exchange_rate(
+        policy.get("currency") or DEFAULT_CURRENCY,
+        policy.get("exchange_rate"),
+        DEFAULT_EXCHANGE_RATE,
+    )
+    summary["cny_total_with_tax"] = round(
+        float(summary["total_with_tax"]) * exchange_rate, 2
+    )
     return summary
 
 

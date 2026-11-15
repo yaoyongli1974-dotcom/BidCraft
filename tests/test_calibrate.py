@@ -9,7 +9,7 @@ from openpyxl import Workbook
 from rich.table import Table
 from typer.testing import CliRunner
 
-from bidcraft.calibrate import calibrate_dir, render_report
+from bidcraft.calibrate import CALIBRATION_PACKAGES, calibrate_dir, render_report
 from bidcraft.cli import app
 from bidcraft.parsing.extract import FIELD_ALIAS_AUGMENT, extract
 from bidcraft.parsing.loader import load_document
@@ -60,36 +60,43 @@ def make_boq_xlsx(path: Path) -> Path:
     return path
 
 
+FIXTURE_NAMES = (
+    "weakcurrent-tender.md",
+    "fire-tender.md",
+    "installation-tender.md",
+    "civil-tender.md",
+    "hvac-tender.md",
+    "decoration-tender.md",
+)
+
+
 def make_regression_dir(base: Path) -> Path:
     root = base / "regression"
     root.mkdir()
-    for name in ("weakcurrent-tender.md", "fire-tender.md"):
+    for name in FIXTURE_NAMES:
         shutil.copy(FIXTURES / name, root / name)
     make_boq_xlsx(root / "boq-weakcurrent.xlsx")
     return root
 
 
-def test_calibrate_dir_three_fixtures(tmp_path):
+def test_calibrate_dir_all_fixtures(tmp_path):
     root = make_regression_dir(tmp_path)
     report = calibrate_dir(root)
 
     aggregate = report["aggregate"]
-    assert aggregate["files"] == 3
-    assert aggregate["ok"] == 3
+    assert aggregate["files"] == 7
+    assert aggregate["ok"] == 7
     assert aggregate["failed"] == 0
     assert aggregate["required_hit_rate"] >= 0.8
     assert aggregate["ocr_files"] == 0
 
     files = {item["file"]: item for item in report["per_file"]}
-    assert set(files) == {
-        "weakcurrent-tender.md",
-        "fire-tender.md",
-        "boq-weakcurrent.xlsx",
-    }
+    assert set(files) == {*FIXTURE_NAMES, "boq-weakcurrent.xlsx"}
     assert all(item["error"] is None for item in files.values())
     assert files["boq-weakcurrent.xlsx"]["materials"] >= 5
     assert files["boq-weakcurrent.xlsx"]["tables"] >= 1
     assert files["weakcurrent-tender.md"]["materials"] == 0  # Markdown 无结构表
+    assert all(item["package"] for item in files.values())
 
     for key in (
         "project.number",
@@ -99,7 +106,40 @@ def test_calibrate_dir_three_fixtures(tmp_path):
         "project.deposit",
         "project.bid_validity",
     ):
-        assert aggregate["field_hits"][key] == 3
+        assert aggregate["field_hits"][key] == 7
+
+    by_type = aggregate["by_type"]
+    assert set(by_type) == set(CALIBRATION_PACKAGES)
+    assert by_type["weakcurrent-cabling"] == {
+        "files": 2,
+        "ok": 2,
+        "required_hit_rate": 1.0,
+    }
+    for name, bucket in by_type.items():
+        assert bucket["ok"] == bucket["files"], name
+        assert bucket["required_hit_rate"] >= 0.8, name
+
+
+def test_six_fixtures_map_to_six_packages():
+    report = calibrate_dir(FIXTURES)
+
+    assert report["aggregate"]["files"] == len(FIXTURE_NAMES)
+    assert report["aggregate"]["ok"] == len(FIXTURE_NAMES)
+    assert report["aggregate"]["failed"] == 0
+
+    packages = {item["file"]: item["package"] for item in report["per_file"]}
+    assert packages == {
+        "weakcurrent-tender.md": "weakcurrent-cabling",
+        "fire-tender.md": "fire-protection",
+        "installation-tender.md": "installation",
+        "civil-tender.md": "civil",
+        "hvac-tender.md": "hvac",
+        "decoration-tender.md": "decoration",
+    }
+    by_type = report["aggregate"]["by_type"]
+    assert set(by_type) == set(CALIBRATION_PACKAGES)
+    for name, bucket in by_type.items():
+        assert bucket == {"files": 1, "ok": 1, "required_hit_rate": 1.0}, name
 
 
 def test_fixture_key_facts_and_new_aliases(tmp_path):
@@ -174,7 +214,15 @@ def test_bad_pdf_records_error_and_continues(tmp_path):
     bad = next(item for item in report["per_file"] if item["file"] == "bad.pdf")
     assert bad["error"]
     assert bad["needs_ocr"] is True
+    assert bad["package"] is None
     assert report["aggregate"]["required_hit_rate"] >= 0.8
+    by_type = report["aggregate"]["by_type"]
+    assert by_type["weakcurrent-cabling"]["ok"] == 1
+    assert by_type["common-bid-facts"] == {
+        "files": 1,
+        "ok": 0,
+        "required_hit_rate": 0.0,
+    }
 
 
 def test_recursive_scan(tmp_path):
@@ -195,7 +243,7 @@ def test_render_report_returns_rich_table(tmp_path):
     report = calibrate_dir(make_regression_dir(tmp_path))
     table = render_report(report)
     assert isinstance(table, Table)
-    assert table.row_count == 4  # 3 个文件 + 合计行
+    assert table.row_count == 8  # 7 个文件 + 合计行
 
 
 def test_cli_calibrate_writes_json(tmp_path):
@@ -207,8 +255,9 @@ def test_cli_calibrate_writes_json(tmp_path):
     assert result.exit_code == 0, result.output
     assert "回归校准" in result.output
     data = json.loads(output.read_text(encoding="utf-8"))
-    assert data["aggregate"]["files"] == 3
+    assert data["aggregate"]["files"] == 7
     assert data["aggregate"]["required_hit_rate"] >= 0.8
+    assert set(data["aggregate"]["by_type"]) == set(CALIBRATION_PACKAGES)
 
 
 def test_cli_calibrate_missing_dir_exits_one(tmp_path):

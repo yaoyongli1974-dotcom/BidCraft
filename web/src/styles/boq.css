@@ -1277,6 +1277,28 @@
   line-height: 1.7;
 }
 
+.boq-quote-total--cny {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--jade);
+}
+
+.boq-quote-total--cny strong {
+  color: var(--jade);
+}
+
+.boq-cny-tag {
+  padding: 0 5px;
+  border: 1px solid rgba(47, 107, 85, 0.24);
+  border-radius: 3px;
+  background: var(--jade-soft);
+  color: var(--jade);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  line-height: 1.7;
+}
+
 /* ------------------------------------------------------------------ 报价版本 */
 
 .boq-version-save {

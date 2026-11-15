@@ -115,6 +115,7 @@ def _calibrate_file(
             "warnings": [],
             "needs_ocr": False,
             "error": f"{type(exc).__name__}: {exc}",
+            "package": None,
         }
 
     warnings = _parse_warnings(parsed)
@@ -133,6 +134,7 @@ def _calibrate_file(
             "warnings": warnings,
             "needs_ocr": needs_ocr,
             "error": error,
+            "package": None,
         }
 
     try:
@@ -155,6 +157,7 @@ def _calibrate_file(
             "warnings": warnings,
             "needs_ocr": needs_ocr,
             "error": f"{type(exc).__name__}: {exc}",
+            "package": None,
         }
 
     return {
@@ -168,6 +171,7 @@ def _calibrate_file(
         "warnings": warnings,
         "needs_ocr": needs_ocr,
         "error": None,
+        "package": package.name,
         "_hit_keys": {fact.key for fact in ledger.facts if fact.value},
     }
 
@@ -193,6 +197,7 @@ def calibrate_dir(path: str | Path, recursive: bool = False) -> dict[str, Any]:
     field_hits: dict[str, int] = {}
     required_total = 0
     required_filled = 0
+    by_type: dict[str, dict[str, int]] = {}
 
     for file_path in _iter_files(root, recursive):
         item = _calibrate_file(
@@ -203,6 +208,15 @@ def calibrate_dir(path: str | Path, recursive: bool = False) -> dict[str, Any]:
             field_hits[key] = field_hits.get(key, 0) + 1
         required_total += item["facts_required"]
         required_filled += item["facts_required"] - item["facts_missing_required"]
+        kind = item.get("package") or FALLBACK_PACKAGE
+        bucket = by_type.setdefault(
+            kind, {"files": 0, "ok": 0, "required": 0, "filled": 0}
+        )
+        bucket["files"] += 1
+        if item["error"] is None:
+            bucket["ok"] += 1
+        bucket["required"] += item["facts_required"]
+        bucket["filled"] += item["facts_required"] - item["facts_missing_required"]
         per_file.append(item)
 
     ok = sum(1 for item in per_file if item["error"] is None)
@@ -210,11 +224,24 @@ def calibrate_dir(path: str | Path, recursive: bool = False) -> dict[str, Any]:
     ordered_hits = dict(
         sorted(field_hits.items(), key=lambda pair: (-pair[1], pair[0]))
     )
+    by_type_payload = {
+        name: {
+            "files": bucket["files"],
+            "ok": bucket["ok"],
+            "required_hit_rate": (
+                round(bucket["filled"] / bucket["required"], 4)
+                if bucket["required"]
+                else 0.0
+            ),
+        }
+        for name, bucket in sorted(by_type.items())
+    }
     aggregate = {
         "files": len(per_file),
         "ok": ok,
         "failed": failed,
         "field_hits": ordered_hits,
+        "by_type": by_type_payload,
         "required_hit_rate": (
             round(required_filled / required_total, 4) if required_total else 0.0
         ),
@@ -237,6 +264,7 @@ def render_report(report: dict[str, Any]) -> Table:
     """Render the per-file calibration table for the CLI."""
     table = Table(title="招标文件回归校准")
     table.add_column("文件", overflow="fold")
+    table.add_column("行业包", overflow="fold")
     table.add_column("页", justify="right")
     table.add_column("表", justify="right")
     table.add_column("材料", justify="right")
@@ -256,6 +284,7 @@ def render_report(report: dict[str, Any]) -> Table:
             status = "[green]OK[/green]"
         table.add_row(
             str(item.get("file", "")),
+            str(item.get("package") or "-"),
             str(item.get("pages", 0)),
             str(item.get("tables", 0)),
             str(item.get("materials", 0)),
@@ -269,6 +298,7 @@ def render_report(report: dict[str, Any]) -> Table:
     table.add_section()
     table.add_row(
         f"合计 {aggregate.get('files', 0)} 个文件",
+        "",
         "",
         "",
         f"平均 {aggregate.get('avg_materials', 0)}",

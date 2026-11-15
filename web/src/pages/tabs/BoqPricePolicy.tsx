@@ -25,6 +25,7 @@ function clampPolicy(policy: PricePolicy): PricePolicy {
     round_digits: policy.round_digits,
     tax_rate: policy.tax_rate,
     currency: policy.currency,
+    exchange_rate: policy.exchange_rate,
   })
 }
 
@@ -34,7 +35,8 @@ function samePolicy(left: PricePolicy, right: PricePolicy): boolean {
     left.factor === right.factor &&
     left.round_digits === right.round_digits &&
     left.tax_rate === right.tax_rate &&
-    left.currency === right.currency
+    left.currency === right.currency &&
+    left.exchange_rate === right.exchange_rate
   )
 }
 
@@ -48,7 +50,10 @@ const CURRENCY_OPTIONS: Array<{ value: PriceCurrency; label: string }> = [
 function policySummary(policy: PricePolicy, adjusted: number | null): string {
   const factor = formatMoney(policy.factor, 2)
   const tax = policy.tax_rate > 0 ? ` · 含税 ${formatMoney(policy.tax_rate * 100, 2)}%` : ' · 免税'
-  const currency = policy.currency === 'CNY' ? '' : ` · ${policy.currency}`
+  const currency =
+    policy.currency === 'CNY'
+      ? ''
+      : ` · ${policy.currency} · 汇率 ${formatMoney(policy.exchange_rate, 4)}`
   if (!policy.enabled) return `已保存系数 ×${factor}${tax}${currency}，当前按原价合计`
   return `×${factor} · ${policy.round_digits} 位小数${tax}${currency}${
     adjusted === null ? '' : ` · 调整后合计 ¥${formatMoney(adjusted, policy.round_digits)}`
@@ -287,9 +292,15 @@ export function PricePolicyPanel({
                   className="select select--sm"
                   value={draft.currency}
                   disabled={!canWrite || saving || adjusting}
-                  onChange={(event) =>
-                    patch({ currency: event.target.value as PriceCurrency })
-                  }
+                  onChange={(event) => {
+                    const currency = event.target.value as PriceCurrency
+                    // 人民币没有折算需求：切回 CNY 时汇率立即归 1，避免残留旧汇率。
+                    patch(
+                      currency === 'CNY'
+                        ? { currency, exchange_rate: 1 }
+                        : { currency },
+                    )
+                  }}
                 >
                   {CURRENCY_OPTIONS.map((option) => (
                     <option key={option.value} value={option.value}>
@@ -297,8 +308,33 @@ export function PricePolicyPanel({
                     </option>
                   ))}
                 </select>
-                <small>用于导出汇总与含税合计的币种标注</small>
+                <small>用于导出汇总与含税合计的币种标注；非人民币可按汇率折算</small>
               </label>
+
+              {draft.currency !== 'CNY' && (
+                <label className="price-policy-field">
+                  <span>汇率（1 {draft.currency} = ? CNY）</span>
+                  <input
+                    className="input input--sm input--number"
+                    type="number"
+                    min={0.0001}
+                    max={10000}
+                    step={0.0001}
+                    inputMode="decimal"
+                    value={draft.exchange_rate}
+                    disabled={!canWrite || saving || adjusting}
+                    onChange={(event) => {
+                      const next =
+                        event.target.value === '' ? 0.0001 : Number(event.target.value)
+                      if (Number.isFinite(next)) patch({ exchange_rate: next })
+                    }}
+                    onBlur={() =>
+                      setDraft((current) => (current ? clampPolicy(current) : current))
+                    }
+                  />
+                  <small>0.0001 – 10000；保存时按区间 clamp，摘要按此折算人民币合计</small>
+                </label>
+              )}
             </div>
 
             <div className={className('price-policy-preview', !draft.enabled && 'is-off')}>

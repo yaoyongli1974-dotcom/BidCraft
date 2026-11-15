@@ -814,6 +814,8 @@ export interface BoqSummary {
   tax_amount: number | null
   /** 含税合计（total + tax_amount）；total 缺失时为 null。 */
   total_with_tax: number | null
+  /** 按调价策略汇率折算的人民币含税合计（round(total_with_tax × exchange_rate, 2)）；缺失时为 null。 */
+  cny_total_with_tax: number | null
 }
 
 export interface BoqLedgerSummary {
@@ -913,6 +915,8 @@ export interface PricePolicy {
   /** 税率（小数形式，例如 0.09 表示 9%）；0–0.5。 */
   tax_rate: number
   currency: PriceCurrency
+  /** 汇率：1 单位币种 = X CNY，clamp 0.0001–10000；币种为 CNY 时恒为 1。 */
+  exchange_rate: number
 }
 
 // ---------------------------------------------------------------- 协作与审计

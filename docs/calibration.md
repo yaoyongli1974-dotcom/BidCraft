@@ -37,7 +37,8 @@ bidcraft calibrate /path/to/tenders --recursive --output /tmp/calibrate-report.j
       "facts_missing_required": 0,
       "warnings": [],
       "needs_ocr": false,
-      "error": null
+      "error": null,
+      "package": "weakcurrent-cabling"
     }
   ],
   "aggregate": {
@@ -45,6 +46,9 @@ bidcraft calibrate /path/to/tenders --recursive --output /tmp/calibrate-report.j
     "ok": 1,
     "failed": 0,
     "field_hits": {"project.name": 1},
+    "by_type": {
+      "weakcurrent-cabling": {"files": 1, "ok": 1, "required_hit_rate": 1.0}
+    },
     "required_hit_rate": 1.0,
     "avg_materials": 0.0,
     "ocr_files": 0
@@ -66,7 +70,9 @@ bidcraft calibrate /path/to/tenders --recursive --output /tmp/calibrate-report.j
 | `per_file[].warnings` | PDF/OCR/空白页等非致命提示 |
 | `per_file[].needs_ocr` | 是否未提取到文本、需要 OCR |
 | `per_file[].error` | 解析失败原因；成功为 `null` |
+| `per_file[].package` | 该文件选中的行业包名（`weakcurrent-cabling`/`fire-protection`/`installation`/`civil`/`hvac`/`decoration`）；解析失败或未选出时为 `null` |
 | `aggregate.field_hits` | `{字段 key: 命中文件数}`，只列出至少命中 1 次的字段 |
+| `aggregate.by_type` | 按所选行业包分组的 `{包名: {files, ok, required_hit_rate}}`；`ok` 为无 error 的文件数，`required_hit_rate` 为该组「已填必填事实 / 必填事实」 |
 | `aggregate.required_hit_rate` | 所有成功文件的「已填必填事实 / 必填事实」汇总，`0.0`–`1.0` |
 | `aggregate.avg_materials` | 成功文件的平均材料行数 |
 | `aggregate.ocr_files` | `needs_ocr=true` 的文件数 |
@@ -86,9 +92,24 @@ CLI 会额外打印汇总表、每文件一行和字段命中 Top 10；`--output
 
 ## fixtures 与真实件
 
-`tests/fixtures/regression/` 下的 `weakcurrent-tender.md`、`fire-tender.md` 是**仿真件**，
-用于回归测试别名与抽取口径；`boq-weakcurrent.xlsx` 由测试用 openpyxl 动态生成，不入库。
+`tests/fixtures/regression/` 下的六份 Markdown 是**仿真件**，一份对应一个行业规则包，
+用于回归测试别名、行业包选择与必填事实命中率：
+
+| 文件 | 行业包 | 关键事实 |
+| --- | --- | --- |
+| `weakcurrent-tender.md` | `weakcurrent-cabling` | 信息点/线缆等级/测试标准，含「计划工期」「免费维保期」别名 |
+| `fire-tender.md` | `fire-protection` | 喷头/探测器数量、消防验收标准，含「缺陷责任期」「磋商保证金」别名 |
+| `installation-tender.md` | `installation` | 安装范围、专业系统、管道材质、试压与验收标准 |
+| `civil-tender.md` | `civil` | 建筑面积、结构形式、混凝土/钢筋/砌体、质量验收标准 |
+| `hvac-tender.md` | `hvac` | 冷热负荷、冷热源与设备数量、风管/水管材质、暖通验收标准 |
+| `decoration-tender.md` | `decoration` | 装饰范围/面积/标准、主要材料、防火与环保验收标准 |
+
+`boq-weakcurrent.xlsx` 由测试用 openpyxl 动态生成，不入库。
 真实招标文件涉及商业信息，需由用户自行放入独立目录运行校准，不要提交到仓库。
+
+`tests/test_calibrate.py` 断言六份 fixtures 全部 `ok`、`by_type` 覆盖 6 个行业包、
+每个包的 `required_hit_rate >= 0.8`；CI 的 python job 还以
+`uv run --frozen bidcraft calibrate tests/fixtures/regression` 作为 exit 0 门禁。
 
 运行内置回归：
 

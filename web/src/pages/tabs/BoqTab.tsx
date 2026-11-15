@@ -19,6 +19,7 @@ import { useWorkspace } from '../useWorkspace'
 import {
   ApiError,
   applyBoq,
+  cnyTotalWithTax,
   deleteBoq,
   exportBoq,
   getBoq,
@@ -1082,6 +1083,7 @@ function SummaryStrip({
     total_amount: number
     tax_amount?: number | null
     total_with_tax?: number | null
+    cny_total_with_tax?: number | null
   }
   matchPercent: number
   policy: PricePolicy | null
@@ -1099,6 +1101,13 @@ function SummaryStrip({
     s?.total_with_tax ??
     (s && taxAmount !== null ? roundTo(s.total_amount + taxAmount, 2) : null)
   const showTax = taxRate > 0 && taxAmount !== null && totalWithTax !== null
+  // 非人民币币种再给一行人民币含税合计：后端折算优先，旧后端按总额 × 汇率本地兜底。
+  const cnyTotal = cnyTotalWithTax(
+    s?.cny_total_with_tax,
+    totalWithTax,
+    policy?.exchange_rate ?? 1,
+  )
+  const showCny = Boolean(policy && policy.currency !== 'CNY' && cnyTotal !== null)
   return (
     <section className="ledger-summary boq-summary">
       <div className="ledger-summary-main">
@@ -1182,6 +1191,19 @@ function SummaryStrip({
               <strong className="mono">¥{money(totalWithTax)}</strong>
             </span>
           </>
+        )}
+        {showCny && policy && (
+          <span
+            className="boq-quote-total boq-quote-total--cny"
+            title={`汇率 1 ${policy.currency} = ${formatMoney(
+              policy.exchange_rate,
+              4,
+            )} CNY，按含税合计折算`}
+          >
+            <span className="boq-cny-tag">≈ ¥CNY</span>
+            合计
+            <strong className="mono">¥{money(cnyTotal)}</strong>
+          </span>
         )}
       </div>
     </section>

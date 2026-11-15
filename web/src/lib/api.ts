@@ -1473,6 +1473,8 @@ export function normalizeBoqSummary(value: unknown): BoqSummary {
     // 税额与含税合计仅在税率为正时由后端返回；缺失时保持 null，避免误显 0。
     tax_amount: nullableNumber(source.tax_amount),
     total_with_tax: nullableNumber(source.total_with_tax),
+    // 人民币含税合计由新后端按汇率折算；旧后端缺失时界面用本地兜底。
+    cny_total_with_tax: nullableNumber(source.cny_total_with_tax),
   }
 }
 
@@ -1808,9 +1810,12 @@ export const DEFAULT_PRICE_POLICY: PricePolicy = {
   round_digits: 2,
   tax_rate: 0,
   currency: 'CNY',
+  exchange_rate: 1,
 }
 
 const PRICE_CURRENCIES: readonly PriceCurrency[] = ['CNY', 'USD', 'EUR', 'HKD']
+const EXCHANGE_RATE_MIN = 0.0001
+const EXCHANGE_RATE_MAX = 10000
 
 function normalizeCurrency(value: unknown): PriceCurrency {
   const text = typeof value === 'string' ? value.trim().toUpperCase() : ''
@@ -1823,11 +1828,35 @@ function clampNumber(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
 }
 
+/** 汇率 clamp：0.0001–10000，缺省 1；币种为 CNY 时恒为 1。 */
+function clampExchangeRate(value: unknown, currency: PriceCurrency): number {
+  if (currency === 'CNY') return 1
+  return clampNumber(asNumber(value, 1), EXCHANGE_RATE_MIN, EXCHANGE_RATE_MAX)
+}
+
 /** 按小数位四舍五入；与后端 `round(value, digits)` 保持一致的预览口径。 */
 export function roundTo(value: number, digits: number): number {
   const places = Math.round(clampNumber(digits, 0, 4))
   const factor = 10 ** places
   return Math.round((value + Number.EPSILON) * factor) / factor
+}
+
+/**
+ * 人民币含税合计：优先使用后端折算的 `cny_total_with_tax`；
+ * 旧后端缺失该字段时，按含税合计 × 汇率在本地兜底（与后端同一四舍五入口径）。
+ */
+export function cnyTotalWithTax(
+  cnyTotal: number | null | undefined,
+  totalWithTax: number | null | undefined,
+  exchangeRate: number | null | undefined,
+): number | null {
+  if (typeof cnyTotal === 'number' && Number.isFinite(cnyTotal)) return cnyTotal
+  if (typeof totalWithTax !== 'number' || !Number.isFinite(totalWithTax)) return null
+  const rate =
+    typeof exchangeRate === 'number' && Number.isFinite(exchangeRate)
+      ? clampNumber(exchangeRate, EXCHANGE_RATE_MIN, EXCHANGE_RATE_MAX)
+      : 1
+  return roundTo(totalWithTax * rate, 2)
 }
 
 /**
@@ -1842,13 +1871,16 @@ export function normalizePricePolicy(value: unknown): PricePolicy {
       ? (nested as Record<string, unknown>)
       : outer
   const factor = Math.round(clampNumber(asNumber(source.factor, 1), 0.1, 10) * 100) / 100
+  const currency = normalizeCurrency(source.currency)
   return {
     enabled: asLooseBool(source.enabled, false),
     factor,
     round_digits: Math.round(clampNumber(asNumber(source.round_digits, 2), 0, 4)),
     // 税率按后端 0–0.5 的区间 clamp；非法值回退到 0（免税）。
     tax_rate: Math.round(clampNumber(asNumber(source.tax_rate, 0), 0, 0.5) * 10000) / 10000,
-    currency: normalizeCurrency(source.currency),
+    currency,
+    // 仅非人民币币种保留汇率输入；CNY 强制为 1，避免保存出无意义的折算。
+    exchange_rate: clampExchangeRate(source.exchange_rate, currency),
   }
 }
 

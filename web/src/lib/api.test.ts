@@ -5,6 +5,7 @@ import {
   DEFAULT_PRICE_POLICY,
   UNAUTHORIZED_EVENT,
   apiFetch,
+  cnyTotalWithTax,
   createBoqVersion,
   deleteBoqVersion,
   errorDetailText,
@@ -89,6 +90,7 @@ describe('normalizePricePolicy', () => {
       round_digits: 1,
       tax_rate: 0,
       currency: 'CNY',
+      exchange_rate: 1,
     })
   })
 
@@ -114,6 +116,33 @@ describe('normalizePricePolicy', () => {
     expect(normalizePricePolicy({ currency: 'GBP' }).currency).toBe('CNY')
     expect(normalizePricePolicy({ currency: null }).currency).toBe('CNY')
   })
+
+  it('clamps the exchange rate and defaults to 1', () => {
+    expect(normalizePricePolicy({ currency: 'USD' }).exchange_rate).toBe(1)
+    expect(normalizePricePolicy({ currency: 'USD', exchange_rate: 7.2361 }).exchange_rate).toBe(
+      7.2361,
+    )
+    expect(normalizePricePolicy({ currency: 'USD', exchange_rate: 0 }).exchange_rate).toBe(
+      0.0001,
+    )
+    expect(normalizePricePolicy({ currency: 'USD', exchange_rate: -2 }).exchange_rate).toBe(
+      0.0001,
+    )
+    expect(normalizePricePolicy({ currency: 'USD', exchange_rate: 99999 }).exchange_rate).toBe(
+      10000,
+    )
+    expect(
+      normalizePricePolicy({ currency: 'USD', exchange_rate: 'not-a-number' }).exchange_rate,
+    ).toBe(1)
+    expect(normalizePricePolicy({ currency: 'USD', exchange_rate: '7.12' }).exchange_rate).toBe(
+      7.12,
+    )
+  })
+
+  it('forces the exchange rate to 1 for CNY', () => {
+    expect(normalizePricePolicy({ currency: 'CNY', exchange_rate: 7.2 }).exchange_rate).toBe(1)
+    expect(normalizePricePolicy({ exchange_rate: 7.2 }).exchange_rate).toBe(1)
+  })
 })
 
 describe('normalizeBoqSummary', () => {
@@ -122,25 +151,51 @@ describe('normalizeBoqSummary', () => {
       total_amount: 1000,
       tax_amount: 90,
       total_with_tax: 1090,
+      cny_total_with_tax: 7850.5,
     })
     expect(summary.total_amount).toBe(1000)
     expect(summary.tax_amount).toBe(90)
     expect(summary.total_with_tax).toBe(1090)
+    expect(summary.cny_total_with_tax).toBe(7850.5)
   })
 
   it('returns null tax fields when the backend omits them', () => {
     const summary = normalizeBoqSummary({ total_amount: 1000 })
     expect(summary.tax_amount).toBeNull()
     expect(summary.total_with_tax).toBeNull()
+    expect(summary.cny_total_with_tax).toBeNull()
   })
 
   it('treats non-numeric tax fields as missing', () => {
     const summary = normalizeBoqSummary({
       tax_amount: '90',
       total_with_tax: Number.NaN,
+      cny_total_with_tax: '7850',
     })
     expect(summary.tax_amount).toBeNull()
     expect(summary.total_with_tax).toBeNull()
+    expect(summary.cny_total_with_tax).toBeNull()
+  })
+})
+
+describe('cnyTotalWithTax', () => {
+  it('prefers the backend cny total when present', () => {
+    expect(cnyTotalWithTax(7236.1, 1000, 7.2361)).toBe(7236.1)
+  })
+
+  it('falls back to total with tax times the exchange rate for older backends', () => {
+    expect(cnyTotalWithTax(null, 1090, 7.2361)).toBe(7887.35)
+    expect(cnyTotalWithTax(undefined, 100, 1)).toBe(100)
+  })
+
+  it('rounds the fallback to two decimals', () => {
+    expect(cnyTotalWithTax(null, 100.005, 1)).toBe(100.01)
+  })
+
+  it('returns null without a total and defaults an invalid rate to 1', () => {
+    expect(cnyTotalWithTax(null, null, 7.2)).toBeNull()
+    expect(cnyTotalWithTax(undefined, 250, Number.NaN)).toBe(250)
+    expect(cnyTotalWithTax(undefined, 250, 0)).toBe(0.03)
   })
 })
 

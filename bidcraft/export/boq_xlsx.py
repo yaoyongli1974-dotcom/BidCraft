@@ -131,6 +131,12 @@ def _quote_rows(payload: dict[str, Any]) -> list[list[Any]]:
     rows.append(["税率", policy.get("tax_rate", 0.0)])
     rows.append(["税额（元）", summary.get("tax_amount")])
     rows.append(["含税合计（元）", summary.get("total_with_tax")])
+    currency = policy.get("currency") or "CNY"
+    if currency != "CNY":
+        rows.append(
+            [f"汇率（1 {currency} = X CNY）", policy.get("exchange_rate", 1.0)]
+        )
+        rows.append(["人民币含税合计（元）", summary.get("cny_total_with_tax")])
     return rows
 
 
@@ -163,10 +169,14 @@ def export_boq_xlsx(path: str | Path, payload: dict[str, Any]) -> Path:
         "税率",
         "税额（元）",
         "含税合计（元）",
+        "人民币含税合计（元）",
     }
     for row in quote.iter_rows(min_row=2):
-        if row[0].value in money_labels:
+        label = row[0].value
+        if label in money_labels:
             row[1].number_format = "#,##0.00"
+        elif isinstance(label, str) and label.startswith("汇率"):
+            row[1].number_format = "0.0000"
 
     _add_sheet(workbook, "差异汇总", ["指标", "数量"], _summary_rows(payload))
 
