@@ -7,10 +7,10 @@ import {
   type SetStateAction,
 } from 'react'
 import { useBlocker } from 'react-router-dom'
-import { getPackages, messageOf } from '../lib/api'
+import { getPackages, isAbortError, messageOf } from '../lib/api'
 import { readStorage, writeStorage } from '../lib/format'
 import type { AuditEntry, AuditPage, PackageInfo } from '../lib/types'
-import { useConfirm } from '../context/ConfirmContext'
+import { useConfirm } from '../context/useConfirm'
 import {
   QUERY_STALE_TIME,
   ensureQueryEntry,
@@ -103,6 +103,8 @@ export function useQuery<T>(
     }
     const fail = (error: unknown) => {
       if (!active) return
+      // A cancelled request (unmount / key switch / refresh) is not a failure.
+      if (isAbortError(error)) return
       setState((current) => ({
         key,
         data: current.key === key ? current.data : cachedData,

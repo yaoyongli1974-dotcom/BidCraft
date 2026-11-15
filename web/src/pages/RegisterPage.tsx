@@ -11,8 +11,8 @@ import {
   ShieldCheck,
   UserRound,
 } from 'lucide-react'
-import { useAuth } from '../context/AuthContext'
-import { useHealth } from '../context/HealthContext'
+import { useAuth } from '../context/useAuth'
+import { useHealth } from '../context/useHealth'
 import { messageOf, wechatLoginUrl } from '../lib/api'
 import { useDocumentTitle } from '../lib/hooks'
 import { AuthSplash } from '../components/AuthGate'

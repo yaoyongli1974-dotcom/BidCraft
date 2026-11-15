@@ -26,7 +26,7 @@ import {
   validateRulePackage,
 } from '../../lib/api'
 import { useSaveShortcut } from '../../lib/hooks'
-import { useConfirm } from '../../context/ConfirmContext'
+import { useConfirm } from '../../context/useConfirm'
 import { Modal } from '../../components/Modal'
 import { Button } from '../../components/Button'
 import { Badge } from '../../components/Badge'
@@ -200,7 +200,7 @@ export function AdminRulePackageModal({
       editor.scrollLeft = 0
     }, 60)
     return () => window.clearTimeout(timer)
-  }, [open, loading, state.mode, editing?.name])
+  }, [open, loading, state.mode, editing])
 
   useEffect(() => {
     if (!open) return

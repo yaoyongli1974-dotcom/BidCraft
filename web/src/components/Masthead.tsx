@@ -1,8 +1,8 @@
 import { Link, useLocation } from 'react-router-dom'
 import { Cpu, Loader2, Settings2, ShieldCheck, WifiOff } from 'lucide-react'
-import { useHealth } from '../context/HealthContext'
-import { useHelp } from '../context/HelpContext'
-import { useAuth } from '../context/AuthContext'
+import { useHealth } from '../context/useHealth'
+import { useHelp } from '../context/useHelp'
+import { useAuth } from '../context/useAuth'
 import { UserMenu } from './UserMenu'
 import { className } from '../lib/format'
 

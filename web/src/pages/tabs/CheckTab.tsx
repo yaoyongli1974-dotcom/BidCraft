@@ -14,7 +14,7 @@ import {
   ShieldCheck,
   X,
 } from 'lucide-react'
-import { useWorkspace } from '../WorkspacePage'
+import { useWorkspace } from '../useWorkspace'
 import { ApiError, getIssues, messageOf, runCheck } from '../../lib/api'
 import type { CheckResult, Issue } from '../../lib/types'
 import {
@@ -31,7 +31,7 @@ import { Badge } from '../../components/Badge'
 import { Button } from '../../components/Button'
 import { EmptyState, ErrorState, Skeleton } from '../../components/Feedback'
 import { StatTile, TabHeading } from '../../components/Workbench'
-import { useToast } from '../../context/ToastContext'
+import { useToast } from '../../context/useToast'
 
 const LEVEL_ORDER = ['blocking', 'critical', 'major', 'minor', 'info'] as const
 
@@ -61,7 +61,7 @@ export function CheckTab() {
   )
   const localRecord = checkRecords[ref]
 
-  const persistedIssues = issuesQuery.data || []
+  const persistedIssues = useMemo(() => issuesQuery.data || [], [issuesQuery.data])
   const failedIssues = useMemo(
     () => (result?.issues ?? persistedIssues).filter((issue) => !issue.passed),
     [result?.issues, persistedIssues],

@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { KeyRound } from 'lucide-react'
 import { Modal } from './Modal'
 import { Button } from './Button'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
 import { messageOf } from '../lib/api'
 
 export function PasswordChangeModal({

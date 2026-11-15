@@ -15,7 +15,7 @@ import {
   UploadCloud,
   X,
 } from 'lucide-react'
-import { useWorkspace } from '../WorkspacePage'
+import { useWorkspace } from '../useWorkspace'
 import {
   ApiError,
   applyBoq,
@@ -36,14 +36,14 @@ import { Badge } from '../../components/Badge'
 import { Button } from '../../components/Button'
 import { ErrorState, Skeleton } from '../../components/Feedback'
 import { TabHeading } from '../../components/Workbench'
-import { useConfirm } from '../../context/ConfirmContext'
-import { useToast } from '../../context/ToastContext'
+import { useConfirm } from '../../context/useConfirm'
+import { useToast } from '../../context/useToast'
 import {
   BoqPackageBar,
   EnablePackageModal,
   ManagePackagesModal,
-  loadBoqPackageState,
 } from './BoqPackages'
+import { loadBoqPackageState } from './boqPackageState'
 import { PricePolicyPanel } from './BoqPricePolicy'
 import { QuotaFillModal } from './BoqQuotaFill'
 

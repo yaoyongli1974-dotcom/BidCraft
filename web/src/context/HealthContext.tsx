@@ -1,22 +1,12 @@
 import {
-  createContext,
   useCallback,
-  useContext,
   useEffect,
   useState,
   type ReactNode,
 } from 'react'
 import { getHealth, messageOf } from '../lib/api'
 import type { Health } from '../lib/types'
-
-interface HealthApi {
-  health: Health | null
-  error: string | null
-  loading: boolean
-  refresh: () => void
-}
-
-const HealthContext = createContext<HealthApi | null>(null)
+import { HealthContext } from './health'
 
 export function HealthProvider({ children }: { children: ReactNode }) {
   const [health, setHealth] = useState<Health | null>(null)
@@ -52,10 +42,4 @@ export function HealthProvider({ children }: { children: ReactNode }) {
       {children}
     </HealthContext.Provider>
   )
-}
-
-export function useHealth(): HealthApi {
-  const context = useContext(HealthContext)
-  if (!context) throw new Error('useHealth 必须在 HealthProvider 内使用')
-  return context
 }

@@ -26,7 +26,7 @@ import {
   X,
   type LucideIcon,
 } from 'lucide-react'
-import { useWorkspace } from '../WorkspacePage'
+import { useWorkspace } from '../useWorkspace'
 import { getLedger, messageOf, updateFact } from '../../lib/api'
 import type { Fact, Ledger } from '../../lib/types'
 import {
@@ -49,7 +49,7 @@ import {
   SourceQuote,
   TabHeading,
 } from '../../components/Workbench'
-import { useConfirm } from '../../context/ConfirmContext'
+import { useConfirm } from '../../context/useConfirm'
 
 type LedgerTab = 'facts' | 'materials' | 'parameters' | 'scoring' | 'requirements' | 'risks'
 

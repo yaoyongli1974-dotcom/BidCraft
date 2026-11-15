@@ -10,7 +10,7 @@ import {
   ShieldCheck,
   Wallet,
 } from 'lucide-react'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
 import { className, roleMeta } from '../lib/format'
 import { Badge } from './Badge'
 import { PasswordChangeModal } from './PasswordChangeModal'

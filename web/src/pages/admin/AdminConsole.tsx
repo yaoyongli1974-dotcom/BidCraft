@@ -13,8 +13,8 @@ import {
   Wallet,
   type LucideIcon,
 } from 'lucide-react'
-import { useAuth } from '../../context/AuthContext'
-import { useHealth } from '../../context/HealthContext'
+import { useAuth } from '../../context/useAuth'
+import { useHealth } from '../../context/useHealth'
 import { useDocumentTitle, useQuery } from '../../lib/hooks'
 import {
   getKnowledgeBases,

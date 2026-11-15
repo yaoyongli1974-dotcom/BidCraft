@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, NavLink, Outlet, useLocation, useOutletContext, useParams } from 'react-router-dom'
+import { Link, NavLink, Outlet, useLocation, useParams } from 'react-router-dom'
 import {
   ArrowLeft,
   ArrowLeftRight,
@@ -36,8 +36,8 @@ import { useDocumentTitle, usePackages, useQuery } from '../lib/hooks'
 import { Badge, BidSectionBadge } from '../components/Badge'
 import { Button } from '../components/Button'
 import { Skeleton } from '../components/Feedback'
-import { useHealth } from '../context/HealthContext'
-import { useAuth } from '../context/AuthContext'
+import { useHealth } from '../context/useHealth'
+import { useAuth } from '../context/useAuth'
 
 export interface WorkspaceContextValue {
   ref: string
@@ -414,12 +414,4 @@ function WorkspaceSkeleton() {
       </main>
     </div>
   )
-}
-
-export function useWorkspace(): WorkspaceContextValue {
-  const outlet = useOutletContext<WorkspaceContextValue | null>()
-  if (!outlet) {
-    throw new Error('工作区数据尚未加载')
-  }
-  return outlet
 }

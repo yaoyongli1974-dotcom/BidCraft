@@ -12,7 +12,7 @@ import {
   UploadCloud,
   X,
 } from 'lucide-react'
-import { useWorkspace } from '../WorkspacePage'
+import { useWorkspace } from '../useWorkspace'
 import { messageOf, parseProject, sourceFileUrl, uploadSource } from '../../lib/api'
 import type { SourceFile } from '../../lib/types'
 import {
@@ -26,8 +26,8 @@ import { Badge } from '../../components/Badge'
 import { Button } from '../../components/Button'
 import { EmptyState, ProgressBar } from '../../components/Feedback'
 import { GateBanner, TabHeading } from '../../components/Workbench'
-import { useToast } from '../../context/ToastContext'
-import { useConfirm } from '../../context/ConfirmContext'
+import { useToast } from '../../context/useToast'
+import { useConfirm } from '../../context/useConfirm'
 
 const ACCEPT = '.pdf,.docx,.txt,.xlsx,.xlsm'
 const EXTENSIONS = ['pdf', 'docx', 'txt', 'xlsx', 'xlsm']

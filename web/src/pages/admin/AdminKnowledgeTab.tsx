@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Cloud,
   Database,
@@ -23,12 +23,15 @@ import {
 import {
   deleteKnowledgeBase,
   embedKnowledgeBase,
+  getJob,
   messageOf,
+  parseKbReindexResult,
   reindexKnowledgeBase,
   testKnowledgeBase,
+  type KbReindexResult,
 } from '../../lib/api'
-import { useConfirm } from '../../context/ConfirmContext'
-import { useToast } from '../../context/ToastContext'
+import { useConfirm } from '../../context/useConfirm'
+import { useToast } from '../../context/useToast'
 import { Badge } from '../../components/Badge'
 import { Button, IconButton } from '../../components/Button'
 import { EmptyState, ErrorState } from '../../components/Feedback'
@@ -100,10 +103,117 @@ export function AdminKnowledgeTab({
   const [modal, setModal] = useState<KnowledgeModalState | null>(null)
   const [testingId, setTestingId] = useState<string | null>(null)
   const [reindexingId, setReindexingId] = useState<string | null>(null)
+  const [reindexJobId, setReindexJobId] = useState<string | null>(null)
   const [embeddingId, setEmbeddingId] = useState<string | null>(null)
   const [testResults, setTestResults] = useState<Record<string, TestResult>>({})
   const [reindexResults, setReindexResults] = useState<Record<string, string>>({})
   const [actionError, setActionError] = useState<string | null>(null)
+  const reindexJobRef = useRef<{ id: string; kbId: string; kbName: string } | null>(null)
+  const toastRef = useRef(toast)
+  toastRef.current = toast
+  /** Latest result reporter; polling reads it through a ref so the interval
+   * is not torn down by parent re-renders. */
+  const reportReindexRef = useRef<(kbId: string, kbName: string, result: KbReindexResult) => void>(
+    () => {},
+  )
+
+  const reportReindexResult = (
+    kbId: string,
+    kbName: string,
+    result: KbReindexResult,
+  ) => {
+    const vector = result.vector
+    const vectorError = vector?.error?.trim() || ''
+    setReindexResults((current) => ({
+      ...current,
+      [kbId]: `本次索引 ${formatNumber(result.indexed)} 个片段`,
+    }))
+    refresh()
+    if (vectorError) {
+      toastRef.current.warning(
+        '索引已重建，向量未就绪',
+        `${kbName} · ${formatNumber(result.indexed)} 个片段已写入；${vectorError}`,
+      )
+    } else if (vector && vector.embedded > 0) {
+      toastRef.current.success(
+        '索引与向量已重建',
+        `${kbName} · ${formatNumber(result.indexed)} 个片段 · 向量 ${formatNumber(
+          vector.embedded,
+        )}/${formatNumber(vector.total)}`,
+      )
+    } else {
+      toastRef.current.success(
+        '索引已重建',
+        `${kbName} · ${formatNumber(result.indexed)} 个片段`,
+      )
+    }
+  }
+  reportReindexRef.current = reportReindexResult
+
+  // A rebuild can take minutes for a large directory: the server accepts the
+  // job and the UI polls it at a coarse cadence until the terminal state.
+  useEffect(() => {
+    const target = reindexJobRef.current
+    if (!target) return
+    const jobId = target.id
+    const { kbId, kbName } = target
+    let cancelled = false
+    let finished = false
+    let errors = 0
+
+    const stop = () => {
+      if (reindexJobRef.current?.id === jobId) reindexJobRef.current = null
+      setReindexJobId(null)
+    }
+
+    const tick = async () => {
+      try {
+        const job = await getJob(jobId)
+        if (cancelled || finished) return
+        errors = 0
+        const message = job.message || ''
+        const processed = typeof job.payload?.done === 'number' ? job.payload.done : 0
+        const total = typeof job.payload?.total === 'number' ? job.payload.total : 0
+        const progressText =
+          message ||
+          (total > 0
+            ? `已处理 ${formatNumber(processed)}/${formatNumber(total)} 个片段`
+            : '')
+        if (progressText) {
+          setReindexResults((current) => ({ ...current, [kbId]: progressText }))
+        }
+        if (job.status !== 'done' && job.status !== 'failed') return
+        finished = true
+        window.clearInterval(timer)
+        setReindexingId(null)
+        stop()
+        if (job.status === 'failed') {
+          const detail = job.error || job.message || '请稍后重试。'
+          setActionError(detail)
+          toastRef.current.error('重建索引失败', detail)
+          return
+        }
+        reportReindexRef.current(kbId, kbName, parseKbReindexResult(job.result))
+      } catch (error) {
+        if (cancelled) return
+        errors += 1
+        if (errors < 3) return
+        window.clearInterval(timer)
+        setReindexingId(null)
+        stop()
+        const message = messageOf(error)
+        setActionError(message)
+        toastRef.current.error('无法读取重建进度', message)
+      }
+    }
+
+    const timer = window.setInterval(() => void tick(), 1600)
+    void tick()
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [reindexJobId])
 
   const counts = useMemo(() => {
     const result: Record<string, number> = { all: kbs.length }
@@ -159,36 +269,29 @@ export function AdminKnowledgeTab({
     if (!accepted) return
     setReindexingId(kb.id)
     setActionError(null)
+    let polling = false
     try {
-      const result = await reindexKnowledgeBase(kb.id)
-      const vector = result.vector
-      const vectorError = vector?.error?.trim() || ''
-      setReindexResults((current) => ({
-        ...current,
-        [kb.id]: `本次索引 ${formatNumber(result.indexed)} 个片段`,
-      }))
-      refresh()
-      if (vectorError) {
-        toast.warning(
-          '索引已重建，向量未就绪',
-          `${kb.name} · ${formatNumber(result.indexed)} 个片段已写入；${vectorError}`,
+      const started = await reindexKnowledgeBase(kb.id)
+      if (started.job_id) {
+        // New backend: the rebuild runs as a background job.
+        polling = true
+        reindexJobRef.current = { id: started.job_id, kbId: kb.id, kbName: kb.name }
+        setReindexJobId(started.job_id)
+        setReindexResults((current) => ({ ...current, [kb.id]: '重建任务已开始…' }))
+        toast.info(
+          '重建索引已开始',
+          `${kb.name} · 任务在后台运行，完成后会提示结果。`,
         )
-      } else if (vector && vector.embedded > 0) {
-        toast.success(
-          '索引与向量已重建',
-          `${kb.name} · ${formatNumber(result.indexed)} 个片段 · 向量 ${formatNumber(
-            vector.embedded,
-          )}/${formatNumber(vector.total)}`,
-        )
-      } else {
-        toast.success('索引已重建', `${kb.name} · ${formatNumber(result.indexed)} 个片段`)
+        return
       }
+      // Older backend still answers synchronously: report its result directly.
+      if (started.legacy) reportReindexRef.current(kb.id, kb.name, started.legacy)
     } catch (err) {
       const message = messageOf(err)
       setActionError(message)
       toast.error('重建索引失败', message)
     } finally {
-      setReindexingId(null)
+      if (!polling) setReindexingId(null)
     }
   }
 

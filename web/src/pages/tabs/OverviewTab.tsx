@@ -15,7 +15,7 @@ import {
   UploadCloud,
   type LucideIcon,
 } from 'lucide-react'
-import { useWorkspace } from '../WorkspacePage'
+import { useWorkspace } from '../useWorkspace'
 import { getIssues } from '../../lib/api'
 import {
   className,

@@ -93,6 +93,7 @@ BOQ_UPLOAD_SUFFIXES = frozenset({".xlsx", ".xlsm"})
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 MAX_PAGE_SIZE = 1000
 BATCH_STALE_SECONDS = 2 * 3600
+KB_REINDEX_STALE_SECONDS = 2 * 3600
 STARTUP_INTERRUPTED_MESSAGE = "服务重启，任务已中断"
 
 # Roles that represent tender documents (the BOQ workbook is managed separately
@@ -488,6 +489,37 @@ def _cancel_stale_jobs(
             else f"任务超过 {max(1, timeout_seconds // 60)} 分钟无进度，已标记为中断"
         ),
     )
+    return None
+
+
+def _active_kb_reindex(db: Session, kb_id: str) -> Job | None:
+    """Return a live reindex job for one knowledge base, auto-failing stale ones.
+
+    Reindex jobs are project-less (``project_id=None``), so the generic
+    :func:`_cancel_stale_jobs` cannot scope them per KB; the ``payload.kb_id``
+    filter is applied in Python because SQLite JSON lookups are not portable.
+    """
+
+    rows = list(
+        db.scalars(
+            select(Job)
+            .where(Job.kind == "kb_reindex", Job.status.in_(["queued", "running"]))
+            .order_by(Job.created_at.desc())
+        )
+    )
+    now = datetime.now(UTC).replace(tzinfo=None)
+    for row in rows:
+        if str((row.payload or {}).get("kb_id") or "") != kb_id:
+            continue
+        last = row.updated_at or row.created_at
+        if last is not None and now - last < timedelta(seconds=KB_REINDEX_STALE_SECONDS):
+            return row
+        _fail_job(
+            db,
+            row,
+            "知识库索引任务超时中断，已允许重新提交",
+            f"任务超过 {max(1, KB_REINDEX_STALE_SECONDS // 60)} 分钟无进度，已标记为中断",
+        )
     return None
 
 
@@ -1239,6 +1271,103 @@ def _run_batch_check_job(job_id: str, project_ids: list[str]) -> None:
                 _fail_job(db, job, failed_message)
 
 
+def _run_kb_reindex_job(job_id: str, kb_id: str) -> None:
+    """Background worker: rebuild a local KB token index, then its vectors.
+
+    The HTTP request returns as soon as the job row exists, so a large knowledge
+    base no longer blocks the API worker. Each stage uses its own short session
+    and publishes a progress event; the final ``done`` event carries the payload
+    the old synchronous endpoint used to return.
+    """
+
+    from .models import KnowledgeBase  # imported inside create_app at request time
+
+    try:
+        with session_scope() as db:
+            job = db.get(Job, job_id)
+            if job is None:
+                return
+            job.status = "running"
+            job.progress = 5
+            job.message = "正在重建知识库索引…"
+            db.flush()
+            jobs.publish_event(job_id, "status", jobs.job_payload(job), db=db)
+
+        with session_scope() as db:
+            kb = db.get(KnowledgeBase, kb_id)
+            if kb is None:
+                raise knowledge.KnowledgeError("知识库不存在")
+            indexed = knowledge.index_local(db, kb)
+            db.flush()
+            kb_data = knowledge.kb_payload(kb, db)
+            job = db.get(Job, job_id)
+            if job is not None:
+                job.progress = 60
+                job.message = f"文本索引完成：{indexed} 个文本块"
+                jobs.publish_event(
+                    job_id,
+                    "reindex",
+                    {**jobs.job_payload(job), "indexed": indexed, "kb": kb_data},
+                    db=db,
+                )
+
+        vector: dict[str, Any] | None = None
+        if settings.kb_vector_enabled:
+            with session_scope() as db:
+                kb = db.get(KnowledgeBase, kb_id)
+                if kb is None:
+                    raise knowledge.KnowledgeError("知识库不存在")
+                if model_config.resolve_embedding_endpoint(db) is not None:
+                    job = db.get(Job, job_id)
+                    if job is not None:
+                        job.progress = 70
+                        job.message = "正在重建向量索引…"
+                        jobs.publish_event(
+                            job_id, "status", jobs.job_payload(job), db=db
+                        )
+                    vector = knowledge.build_vectors(db, kb)
+                    db.flush()
+                    kb_data = knowledge.kb_payload(kb, db)
+                    job = db.get(Job, job_id)
+                    if job is not None:
+                        job.progress = 95
+                        job.message = "向量索引完成"
+                        jobs.publish_event(
+                            job_id,
+                            "vector",
+                            {
+                                **jobs.job_payload(job),
+                                "vector": vector,
+                                "kb": kb_data,
+                            },
+                            db=db,
+                        )
+
+        with session_scope() as db:
+            job = db.get(Job, job_id)
+            if job is not None:
+                job.status = "done"
+                job.progress = 100
+                job.message = f"索引重建完成：{indexed} 个文本块"
+                job.result = {"indexed": indexed, "vector": vector, "kb": kb_data}
+                jobs.publish_event(
+                    job_id,
+                    "done",
+                    {**jobs.job_payload(job), "report": job.result},
+                    db=db,
+                )
+    except Exception as exc:  # noqa: BLE001 - surfaced to the UI as a stable message
+        logger.exception("知识库索引任务 %s 失败", job_id)
+        if isinstance(exc, knowledge.KnowledgeError):
+            failed_message = "知识库索引失败：本地目录不可用或内容无法解析，详情见服务日志"
+        else:
+            failed_message = "知识库索引失败：服务内部错误，详情见服务日志"
+        with session_scope() as db:
+            job = db.get(Job, job_id)
+            if job is not None:
+                _fail_job(db, job, failed_message)
+
+
 def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None:
     """Background worker: export each project, then bundle the files into a zip.
 
@@ -1971,28 +2100,44 @@ def create_app():
             row.last_test_message = message[:1000]
             return {"ok": ok, "message": message, "latency_ms": latency}
 
-    @app.post("/admin/kbs/{kb_id}/reindex")
+    @app.post("/admin/kbs/{kb_id}/reindex", status_code=202)
     def reindex_kb(kb_id: str, request: Request) -> dict[str, Any]:
+        """Queue a background rebuild of a local KB index and its vectors."""
+
         require_super(request)
+        user = current_user() or {}
         with session_scope() as db:
             row = db.get(KnowledgeBase, kb_id)
             if row is None:
                 raise HTTPException(status_code=404, detail="知识库不存在")
             if row.kind != "local":
                 raise HTTPException(status_code=400, detail="只有本地知识库需要建索引")
-            try:
-                count = knowledge.index_local(db, row)
-            except knowledge.KnowledgeError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            vector = None
-            if settings.kb_vector_enabled:
-                vector = knowledge.build_vectors(db, row)
+            if _active_kb_reindex(db, kb_id) is not None:
+                raise HTTPException(status_code=409, detail="该知识库已有重建索引任务在运行")
+            job = Job(
+                project_id=None,
+                kind="kb_reindex",
+                status="queued",
+                message="知识库重建索引排队中…",
+                payload={
+                    "owner_id": user.get("id") or "",
+                    "kb_id": kb_id,
+                    "name": row.name,
+                },
+            )
+            db.add(job)
             db.flush()
-            return {
-                "indexed": count,
-                "kb": knowledge.kb_payload(row, db),
-                "vector": vector,
-            }
+            job_id = job.id
+            jobs.publish_event(job_id, "queued", jobs.job_payload(job), db=db)
+            audit(db, None, "kb.reindex", {"kb_id": kb_id, "job_id": job_id})
+        worker = threading.Thread(
+            target=_run_kb_reindex_job,
+            args=(job_id, kb_id),
+            daemon=True,
+            name=f"bidcraft-kb-reindex-{job_id[:8]}",
+        )
+        worker.start()
+        return {"job_id": job_id}
 
     @app.post("/admin/kbs/{kb_id}/embed")
     def embed_kb(kb_id: str, request: Request) -> dict[str, Any]:

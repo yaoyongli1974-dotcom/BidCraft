@@ -190,19 +190,34 @@ async function readError(response: Response): Promise<ApiError> {
   return new ApiError(response.status, detail, undefined, payload)
 }
 
-export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+/** Cancellation must stay distinguishable from a real network failure. */
+export function isAbortError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  return (error as { name?: unknown }).name === 'AbortError'
+}
+
+export async function apiFetch<T>(
+  path: string,
+  init?: RequestInit,
+  signal?: AbortSignal,
+): Promise<T> {
+  const requestSignal = signal ?? init?.signal ?? undefined
   let response: Response
   try {
     response = await fetch(path, {
       credentials: 'same-origin',
       ...init,
+      ...(requestSignal ? { signal: requestSignal } : {}),
       headers: {
         Accept: 'application/json',
         ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
         ...(init?.headers || {}),
       },
     })
-  } catch {
+  } catch (error) {
+    // An aborted request is not a server failure: let `useQuery` and callers
+    // recognise it and skip the error state.
+    if (isAbortError(error)) throw error
     throw new ApiError(
       0,
       null,
@@ -232,6 +247,8 @@ interface UploadOptions {
   onProgress?: (percent: number) => void
   /** Friendly message used when the request never reaches the server. */
   networkMessage?: string
+  /** Cancels the upload; the promise rejects with a cancellation ApiError. */
+  signal?: AbortSignal
 }
 
 /**
@@ -246,9 +263,25 @@ export function uploadForm<T>(
   form: FormData,
   options: UploadOptions = {},
 ): Promise<T> {
-  const { onProgress, networkMessage } = options
+  const { onProgress, networkMessage, signal } = options
+  if (signal?.aborted) {
+    return Promise.reject(new ApiError(0, null, '上传已取消。'))
+  }
   return new Promise<T>((resolve, reject) => {
     const xhr = new XMLHttpRequest()
+    const cancelled = () => new ApiError(0, null, '上传已取消。')
+    let settled = false
+    const handleAbort = () => xhr.abort()
+    const cleanup = () => {
+      if (signal) signal.removeEventListener('abort', handleAbort)
+    }
+    const finish = (fn: () => void) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      fn()
+    }
+    if (signal) signal.addEventListener('abort', handleAbort)
     xhr.open('POST', path)
     xhr.responseType = 'text'
     xhr.withCredentials = true
@@ -269,7 +302,7 @@ export function uploadForm<T>(
         }
       })()
       if (xhr.status >= 200 && xhr.status < 300) {
-        resolve((body || {}) as T)
+        finish(() => resolve((body || {}) as T))
         return
       }
       if (xhr.status === 401) notifyUnauthorized(path)
@@ -279,17 +312,19 @@ export function uploadForm<T>(
         body && typeof body === 'object' && 'detail' in body
           ? (body as { detail: unknown }).detail
           : text || fallback
-      reject(new ApiError(xhr.status, detail))
+      finish(() => reject(new ApiError(xhr.status, detail)))
     }
     xhr.onerror = () =>
-      reject(
-        new ApiError(
-          0,
-          null,
-          networkMessage || '上传失败：无法连接本地服务，请确认后端已启动。',
+      finish(() =>
+        reject(
+          new ApiError(
+            0,
+            null,
+            networkMessage || '上传失败：无法连接本地服务，请确认后端已启动。',
+          ),
         ),
       )
-    xhr.onabort = () => reject(new ApiError(0, null, '上传已取消。'))
+    xhr.onabort = () => finish(() => reject(cancelled()))
     xhr.send(form)
   })
 }
@@ -585,16 +620,38 @@ export interface KbReindexResult {
   vector: KbVectorResult | null
 }
 
-export async function reindexKnowledgeBase(id: string): Promise<KbReindexResult> {
-  const data = await request<{ indexed?: unknown; kb?: KnowledgeBase; vector?: unknown }>(
+/**
+ * Newer servers accept the rebuild and return only a job id; the result is read
+ * later from `GET /jobs/{id}`. An older server still answers synchronously with
+ * `{indexed, vector, kb}`, so both shapes are exposed to the caller.
+ */
+export interface KbReindexStart {
+  job_id: string | null
+  legacy: KbReindexResult | null
+}
+
+/** Normalise a `kb_reindex` job result (or a legacy sync response). */
+export function parseKbReindexResult(value: unknown): KbReindexResult {
+  const raw = value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+  const kb =
+    raw.kb && typeof raw.kb === 'object' && !Array.isArray(raw.kb)
+      ? (raw.kb as KnowledgeBase)
+      : ({} as KnowledgeBase)
+  return {
+    indexed: Math.max(0, Math.round(asNumber(raw.indexed, 0))),
+    kb,
+    vector: normalizeKbVector(raw.vector),
+  }
+}
+
+export async function reindexKnowledgeBase(id: string): Promise<KbReindexStart> {
+  const data = await request<Record<string, unknown>>(
     `/admin/kbs/${encodeURIComponent(id)}/reindex`,
     { method: 'POST' },
   )
-  return {
-    indexed: Math.max(0, Math.round(asNumber(data?.indexed, 0))),
-    kb: (data?.kb || {}) as KnowledgeBase,
-    vector: normalizeKbVector(data?.vector),
-  }
+  const jobId = asText(data?.job_id)
+  if (jobId) return { job_id: jobId, legacy: null }
+  return { job_id: null, legacy: parseKbReindexResult(data) }
 }
 
 /**

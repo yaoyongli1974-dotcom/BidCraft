@@ -15,8 +15,8 @@ import {
 } from '../../lib/api'
 import { className, formatMoney } from '../../lib/format'
 import { Button } from '../../components/Button'
-import { useConfirm } from '../../context/ConfirmContext'
-import { useToast } from '../../context/ToastContext'
+import { useConfirm } from '../../context/useConfirm'
+import { useToast } from '../../context/useToast'
 
 function clampPolicy(policy: PricePolicy): PricePolicy {
   return normalizePricePolicy({

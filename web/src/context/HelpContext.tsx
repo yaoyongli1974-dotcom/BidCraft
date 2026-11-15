@@ -1,7 +1,5 @@
 import {
-  createContext,
   useCallback,
-  useContext,
   useState,
   type ReactNode,
 } from 'react'
@@ -18,10 +16,9 @@ import {
 import { Modal } from '../components/Modal'
 import { Badge } from '../components/Badge'
 import { Button } from '../components/Button'
-import { useHealth } from './HealthContext'
+import { useHealth } from './useHealth'
 import { className } from '../lib/format'
-
-const HelpContext = createContext<{ openHelp: () => void } | null>(null)
+import { HelpContext } from './help'
 
 const WORKFLOW = [
   ['01', '导入招标文件', '支持 PDF、DOCX、TXT、XLSX；扫描 PDF 需先做 OCR。'],
@@ -183,10 +180,4 @@ export function HelpProvider({ children }: { children: ReactNode }) {
       </Modal>
     </HelpContext.Provider>
   )
-}
-
-export function useHelp() {
-  const context = useContext(HelpContext)
-  if (!context) throw new Error('useHelp 必须在 HelpProvider 内使用')
-  return context
 }

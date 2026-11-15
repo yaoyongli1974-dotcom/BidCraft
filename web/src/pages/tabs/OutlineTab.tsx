@@ -16,7 +16,7 @@ import {
   Wand2,
   type LucideIcon,
 } from 'lucide-react'
-import { useWorkspace } from '../WorkspacePage'
+import { useWorkspace } from '../useWorkspace'
 import {
   ApiError,
   generateChapter,
@@ -41,8 +41,8 @@ import { Badge } from '../../components/Badge'
 import { Button, IconButton } from '../../components/Button'
 import { ErrorState, Skeleton } from '../../components/Feedback'
 import { AutoTextarea, TabHeading } from '../../components/Workbench'
-import { useConfirm } from '../../context/ConfirmContext'
-import { useToast } from '../../context/ToastContext'
+import { useConfirm } from '../../context/useConfirm'
+import { useToast } from '../../context/useToast'
 
 interface EditableChapter {
   uid: string

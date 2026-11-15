@@ -1,7 +1,5 @@
 import {
-  createContext,
   useCallback,
-  useContext,
   useState,
   type ReactNode,
 } from 'react'
@@ -9,23 +7,11 @@ import { AlertTriangle, ShieldQuestion } from 'lucide-react'
 import { Modal } from '../components/Modal'
 import { Button } from '../components/Button'
 import { className } from '../lib/format'
-
-export interface ConfirmOptions {
-  title: string
-  description?: ReactNode
-  confirmLabel?: string
-  cancelLabel?: string
-  tone?: 'primary' | 'danger' | 'warning'
-  note?: ReactNode
-}
-
-type ConfirmFn = (options: ConfirmOptions) => Promise<boolean>
+import { ConfirmContext, type ConfirmFn, type ConfirmOptions } from './confirm'
 
 interface PendingConfirm extends ConfirmOptions {
   resolve: (value: boolean) => void
 }
-
-const ConfirmContext = createContext<ConfirmFn | null>(null)
 
 export function ConfirmProvider({ children }: { children: ReactNode }) {
   const [pending, setPending] = useState<PendingConfirm | null>(null)
@@ -84,10 +70,4 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
       </Modal>
     </ConfirmContext.Provider>
   )
-}
-
-export function useConfirm(): ConfirmFn {
-  const context = useContext(ConfirmContext)
-  if (!context) throw new Error('useConfirm 必须在 ConfirmProvider 内使用')
-  return context
 }

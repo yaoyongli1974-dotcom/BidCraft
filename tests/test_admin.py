@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 
 pytest.importorskip("fastapi")
@@ -14,6 +16,17 @@ def _client():
     response = client.post("/auth/login", json={"username": "admin", "password": "test-admin"})
     assert response.status_code == 200, response.text
     return client
+
+
+def _wait_job(client, job_id: str, timeout: float = 10.0) -> dict:
+    status: dict = {}
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = client.get(f"/jobs/{job_id}").json()
+        if status["status"] in {"done", "failed", "cancelled"}:
+            return status
+        time.sleep(0.02)
+    raise AssertionError(status)
 
 
 def test_login_and_rbac(db):
@@ -125,9 +138,12 @@ def test_local_knowledge_base_index_and_search(db, tmp_path):
     kb_id = created.json()["id"]
 
     indexed = client.post(f"/admin/kbs/{kb_id}/reindex")
-    assert indexed.status_code == 200
-    assert indexed.json()["indexed"] == 2
-    assert indexed.json()["kb"]["chunk_count"] == 2
+    assert indexed.status_code == 202
+    job = _wait_job(client, indexed.json()["job_id"])
+    assert job["status"] == "done", job
+    assert job["result"]["indexed"] == 2
+    assert job["result"]["kb"]["chunk_count"] == 2
+    assert job["result"]["vector"] is None
 
     tested = client.post(f"/admin/kbs/{kb_id}/test")
     assert tested.json()["ok"] is True

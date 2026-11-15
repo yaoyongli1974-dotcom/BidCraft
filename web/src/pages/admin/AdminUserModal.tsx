@@ -6,7 +6,7 @@ import { createUser, messageOf, updateUser } from '../../lib/api'
 import { Modal } from '../../components/Modal'
 import { Button } from '../../components/Button'
 import { Badge } from '../../components/Badge'
-import { useAuth } from '../../context/AuthContext'
+import { useAuth } from '../../context/useAuth'
 
 export type UserModalState =
   | { mode: 'create' }

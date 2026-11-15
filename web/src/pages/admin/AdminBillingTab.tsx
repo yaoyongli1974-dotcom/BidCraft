@@ -28,7 +28,7 @@ import {
   redeemStatusMeta,
   shortId,
 } from '../../lib/format'
-import { useToast } from '../../context/ToastContext'
+import { useToast } from '../../context/useToast'
 import { Badge } from '../../components/Badge'
 import { Button, IconButton } from '../../components/Button'
 import { ErrorState, Skeleton } from '../../components/Feedback'
@@ -82,7 +82,7 @@ export function AdminBillingTab() {
   }, [data])
 
   const stats = data?.stats
-  const orders = data?.orders || []
+  const orders = useMemo(() => data?.orders || [], [data?.orders])
   const codes = data?.codes || []
 
   const totalOrderCents = useMemo(

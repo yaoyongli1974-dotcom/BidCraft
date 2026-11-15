@@ -15,7 +15,7 @@ import {
   WifiOff,
   type LucideIcon,
 } from 'lucide-react'
-import { useWorkspace } from '../WorkspacePage'
+import { useWorkspace } from '../useWorkspace'
 import { downloadBlob, exportProject, messageOf } from '../../lib/api'
 import type { ExportFormat, ExportRecord } from '../../lib/types'
 import {
@@ -25,13 +25,13 @@ import {
   outlineCount,
   projectStats,
 } from '../../lib/format'
-import { useHealth } from '../../context/HealthContext'
+import { useHealth } from '../../context/useHealth'
 import { useLocalStorageState } from '../../lib/hooks'
 import { Badge } from '../../components/Badge'
 import { Button } from '../../components/Button'
 import { ProgressBar } from '../../components/Feedback'
 import { StatTile, TabHeading } from '../../components/Workbench'
-import { useToast } from '../../context/ToastContext'
+import { useToast } from '../../context/useToast'
 
 const FORMATS: Array<
   ExportFormat & { icon: LucideIcon; recommended?: boolean; note?: string }

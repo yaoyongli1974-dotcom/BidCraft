@@ -7,7 +7,7 @@ import {
   UserPlus,
   Users,
 } from 'lucide-react'
-import { useWorkspace } from '../WorkspacePage'
+import { useWorkspace } from '../useWorkspace'
 import {
   addMember,
   getMembers,
@@ -33,8 +33,8 @@ import { Badge } from '../../components/Badge'
 import { Button, IconButton } from '../../components/Button'
 import { EmptyState, ErrorState, Skeleton } from '../../components/Feedback'
 import { TabHeading } from '../../components/Workbench'
-import { useConfirm } from '../../context/ConfirmContext'
-import { useToast } from '../../context/ToastContext'
+import { useConfirm } from '../../context/useConfirm'
+import { useToast } from '../../context/useToast'
 
 const MEMBER_ROLE_OPTIONS: MemberRole[] = ['editor', 'viewer']
 

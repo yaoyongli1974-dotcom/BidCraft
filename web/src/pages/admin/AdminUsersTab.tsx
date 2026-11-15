@@ -21,9 +21,9 @@ import {
   roleMeta,
 } from '../../lib/format'
 import { deleteUser, messageOf, updateUser } from '../../lib/api'
-import { useAuth } from '../../context/AuthContext'
-import { useConfirm } from '../../context/ConfirmContext'
-import { useToast } from '../../context/ToastContext'
+import { useAuth } from '../../context/useAuth'
+import { useConfirm } from '../../context/useConfirm'
+import { useToast } from '../../context/useToast'
 import { Badge } from '../../components/Badge'
 import { Button, IconButton } from '../../components/Button'
 import { EmptyState, ErrorState } from '../../components/Feedback'

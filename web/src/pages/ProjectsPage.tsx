@@ -50,10 +50,10 @@ import { Button, IconButton } from '../components/Button'
 import { EmptyState, ErrorState, ProgressBar, Skeleton } from '../components/Feedback'
 import { NewProjectModal } from '../components/NewProjectModal'
 import { EditProjectModal } from '../components/EditProjectModal'
-import { useToast } from '../context/ToastContext'
-import { useConfirm } from '../context/ConfirmContext'
-import { useHelp } from '../context/HelpContext'
-import { useAuth } from '../context/AuthContext'
+import { useToast } from '../context/useToast'
+import { useConfirm } from '../context/useConfirm'
+import { useHelp } from '../context/useHelp'
+import { useAuth } from '../context/useAuth'
 
 const WORKFLOW_STEPS = ['导入', '解析', '校订事实', '大纲', '正文', '核对', '导出'] as const
 

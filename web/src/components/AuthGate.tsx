@@ -1,6 +1,6 @@
 import { Navigate, useLocation } from 'react-router-dom'
 import { AlertTriangle, RotateCcw, ShieldCheck } from 'lucide-react'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
 import { AppShell } from './AppShell'
 import { Button } from './Button'
 

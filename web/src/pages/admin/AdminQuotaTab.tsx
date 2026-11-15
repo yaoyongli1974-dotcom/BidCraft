@@ -22,8 +22,8 @@ import {
   messageOf,
 } from '../../lib/api'
 import { useDebouncedValue, useQuery } from '../../lib/hooks'
-import { useConfirm } from '../../context/ConfirmContext'
-import { useToast } from '../../context/ToastContext'
+import { useConfirm } from '../../context/useConfirm'
+import { useToast } from '../../context/useToast'
 import { Badge } from '../../components/Badge'
 import { Button, IconButton } from '../../components/Button'
 import { EmptyState, ErrorState } from '../../components/Feedback'
@@ -80,7 +80,10 @@ export function AdminQuotaTab({
     { enabled: query.length > 0 },
   )
 
-  const source = query ? searchQuery.data ?? [] : quotas
+  const source = useMemo(
+    () => (query ? searchQuery.data ?? [] : quotas),
+    [query, searchQuery.data, quotas],
+  )
   const busy = query ? searchQuery.loading : loading
 
   const categories = useMemo(() => {

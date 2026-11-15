@@ -1,7 +1,5 @@
 import {
-  createContext,
   useCallback,
-  useContext,
   useEffect,
   useRef,
   useState,
@@ -9,8 +7,7 @@ import {
 } from 'react'
 import { AlertTriangle, CheckCircle2, Info, X, XCircle } from 'lucide-react'
 import { className } from '../lib/format'
-
-type ToastKind = 'success' | 'error' | 'info' | 'warning'
+import { ToastContext, type ToastApi, type ToastKind } from './toast'
 
 interface ToastItem {
   id: number
@@ -18,17 +15,6 @@ interface ToastItem {
   title: string
   description?: string
 }
-
-interface ToastApi {
-  notify: (kind: ToastKind, title: string, description?: string) => void
-  success: (title: string, description?: string) => void
-  error: (title: string, description?: string) => void
-  info: (title: string, description?: string) => void
-  warning: (title: string, description?: string) => void
-  dismiss: (id: number) => void
-}
-
-const ToastContext = createContext<ToastApi | null>(null)
 
 const ICONS = {
   success: CheckCircle2,
@@ -103,10 +89,4 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       </div>
     </ToastContext.Provider>
   )
-}
-
-export function useToast(): ToastApi {
-  const context = useContext(ToastContext)
-  if (!context) throw new Error('useToast 必须在 ToastProvider 内使用')
-  return context
 }

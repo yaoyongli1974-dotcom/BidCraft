@@ -93,7 +93,7 @@ export function QuotaFillModal({
     }
   }, [open, projectRef, packageId, onlyMissing, nonce])
 
-  const proposals = result?.proposals ?? []
+  const proposals = useMemo(() => result?.proposals ?? [], [result?.proposals])
 
   const qtyByRow = useMemo(() => {
     const map = new Map<number, number | null>()

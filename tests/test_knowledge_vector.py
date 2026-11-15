@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime
 
 import httpx
@@ -139,6 +140,17 @@ def _client():
     response = client.post("/auth/login", json={"username": "admin", "password": "test-admin"})
     assert response.status_code == 200, response.text
     return client
+
+
+def _wait_job(client, job_id: str, timeout: float = 10.0) -> dict:
+    status: dict = {}
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = client.get(f"/jobs/{job_id}").json()
+        if status["status"] in {"done", "failed", "cancelled"}:
+            return status
+        time.sleep(0.02)
+    raise AssertionError(status)
 
 
 def _api_embedding_model(client, model="emb-main", name="向量模型") -> str:
@@ -458,9 +470,11 @@ def test_reindex_returns_vector_and_payload_fields(db, tmp_path, monkeypatch):
     assert created["vector_stale"] is False
     assert created["vector_model"] == "emb-main"
 
-    indexed = client.post(f"/admin/kbs/{kb_id}/reindex")
-    assert indexed.status_code == 200, indexed.text
-    body = indexed.json()
+    accepted = client.post(f"/admin/kbs/{kb_id}/reindex")
+    assert accepted.status_code == 202, accepted.text
+    job = _wait_job(client, accepted.json()["job_id"])
+    assert job["status"] == "done", job
+    body = job["result"]
     assert body["vector"] == {
         "embedded": 2,
         "total": 2,
@@ -516,7 +530,9 @@ def test_embed_route_validation_errors(db, tmp_path, monkeypatch):
     assert empty.status_code == 400
     assert empty.json()["detail"] == "请先重建索引"
 
-    assert client.post(f"/admin/kbs/{kb_id}/reindex").status_code == 200
+    accepted = client.post(f"/admin/kbs/{kb_id}/reindex")
+    assert accepted.status_code == 202
+    assert _wait_job(client, accepted.json()["job_id"])["status"] == "done"
     monkeypatch.setattr(settings, "offline", True)
     missing = client.post(f"/admin/kbs/{kb_id}/embed")
     assert missing.status_code == 400
@@ -536,9 +552,11 @@ def test_embed_route_partial_failure_is_200(db, tmp_path, monkeypatch):
     root = _write_kb_dir(tmp_path, ["双绞线缆", "网线面板"])
     kb_id = _api_local_kb(client, root)
 
-    indexed = client.post(f"/admin/kbs/{kb_id}/reindex")
-    assert indexed.status_code == 200, indexed.text
-    assert indexed.json()["vector"]["embedded"] == 1
+    accepted = client.post(f"/admin/kbs/{kb_id}/reindex")
+    assert accepted.status_code == 202, accepted.text
+    job = _wait_job(client, accepted.json()["job_id"])
+    assert job["status"] == "done", job
+    assert job["result"]["vector"]["embedded"] == 1
 
     # Simulate a stale index so the second call reprocesses both chunks.
     from sqlalchemy import select

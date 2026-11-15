@@ -1,6 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useQuery } from './hooks'
+import { apiFetch } from './api'
 import { clearQueryCache } from './queryCache'
 
 function deferred<T>() {
@@ -15,6 +16,10 @@ function deferred<T>() {
 
 beforeEach(() => {
   clearQueryCache()
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
 })
 
 describe('useQuery cache', () => {
@@ -137,5 +142,51 @@ describe('useQuery request lifecycle', () => {
     const { result } = renderHook(() => useQuery('boq:waiting', fetcher, { enabled: false }))
     expect(fetcher).not.toHaveBeenCalled()
     expect(result.current.loading).toBe(true)
+  })
+})
+
+describe('useQuery cancellation', () => {
+  it('passes its signal to the fetcher and aborts it on unmount', async () => {
+    let received: AbortSignal | undefined
+    const fetcher = vi.fn((signal?: AbortSignal) => {
+      received = signal
+      return new Promise<string>(() => {
+        /* never resolves: the hook must be able to cancel it */
+      })
+    })
+
+    const { unmount } = renderHook(() => useQuery('cancel:one', fetcher))
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1))
+    expect(received).toBeDefined()
+    expect(received?.aborted).toBe(false)
+
+    unmount()
+    expect(received?.aborted).toBe(true)
+  })
+
+  it('forwards the signal through apiFetch and aborts the underlying fetch', async () => {
+    const signals: AbortSignal[] = []
+    const fetchMock = vi.fn((_path: RequestInfo | URL, init?: RequestInit) => {
+      const signal = init?.signal
+      if (!signal) throw new Error('missing abort signal')
+      signals.push(signal)
+      return new Promise<Response>((_resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+        })
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { unmount } = renderHook(() =>
+      useQuery('cancel:fetch', (signal) => apiFetch('/slow', undefined, signal)),
+    )
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    expect(signals[0].aborted).toBe(false)
+
+    unmount()
+    expect(signals[0].aborted).toBe(true)
+    // The abort rejection must not leak as an unhandled error.
+    await act(async () => {})
   })
 })

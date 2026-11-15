@@ -1,13 +1,71 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  ApiError,
   DEFAULT_IMAGE_POLICY,
   DEFAULT_PRICE_POLICY,
+  UNAUTHORIZED_EVENT,
+  apiFetch,
   errorDetailText,
   messageOf,
   normalizeImagePolicy,
   normalizePricePolicy,
+  reindexKnowledgeBase,
   roundTo,
+  uploadForm,
 } from './api'
+
+class FakeXhr {
+  static instances: FakeXhr[] = []
+  upload: { onprogress?: (event: ProgressEvent) => void } = {}
+  status = 0
+  statusText = ''
+  responseText = ''
+  responseType = ''
+  withCredentials = false
+  aborted = false
+  method = ''
+  url = ''
+  onload: (() => void) | null = null
+  onerror: (() => void) | null = null
+  onabort: (() => void) | null = null
+
+  constructor() {
+    FakeXhr.instances.push(this)
+  }
+
+  open(method: string, url: string) {
+    this.method = method
+    this.url = url
+  }
+
+  send() {}
+
+  abort() {
+    this.aborted = true
+    this.onabort?.()
+  }
+
+  progress(loaded: number, total: number) {
+    this.upload.onprogress?.({
+      lengthComputable: true,
+      loaded,
+      total,
+    } as ProgressEvent)
+  }
+
+  respond(status: number, text: string) {
+    this.status = status
+    this.responseText = text
+    this.onload?.()
+  }
+}
+
+function form() {
+  const data = new FormData()
+  data.append('file', new Blob(['hello']), 'a.txt')
+  return data
+}
+
 
 describe('normalizePricePolicy', () => {
   it('uses the defaults for an empty payload', () => {
@@ -82,5 +140,129 @@ describe('error helpers', () => {
     expect(errorDetailText({ foo: 'bar' })).toBe('{"foo":"bar"}')
     expect(messageOf(new Error('网络异常'))).toBe('网络异常')
     expect(messageOf(null)).toBe('发生未知错误，请重试')
+  })
+})
+
+describe('uploadForm', () => {
+  beforeEach(() => {
+    FakeXhr.instances = []
+    vi.stubGlobal('XMLHttpRequest', FakeXhr)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('reports upload progress percentages', async () => {
+    const seen: number[] = []
+    const pending = uploadForm('/projects/a/sources', form(), {
+      onProgress: (percent) => seen.push(percent),
+    })
+    const xhr = FakeXhr.instances[0]
+    xhr.progress(3, 4)
+    xhr.respond(200, '{"ok":true}')
+    await expect(pending).resolves.toEqual({ ok: true })
+    expect(seen).toEqual([75])
+  })
+
+  it('fires the global unauthorized event on 401 and rejects with the detail', async () => {
+    const onUnauthorized = vi.fn()
+    window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized)
+    const pending = uploadForm('/projects/a/sources', form())
+    const xhr = FakeXhr.instances[0]
+    xhr.respond(401, '{"detail":"登录已失效"}')
+
+    await expect(pending).rejects.toMatchObject({
+      name: 'ApiError',
+      status: 401,
+      message: '登录已失效',
+    })
+    expect(onUnauthorized).toHaveBeenCalledTimes(1)
+    expect((onUnauthorized.mock.calls[0][0] as CustomEvent).detail).toEqual({
+      path: '/projects/a/sources',
+    })
+    window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized)
+  })
+
+  it('aborts the XHR when the signal is aborted', async () => {
+    const controller = new AbortController()
+    const pending = uploadForm('/projects/a/sources', form(), {
+      signal: controller.signal,
+    })
+    const xhr = FakeXhr.instances[0]
+    controller.abort()
+
+    expect(xhr.aborted).toBe(true)
+    await expect(pending).rejects.toBeInstanceOf(ApiError)
+    await expect(pending).rejects.toMatchObject({ message: '上传已取消。' })
+  })
+
+  it('rejects immediately when the signal is already aborted', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    await expect(
+      uploadForm('/projects/a/sources', form(), { signal: controller.signal }),
+    ).rejects.toMatchObject({ message: '上传已取消。' })
+    expect(FakeXhr.instances).toHaveLength(0)
+  })
+})
+
+describe('request cancellation', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('rethrows an abort instead of masking it as a network failure', async () => {
+    const controller = new AbortController()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        (_path: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+            })
+          }),
+      ),
+    )
+    const pending = apiFetch('/slow', undefined, controller.signal)
+    controller.abort()
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
+  it('returns a job id for the async reindex endpoint', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify({ job_id: 'job-9' }), {
+          status: 202,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    )
+    await expect(reindexKnowledgeBase('kb-1')).resolves.toEqual({
+      job_id: 'job-9',
+      legacy: null,
+    })
+  })
+
+  it('falls back to the legacy synchronous reindex payload', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            indexed: 4,
+            vector: { embedded: 2, total: 4, model: 'bge', dim: 8 },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      ),
+    )
+    const result = await reindexKnowledgeBase('kb-1')
+    expect(result.job_id).toBeNull()
+    expect(result.legacy?.indexed).toBe(4)
+    expect(result.legacy?.vector?.embedded).toBe(2)
+    expect(result.legacy?.vector?.model).toBe('bge')
   })
 })

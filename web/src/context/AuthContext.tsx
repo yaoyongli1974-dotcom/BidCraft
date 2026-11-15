@@ -1,7 +1,5 @@
 import {
-  createContext,
   useCallback,
-  useContext,
   useEffect,
   useRef,
   useState,
@@ -19,23 +17,7 @@ import {
 } from '../lib/api'
 import type { User } from '../lib/types'
 import { clearQueryCache } from '../lib/queryCache'
-
-interface AuthApi {
-  user: User | null
-  loading: boolean
-  error: string | null
-  isSuperAdmin: boolean
-  canWrite: boolean
-  login: (username: string, password: string) => Promise<User>
-  register: (username: string, password: string, displayName?: string) => Promise<User>
-  updateUser: (user: User) => void
-  syncUser: () => Promise<void>
-  logout: () => Promise<void>
-  changePassword: (currentPassword: string, newPassword: string) => Promise<void>
-  refresh: () => void
-}
-
-const AuthContext = createContext<AuthApi | null>(null)
+import { AuthContext, type AuthApi } from './auth'
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
@@ -153,10 +135,4 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return <AuthContext.Provider value={api}>{children}</AuthContext.Provider>
-}
-
-export function useAuth(): AuthApi {
-  const context = useContext(AuthContext)
-  if (!context) throw new Error('useAuth 必须在 AuthProvider 内使用')
-  return context
 }

@@ -23,8 +23,8 @@ import {
   updatePlugin,
 } from '../../lib/api'
 import { className, formatLatency, formatRelative } from '../../lib/format'
-import { useConfirm } from '../../context/ConfirmContext'
-import { useToast } from '../../context/ToastContext'
+import { useConfirm } from '../../context/useConfirm'
+import { useToast } from '../../context/useToast'
 import { Badge } from '../../components/Badge'
 import { Button, IconButton } from '../../components/Button'
 import { EmptyState, ErrorState } from '../../components/Feedback'

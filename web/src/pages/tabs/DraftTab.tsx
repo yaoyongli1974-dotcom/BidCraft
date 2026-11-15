@@ -23,7 +23,7 @@ import {
   Wand2,
   X,
 } from 'lucide-react'
-import { useWorkspace } from '../WorkspacePage'
+import { useWorkspace } from '../useWorkspace'
 import {
   ApiError,
   applyImagePlan,
@@ -78,9 +78,9 @@ import { Button, IconButton } from '../../components/Button'
 import { EmptyState, ErrorState, ProgressBar, Skeleton } from '../../components/Feedback'
 import { Modal } from '../../components/Modal'
 import { TabHeading } from '../../components/Workbench'
-import { useConfirm } from '../../context/ConfirmContext'
-import { useToast } from '../../context/ToastContext'
-import { useAuth } from '../../context/AuthContext'
+import { useConfirm } from '../../context/useConfirm'
+import { useToast } from '../../context/useToast'
+import { useAuth } from '../../context/useAuth'
 
 const JOB_STATUS_LABEL: Record<string, string> = {
   queued: '排队中',
@@ -1046,7 +1046,7 @@ export function DraftTab() {
   // Image batches are polled rather than streamed: progress is coarse-grained
   // and the browser does not need token-level previews.
   useEffect(() => {
-    const current = imageBatchJob
+    const current = imageBatchJobRef.current
     if (
       !current ||
       (current.status !== 'queued' && current.status !== 'running')
