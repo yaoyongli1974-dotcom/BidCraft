@@ -1,0 +1,260 @@
+# C1 领域规格 · 通用投标事实包
+# 这一层只放「任何行业招标文件都成立」的字段、解析规则与核对项。
+# 行业包通过 extends 继承并按 key 覆盖；业务人员改这里不需要改代码。
+package: common-bid-facts
+version: 1
+abstract: true
+project_type: common
+project_type_label: 通用
+title: 通用投标事实
+description: 项目身份、商务条款、资格与响应要求的通用抽取与核对口径。
+
+parse:
+  # 章节标题：用于切分「投标人须知 / 评标办法 / 技术需求 / 投标文件格式」
+  heading_patterns:
+    - "^第[一二三四五六七八九十百0-9]+[章节部分篇]"
+    - "^[一二三四五六七八九十]{1,3}[、.．]"
+    - "^[（(][一二三四五六七八九十]{1,3}[）)]"
+    - "^\\d{1,2}(\\.\\d{1,2}){0,2}[、.．\\s]"
+  # 表格识别提示：表头/上下文包含这些词时按对应类型解析
+  table_hints:
+    scoring: ["评分办法", "评标办法", "评审办法", "评分标准", "评分细则", "综合评分"]
+    parameters: ["技术参数", "技术规格", "技术要求", "性能指标", "配置要求"]
+    materials: ["工程量清单", "材料清单", "设备清单", "分项报价", "货物清单"]
+    composition: ["投标文件组成", "响应文件组成", "投标文件的组成", "文件格式"]
+  # 正文里出现这些词的行视为程序性噪声，不参与字段取值
+  noise_patterns:
+    - "^(?:第\\s*)?\\d{1,4}\\s*(?:页)?$"
+    - "[.．。·•‥…]{3,}\\s*\\d{0,4}\\s*$"
+    - "^(?:目录|目\\s*录)$"
+
+fields:
+  - key: project.name
+    label: 项目名称
+    group: identity
+    aliases: [招标项目名称, 项目名称, 采购项目名称, 工程名称]
+    required: true
+    type: text
+    max_len: 80
+    reject_patterns:
+      - "^(?:即|见|详见|参见).{0,30}(?:须知|附表|公告|为准)"
+      - "^[\\s*＊#＃xX×\\-—_]+$"
+  - key: project.number
+    label: 项目编号
+    group: identity
+    aliases: [招标项目编号, 项目编号, 项目编码, 采购项目编号]
+    required: true
+    type: code
+  - key: tender.number
+    label: 招标编号
+    group: identity
+    aliases: [招标编号, 招标文件编号, 采购编号, 采购文件编号, 标段编号, 文件编号]
+    required: false
+    type: code
+  - key: project.buyer
+    label: 招标人
+    group: identity
+    aliases: [招标人, 采购人, 招标单位, 采购单位, 建设单位, 业主]
+    required: true
+    type: entity
+  - key: project.agency
+    label: 招标代理机构
+    group: identity
+    aliases: [招标代理机构, 采购代理机构, 代理机构]
+    required: false
+    type: entity
+  - key: project.budget
+    label: 预算金额/最高限价
+    group: commercial
+    aliases: [预算金额, 采购预算, 最高限价, 招标控制价, 最高投标限价, 项目预算]
+    required: true
+    type: money
+  - key: project.bid_deadline
+    label: 投标截止时间
+    group: commercial
+    aliases: [投标截止时间, 递交截止时间, 响应文件递交截止时间, 报价截止时间, 投标文件递交截止时间]
+    required: true
+    type: datetime
+  - key: project.open_time
+    label: 开标时间
+    group: commercial
+    aliases: [开标时间, 开启时间, 唱标时间]
+    required: false
+    type: datetime
+  - key: project.location
+    label: 项目地点
+    group: commercial
+    aliases: [服务地点, 项目地点, 交货地点, 实施地点, 交付地点, 建设地点]
+    required: true
+    type: text
+  - key: project.duration
+    label: 工期/服务期
+    group: commercial
+    aliases: [服务期, 履约期限, 交货期, 完成时间, 工期, 供货期, 建设周期]
+    required: true
+    type: duration
+  - key: project.warranty
+    label: 质保期
+    group: commercial
+    aliases: [质保期, 保修期, 质量保证期, 免费维护期, 维保期, 质保, 保修]
+    required: true
+    type: duration
+  - key: project.bid_validity
+    label: 投标有效期
+    group: commercial
+    aliases: [投标有效期, 报价有效期, 响应有效期]
+    required: true
+    type: duration
+  - key: project.deposit
+    label: 投标保证金
+    group: commercial
+    aliases: [投标保证金, 投标担保, 保证金]
+    required: true
+    type: money
+  - key: project.payment
+    label: 付款方式
+    group: commercial
+    aliases: [付款方式, 付款条件, 结算方式, 支付方式]
+    required: false
+    type: text
+  - key: project.acceptance
+    label: 验收标准
+    group: commercial
+    aliases: [验收标准, 验收方式, 验收要求]
+    required: false
+    type: text
+  - key: qualification.requirements
+    label: 资格/资质要求
+    group: qualification
+    aliases: [资质要求, 资格要求, 投标人资格, 供应商资格, 资格条件]
+    required: true
+    type: text
+  - key: personnel.requirements
+    label: 人员要求
+    group: qualification
+    aliases: [人员要求, 项目负责人要求, 项目经理要求, 技术负责人要求]
+    required: false
+    type: text
+  - key: scoring.method
+    label: 评分办法
+    group: scoring
+    aliases: [评标办法, 评分办法, 评审办法, 评标方法, 评分方法]
+    required: true
+    type: text
+  - key: project.content
+    label: 招标内容
+    group: technical
+    aliases: [招标内容, 采购内容, 招标范围, 采购范围, 项目概况, 项目规模, 建设内容, 工程概况, 项目概述, 建设范围, 建设规模, 招标项目概况]
+    required: true
+    type: text
+  - key: tech.requirements
+    label: 技术需求
+    group: technical
+    aliases: [技术需求, 技术要求, 采购需求, 技术规格]
+    required: false
+    type: text
+  - key: bidder.name
+    label: 投标人名称
+    group: bidder
+    aliases: [投标人名称, 供应商名称, 投标单位名称, 响应人名称]
+    required: false
+    type: entity
+  - key: bidder.price
+    label: 投标报价
+    group: bidder
+    aliases: [投标报价, 投标总价, 报价总额, 总报价, 投标价格]
+    required: false
+    type: money
+  - key: bidder.contact
+    label: 投标人联系人
+    group: bidder
+    aliases: [投标人联系人, 项目联系人, 联系人]
+    required: false
+    type: text
+
+# 通用结构：行业包未定义 outline 时使用
+outline:
+  mode: replace
+  items:
+    - {heading: 投标函及投标函附录, intent: 按招标文件格式填写，承诺报价、工期与有效期, target_words: 800, needs: [project.name, project.number, bidder.name]}
+    - {heading: 法定代表人身份证明及授权委托书, intent: 提供法定代表人与授权代表信息、签字盖章, target_words: 600, needs: [bidder.name]}
+    - {heading: 投标人资格证明文件, intent: 逐项响应资格条件并附证明材料清单, target_words: 1500, needs: [qualification.requirements, bidder.name]}
+    - {heading: 商务响应与偏离说明, intent: 响应付款、工期、质保、有效期等商务条款, target_words: 1200, needs: [project.duration, project.warranty, project.bid_validity, project.payment]}
+    - {heading: 实质性条款与废标风险响应, intent: 逐条对照招标文件的废标/否决/无效条款与实质性要求，说明规避措施与责任分工, target_words: 1800, needs: [project.name]}
+    - {heading: 技术方案, intent: 响应技术需求、参数与实施要求, target_words: 6000, needs: [tech.requirements, project.content]}
+    - {heading: 项目实施与售后服务方案, intent: 说明组织、进度、质量、培训与售后, target_words: 2500, needs: [project.duration, project.warranty]}
+    - {heading: 报价文件, intent: 按清单报价，口径与总价一致, target_words: 800, needs: [bidder.price, project.budget]}
+
+checks:
+  - id: COM-001
+    level: blocking
+    category: 项目身份
+    assert: "present(facts['project.name'])"
+    message: 未识别到项目名称，封面与正文无法保持一致
+    recommendation: 在「事实台账」中人工确认项目名称
+  - id: COM-002
+    level: blocking
+    category: 项目身份
+    assert: "present(facts['project.number'])"
+    message: 未识别到项目编号
+    recommendation: 在「事实台账」中补录项目编号
+  - id: COM-003
+    level: critical
+    category: 资格
+    assert: "present(facts['qualification.requirements'])"
+    message: 未识别到资格/资质要求，资格响应可能漏项
+    recommendation: 人工核对投标人须知中的资格条件
+  - id: COM-004
+    level: critical
+    category: 商务
+    assert: "present(facts['project.bid_validity']) and present(facts['project.duration']) and present(facts['project.warranty'])"
+    message: 工期、质保期或投标有效期缺失
+    recommendation: 补齐三项期限口径后再生成
+  - id: COM-005
+    level: blocking
+    category: 报价
+    assert: "not present(facts['bidder.price']) or not present(facts['project.budget']) or number(facts['project.budget']) >= number(facts['bidder.price'])"
+    message: 投标报价超过预算/最高限价
+    recommendation: 下调报价或核对限价口径
+  - id: COM-006
+    level: major
+    category: 一致性
+    assert: "not present(facts['project.name']) or contains(doc, facts['project.name'])"
+    message: 正文未出现招标项目名称
+    recommendation: 在封面、投标函与正文首段使用台账中的项目名称
+  - id: COM-007
+    level: major
+    category: 一致性
+    assert: "not present(facts['project.number']) or contains(doc, facts['project.number'])"
+    message: 正文未出现项目编号
+    recommendation: 在封面与投标函中引用项目编号
+  - id: COM-008
+    level: major
+    category: 一致性
+    assert: "not present(facts['project.bid_validity']) or contains(doc, facts['project.bid_validity'])"
+    message: 正文未响应投标有效期
+    recommendation: 在商务响应章节写明投标有效期
+  - id: COM-009
+    level: major
+    category: 一致性
+    assert: "not present(facts['project.duration']) or contains(doc, facts['project.duration'])"
+    message: 正文未响应工期/服务期
+    recommendation: 在商务响应与实施计划中写明工期
+  - id: COM-010
+    level: minor
+    category: 文本
+    assert: "not contains(doc, '{{待填:招标项目名称}}')"
+    message: 成稿仍存在未填写的项目名称占位
+    recommendation: 用台账中的项目名称替换占位
+  - id: COM-011
+    level: major
+    category: 实质性响应
+    assert: "not len(risks) or has_section(sections, '废标')"
+    message: 招标文件含废标/否决条款，但成稿缺少实质性条款响应章节
+    recommendation: 生成「实质性条款与废标风险响应」章节，逐条说明规避措施
+  - id: COM-012
+    level: minor
+    category: 文本
+    assert: "not contains(doc, '{{待填')"
+    message: 成稿仍存在未填写占位符
+    recommendation: 用事实台账或人工确认值替换 {{待填:...}} 后再定稿

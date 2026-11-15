@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.build/
+dist/
+*.egg-info/
+.bidcraft/
+projects/
+*.db
+*.sqlite3
+.DS_Store
+web/node_modules/
+web/dist/
+bidcraft/web_dist/
+.opencode/

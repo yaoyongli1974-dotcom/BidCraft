@@ -1,0 +1,140 @@
+# 消防工程 · 火灾自动报警 / 喷淋 / 消火栓 / 防排烟
+package: fire-protection
+version: 1
+project_type: fire
+project_type_label: 消防工程
+title: 消防工程技术标
+description: 消防系统范围、火灾自动报警、自动喷水灭火、消火栓与防排烟的解析项、章节骨架与核对规则。
+extends: [common-bid-facts]
+
+parse:
+  keywords: [消防, 火灾自动报警, 自动喷水灭火, 喷淋, 消火栓, 防排烟, 消防泵, 报警阀, 探测器, 喷头, 消防水池]
+  parameter_vocab:
+    - 火灾自动报警
+    - 自动喷水灭火
+    - 消火栓
+    - 防排烟
+    - 消防泵
+    - 报警阀
+    - 水流指示器
+    - 探测器
+    - 喷头
+    - 消防水池
+    - 消防水箱
+    - 耐火等级
+    - 疏散指示
+    - 应急照明
+    - GB 50016
+    - GB 50166
+    - GB 50261
+  table_hints:
+    materials: [工程量清单, 消防材料清单, 设备清单, 设备材料表]
+    parameters: [技术参数, 技术规格, 性能指标, 配置要求]
+
+fields:
+  - key: fire.system_scope
+    label: 消防系统范围
+    group: technical
+    aliases: [消防系统, 消防工程范围, 消防系统组成, 招标范围]
+    required: true
+    type: text
+  - key: fire.building_area
+    label: 建筑面积
+    group: technical
+    aliases: [建筑面积, 总建筑面积, 建筑规模]
+    required: false
+    type: number
+    unit: ㎡
+  - key: fire.building_height
+    label: 建筑高度
+    group: technical
+    aliases: [建筑高度, 建筑层高, 建筑标高]
+    required: false
+    type: number
+    unit: m
+  - key: fire.fire_rating
+    label: 建筑耐火等级
+    group: technical
+    aliases: [耐火等级, 建筑耐火等级, 防火等级]
+    required: false
+    type: text
+  - key: fire.sprinkler_count
+    label: 喷头数量
+    group: technical
+    aliases: [喷头数量, 喷淋头数量, 喷头点位, 喷淋点数]
+    required: false
+    type: number
+    unit: 个
+  - key: fire.detector_count
+    label: 探测器数量
+    group: technical
+    aliases: [探测器数量, 火灾探测器数量, 报警点位, 探测器点位]
+    required: false
+    type: number
+    unit: 只
+  - key: fire.water_demand
+    label: 消防水量
+    group: technical
+    aliases: [消防水量, 消防用水量, 设计流量, 消防水池容积]
+    required: false
+    type: text
+  - key: fire.acceptance_standard
+    label: 消防验收标准
+    group: technical
+    aliases: [验收标准, 消防验收, 验收规范, 检测标准]
+    required: true
+    type: text
+  - key: fire.warranty_years
+    label: 消防系统质保年限
+    group: commercial
+    aliases: [质保年限, 质保期, 保修期, 系统质保]
+    required: false
+    type: duration
+
+outline:
+  mode: replace
+  items:
+    - {heading: 项目理解与消防需求分析, intent: 引用项目身份、建筑规模、消防系统范围与验收目标，说明对招标文件的理解, target_words: 2200, needs: [project.name, fire.system_scope, fire.building_area]}
+    - {heading: 商务条款响应与承诺, intent: 逐项响应工期、质保、投标有效期、付款与验收条款, target_words: 1800, needs: [project.duration, project.warranty, project.bid_validity, project.payment]}
+    - {heading: 实质性条款与废标风险响应, intent: 对照消防工程否决项、资质与人员要求，说明响应措施与责任分工, target_words: 1800, needs: [project.name, qualification.requirements]}
+    - {heading: 消防系统总体设计, intent: 说明设计依据、系统组成、防火分区与消防控制室架构, target_words: 4200, needs: [fire.system_scope, fire.fire_rating, fire.building_height]}
+    - {heading: 火灾自动报警系统, intent: 探测器、手报、声光、模块、报警控制器与联动逻辑, target_words: 4200, needs: [fire.detector_count, fire.system_scope]}
+    - {heading: 自动喷水灭火系统, intent: 喷头选型与布置、报警阀、水流指示器、末端试水与水力计算, target_words: 4200, needs: [fire.sprinkler_count, fire.water_demand]}
+    - {heading: 消火栓与消防供水系统, intent: 室内外消火栓、消防泵房、水池水箱与稳压设施, target_words: 3200, needs: [fire.water_demand, fire.building_area]}
+    - {heading: 防排烟与疏散系统, intent: 防烟分区、排烟风机、补风、疏散指示与应急照明, target_words: 3000, needs: [fire.system_scope, fire.fire_rating]}
+    - {heading: 消防材料设备与工程量响应, intent: 对照清单核对喷头、探测器、管材、阀门与设备数量规格, target_words: 2800, needs: [fire.sprinkler_count, fire.detector_count]}
+    - {heading: 施工组织与系统调试, intent: 施工顺序、交叉作业、管道试压冲洗、单机与联动调试, target_words: 3200, needs: [project.duration, project.location]}
+    - {heading: 质量保证与消防验收, intent: 过程质量控制、检测比例、资料报验与消防验收配合, target_words: 2800, needs: [fire.acceptance_standard]}
+    - {heading: 安全文明施工与售后服务, intent: 动火作业、临时消防、成品保护、质保响应与巡检, target_words: 1800, needs: [fire.warranty_years, project.warranty]}
+
+checks:
+  - id: FIR-001
+    level: blocking
+    category: 数量一致
+    assert: "not present(facts['fire.sprinkler_count']) or not materials or materials_total(materials, '喷头') == 0 or number(facts['fire.sprinkler_count']) == materials_total(materials, '喷头')"
+    message: 喷头数量与招标工程量清单合计不一致
+    recommendation: 逐项核对喷头点位表与清单数量，统一口径后再生成
+  - id: FIR-002
+    level: blocking
+    category: 数量一致
+    assert: "not present(facts['fire.detector_count']) or not materials or materials_total(materials, '探测器|探头') == 0 or number(facts['fire.detector_count']) == materials_total(materials, '探测器|探头')"
+    message: 探测器数量与招标工程量清单合计不一致
+    recommendation: 核对火灾自动报警点位表与探测器清单
+  - id: FIR-003
+    level: major
+    category: 参数响应
+    assert: "not parameters or param_response_ratio(parameters, doc) >= 0.95"
+    message: 消防技术参数未逐条响应（响应率低于 95%）
+    recommendation: 在技术参数响应表中逐条列出参数、响应值与偏离说明
+  - id: FIR-004
+    level: major
+    category: 验收
+    assert: "not present(facts['fire.acceptance_standard']) or contains(doc, facts['fire.acceptance_standard'])"
+    message: 正文未引用招标要求的消防验收标准
+    recommendation: 在质量验收章节写明标准号与检测要求
+  - id: FIR-005
+    level: minor
+    category: 完整性
+    assert: "contains_ratio(doc, ['火灾自动报警', '自动喷水灭火', '消火栓', '防排烟']) >= 0.75"
+    message: 消防系统章节覆盖不足
+    recommendation: 按招标范围补齐报警、喷淋、消火栓与防排烟内容

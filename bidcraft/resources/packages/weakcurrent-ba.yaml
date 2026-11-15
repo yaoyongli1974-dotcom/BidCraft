@@ -1,0 +1,149 @@
+# C1 领域规格 · 弱电 · 楼宇自控（BA）
+package: weakcurrent-ba
+version: 1
+project_type: weakcurrent
+project_type_label: 弱电智能化
+title: 楼宇自控技术标
+description: BA/DDC 系统的点位表、协议、控制逻辑、章节骨架与核对规则。
+extends: [common-bid-facts]
+
+parse:
+  keywords: [楼宇自控, 楼宇自动化, BA系统, DDC, 控制器, 传感器, 执行器, BACnet, Modbus, 监控点位]
+  parameter_vocab:
+    - DDC
+    - 控制器
+    - DI
+    - DO
+    - AI
+    - AO
+    - BACnet
+    - Modbus
+    - 传感器
+    - 执行器
+    - 温湿度
+    - 压差
+    - 水流开关
+    - 电动阀
+    - 风机
+    - 水泵
+    - 冷机
+    - 空调机组
+  table_hints:
+    materials: [工程量清单, 设备清单, 材料清单, 监控点位表, 点表]
+    parameters: [技术参数, 技术规格, 性能指标, 配置要求]
+
+fields:
+  - key: ba.ddc_count
+    label: DDC 控制器数量
+    group: technical
+    aliases: [DDC数量, 控制器数量, DDC控制器数量, 现场控制器数量]
+    required: false
+    type: number
+    unit: 台
+  - key: ba.total_points
+    label: 监控点总数
+    group: technical
+    aliases: [监控点总数, 点位总数, 控制点总数, I/O点数, 点位数]
+    required: true
+    type: number
+    unit: 点
+  - key: ba.di_points
+    label: DI 点数
+    group: technical
+    aliases: [DI点数, 数字输入点数, 开关量输入]
+    required: false
+    type: number
+    unit: 点
+  - key: ba.do_points
+    label: DO 点数
+    group: technical
+    aliases: [DO点数, 数字输出点数, 开关量输出]
+    required: false
+    type: number
+    unit: 点
+  - key: ba.ai_points
+    label: AI 点数
+    group: technical
+    aliases: [AI点数, 模拟输入点数, 模拟量输入]
+    required: false
+    type: number
+    unit: 点
+  - key: ba.ao_points
+    label: AO 点数
+    group: technical
+    aliases: [AO点数, 模拟输出点数, 模拟量输出]
+    required: false
+    type: number
+    unit: 点
+  - key: ba.protocols
+    label: 通信协议
+    group: technical
+    aliases: [通信协议, 通讯协议, 总线协议, 协议要求]
+    required: true
+    type: text
+  - key: ba.energy_strategy
+    label: 节能控制要求
+    group: technical
+    aliases: [节能策略, 节能控制, 节能要求, 能耗管理]
+    required: false
+    type: text
+  - key: ba.integration
+    label: 系统集成要求
+    group: technical
+    aliases: [系统集成, 集成要求, 联动要求, 上位机]
+    required: false
+    type: text
+
+outline:
+  mode: replace
+  items:
+    - {heading: 项目理解与需求分析, intent: 引用项目身份、监控范围与控制目标, target_words: 2200, needs: [project.name, project.content, ba.total_points]}
+    - {heading: 商务条款响应与承诺, intent: 逐项响应工期、质保、投标有效期、付款与验收条款, target_words: 2000, needs: [project.duration, project.warranty, project.bid_validity, project.payment]}
+    - {heading: 实质性条款与废标风险响应, intent: 逐条对照招标文件的废标/否决/无效条款与实质性要求，说明规避措施与责任分工, target_words: 1800, needs: [project.name]}
+    - {heading: 楼宇自控系统总体设计, intent: 设计依据、系统架构、管理层/控制层/现场层划分, target_words: 4600, needs: [ba.protocols, ba.ddc_count]}
+    - {heading: 监控点位表与 I/O 统计, intent: 按设备系统列出 DI/DO/AI/AO 点位并汇总, target_words: 3400, needs: [ba.total_points, ba.di_points, ba.do_points, ba.ai_points, ba.ao_points]}
+    - {heading: DDC 控制器配置与选型, intent: 按点位容量与分布配置 DDC，说明扩展与冗余, target_words: 3000, needs: [ba.ddc_count, ba.total_points]}
+    - {heading: 控制逻辑与联动策略, intent: 冷热源、空调机组、新风、水泵、照明等控制逻辑与联动, target_words: 4200, needs: [ba.energy_strategy, ba.integration]}
+    - {heading: 通信网络与协议对接, intent: BACnet/Modbus 组网、网关、与第三方系统集成, target_words: 2600, needs: [ba.protocols, ba.integration]}
+    - {heading: 节能与能耗管理, intent: 分项计量、策略优化、节能量测算口径, target_words: 2400, needs: [ba.energy_strategy]}
+    - {heading: 施工组织与调试计划, intent: 施工顺序、点表校验、单体调试与联合调试, target_words: 3000, needs: [project.duration, project.location]}
+    - {heading: 测试验收与培训, intent: 点对点测试、控制逻辑验证、竣工资料与培训, target_words: 2400, needs: [ba.total_points, ba.protocols]}
+    - {heading: 售后服务与质保承诺, intent: 响应时限、备件、巡检与质保口径, target_words: 1800, needs: [project.warranty]}
+
+checks:
+  - id: BA-001
+    level: blocking
+    category: 点位一致
+    assert: "not present(facts['ba.total_points']) or not materials or materials_total(materials, '模块|点位|DDC|控制器') == 0 or number(facts['ba.total_points']) == materials_total(materials, '模块|点位|DDC|控制器')"
+    message: 监控点总数与工程量清单/点表合计不一致
+    recommendation: 核对点表与清单，统一点位统计口径
+  - id: BA-002
+    level: major
+    category: 点位一致
+    assert: "not (present(facts['ba.di_points']) and present(facts['ba.do_points']) and present(facts['ba.ai_points']) and present(facts['ba.ao_points'])) or not present(facts['ba.total_points']) or number(facts['ba.di_points']) + number(facts['ba.do_points']) + number(facts['ba.ai_points']) + number(facts['ba.ao_points']) == number(facts['ba.total_points'])"
+    message: DI/DO/AI/AO 分项合计与监控点总数不一致
+    recommendation: 逐项核对点表并修正汇总
+  - id: BA-003
+    level: blocking
+    category: 参数响应
+    assert: "not present(facts['ba.protocols']) or contains(doc, facts['ba.protocols'])"
+    message: 正文未响应招标要求的通信协议
+    recommendation: 在总体设计与通信网络章节写明 BACnet/Modbus 等协议响应
+  - id: BA-004
+    level: major
+    category: 参数响应
+    assert: "not parameters or param_response_ratio(parameters, doc) >= 0.95"
+    message: 技术参数未逐条响应（响应率低于 95%）
+    recommendation: 补齐技术参数响应表
+  - id: BA-005
+    level: major
+    category: 控制逻辑
+    assert: "not present(facts['ba.total_points']) or contains(doc, facts['ba.total_points'])"
+    message: 正文未出现监控点总数
+    recommendation: 在点位表与 DDC 配置章节写明点数
+  - id: BA-006
+    level: minor
+    category: 完整性
+    assert: "contains_ratio(doc, ['点位表', '控制逻辑', '系统架构', '调试']) >= 0.75"
+    message: BA 核心内容覆盖不足
+    recommendation: 补齐点位表、控制逻辑、系统架构与调试章节

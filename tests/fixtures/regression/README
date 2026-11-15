@@ -1,0 +1,30 @@
+# 回归校准 fixtures（仿真件）
+
+本目录只提交两份 Markdown 仿真招标文件，**不提交二进制 xlsx**：
+
+| 文件 | 说明 |
+| --- | --- |
+| `weakcurrent-tender.md` | 弱电智能化工程：招标公告、投标人须知、合同条款、技术需求、信息点数量表文本；覆盖 `计划工期`、`免费维保期` 等别名。 |
+| `fire-tender.md` | 消防设施改造工程：喷头/探测器数量、验收标准、合同条款；覆盖 `缺陷责任期`、`磋商保证金`、`报价有效期` 等别名。 |
+| `boq-weakcurrent.xlsx` | 测试运行时由 `tests/test_calibrate.py::make_boq_xlsx()` 用 openpyxl 动态生成，不进入版本库。 |
+
+## 动态 xlsx 布局
+
+- 工作表 `封面`：每行一个事实，包含项目名称、采购项目编号、采购人、预算、工期、
+  质量保证期、投标有效期、投标保证金、资格要求、评标办法、招标范围、信息点数量、
+  线缆等级、测试标准。
+- 工作表 `工程量清单`：表头为 `序号 / 名称 / 规格型号 / 单位 / 数量`，6 行材料。
+
+生成逻辑见 `tests/test_calibrate.py` 中的 `BOQ_HEADER`、`BOQ_ROWS` 与 `make_boq_xlsx()`。
+如需手工替换为真实清单，保持上述列名即可被 `extract_materials` 识别。
+
+## 覆盖断言
+
+`tests/test_calibrate.py` 断言：
+
+- `calibrate_dir()` 扫描 3 个文件时 `files=3`、`ok=3`；
+- 关键事实 `project.number/buyer/duration/warranty/deposit/bid_validity` 三份文件均命中；
+- 必填事实命中率 `required_hit_rate >= 0.8`；
+- `boq-weakcurrent.xlsx` 材料抽取不少于 5 行。
+
+真实招标文件请放在独立目录后用 `bidcraft calibrate <dir>` 运行，不要提交到本仓库。

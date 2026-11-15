@@ -1,0 +1,10 @@
+.venv
+.bidcraft
+.pytest_cache
+.ruff_cache
+**/__pycache__
+tests
+docs
+web/node_modules
+web/dist
+bidcraft/web_dist

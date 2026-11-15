@@ -1,0 +1,143 @@
+"""Password hashing, session tokens and secret encryption.
+
+Only the Python standard library plus ``cryptography`` are used. There is no
+external identity provider and no telemetry.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import os
+import secrets
+from pathlib import Path
+
+from cryptography.fernet import Fernet, InvalidToken
+
+from .config import settings
+
+_SCRYPT_N = 2**14
+_SCRYPT_R = 8
+_SCRYPT_P = 1
+_PREFIX = "scrypt"
+
+
+def hash_password(password: str) -> str:
+    if not password:
+        raise ValueError("密码不能为空")
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(
+        password.encode("utf-8"), salt=salt, n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=32
+    )
+    return "$".join(
+        (
+            _PREFIX,
+            str(_SCRYPT_N),
+            str(_SCRYPT_R),
+            str(_SCRYPT_P),
+            base64.b64encode(salt).decode("ascii"),
+            base64.b64encode(digest).decode("ascii"),
+        )
+    )
+
+
+def verify_password(password: str, encoded: str) -> bool:
+    try:
+        prefix, n, r, p, salt_b64, digest_b64 = encoded.split("$")
+        if prefix != _PREFIX:
+            return False
+        salt = base64.b64decode(salt_b64)
+        expected = base64.b64decode(digest_b64)
+        actual = hashlib.scrypt(
+            password.encode("utf-8"),
+            salt=salt,
+            n=int(n),
+            r=int(r),
+            p=int(p),
+            dklen=len(expected),
+        )
+    except (ValueError, TypeError):
+        return False
+    return hmac.compare_digest(actual, expected)
+
+
+def new_session_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _key_path() -> Path:
+    return settings.home / "secret.key"
+
+
+def _fernet() -> Fernet:
+    path = _key_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        raw = path.read_bytes().strip()
+    else:
+        raw = Fernet.generate_key()
+        # O_EXCL avoids two workers racing to create different keys.
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            raw = path.read_bytes().strip()
+        else:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(raw)
+    return Fernet(raw)
+
+
+def encrypt_secret(value: str) -> str:
+    if not value:
+        return ""
+    return _fernet().encrypt(value.encode("utf-8")).decode("ascii")
+
+
+def decrypt_secret(value: str) -> str:
+    if not value:
+        return ""
+    try:
+        return _fernet().decrypt(value.encode("ascii")).decode("utf-8")
+    except (InvalidToken, ValueError):
+        return ""
+
+
+def _signing_key() -> bytes:
+    raw = _key_path().read_bytes().strip()
+    return hashlib.sha256(raw).digest()
+
+
+def sign_state(payload: dict, ttl_seconds: int = 600) -> str:
+    import json
+    import time
+
+    body = {**payload, "exp": int(time.time()) + ttl_seconds}
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).rstrip(b"=")
+    signature = hmac.new(_signing_key(), encoded, hashlib.sha256).digest()
+    return encoded.decode("ascii") + "." + base64.urlsafe_b64encode(signature).decode("ascii")
+
+
+def verify_state(token: str) -> dict | None:
+    import json
+    import time
+
+    try:
+        encoded, signature = token.split(".", 1)
+        expected = hmac.new(_signing_key(), encoded.encode("ascii"), hashlib.sha256).digest()
+        actual = base64.urlsafe_b64decode(signature.encode("ascii"))
+        if not hmac.compare_digest(expected, actual):
+            return None
+        padded = encoded + "=" * (-len(encoded) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+        if int(payload.get("exp", 0)) < int(time.time()):
+            return None
+        return payload
+    except (ValueError, KeyError, json.JSONDecodeError):
+        return None

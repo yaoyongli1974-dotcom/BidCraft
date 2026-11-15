@@ -1,0 +1,113 @@
+# 安装工程 · 给排水 / 电气 / 设备安装 / 调试
+package: installation
+version: 1
+project_type: installation
+project_type_label: 安装工程
+title: 安装工程技术标
+description: 给排水、电气、设备安装、管道试压与系统调试的解析项、章节骨架与核对规则。
+extends: [common-bid-facts]
+
+parse:
+  keywords: [安装工程, 给排水, 电气安装, 设备安装, 管道, 桥架, 电缆, 配电箱, 水泵, 通风, 调试, 试压]
+  parameter_vocab:
+    - 给排水
+    - 电气安装
+    - 设备安装
+    - 管道
+    - 阀门
+    - 桥架
+    - 电缆
+    - 配电箱
+    - 水泵
+    - 风机
+    - 试压
+    - 冲洗
+    - 调试
+    - 接地
+    - 绝缘
+    - GB 50242
+    - GB 50303
+  table_hints:
+    materials: [工程量清单, 安装材料清单, 设备清单, 设备材料表]
+    parameters: [技术参数, 技术规格, 性能指标, 配置要求]
+
+fields:
+  - key: install.scope
+    label: 安装工程范围
+    group: technical
+    aliases: [安装范围, 安装工程范围, 承包范围, 施工范围]
+    required: true
+    type: text
+  - key: install.mep_systems
+    label: 涉及专业系统
+    group: technical
+    aliases: [专业系统, 安装系统, 机电系统, 系统组成]
+    required: true
+    type: text
+  - key: install.pipe_material
+    label: 主要管道材质
+    group: technical
+    aliases: [管道材质, 管材, 管道规格, 主要管材]
+    required: false
+    type: text
+  - key: install.equipment_count
+    label: 主要设备数量
+    group: technical
+    aliases: [设备数量, 主要设备, 设备台数, 设备清单数量]
+    required: false
+    type: number
+    unit: 台
+  - key: install.test_standard
+    label: 管道试压与验收标准
+    group: technical
+    aliases: [试压标准, 验收标准, 管道试验, 调试标准]
+    required: true
+    type: text
+  - key: install.warranty_years
+    label: 安装工程质保年限
+    group: commercial
+    aliases: [质保年限, 质保期, 保修期, 系统质保]
+    required: false
+    type: duration
+
+outline:
+  mode: replace
+  items:
+    - {heading: 项目理解与安装需求分析, intent: 引用项目身份、安装范围、专业系统与交付目标，说明对招标文件的理解, target_words: 2200, needs: [project.name, install.scope, install.mep_systems]}
+    - {heading: 商务条款响应与承诺, intent: 逐项响应工期、质保、投标有效期、付款与验收条款, target_words: 1800, needs: [project.duration, project.warranty, project.bid_validity, project.payment]}
+    - {heading: 实质性条款与废标风险响应, intent: 对照安装工程否决项、资质与人员要求，说明响应措施与责任分工, target_words: 1800, needs: [project.name, qualification.requirements]}
+    - {heading: 安装工程总体部署, intent: 说明施工分区、专业穿插、工期节点与总包配合界面, target_words: 3200, needs: [install.scope, project.duration]}
+    - {heading: 给排水与管道系统安装, intent: 管材选型、支吊架、坡度、试压冲洗与保温防腐, target_words: 3800, needs: [install.pipe_material, install.test_standard]}
+    - {heading: 电气与配电系统安装, intent: 桥架、电缆、配电箱、接地与绝缘测试, target_words: 3800, needs: [install.mep_systems, install.scope]}
+    - {heading: 通风空调与设备安装, intent: 风机、水泵、机组基础、减振、接管与单机试运转, target_words: 3200, needs: [install.equipment_count, install.mep_systems]}
+    - {heading: 设备材料与工程量响应, intent: 对照清单核对设备、管材、电缆与辅材的数量规格, target_words: 2600, needs: [install.equipment_count, install.pipe_material]}
+    - {heading: 系统调试与联合试运转, intent: 单机、系统与联动调试，记录参数并处理缺陷, target_words: 2800, needs: [install.test_standard]}
+    - {heading: 质量保证与验收, intent: 过程质量控制、隐蔽验收、试验记录与竣工资料, target_words: 2600, needs: [install.test_standard]}
+    - {heading: 安全文明施工与成品保护, intent: 临时用电、动火、高处作业、交叉施工与成品保护, target_words: 1800, needs: [project.location]}
+    - {heading: 售后服务与质保承诺, intent: 质保年限、响应时限、备品备件与巡检, target_words: 1800, needs: [install.warranty_years, project.warranty]}
+
+checks:
+  - id: INS-001
+    level: major
+    category: 参数响应
+    assert: "not parameters or param_response_ratio(parameters, doc) >= 0.95"
+    message: 安装工程技术参数未逐条响应（响应率低于 95%）
+    recommendation: 在技术参数响应表中逐条列出参数、响应值与偏离说明
+  - id: INS-002
+    level: major
+    category: 验收
+    assert: "not present(facts['install.test_standard']) or contains(doc, facts['install.test_standard'])"
+    message: 正文未引用管道试压/验收标准
+    recommendation: 在调试与验收章节写明标准号、试验压力与验收要求
+  - id: INS-003
+    level: major
+    category: 范围响应
+    assert: "not present(facts['install.mep_systems']) or contains(doc, facts['install.mep_systems'])"
+    message: 正文未覆盖招标要求的专业系统范围
+    recommendation: 在总体部署中逐项列出给排水、电气、通风等系统
+  - id: INS-004
+    level: minor
+    category: 完整性
+    assert: "contains_ratio(doc, ['给排水', '电气', '设备安装', '调试']) >= 0.75"
+    message: 安装工程章节覆盖不足
+    recommendation: 按招标范围补齐专业系统、设备安装与调试内容

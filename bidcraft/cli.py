@@ -1,0 +1,815 @@
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import typer
+from rich.console import Console
+from rich.table import Table
+
+from . import __version__, knowledge, model_config
+from .config import settings
+from .db import init_db, session_scope
+from .generation.agent import ModelClient
+from .generation.outline import build_outline, load_outline, save_outline
+from .generation.writer import generate_document
+from .ledger import ledger_summary, load_ledger, update_fact
+from .models import Delivery, Project
+from .pipeline import add_source, check_project, create_project, parse_project, resolve_project
+from .rules.engine import ledger_gate
+from .rules.loader import list_packages, load_package, validate_package
+
+app = typer.Typer(add_completion=False, help="BidCraft · 弱电投标文件编制系统")
+console = Console()
+
+
+def _db():
+    init_db()
+    return session_scope()
+
+
+def _generation_client(db) -> ModelClient:
+    endpoint = model_config.resolve_chat_endpoint(db)
+    return ModelClient(endpoint if endpoint is not None else settings)
+
+
+def _knowledge_provider(db):
+    def provide(query: str) -> str:
+        return knowledge.context_block(knowledge.search(db, query, limit=4))
+
+    return provide
+
+
+def _project_or_exit(db, ref: str) -> Project:
+    try:
+        return resolve_project(db, ref)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+
+def _image_resolver(project_id: str):
+    from .images import url_resolver
+
+    return url_resolver(project_id)
+
+
+@app.command()
+def version() -> None:
+    """显示版本。"""
+    console.print(f"BidCraft {__version__}")
+
+
+@app.command()
+def mcp(
+    readonly: bool = typer.Option(
+        False, "--readonly/--no-readonly", help="只读模式：禁用核对与导出"
+    ),
+) -> None:
+    """启动 MCP stdio 服务（供 Claude/Cursor 等客户端接入）。"""
+    from . import mcp as mcp_server
+
+    mode = "只读" if readonly else "读写"
+    print(
+        f"BidCraft MCP stdio 服务启动：{len(mcp_server.TOOL_SPECS)} 个工具，{mode}模式",
+        file=sys.stderr,
+        flush=True,
+    )
+    mcp_server.serve_stdio(readonly=readonly)
+
+
+@app.command()
+def doctor() -> None:
+    """检查运行环境、数据库与模型端点配置。"""
+    import shutil
+
+    init_db()
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    from sqlalchemy import func, select
+
+    from .models import KnowledgeBase, ModelConfig, User
+    from .parsing.ocr import probe_ocr
+
+    with session_scope() as db:
+        users = db.scalar(select(func.count()).select_from(User)) or 0
+        models = db.scalar(select(func.count()).select_from(ModelConfig)) or 0
+        kbs = db.scalar(select(func.count()).select_from(KnowledgeBase)) or 0
+        endpoint = model_config.resolve_chat_endpoint(db)
+        embedding = model_config.resolve_embedding_endpoint(db)
+    ocr = probe_ocr()
+    if not settings.kb_vector_enabled:
+        vector_label = "禁用（BIDCRAFT_KB_VECTOR=0）"
+    elif embedding is not None:
+        vector_label = f"可用（{embedding.model_name}）"
+    else:
+        vector_label = "未配置（关键词召回）"
+    if not settings.ocr_enabled:
+        ocr_label = "已禁用（BIDCRAFT_OCR=0）"
+    elif ocr.available:
+        ocr_label = f"可用（{'+'.join(ocr.languages)}，pdftoppm + tesseract）"
+        if ocr.warning:
+            ocr_label += f"；{ocr.warning}"
+    else:
+        ocr_label = f"不可用（{ocr.reason}）"
+    rows = [
+        ("BIDCRAFT_HOME", str(settings.home)),
+        ("数据库", settings.db_url),
+        (
+            "登录与权限",
+            f"已启用（{users} 个用户，RBAC）" if users else "未初始化（首次 serve 自动创建管理员）",
+        ),
+        ("对话模型", endpoint.label if endpoint else "（未配置，将使用确定性草稿）"),
+        ("模型配置", f"{models} 个"),
+        ("知识库", f"{kbs} 个"),
+        ("向量检索", vector_label),
+        ("离线模式", "是" if settings.offline else "否"),
+        ("PDF 导出", soffice or "（未找到 LibreOffice，可仅导出 DOCX）"),
+        ("扫描件 OCR", ocr_label),
+        (
+            "Web 客户端",
+            "已构建" if (Path(__file__).resolve().parent / "web_dist" / "index.html").is_file() else "未构建（cd web && npm install && npm run build）",
+        ),
+    ]
+    table = Table(title="环境检查")
+    table.add_column("项目")
+    table.add_column("值")
+    for key, value in rows:
+        table.add_row(key, value)
+    console.print(table)
+    problems = []
+    for item in list_packages():
+        problems.extend(f"{item['name']}: {p}" for p in validate_package(str(item["name"])))
+    if problems:
+        console.print("[red]规则包校验发现问题：[/red]")
+        for problem in problems:
+            console.print(f"  - {problem}")
+    else:
+        console.print("[green]规则包校验通过[/green]")
+    console.print("[dim]零遥测：除显式配置的模型端点外，本程序不发起任何外部连接。[/dim]")
+
+
+@app.command()
+def calibrate(
+    directory: Path = typer.Argument(..., help="招标文件目录"),
+    output: Path | None = typer.Option(None, "--output", "-o", help="报告 JSON 输出路径"),
+    recursive: bool = typer.Option(False, "--recursive", "-r", help="递归扫描子目录"),
+) -> None:
+    """对真实招标文件目录做解析/字段回归校准（只读，不写数据库）。"""
+    from .calibrate import calibrate_dir, render_report
+
+    if not directory.is_dir():
+        console.print(f"[red]目录不存在：{directory}[/red]")
+        raise typer.Exit(1)
+
+    report = calibrate_dir(directory, recursive=recursive)
+    console.print(render_report(report))
+
+    aggregate = report["aggregate"]
+    console.print(
+        f"文件 {aggregate['files']}（成功 {aggregate['ok']}，失败 {aggregate['failed']}）· "
+        f"必填命中率 {aggregate['required_hit_rate']:.1%} · "
+        f"平均材料 {aggregate['avg_materials']} · 需 OCR {aggregate['ocr_files']}"
+    )
+
+    hits = sorted(
+        aggregate["field_hits"].items(), key=lambda pair: (-pair[1], pair[0])
+    )
+    if hits:
+        table = Table(title="字段命中 Top 10")
+        table.add_column("字段")
+        table.add_column("命中文件数", justify="right")
+        for key, count in hits[:10]:
+            table.add_row(key, str(count))
+        console.print(table)
+    else:
+        console.print("[yellow]没有任何字段命中。[/yellow]")
+
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        console.print(f"[green]报告已写入[/green] {output}")
+
+
+@app.command("packages")
+def packages_cmd(validate: bool = typer.Option(False, "--validate", help="深度校验规则包")) -> None:
+    """列出可用行业规则包（含管理员覆盖，隐藏包不显示）。"""
+    table = Table(title="规则包")
+    table.add_column("名称")
+    table.add_column("类型")
+    table.add_column("标题")
+    table.add_column("继承")
+    table.add_column("版本")
+    for item in list_packages():
+        table.add_row(
+            str(item["name"]),
+            str(item.get("project_type_label") or item.get("project_type") or "其他"),
+            str(item["title"]),
+            ", ".join(item.get("extends") or []) or "-",
+            str(item["version"]),
+        )
+    console.print(table)
+    if validate:
+        bad = 0
+        for item in list_packages():
+            problems = validate_package(str(item["name"]))
+            if problems:
+                bad += 1
+                console.print(f"[red]{item['name']}[/red]")
+                for problem in problems:
+                    console.print(f"  - {problem}")
+        if not bad:
+            console.print("[green]全部规则包校验通过[/green]")
+
+
+@app.command()
+def init(
+    name: str = typer.Argument(..., help="项目名称"),
+    package: str = typer.Option("weakcurrent-cabling", "--package", "-p", help="行业规则包"),
+) -> None:
+    """创建一个投标项目。"""
+    with _db() as db:
+        try:
+            project = create_project(db, name, package)
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1)
+        console.print(f"[green]已创建项目[/green] {project.id}  {project.name}  ({project.package})")
+
+
+@app.command()
+def projects() -> None:
+    """列出项目。"""
+    with _db() as db:
+        from sqlalchemy import select
+
+        rows = list(db.scalars(select(Project).order_by(Project.created_at.desc())))
+        table = Table(title="投标项目")
+        for column in ("ID", "名称", "规则包", "状态", "创建时间"):
+            table.add_column(column)
+        for project in rows:
+            table.add_row(
+                project.id[:8],
+                project.name,
+                project.package,
+                project.status,
+                project.created_at.strftime("%Y-%m-%d %H:%M"),
+            )
+        console.print(table)
+
+
+@app.command()
+def ingest(
+    file: Path = typer.Argument(..., exists=True, help="招标文件 PDF/DOCX/TXT/XLSX"),
+    name: str = typer.Option("", "--name", "-n", help="项目名称（默认取文件名）"),
+    package: str = typer.Option("weakcurrent-cabling", "--package", "-p"),
+    project: str = typer.Option("", "--project", help="导入到已有项目 ID/名称"),
+) -> None:
+    """导入招标文件并抽取事实台账。"""
+    with _db() as db:
+        if project:
+            target = _project_or_exit(db, project)
+        else:
+            target = create_project(db, name or file.stem, package)
+        add_source(db, target, file)
+        try:
+            ledger, info = parse_project(db, target.id)
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]解析失败：{exc}[/red]")
+            raise typer.Exit(1)
+        db.commit()
+        summary = ledger_summary(ledger)
+        console.rule(f"事实台账 · {target.name}")
+        console.print(
+            f"字段 {summary['fields_filled']}/{summary['fields_total']} 已填，"
+            f"必填缺失 {summary['missing_required']}，"
+            f"材料 {summary['materials']}，参数 {summary['parameters']}，"
+            f"评分项 {summary['scoring']}，要求 {summary['requirements']}，风险 {summary['risks']}"
+        )
+        for note in info["notes"]:
+            console.print(f"[yellow]{note}[/yellow]")
+        _print_facts(ledger)
+        console.print(f"\n项目 ID：{target.id}")
+
+
+def _print_facts(ledger) -> None:
+    table = Table(title="关键事实")
+    table.add_column("字段")
+    table.add_column("取值")
+    table.add_column("状态")
+    for item in ledger.facts:
+        if not item.required and not item.value:
+            continue
+        mark = "✓" if item.value else "缺"
+        color = "green" if item.value else "red"
+        table.add_row(item.label, item.value or "—", f"[{color}]{mark}[/{color}]")
+    console.print(table)
+
+
+@app.command()
+def show(ref: str = typer.Argument(..., help="项目 ID/名称")) -> None:
+    """查看项目事实台账。"""
+    with _db() as db:
+        project = _project_or_exit(db, ref)
+        ledger = load_ledger(db, project.id)
+        _print_facts(ledger)
+        if ledger.scoring:
+            table = Table(title="评分项")
+            table.add_column("评分因素")
+            table.add_column("分值")
+            table.add_column("标准")
+            for item in ledger.scoring:
+                table.add_row(item.name, "" if item.score is None else f"{item.score:g}", item.criteria[:60])
+            console.print(table)
+        console.print(
+            f"\n材料 {len(ledger.materials)} · 参数 {len(ledger.parameters)} · "
+            f"要求 {len(ledger.requirements)} · 风险 {len(ledger.risks)}"
+        )
+
+
+@app.command()
+def fact(
+    ref: str = typer.Argument(..., help="项目 ID/名称"),
+    key: str = typer.Argument(..., help="事实 key，例如 project.name"),
+    value: str = typer.Option(..., "--value", "-v", help="人工确认后的取值"),
+) -> None:
+    """人工修正一条事实（抽取结果必须可校订）。"""
+    with _db() as db:
+        project = _project_or_exit(db, ref)
+        try:
+            row = update_fact(db, project.id, key, value=value, status="confirmed")
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1)
+        console.print(f"[green]{row.label}[/green] = {row.value}（已确认）")
+
+
+@app.command()
+def outline(
+    ref: str = typer.Argument(..., help="项目 ID/名称"),
+    mode: str = typer.Option("auto", "--mode", help="auto|package|scoring|tender-format"),
+    total_words: int = typer.Option(30000, "--words", help="评分对齐时的全书目标字数"),
+    force: bool = typer.Option(False, "--force", help="覆盖已有大纲与正文"),
+) -> None:
+    """生成章节大纲。"""
+    with _db() as db:
+        project = _project_or_exit(db, ref)
+        ledger = load_ledger(db, project.id)
+        existing = load_outline(db, project.id)
+        if existing and not force:
+            console.print("[yellow]已有大纲，如需重建请加 --force[/yellow]")
+            _print_outline(existing)
+            return
+        package = load_package(project.package)
+        spec = build_outline(ledger, package, mode=mode, total_words=total_words)
+        save_outline(db, project.id, spec)
+        db.flush()
+        rows = load_outline(db, project.id)
+        console.print(f"[green]已生成 {len(rows)} 章大纲（{spec.mode}）[/green]")
+        _print_outline(rows)
+
+
+def _print_outline(rows) -> None:
+    table = Table(title="章节大纲")
+    table.add_column("#", width=4)
+    table.add_column("章节")
+    table.add_column("目标字数", justify="right")
+    table.add_column("状态")
+    for index, row in enumerate(rows, start=1):
+        table.add_row(str(index), row["heading"], str(row["target_words"]), row["status"])
+    console.print(table)
+
+
+@app.command()
+def write(
+    ref: str = typer.Argument(..., help="项目 ID/名称"),
+    stream: bool = typer.Option(False, "--stream", help="流式输出到终端"),
+    force: bool = typer.Option(False, "--force", help="重写已生成章节"),
+) -> None:
+    """按大纲生成正文（模型不可用时回落到确定性草稿）。"""
+    with _db() as db:
+        project = _project_or_exit(db, ref)
+        ledger = load_ledger(db, project.id)
+        problems = ledger_gate(ledger)
+        if problems:
+            console.print("[red]事实台账未就绪，拒绝生成：[/red]")
+            for problem in problems:
+                console.print(f"  - {problem}")
+            console.print("[dim]用 `bidcraft fact <项目> <key> -v <值>` 补齐必填事实。[/dim]")
+            raise typer.Exit(1)
+        if force:
+            from sqlalchemy import delete
+
+            from .models import Section
+
+            nodes = load_outline(db, project.id)
+            ids = [node["id"] for node in nodes]
+            if ids:
+                db.execute(delete(Section).where(Section.node_id.in_(ids)))
+            for node in nodes:
+                db.add(Section(node_id=node["id"], body="", status="pending", words=0))
+            db.flush()
+
+        package = load_package(project.package)
+        if not load_outline(db, project.id):
+            spec = build_outline(ledger, package)
+            save_outline(db, project.id, spec)
+            db.flush()
+            console.print(f"[green]已自动生成大纲 {len(spec.items)} 章（{spec.mode}）[/green]")
+
+        client = _generation_client(db)
+        if not client.available:
+            console.print("[yellow]未配置模型端点，使用确定性草稿模式（可正常出稿，质量有限）。[/yellow]")
+
+        def on_progress(info):
+            console.print(
+                f"[cyan]{info['progress']:3d}%[/cyan] {info['heading']} "
+                f"({info['done']}/{info['total']})"
+            )
+
+        def on_delta(delta):
+            console.print(delta, end="")
+
+        report = generate_document(
+            db,
+            project.id,
+            client,
+            ledger,
+            package,
+            stream=stream,
+            on_delta=on_delta,
+            on_progress=on_progress,
+            only_node=None,
+            knowledge_provider=_knowledge_provider(db),
+        )
+        project.status = "drafting"
+        db.commit()
+        console.print(
+            f"\n[green]完成 {len(report.written)} 章[/green]，"
+            f"回落草稿 {len(report.fallback)} 章，失败 {len(report.failed)} 章"
+        )
+        for failure in report.failed:
+            console.print(f"[red]{failure['heading']}: {failure['error']}[/red]")
+        if report.suspicious:
+            console.print("[yellow]疑似台账外数字（请人工复核）：[/yellow]")
+            for heading, numbers in report.suspicious.items():
+                console.print(f"  - {heading}: {', '.join(numbers)}")
+
+
+@app.command()
+def check(ref: str = typer.Argument(..., help="项目 ID/名称")) -> None:
+    """执行废标项/参数响应/一致性核对。"""
+    with _db() as db:
+        project = _project_or_exit(db, ref)
+        results, summary = check_project(db, project.id)
+        db.commit()
+        table = Table(title=f"核对结果 · {summary['verdict']}")
+        table.add_column("编号")
+        table.add_column("级别")
+        table.add_column("类别")
+        table.add_column("问题")
+        table.add_column("位置")
+        for result in results:
+            color = {"blocking": "red", "critical": "red", "major": "yellow"}.get(result.level, "white")
+            table.add_row(
+                result.code,
+                f"[{color}]{result.level}[/{color}]",
+                result.category,
+                result.message,
+                result.location,
+            )
+        console.print(table)
+        console.print(
+            f"失败 {summary['failed']} 项，分布 {summary['by_level']}；结论：{summary['verdict']}"
+        )
+
+
+@app.command()
+def export(
+    ref: str = typer.Argument(..., help="项目 ID/名称"),
+    fmt: str = typer.Option("docx", "--format", "-f", help="docx|md|pdf|xlsx"),
+    output: Path = typer.Option(None, "--output", "-o"),
+) -> None:
+    """导出 DOCX / Markdown / PDF / Excel。"""
+    from .export.docx import export_docx, export_markdown
+
+    with _db() as db:
+        project = _project_or_exit(db, ref)
+        ledger = load_ledger(db, project.id)
+        nodes = load_outline(db, project.id)
+        if fmt not in {"xlsx"} and (not nodes or not any(node.get("body") for node in nodes)):
+            console.print("[red]还没有正文，先运行 bidcraft write[/red]")
+            raise typer.Exit(1)
+        suffix = {"docx": "docx", "md": "md", "markdown": "md", "pdf": "pdf", "xlsx": "xlsx"}.get(fmt)
+        if suffix is None:
+            console.print("[red]--format 只能是 docx、md、pdf 或 xlsx[/red]")
+            raise typer.Exit(1)
+        target = output or (settings.project_dir(project.id) / "output" / f"bid.{suffix}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if fmt == "docx":
+            path = export_docx(target, ledger, nodes, image_resolver=_image_resolver(target.id))
+        elif fmt in {"md", "markdown"}:
+            path = export_markdown(target, ledger, nodes)
+        elif fmt == "xlsx":
+            from .export.xlsx import export_xlsx
+
+            path = export_xlsx(target, ledger)
+        else:
+            from .export.pdf import PdfExportError, export_pdf
+
+            docx_path = target.with_suffix(".docx")
+            export_docx(
+                docx_path,
+                ledger,
+                nodes,
+                image_resolver=_image_resolver(project.id),
+            )
+            try:
+                path = export_pdf(docx_path, target)
+            except PdfExportError as exc:
+                console.print(f"[red]{exc}[/red]")
+                raise typer.Exit(2) from exc
+        db.add(Delivery(project_id=project.id, file_format=fmt, file_path=str(path), status="done"))
+        project.status = "delivery"
+        db.commit()
+        console.print(f"[green]已导出[/green] {path}")
+
+
+@app.command()
+def boq(
+    ref: str = typer.Argument(..., help="项目 ID/名称"),
+    file: Path = typer.Argument(..., exists=True, help="工程量清单 .xlsx"),
+    sheet: str = typer.Option("", "--sheet", help="指定工作表名称（默认取清单行最多的工作表）"),
+) -> None:
+    """导入招标工程量清单并与台账材料对齐。"""
+    from .boq import build_payload, import_boq
+
+    with _db() as db:
+        project = _project_or_exit(db, ref)
+        try:
+            snapshot = import_boq(db, project, file, sheet=sheet or None)
+        except Exception as exc:
+            console.print(f"[red]清单导入失败：{exc}[/red]")
+            raise typer.Exit(1) from exc
+        payload = build_payload(db, project.id)
+        db.commit()
+        summary = payload["summary"]
+        console.rule(f"工程量清单 · {project.name}")
+        console.print(
+            f"工作表 {snapshot.sheet}（表头第 {snapshot.header_row} 行），"
+            f"清单条目 {summary['boq_rows']}，已匹配 {summary['matched']}，"
+            f"差异 {summary['total_diffs']}（数量 {summary['qty_diff']} / "
+            f"单位 {summary['unit_diff']} / 规格 {summary['spec_diff']}），"
+            f"清单有台账无 {summary['missing_in_ledger']}，"
+            f"台账有清单无 {summary['missing_in_boq']}，"
+            f"匹配率 {summary['match_rate']:.1%}；"
+            f"报价 已报价 {summary['priced']} / 未报价 {summary['unpriced']}，"
+            f"合计 {summary['total_amount']:,.2f} 元"
+        )
+        for warning in snapshot.warnings or []:
+            console.print(f"[yellow]{warning}[/yellow]")
+        pending = [
+            row for row in payload["rows"] if row["status"] not in {"matched"} and not row["ignored"]
+        ]
+        if pending:
+            table = Table(title=f"待对齐（{len(pending)} 行，显示前 20 行）")
+            table.add_column("行")
+            table.add_column("名称")
+            table.add_column("清单规格")
+            table.add_column("数量", justify="right")
+            table.add_column("状态")
+            for row in pending[:20]:
+                table.add_row(
+                    str(row["boq_row"] or "-"),
+                    row["name"],
+                    row["spec"] or "-",
+                    "" if row["qty"] is None else f"{row['qty']:g}",
+                    row["status"],
+                )
+            console.print(table)
+        else:
+            console.print("[green]清单与台账已全部一致[/green]")
+        console.print(f"\n项目 ID：{project.id}")
+
+
+@app.command("boq-price")
+def boq_price(
+    ref: str = typer.Argument(..., help="项目 ID/名称"),
+    boq_row: int = typer.Argument(..., help="清单行号"),
+    unit_price: float | None = typer.Argument(None, help="单价（元）；用 --clear 清除"),
+    clear: bool = typer.Option(False, "--clear", help="清除该行单价"),
+) -> None:
+    """设置或清除某条清单的单价（报价按清单数量计算合价）。"""
+    from .boq import set_unit_price
+
+    if clear is False and unit_price is None:
+        console.print("[red]请提供单价，或使用 --clear 清除已有单价[/red]")
+        raise typer.Exit(1)
+    with _db() as db:
+        project = _project_or_exit(db, ref)
+        try:
+            payload = set_unit_price(db, project, boq_row, None if clear else unit_price)
+        except Exception as exc:
+            console.print(f"[red]设置单价失败：{exc}[/red]")
+            raise typer.Exit(1) from exc
+        db.commit()
+        summary = payload["summary"]
+        console.print(
+            f"[green]{'已清除' if clear else '已设置'}[/green] 第 {boq_row} 行单价；"
+            f"已报价 {summary['priced']} / 未报价 {summary['unpriced']}，"
+            f"合计 {summary['total_amount']:,.2f} 元"
+        )
+
+
+@app.command("boq-export")
+def boq_export(
+    ref: str = typer.Argument(..., help="项目 ID/名称"),
+    output: Path = typer.Option(None, "--output", "-o", help="另存路径"),
+) -> None:
+    """导出工程量清单响应表（.xlsx）。"""
+    from .boq import build_payload
+    from .export.boq_xlsx import export_boq_xlsx
+
+    with _db() as db:
+        project = _project_or_exit(db, ref)
+        payload = build_payload(db, project.id)
+        if payload["snapshot"] is None:
+            console.print("[red]尚未上传工程量清单，请先运行 bidcraft boq[/red]")
+            raise typer.Exit(1)
+        target = output or (settings.project_dir(project.id) / "output" / "boq-response.xlsx")
+        path = export_boq_xlsx(target, payload)
+        db.commit()
+        console.print(f"[green]已导出[/green] {path}")
+
+
+@app.command()
+def run(
+    file: Path = typer.Argument(..., exists=True, help="招标文件 PDF/DOCX/TXT/XLSX"),
+    name: str = typer.Option("", "--name", "-n"),
+    package: str = typer.Option("weakcurrent-cabling", "--package", "-p"),
+    mode: str = typer.Option("auto", "--mode"),
+    no_write: bool = typer.Option(False, "--no-write", help="只解析并建大纲，不生成正文"),
+) -> None:
+    """一条命令跑通：导入 → 台账 → 大纲 → 正文 → 核对 → DOCX。"""
+    with _db() as db:
+        project = create_project(db, name or file.stem, package)
+        add_source(db, project, file)
+        ledger, info = parse_project(db, project.id)
+        db.commit()
+        summary = ledger_summary(ledger)
+        console.print(
+            f"[green]解析完成[/green] 字段 {summary['fields_filled']}/{summary['fields_total']}，"
+            f"材料 {summary['materials']}，参数 {summary['parameters']}，评分项 {summary['scoring']}"
+        )
+        for note in info["notes"]:
+            console.print(f"[yellow]{note}[/yellow]")
+
+        problems = ledger_gate(ledger)
+        if problems and not no_write:
+            console.print("[red]必填事实缺失，拒绝生成正文：[/red]")
+            for problem in problems:
+                console.print(f"  - {problem}")
+            console.print(f"[dim]项目 ID：{project.id}；补齐后运行 bidcraft write {project.id}[/dim]")
+            raise typer.Exit(1)
+
+        pkg = load_package(project.package)
+        spec = build_outline(ledger, pkg, mode=mode)
+        save_outline(db, project.id, spec)
+        db.flush()
+        console.print(f"[green]大纲 {len(spec.items)} 章（{spec.mode}）[/green]")
+        if no_write:
+            db.commit()
+            return
+
+        client = _generation_client(db)
+        if not client.available:
+            console.print("[yellow]未配置模型端点，使用确定性草稿。[/yellow]")
+        report = generate_document(
+            db,
+            project.id,
+            client,
+            ledger,
+            pkg,
+            knowledge_provider=_knowledge_provider(db),
+        )
+        project.status = "drafting"
+        db.commit()
+        console.print(f"[green]正文 {len(report.written)} 章完成[/green]")
+
+        _, verdict = check_project(db, project.id)
+        db.commit()
+        console.print(f"核对未通过 {verdict['failed']} 项，结论 {verdict['verdict']}")
+
+        from .export.docx import export_docx
+
+        target = settings.project_dir(project.id) / "output" / "bid.docx"
+        path = export_docx(
+            target,
+            ledger,
+            load_outline(db, project.id),
+            image_resolver=_image_resolver(project.id),
+        )
+        db.add(Delivery(project_id=project.id, file_format="docx", file_path=str(path), status="done"))
+        db.commit()
+        console.print(f"[green]已导出[/green] {path}")
+        console.print(f"项目 ID：{project.id}")
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8000, "--port"),
+    open_browser: bool = typer.Option(False, "--open", "-o", help="启动后打开浏览器"),
+) -> None:
+    """启动 B/S 服务：浏览器客户端 + HTTP API（需安装 api 扩展）。"""
+    try:
+        import uvicorn
+    except ImportError as exc:
+        console.print("[red]缺少可选依赖：uv pip install -e '.[api]'[/red]")
+        raise typer.Exit(2) from exc
+    from .api import create_app
+
+    app = create_app()
+    web_ready = (Path(__file__).resolve().parent / "web_dist" / "index.html").is_file()
+    console.print(f"[green]BidCraft[/green] http://{host}:{port}  API 文档 /docs")
+    if web_ready:
+        console.print("[dim]浏览器客户端已就绪；局域网部署请加 --host 0.0.0.0[/dim]")
+    else:
+        console.print(
+            "[yellow]Web 客户端未构建：cd web && npm install && npm run build[/yellow]"
+        )
+    if host in {"0.0.0.0", "::"}:
+        console.print(
+            "[yellow]局域网模式已启用登录与 RBAC；公网访问仍须使用 HTTPS"
+            "（BIDCRAFT_SECURE_COOKIE=1）或置于 TLS 反向代理之后。[/yellow]"
+        )
+    initial = settings.home / "initial-admin.txt"
+    if initial.is_file():
+        console.print(f"[yellow]初始管理员凭据：{initial}（登录后请立即修改）[/yellow]")
+    if open_browser:
+        import threading
+        import webbrowser
+
+        url = f"http://{host if host not in {'0.0.0.0', '::'} else '127.0.0.1'}:{port}/"
+        threading.Timer(1.0, webbrowser.open, args=(url,)).start()
+    uvicorn.run(app, host=host, port=port, log_level="info")
+
+
+@app.command("reset-password")
+def reset_password(
+    username: str = typer.Argument(..., help="用户名"),
+    password: str = typer.Option("", "--password", help="新密码；省略则交互输入"),
+) -> None:
+    """重置本地账号密码（忘记管理员密码时的离线恢复方式）。"""
+    from sqlalchemy import select
+
+    from .auth import revoke_user_sessions
+    from .models import User
+    from .security import hash_password
+
+    init_db()
+    with session_scope() as db:
+        user = db.scalar(select(User).where(User.username == username))
+        if user is None:
+            console.print(f"[red]用户不存在：{username}[/red]")
+            raise typer.Exit(1)
+        if not password:
+            password = typer.prompt("新密码", hide_input=True, confirmation_prompt=True)
+        if len(password) < 8:
+            console.print("[red]密码至少 8 位[/red]")
+            raise typer.Exit(1)
+        user.password_hash = hash_password(password)
+        revoke_user_sessions(db, user.id)
+        console.print(f"[green]已重置 {user.username} 的密码，所有会话已失效。[/green]")
+
+
+@app.command("ledger-json")
+def ledger_json(ref: str = typer.Argument(...)) -> None:
+    """输出事实台账 JSON（供外部系统/人工校订）。"""
+    with _db() as db:
+        project = _project_or_exit(db, ref)
+        ledger = load_ledger(db, project.id)
+        console.print_json(ledger.model_dump_json())
+
+
+@app.command("schema")
+def schema_cmd(
+    out: Path | None = typer.Option(None, "--out", help="另存路径；默认打印内置 C1 Schema"),
+) -> None:
+    """输出事实台账 JSON Schema（C1 契约）。"""
+    from .tools.dump_schema import SCHEMA_PATH, build_schema
+
+    if out is None:
+        console.print_json(json.dumps(build_schema(), ensure_ascii=False))
+        return
+    path = json.dumps(build_schema(), ensure_ascii=False, indent=2) + "\n"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(path, encoding="utf-8")
+    console.print(f"[green]已写入[/green] {out}")
+    console.print(f"内置契约：{SCHEMA_PATH}")
+
+
+if __name__ == "__main__":
+    app()

@@ -1,0 +1,338 @@
+{
+  "$defs": {
+    "FactItem": {
+      "properties": {
+        "key": {
+          "title": "Key",
+          "type": "string"
+        },
+        "label": {
+          "default": "",
+          "title": "Label",
+          "type": "string"
+        },
+        "value": {
+          "default": "",
+          "title": "Value",
+          "type": "string"
+        },
+        "unit": {
+          "default": "",
+          "title": "Unit",
+          "type": "string"
+        },
+        "status": {
+          "default": "extracted",
+          "enum": [
+            "extracted",
+            "confirmed",
+            "manual",
+            "missing",
+            "conflict"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "confidence": {
+          "default": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "required": {
+          "default": false,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceRef"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "title": "FactItem",
+      "type": "object"
+    },
+    "MaterialItem": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "spec": {
+          "default": "",
+          "title": "Spec",
+          "type": "string"
+        },
+        "unit": {
+          "default": "",
+          "title": "Unit",
+          "type": "string"
+        },
+        "qty": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Qty"
+        },
+        "note": {
+          "default": "",
+          "title": "Note",
+          "type": "string"
+        },
+        "source_quote": {
+          "default": "",
+          "title": "Source Quote",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "MaterialItem",
+      "type": "object"
+    },
+    "ParameterItem": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "value": {
+          "default": "",
+          "title": "Value",
+          "type": "string"
+        },
+        "unit": {
+          "default": "",
+          "title": "Unit",
+          "type": "string"
+        },
+        "requirement": {
+          "default": "",
+          "title": "Requirement",
+          "type": "string"
+        },
+        "category": {
+          "default": "",
+          "title": "Category",
+          "type": "string"
+        },
+        "mandatory": {
+          "default": true,
+          "title": "Mandatory",
+          "type": "boolean"
+        },
+        "source_quote": {
+          "default": "",
+          "title": "Source Quote",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "ParameterItem",
+      "type": "object"
+    },
+    "RequirementItem": {
+      "properties": {
+        "kind": {
+          "default": "substantive",
+          "title": "Kind",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "mandatory": {
+          "default": true,
+          "title": "Mandatory",
+          "type": "boolean"
+        },
+        "source_quote": {
+          "default": "",
+          "title": "Source Quote",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "RequirementItem",
+      "type": "object"
+    },
+    "RiskItem": {
+      "properties": {
+        "level": {
+          "default": "major",
+          "title": "Level",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "source_quote": {
+          "default": "",
+          "title": "Source Quote",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "RiskItem",
+      "type": "object"
+    },
+    "ScoringItemModel": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Score"
+        },
+        "criteria": {
+          "default": "",
+          "title": "Criteria",
+          "type": "string"
+        },
+        "category": {
+          "default": "",
+          "title": "Category",
+          "type": "string"
+        },
+        "section_hint": {
+          "default": "",
+          "title": "Section Hint",
+          "type": "string"
+        },
+        "source_quote": {
+          "default": "",
+          "title": "Source Quote",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "ScoringItemModel",
+      "type": "object"
+    },
+    "SourceRef": {
+      "properties": {
+        "file": {
+          "default": "",
+          "title": "File",
+          "type": "string"
+        },
+        "page": {
+          "default": 0,
+          "title": "Page",
+          "type": "integer"
+        },
+        "quote": {
+          "default": "",
+          "title": "Quote",
+          "type": "string"
+        }
+      },
+      "title": "SourceRef",
+      "type": "object"
+    }
+  },
+  "description": "C1 事实台账：生成阶段唯一可信事实来源。由解析+人工确认产生，可直接作为跨工具交换格式。",
+  "properties": {
+    "schema_version": {
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "package": {
+      "default": "weakcurrent-cabling",
+      "title": "Package",
+      "type": "string"
+    },
+    "project": {
+      "additionalProperties": true,
+      "title": "Project",
+      "type": "object"
+    },
+    "facts": {
+      "items": {
+        "$ref": "#/$defs/FactItem"
+      },
+      "title": "Facts",
+      "type": "array"
+    },
+    "materials": {
+      "items": {
+        "$ref": "#/$defs/MaterialItem"
+      },
+      "title": "Materials",
+      "type": "array"
+    },
+    "parameters": {
+      "items": {
+        "$ref": "#/$defs/ParameterItem"
+      },
+      "title": "Parameters",
+      "type": "array"
+    },
+    "scoring": {
+      "items": {
+        "$ref": "#/$defs/ScoringItemModel"
+      },
+      "title": "Scoring",
+      "type": "array"
+    },
+    "requirements": {
+      "items": {
+        "$ref": "#/$defs/RequirementItem"
+      },
+      "title": "Requirements",
+      "type": "array"
+    },
+    "risks": {
+      "items": {
+        "$ref": "#/$defs/RiskItem"
+      },
+      "title": "Risks",
+      "type": "array"
+    },
+    "template_sections": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Template Sections",
+      "type": "array"
+    },
+    "stats": {
+      "additionalProperties": true,
+      "title": "Stats",
+      "type": "object"
+    }
+  },
+  "title": "BidCraft Fact Ledger",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bidcraft.local/schema/fact_ledger.schema.json"
+}

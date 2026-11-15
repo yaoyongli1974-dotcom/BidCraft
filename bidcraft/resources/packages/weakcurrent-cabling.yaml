@@ -1,0 +1,127 @@
+# C1 领域规格 · 弱电 · 综合布线
+package: weakcurrent-cabling
+version: 1
+project_type: weakcurrent
+project_type_label: 弱电智能化
+title: 综合布线技术标
+description: 综合布线系统的解析项、点位/材料口径、章节骨架与核对规则。
+extends: [common-bid-facts]
+
+parse:
+  keywords: [综合布线, 布线系统, 信息点, 配线架, 理线架, 跳线, 光纤, 铜缆, 机柜, 桥架]
+  parameter_vocab:
+    - 信息点
+    - 数据点
+    - 语音点
+    - 光纤点
+    - 配线架
+    - 理线架
+    - 跳线
+    - 模块
+    - 面板
+    - 机柜
+    - 桥架
+    - 线槽
+    - Cat6
+    - Cat6A
+    - OM3
+    - OM4
+    - 单模
+    - 多模
+  table_hints:
+    materials: [工程量清单, 材料清单, 设备材料表, 主要材料表, 分项报价表]
+    parameters: [技术参数, 技术规格, 性能指标, 配置要求]
+
+fields:
+  - key: cabling.point_count
+    label: 信息点位数量
+    group: technical
+    aliases: [信息点数量, 信息点位, 数据点数量, 语音点数量, 综合布线点位, 点位数量, 信息点数]
+    required: true
+    type: number
+    unit: 个
+  - key: cabling.cable_grade
+    label: 线缆等级
+    group: technical
+    aliases: [线缆等级, 布线等级, 铜缆等级, 电缆等级, 链路等级, 布线类别]
+    required: true
+    type: text
+  - key: cabling.fiber_grade
+    label: 光纤等级
+    group: technical
+    aliases: [光纤等级, 光缆类型, 光纤类型, 光缆规格]
+    required: false
+    type: text
+  - key: cabling.test_standard
+    label: 链路测试标准
+    group: technical
+    aliases: [测试标准, 链路测试, 验收标准, 认证测试, 测试规范]
+    required: true
+    type: text
+  - key: cabling.subsystems
+    label: 子系统范围
+    group: technical
+    aliases: [子系统, 系统组成, 布线子系统]
+    required: false
+    type: text
+  - key: cabling.warranty_years
+    label: 布线系统质保年限
+    group: commercial
+    aliases: [质保年限, 质保期, 保修期, 系统质保]
+    required: false
+    type: duration
+
+outline:
+  mode: replace
+  items:
+    - {heading: 项目理解与需求分析, intent: 引用招标项目身份、点位规模与建设目标，说明对招标文件的理解, target_words: 2200, needs: [project.name, project.content, cabling.point_count]}
+    - {heading: 商务条款响应与承诺, intent: 逐项响应工期、质保、投标有效期、付款与验收条款, target_words: 2000, needs: [project.duration, project.warranty, project.bid_validity, project.payment]}
+    - {heading: 实质性条款与废标风险响应, intent: 逐条对照招标文件的废标/否决/无效条款与实质性要求，说明规避措施与责任分工, target_words: 1800, needs: [project.name]}
+    - {heading: 综合布线系统总体设计, intent: 说明设计依据、系统架构、六大子系统划分与拓扑, target_words: 5000, needs: [cabling.subsystems, cabling.cable_grade, cabling.fiber_grade]}
+    - {heading: 工作区子系统设计, intent: 信息点配置、面板模块与跳线选型, target_words: 2600, needs: [cabling.point_count, cabling.cable_grade]}
+    - {heading: 水平子系统与垂直子系统设计, intent: 线缆路由、长度控制、桥架线槽与穿管要求, target_words: 3600, needs: [cabling.cable_grade, cabling.fiber_grade]}
+    - {heading: 管理子系统与设备间设计, intent: 配线架、理线、机柜、标识与端口管理, target_words: 2800, needs: [cabling.point_count]}
+    - {heading: 信息点位表与材料清单, intent: 点位数量与工程量清单逐项对齐，列出材料规格数量, target_words: 3200, needs: [cabling.point_count, cabling.cable_grade]}
+    - {heading: 施工组织与进度计划, intent: 施工流程、人员机具、工期节点与配合界面, target_words: 3000, needs: [project.duration, project.location]}
+    - {heading: 质量保证与链路测试验收, intent: 测试标准、测试比例、仪器与方法、验收资料, target_words: 3000, needs: [cabling.test_standard]}
+    - {heading: 安全文明施工与成品保护, intent: 现场安全、成品保护、隐蔽工程与环保要求, target_words: 1800, needs: [project.location]}
+    - {heading: 售后服务与质保承诺, intent: 质保年限、响应时限、备品备件与巡检, target_words: 1800, needs: [cabling.warranty_years, project.warranty]}
+
+checks:
+  - id: CBL-001
+    level: blocking
+    category: 数量一致
+    assert: "not present(facts['cabling.point_count']) or not materials or materials_total(materials, '面板|模块|信息点|底盒|插座') == 0 or number(facts['cabling.point_count']) == materials_total(materials, '面板|模块|信息点|底盒|插座')"
+    message: 信息点位数与招标工程量清单/材料表合计不一致
+    recommendation: 逐项核对点位表与清单数量，统一口径后再生成
+  - id: CBL-002
+    level: major
+    category: 参数响应
+    assert: "not parameters or param_response_ratio(parameters, doc) >= 0.95"
+    message: 技术参数未逐条响应（响应率低于 95%）
+    recommendation: 在「技术参数响应表」中逐条列出参数、响应值与偏离说明
+    evidence: {show: param_response_missing}
+  - id: CBL-003
+    level: major
+    category: 参数响应
+    assert: "not present(facts['cabling.cable_grade']) or contains(doc, facts['cabling.cable_grade'])"
+    message: 正文未响应招标要求的线缆等级
+    recommendation: 在设计、材料清单与测试章节引用线缆等级
+  - id: CBL-004
+    level: major
+    category: 验收
+    assert: "not present(facts['cabling.test_standard']) or contains(doc, facts['cabling.test_standard'])"
+    message: 正文未引用招标要求的链路测试标准
+    recommendation: 在测试验收章节写明标准号与测试比例
+  - id: CBL-005
+    level: major
+    category: 数量一致
+    assert: "not present(facts['cabling.point_count']) or contains(doc, facts['cabling.point_count'])"
+    message: 正文未出现信息点位数量
+    recommendation: 在总体设计与点位表章节写明点位总数
+  - id: CBL-006
+    level: minor
+    category: 完整性
+    assert: "contains_ratio(doc, ['工作区子系统', '水平子系统', '管理子系统', '垂直子系统', '设备间子系统', '建筑群子系统']) >= 0.66"
+    message: 综合布线子系统覆盖不足
+    recommendation: 按招标范围补齐子系统设计内容

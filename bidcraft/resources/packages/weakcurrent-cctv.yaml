@@ -1,0 +1,148 @@
+# C1 领域规格 · 弱电 · 安防监控
+package: weakcurrent-cctv
+version: 1
+project_type: weakcurrent
+project_type_label: 弱电智能化
+title: 安防监控技术标
+description: 视频监控系统的点位、码率/存储、平台对接、章节骨架与核对规则。
+extends: [common-bid-facts]
+
+parse:
+  keywords: [视频监控, 安防监控, 摄像机, 球机, 枪机, 半球, NVR, 存储, 解码, 上墙, GB28181, 等保]
+  parameter_vocab:
+    - 摄像机
+    - 球机
+    - 枪机
+    - 半球
+    - 分辨率
+    - 帧率
+    - 码率
+    - 编码
+    - H.264
+    - H.265
+    - NVR
+    - 存储
+    - 硬盘
+    - 解码器
+    - 拼接屏
+    - 平台
+    - GB/T 28181
+    - ONVIF
+    - 等保
+  table_hints:
+    materials: [工程量清单, 设备清单, 材料清单, 设备材料表]
+    parameters: [技术参数, 技术规格, 性能指标, 配置要求]
+
+fields:
+  - key: cctv.camera_count
+    label: 摄像机点位数量
+    group: technical
+    aliases: [摄像机数量, 监控点位, 视频点位, 摄像头数量, 前端点位数量, 监控点数量]
+    required: true
+    type: number
+    unit: 路
+  - key: cctv.resolution
+    label: 摄像机分辨率
+    group: technical
+    aliases: [分辨率, 摄像机分辨率, 视频分辨率, 像素]
+    required: true
+    type: text
+  - key: cctv.encoding
+    label: 视频编码格式
+    group: technical
+    aliases: [编码格式, 视频编码, 压缩标准, 编码方式]
+    required: false
+    type: text
+  - key: cctv.storage_days
+    label: 录像存储天数
+    group: technical
+    aliases: [存储天数, 录像保存天数, 保存周期, 存储周期, 录像存储时间]
+    required: true
+    type: number
+    unit: 天
+  - key: cctv.bitrate_mbps
+    label: 单路码率
+    group: technical
+    aliases: [单路码率, 码率, 视频码率, 主码流码率]
+    required: false
+    type: number
+    unit: Mbps
+  - key: cctv.storage_tb
+    label: 存储容量
+    group: technical
+    aliases: [存储容量, 录像容量, 存储总容量, 磁盘容量]
+    required: false
+    type: number
+    unit: TB
+  - key: cctv.platform_protocol
+    label: 平台对接协议
+    group: technical
+    aliases: [对接协议, 平台协议, 联网协议, GB28181, GB/T 28181, ONVIF]
+    required: true
+    type: text
+  - key: cctv.security_level
+    label: 等保要求
+    group: technical
+    aliases: [等保, 等级保护, 安全等级, 等保级别]
+    required: false
+    type: text
+  - key: cctv.decode_wall
+    label: 解码上墙要求
+    group: technical
+    aliases: [解码上墙, 上墙, 电视墙, 拼接屏, 解码器]
+    required: false
+    type: text
+
+outline:
+  mode: replace
+  items:
+    - {heading: 项目理解与需求分析, intent: 引用项目身份、点位规模、存储与联网要求, target_words: 2200, needs: [project.name, project.content, cctv.camera_count]}
+    - {heading: 商务条款响应与承诺, intent: 逐项响应工期、质保、投标有效期、付款与验收条款, target_words: 2000, needs: [project.duration, project.warranty, project.bid_validity, project.payment]}
+    - {heading: 实质性条款与废标风险响应, intent: 逐条对照招标文件的废标/否决/无效条款与实质性要求，说明规避措施与责任分工, target_words: 1800, needs: [project.name]}
+    - {heading: 视频监控系统总体设计, intent: 设计依据、系统架构、前端-传输-存储-平台-联动分层, target_words: 4800, needs: [cctv.camera_count, cctv.resolution]}
+    - {heading: 前端摄像机选型与点位设计, intent: 按场景选型，分辨率/镜头/编码/供电与安装方式逐条响应, target_words: 3600, needs: [cctv.camera_count, cctv.resolution, cctv.encoding]}
+    - {heading: 传输网络与供电设计, intent: 接入交换机、光纤链路、PoE 供电与网络隔离, target_words: 2800, needs: [cctv.camera_count]}
+    - {heading: 存储系统与容量计算, intent: 码率×路数×天数计算存储容量，NVR/磁盘阵列配置, target_words: 3200, needs: [cctv.camera_count, cctv.storage_days, cctv.bitrate_mbps, cctv.storage_tb]}
+    - {heading: 监控平台与联网对接, intent: 平台功能、GB/T 28181/ONVIF 对接、权限与级联, target_words: 3000, needs: [cctv.platform_protocol, cctv.security_level]}
+    - {heading: 解码上墙与联动控制, intent: 解码器/拼接屏配置、轮巡预案与报警联动, target_words: 2200, needs: [cctv.decode_wall]}
+    - {heading: 施工组织与进度计划, intent: 施工流程、隐蔽工程、系统调试与工期节点, target_words: 2800, needs: [project.duration, project.location]}
+    - {heading: 测试验收与培训, intent: 图像质量、存储回放、联网测试与培训交付, target_words: 2400, needs: [cctv.storage_days, cctv.platform_protocol]}
+    - {heading: 售后服务与质保承诺, intent: 响应时限、备件、巡检与质保口径, target_words: 1800, needs: [project.warranty]}
+
+checks:
+  - id: CCTV-001
+    level: blocking
+    category: 容量校验
+    assert: "not (present(facts['cctv.camera_count']) and present(facts['cctv.storage_days']) and present(facts['cctv.bitrate_mbps'])) or not present(facts['cctv.storage_tb']) or number(facts['cctv.storage_tb']) >= storage_tb(number(facts['cctv.camera_count']), number(facts['cctv.storage_days']), number(facts['cctv.bitrate_mbps']))"
+    message: 存储容量小于按码率×路数×天数计算的最低需求
+    recommendation: 提高存储容量或调整码率/存储天数口径，并在容量计算表中写明公式
+  - id: CCTV-002
+    level: major
+    category: 参数响应
+    assert: "not present(facts['cctv.resolution']) or contains(doc, facts['cctv.resolution'])"
+    message: 正文未响应摄像机分辨率要求
+    recommendation: 在前端选型与参数响应表中写明分辨率
+  - id: CCTV-003
+    level: major
+    category: 参数响应
+    assert: "not present(facts['cctv.storage_days']) or contains(doc, facts['cctv.storage_days'])"
+    message: 正文未响应录像存储天数
+    recommendation: 在存储系统章节写明存储天数与容量计算
+  - id: CCTV-004
+    level: blocking
+    category: 联网
+    assert: "not present(facts['cctv.platform_protocol']) or contains(doc, facts['cctv.platform_protocol'])"
+    message: 正文未响应平台对接协议
+    recommendation: 在平台与联网章节写明 GB/T 28181/ONVIF 等协议响应
+  - id: CCTV-005
+    level: major
+    category: 参数响应
+    assert: "not parameters or param_response_ratio(parameters, doc) >= 0.95"
+    message: 技术参数未逐条响应（响应率低于 95%）
+    recommendation: 补齐技术参数响应表，逐条给出响应值与偏离说明
+  - id: CCTV-006
+    level: minor
+    category: 完整性
+    assert: "contains_ratio(doc, ['前端', '传输', '存储', '平台', '联动']) >= 0.8"
+    message: 视频监控系统分层内容覆盖不足
+    recommendation: 按前端、传输、存储、平台、联动五层补齐

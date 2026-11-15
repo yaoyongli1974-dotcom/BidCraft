@@ -1,0 +1,125 @@
+# 暖通空调 · 冷热源 / 风系统 / 水系统 / 防排烟 / 自控
+package: hvac
+version: 1
+project_type: hvac
+project_type_label: 暖通空调
+title: 暖通空调技术标
+description: 冷热负荷、冷热源、空调风/水系统、通风防排烟与自控节能的解析项、章节骨架与核对规则。
+extends: [common-bid-facts]
+
+parse:
+  keywords: [暖通, 空调, 冷热源, 冷水机组, 锅炉, 风机盘管, 新风, 排风, 防排烟, 风管, 水管, 保温, 自控, 节能]
+  parameter_vocab:
+    - 冷负荷
+    - 热负荷
+    - 冷水机组
+    - 锅炉
+    - 风机盘管
+    - 新风机组
+    - 空调箱
+    - 风机
+    - 风管
+    - 水管
+    - 保温
+    - 冷媒
+    - 变频
+    - 自控
+    - 防排烟
+    - GB 50243
+    - GB 50736
+  table_hints:
+    materials: [工程量清单, 暖通材料清单, 设备清单, 设备材料表]
+    parameters: [技术参数, 技术规格, 性能指标, 配置要求]
+
+fields:
+  - key: hvac.system_scope
+    label: 暖通系统范围
+    group: technical
+    aliases: [暖通范围, 空调范围, 通风范围, 系统组成, 招标范围]
+    required: true
+    type: text
+  - key: hvac.cooling_load
+    label: 空调冷负荷
+    group: technical
+    aliases: [冷负荷, 空调冷负荷, 制冷量, 设计冷负荷]
+    required: false
+    type: text
+  - key: hvac.heating_load
+    label: 空调热负荷
+    group: technical
+    aliases: [热负荷, 空调热负荷, 供热量, 设计热负荷]
+    required: false
+    type: text
+  - key: hvac.equipment_count
+    label: 主要设备数量
+    group: technical
+    aliases: [设备数量, 机组数量, 主要设备, 设备台数]
+    required: false
+    type: number
+    unit: 台
+  - key: hvac.refrigerant
+    label: 冷媒/制冷剂
+    group: technical
+    aliases: [冷媒, 制冷剂, 冷媒类型, 工质]
+    required: false
+    type: text
+  - key: hvac.duct_material
+    label: 风管材质
+    group: technical
+    aliases: [风管材质, 风管, 风管规格, 通风管道]
+    required: false
+    type: text
+  - key: hvac.test_standard
+    label: 暖通验收标准
+    group: technical
+    aliases: [验收标准, 暖通验收, 通风空调验收, 调试标准]
+    required: true
+    type: text
+  - key: hvac.warranty_years
+    label: 暖通系统质保年限
+    group: commercial
+    aliases: [质保年限, 质保期, 保修期, 系统质保]
+    required: false
+    type: duration
+
+outline:
+  mode: replace
+  items:
+    - {heading: 项目理解与暖通需求分析, intent: 引用项目身份、暖通范围、负荷与舒适性目标，说明对招标文件的理解, target_words: 2200, needs: [project.name, hvac.system_scope, hvac.cooling_load]}
+    - {heading: 商务条款响应与承诺, intent: 逐项响应工期、质保、投标有效期、付款与验收条款, target_words: 1800, needs: [project.duration, project.warranty, project.bid_validity, project.payment]}
+    - {heading: 实质性条款与废标风险响应, intent: 对照暖通工程否决项、资质与人员要求，说明响应措施与责任分工, target_words: 1800, needs: [project.name, qualification.requirements]}
+    - {heading: 负荷计算与系统选型, intent: 冷热负荷、系统形式、分区与设备选型依据, target_words: 3200, needs: [hvac.cooling_load, hvac.heating_load, hvac.system_scope]}
+    - {heading: 冷热源与机房系统, intent: 冷水机组、锅炉/热泵、水泵、水处理与机房布置, target_words: 3800, needs: [hvac.equipment_count, hvac.refrigerant]}
+    - {heading: 空调风系统与末端, intent: 空调箱、新风、风机盘管、风管与气流组织, target_words: 3800, needs: [hvac.duct_material, hvac.system_scope]}
+    - {heading: 空调水系统与保温, intent: 水管、阀门、水泵、定压补水、保温与防腐, target_words: 3200, needs: [hvac.system_scope, hvac.equipment_count]}
+    - {heading: 通风与防排烟系统, intent: 排风、补风、防烟分区、排烟风机与联动控制, target_words: 2800, needs: [hvac.system_scope]}
+    - {heading: 自控与节能措施, intent: 楼控接口、变频、群控、计量与节能运行策略, target_words: 2400, needs: [hvac.system_scope]}
+    - {heading: 设备材料与工程量响应, intent: 对照清单核对机组、风管、水管、阀门与保温数量规格, target_words: 2600, needs: [hvac.equipment_count, hvac.duct_material]}
+    - {heading: 施工组织与调试验收, intent: 施工顺序、管道试压、风管漏光/漏风、单机与联动调试, target_words: 3200, needs: [hvac.test_standard, project.duration]}
+    - {heading: 质量安全与售后服务, intent: 质量控制、成品保护、质保响应与巡检, target_words: 2000, needs: [hvac.warranty_years, project.warranty]}
+
+checks:
+  - id: HVA-001
+    level: major
+    category: 参数响应
+    assert: "not parameters or param_response_ratio(parameters, doc) >= 0.95"
+    message: 暖通技术参数未逐条响应（响应率低于 95%）
+    recommendation: 在技术参数响应表中逐条列出参数、响应值与偏离说明
+  - id: HVA-002
+    level: major
+    category: 验收
+    assert: "not present(facts['hvac.test_standard']) or contains(doc, facts['hvac.test_standard'])"
+    message: 正文未引用暖通验收标准
+    recommendation: 在调试验收章节写明标准号、试验与检测要求
+  - id: HVA-003
+    level: major
+    category: 范围响应
+    assert: "not present(facts['hvac.system_scope']) or contains(doc, facts['hvac.system_scope'])"
+    message: 正文未覆盖招标要求的暖通系统范围
+    recommendation: 在总体设计章节逐项列出冷热源、风系统、水系统与防排烟
+  - id: HVA-004
+    level: minor
+    category: 完整性
+    assert: "contains_ratio(doc, ['冷热源', '风系统', '水系统', '防排烟']) >= 0.75"
+    message: 暖通系统章节覆盖不足
+    recommendation: 按招标范围补齐冷热源、风系统、水系统与防排烟内容

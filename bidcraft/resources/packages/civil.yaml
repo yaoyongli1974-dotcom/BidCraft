@@ -1,0 +1,116 @@
+# 土建工程 · 基础 / 主体 / 屋面 / 装饰 / 施工组织
+package: civil
+version: 1
+project_type: civil
+project_type_label: 土建工程
+title: 土建工程技术标
+description: 建筑规模、结构形式、基础与主体施工、质量安全与进度的解析项、章节骨架与核对规则。
+extends: [common-bid-facts]
+
+parse:
+  keywords: [土建, 建筑工程, 基础, 主体结构, 混凝土, 钢筋, 模板, 砌体, 屋面, 防水, 装饰装修, 施工组织]
+  parameter_vocab:
+    - 建筑面积
+    - 结构形式
+    - 基础形式
+    - 混凝土强度
+    - 钢筋
+    - 模板
+    - 砌体
+    - 屋面防水
+    - 装饰装修
+    - 基坑
+    - 脚手架
+    - 施工缝
+    - GB 50300
+    - GB 50204
+  table_hints:
+    materials: [工程量清单, 土建材料清单, 材料表, 分部分项工程量清单]
+    parameters: [技术参数, 技术规格, 质量标准, 施工要求]
+
+fields:
+  - key: civil.building_area
+    label: 建筑面积
+    group: technical
+    aliases: [建筑面积, 总建筑面积, 建筑规模]
+    required: true
+    type: number
+    unit: ㎡
+  - key: civil.structure_type
+    label: 结构形式
+    group: technical
+    aliases: [结构形式, 结构类型, 主体结构, 建筑结构]
+    required: true
+    type: text
+  - key: civil.floors
+    label: 层数
+    group: technical
+    aliases: [层数, 地上层数, 地下层数, 建筑层数]
+    required: false
+    type: text
+  - key: civil.foundation_type
+    label: 基础形式
+    group: technical
+    aliases: [基础形式, 基础类型, 桩基, 筏板基础]
+    required: false
+    type: text
+  - key: civil.concrete_grade
+    label: 主要混凝土强度等级
+    group: technical
+    aliases: [混凝土强度, 混凝土等级, 砼强度等级]
+    required: false
+    type: text
+  - key: civil.quality_standard
+    label: 质量验收标准
+    group: technical
+    aliases: [质量标准, 验收标准, 质量目标, 施工质量]
+    required: true
+    type: text
+  - key: civil.warranty_years
+    label: 工程质量保修年限
+    group: commercial
+    aliases: [保修年限, 质保期, 保修期, 工程质量保修]
+    required: false
+    type: duration
+
+outline:
+  mode: replace
+  items:
+    - {heading: 项目理解与工程概况, intent: 引用项目身份、建筑面积、结构形式与建设目标，说明对招标文件的理解, target_words: 2200, needs: [project.name, civil.building_area, civil.structure_type]}
+    - {heading: 商务条款响应与承诺, intent: 逐项响应工期、质保、投标有效期、付款与验收条款, target_words: 1800, needs: [project.duration, project.warranty, project.bid_validity, project.payment]}
+    - {heading: 实质性条款与废标风险响应, intent: 对照土建工程否决项、资质与人员要求，说明响应措施与责任分工, target_words: 1800, needs: [project.name, qualification.requirements]}
+    - {heading: 施工总体部署, intent: 施工分区、流水段、总平面布置、资源配置与工期节点, target_words: 3400, needs: [civil.building_area, project.duration, project.location]}
+    - {heading: 基础与地下结构施工, intent: 基坑、降水、桩基/筏板、土方与地下防水施工, target_words: 3600, needs: [civil.foundation_type, civil.concrete_grade]}
+    - {heading: 主体结构施工, intent: 模板、钢筋、混凝土、砌体与结构质量控制, target_words: 4600, needs: [civil.structure_type, civil.concrete_grade, civil.floors]}
+    - {heading: 屋面与防水工程, intent: 屋面构造、防水材料、节点做法与蓄水试验, target_words: 2600, needs: [civil.quality_standard]}
+    - {heading: 装饰装修与门窗工程, intent: 地面、墙面、吊顶、门窗与细部做法, target_words: 3000, needs: [civil.quality_standard]}
+    - {heading: 材料与工程量响应, intent: 对照清单核对混凝土、钢筋、砌体与装饰材料数量规格, target_words: 2600, needs: [civil.concrete_grade]}
+    - {heading: 质量保证与验收, intent: 质量目标、过程控制、检验批、隐蔽验收与竣工资料, target_words: 2800, needs: [civil.quality_standard]}
+    - {heading: 安全文明施工与环境保护, intent: 深基坑、高处作业、临时用电、扬尘与噪声控制, target_words: 2200, needs: [project.location]}
+    - {heading: 售后服务与工程回访, intent: 保修年限、回访计划、缺陷责任与维修响应, target_words: 1600, needs: [civil.warranty_years, project.warranty]}
+
+checks:
+  - id: CIV-001
+    level: major
+    category: 参数响应
+    assert: "not parameters or param_response_ratio(parameters, doc) >= 0.95"
+    message: 土建技术参数未逐条响应（响应率低于 95%）
+    recommendation: 在技术参数响应表中逐条列出参数、响应值与偏离说明
+  - id: CIV-002
+    level: major
+    category: 验收
+    assert: "not present(facts['civil.quality_standard']) or contains(doc, facts['civil.quality_standard'])"
+    message: 正文未引用招标要求的质量验收标准
+    recommendation: 在质量保证章节写明标准号与验收目标
+  - id: CIV-003
+    level: major
+    category: 范围响应
+    assert: "not present(facts['civil.structure_type']) or contains(doc, facts['civil.structure_type'])"
+    message: 正文未响应招标要求的结构形式
+    recommendation: 在工程概况与主体结构章节写明结构形式
+  - id: CIV-004
+    level: minor
+    category: 完整性
+    assert: "contains_ratio(doc, ['基础', '主体结构', '屋面', '装饰装修']) >= 0.75"
+    message: 土建分部分项覆盖不足
+    recommendation: 按招标范围补齐基础、主体、屋面与装饰内容
