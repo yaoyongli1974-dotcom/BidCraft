@@ -39,6 +39,7 @@ bidcraft export <项目ID> -f docx
 bidcraft export <项目ID> -f pdf     # 本机 LibreOffice 转换，自动刷新目录页码
 bidcraft schema                     # 输出 C1 事实台账 JSON Schema
 bidcraft export <项目ID> -f xlsx     # 导出事实台账/材料/参数/评分/风险工作簿
+bidcraft backup                     # 在线一致性备份 db + secret.key 为 zip
 
 # B/S 客户端（推荐；需要 Node.js 20+）
 uv pip install -e '.[api]'
@@ -49,6 +50,12 @@ bidcraft serve --open               # http://127.0.0.1:8000
 浏览器客户端覆盖：项目列表 → 招标文件上传/解析 → 事实台账校订 → 大纲编排 →
 逐章生成/编辑 → 合规核对 → 清单对齐 → DOCX/PDF/XLSX 导出。模型不可用时所有按钮仍可走
 确定性草稿，界面会明确提示。
+
+依赖已锁定在根目录 `uv.lock`（49 个包）。复现同一环境用：
+
+```bash
+uv sync --frozen --extra api --extra dev   # 或在已激活的 venv 内 uv sync --frozen
+```
 
 ## B/S 部署
 
@@ -72,8 +79,37 @@ RBAC（超级管理员 / 投标经理 / 只读成员），首次启动会创建�
 - 超级管理员登录后进入「管理控制台」，配置对话/图片/向量模型、知识库与用户。
 - 公网或跨网段访问请启用 HTTPS 并设置 `BIDCRAFT_SECURE_COOKIE=1`，建议置于 TLS
   反向代理之后。项目数据集中存储在 `BIDCRAFT_HOME`（SQLite + 原件 + 导出件），
-  备份该目录即可；`secret.key` 用于解密模型/知识库密钥，需一并备份。
-  详细组件、数据流、并发与安全边界见 `docs/architecture.md`。
+  `secret.key` 用于解密模型/知识库密钥，需一并备份。详细组件、数据流、并发与安全边
+  界见 `docs/architecture.md`。
+
+### 备份与恢复
+
+数据库运行在 SQLite WAL 模式，**直接 `cp` 数据目录有撕裂风险**（`-wal`/`-shm`
+与主库不同步，拷贝中若有写入会得到不一致的快照）。使用内置命令即可在线生成一致性
+快照（SQLite 在线备份 API，无需停服）：
+
+```bash
+bidcraft backup                       # 默认写入 BIDCRAFT_HOME/backups/bidcraft-<YYYYmmdd-HHMMSS>.zip
+bidcraft backup -o /backup/           # 指定目录，自动按时间命名
+bidcraft backup -o /backup/manual.zip # 指定完整文件路径
+bidcraft backup --list                # 查看已有备份
+```
+
+备份包内含 `bidcraft.db`（一致性快照）、`secret.key`（存在时）与 `manifest.json`
+（版本、创建时间、库大小、是否含密钥、`BIDCRAFT_HOME`）。`secret.key` 必须一并保存，
+否则已加密的模型/知识库 API Key 无法解密，只能重新录入。
+
+**恢复步骤**：
+
+1. 停止服务：`systemctl stop bidcraft`（或 `docker stop bidcraft`）。
+2. 备份现有数据目录后解压：`unzip /backup/bidcraft-<时间>.zip -d /tmp/restore`。
+3. 把 `bidcraft.db` 与 `secret.key` 放回 `BIDCRAFT_HOME`（默认 `./.bidcraft/`），
+   保持路径不变并确保文件属主为运行用户（容器内 uid 10001）。
+4. 启动服务（`bidcraft serve` 或容器），确认项目与模型配置可正常读取。
+
+没有安装 CLI 或需要保留原件/导出件时，仍可手工冷备（停服后整目录打包）或用
+`sqlite3 $BIDCRAFT_HOME/bidcraft.db ".backup '/backup/bidcraft.db'"` 取库快照后
+`rsync` 同步 `projects/ packages/ output/ secret.key`；不要直接 `cp` 运行中的目录。
 
 Docker（含 LibreOffice、中文字体与 OCR，构建时自动编译 Web 客户端）：
 
@@ -81,6 +117,10 @@ Docker（含 LibreOffice、中文字体与 OCR，构建时自动编译 Web 客�
 docker build -t bidcraft .
 docker run -d -p 8000:8000 -v bidcraft-data:/data --name bidcraft bidcraft
 ```
+
+镜像内以非 root 用户 `bidcraft`（uid 10001）运行，`/data` 为唯一需要写权限的目录；
+用宿主目录挂载时请先 `chown -R 10001:10001 <目录>`。`HEALTHCHECK` 轮询 `/health`，
+`docker ps` 可直接看到健康状态。
 
 不配置模型也能出稿：`write` 会回落到确定性草稿（结构与台账表格完整，文字质量有限）。
 模型优先使用管理控制台里「设为默认」的对话模型；也保留环境变量作为兜底：
@@ -152,6 +192,20 @@ export BIDCRAFT_WECHAT_PAY_MOCK=1         # 本地演示支付
 
 数据默认落在 `./.bidcraft/`（SQLite + 原件 + 导出件），可用 `BIDCRAFT_HOME` 改路径。
 
+## 文档索引
+
+- [`docs/architecture.md`](docs/architecture.md)：组件分层、数据流、并发模型、
+  安全边界、部署拓扑与备份/恢复。
+- [`docs/admin-guide.md`](docs/admin-guide.md)：管理控制台、角色矩阵、模型/知识库/
+  规则包配置与首次登录。
+- [`docs/billing.md`](docs/billing.md)：注册、按章扣点、兑换码与微信支付。
+- [`docs/roadmap.md`](docs/roadmap.md)：已落地能力与后续版本计划。
+- [`docs/mcp.md`](docs/mcp.md)：MCP（JSON-RPC 2.0）服务与 6 个工具接入。
+- [`docs/plugins.md`](docs/plugins.md)：MCP 客户端插件市场、聚合与安全边界。
+- [`docs/calibration.md`](docs/calibration.md)：真实招标文件回归校准命令与报告字段。
+- [`docs/C1-spec.md`](docs/C1-spec.md)：领域规格（事实台账 Schema 与规则口径）。
+- [`LICENSE`](LICENSE) / [`NOTICE`](NOTICE)：专有许可条款与第三方组件许可。
+
 ## MVP 范围（C1–C4 + 最小交付）
 
 | 模块 | 状态 | 说明 |
@@ -208,10 +262,14 @@ bidcraft/
 web/            React + TypeScript + Vite 客户端源码
 docs/
   research/     两套上游源码的规格提取（只记录规则，不复制代码）
-  C1-spec.md    领域规格说明
-  mcp.md        MCP 服务接入与工具说明
-  plugins.md    插件市场：MCP 客户端插件、聚合、安全边界与排错
-  calibration.md 真实招标文件回归校准：命令、报告字段与别名维护
+  architecture.md 组件、数据流、并发模型、安全边界与备份/恢复
+  admin-guide.md  管理控制台：角色矩阵、模型/知识库/规则包/用户配置
+  billing.md      注册、计费、兑换码与微信支付（Native）配置
+  C1-spec.md      领域规格说明
+  mcp.md          MCP 服务接入与工具说明
+  plugins.md      插件市场：MCP 客户端插件、聚合、安全边界与排错
+  calibration.md  真实招标文件回归校准：命令、报告字段与别名维护
+  roadmap.md      版本路线与后续计划
 tests/          单元 + 端到端回归
 ```
 
@@ -243,9 +301,16 @@ param_response_ratio/storage_tb/...`），由 AST 白名单执行，不是 `eval
 ## 验证
 
 ```bash
-pytest
+uv sync --frozen --extra api --extra dev   # 复现锁定环境
+uv run ruff check bidcraft tests
+uv run pytest
 bidcraft doctor
 ```
+
+CI（`.github/workflows/ci.yml`）在 push / PR 时执行同样的两道门禁：Python 侧
+`ruff check bidcraft tests` + `pytest -q`（Python 3.13），Web 侧 `npm run lint` /
+`npm run test` / `npm run build`（Node 22）。测试全部使用 mock 端点与本地临时目录，
+不需要数据库、模型或网络服务。
 
 回归链路：`tests/test_e2e.py` 用合成招标文件跑「解析 → 台账 → 大纲 → 草稿 → 核对 → DOCX」，
 并断言抽取字段、规则命中、Markdown 表格转 Word 表格与文件产出；`tests/test_pdf.py` 在装有
@@ -278,5 +343,10 @@ DOCX 图注编号与版心宽度、批量生成默认风格尺寸；`tests/test_
 
 ## 许可与合规
 
-本仓库为自有代码。上游两个项目均为 AGPL-3.0：本项目只参考其**领域规格与行为**，
-不包含其源代码；如未来需要复制上游代码，必须重新评估 AGPL §13 与 NOTICE 归属义务。
+本项目以**专有许可**发布：版权归 yaoyongli1974-dotcom 所有，允许自用与修改，
+**禁止未经授权的分发或对外托管服务**。完整条款见 [`LICENSE`](LICENSE)，
+第三方依赖及其许可见 [`NOTICE`](NOTICE)。
+
+上游 fb-labs/ZhiBiao 与 FB208/OpenBidKit_Yibiao 均为 AGPL-3.0：本项目只参考其
+**领域规格与行为**，不包含其源代码；如未来需要复制上游代码，必须重新评估
+AGPL §13 与 NOTICE 归属义务。

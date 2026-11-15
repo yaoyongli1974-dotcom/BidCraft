@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 
 // The API is served by the same origin in production. During development every
@@ -22,6 +22,10 @@ const proxy = Object.fromEntries(
     '/admin/users',
     '/admin/billing',
     '/admin/redeem-codes',
+    '/admin/rule-packages',
+    '/admin/quotas',
+    '/admin/plugins',
+    '/admin/audit',
   ].map((path) => [path, { target: apiTarget, changeOrigin: true }]),
 )
 
@@ -31,6 +35,14 @@ export default defineConfig({
   build: {
     outDir: '../bidcraft/web_dist',
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'react-vendor': ['react', 'react-dom', 'react-router-dom'],
+          icons: ['lucide-react'],
+        },
+      },
+    },
   },
   server: {
     host: '127.0.0.1',
@@ -40,5 +52,11 @@ export default defineConfig({
   preview: {
     host: '127.0.0.1',
     port: 4173,
+  },
+  test: {
+    environment: 'jsdom',
+    setupFiles: './src/test/setup.ts',
+    include: ['src/**/*.test.{ts,tsx}'],
+    css: false,
   },
 })

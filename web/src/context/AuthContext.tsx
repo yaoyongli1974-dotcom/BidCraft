@@ -18,6 +18,7 @@ import {
   messageOf,
 } from '../lib/api'
 import type { User } from '../lib/types'
+import { clearQueryCache } from '../lib/queryCache'
 
 interface AuthApi {
   user: User | null
@@ -45,6 +46,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let active = true
+    // A new session may belong to another account; never reuse cached API data.
+    clearQueryCache()
     setLoading(true)
     setError(null)
     getMe()
@@ -71,6 +74,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const onUnauthorized = () => {
+      clearQueryCache()
       setUser(null)
       setLoading(false)
       if (redirecting.current) return
@@ -87,6 +91,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (username: string, password: string) => {
     const result = await loginRequest(username, password)
+    clearQueryCache()
     setUser(result.user)
     setError(null)
     return result.user
@@ -95,6 +100,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const register = useCallback(
     async (username: string, password: string, displayName = '') => {
       const result = await registerRequest(username, password, displayName)
+      clearQueryCache()
       setUser(result.user)
       setError(null)
       return result.user
@@ -118,12 +124,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Clearing the local session is still the right outcome if the server
       // session has already expired or the service is unavailable.
     } finally {
+      clearQueryCache()
       setUser(null)
     }
   }, [])
 
   const changePassword = useCallback(async (currentPassword: string, newPassword: string) => {
     await changePasswordRequest(currentPassword, newPassword)
+    clearQueryCache()
     setUser(null)
   }, [])
 

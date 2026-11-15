@@ -14,30 +14,13 @@ export function Masthead() {
   const onProjects = location.pathname === '/'
   const onAdmin = location.pathname === '/admin'
 
-  let label = '检查本地服务'
-  let tone = 'neutral'
-  let Icon = Loader2
-  if (loading) {
-    label = '检查本地服务'
-    tone = 'neutral'
-    Icon = Loader2
-  } else if (error) {
-    label = '本地服务未连接'
-    tone = 'danger'
-    Icon = WifiOff
-  } else if (health?.offline) {
-    label = '离线模式'
-    tone = 'warn'
-    Icon = WifiOff
-  } else if (health?.model_configured) {
-    label = '模型已配置'
-    tone = 'success'
-    Icon = Cpu
-  } else {
-    label = '确定性草稿'
-    tone = 'info'
-    Icon = Cpu
-  }
+  const { label, tone, Icon } = (() => {
+    if (loading) return { label: '检查本地服务', tone: 'neutral', Icon: Loader2 }
+    if (error) return { label: '本地服务未连接', tone: 'danger', Icon: WifiOff }
+    if (health?.offline) return { label: '离线模式', tone: 'warn', Icon: WifiOff }
+    if (health?.model_configured) return { label: '模型已配置', tone: 'success', Icon: Cpu }
+    return { label: '确定性草稿', tone: 'info', Icon: Cpu }
+  })()
 
   return (
     <header className="masthead">

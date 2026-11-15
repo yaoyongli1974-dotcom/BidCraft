@@ -1,0 +1,115 @@
+BidCraft Proprietary License
+Copyright (c) 2026 yaoyongli1974-dotcom. All rights reserved.
+
+BidCraft 专有许可协议 / BidCraft Proprietary License
+
+本许可同时以中英文书写；如两种文本存在歧义，以英文文本为准。
+This license is written in both Chinese and English; in case of ambiguity, the
+English text prevails.
+
+1. 定义 / Definitions
+
+   "软件" 指本仓库中的全部源代码、规则包（YAML）、JSON Schema、文档及其构建产物。
+   "Software" means all source code, rule packages (YAML), JSON Schemas, documentation
+   and build artifacts contained in this repository.
+
+   "许可方" 指版权持有人 yaoyongli1974-dotcom。
+   "Licensor" means the copyright holder, yaoyongli1974-dotcom.
+
+2. 授权 / Grant
+
+   在遵守本协议全部条款的前提下，许可方授予你一项非排他、不可转让、可撤销的许可，
+   允许你：
+   (a) 为个人学习、内部评估或自身业务需要而使用、复制、修改本软件；
+   (b) 在你拥有或控制的设备上运行本软件，包括将其部署于你所在组织内部的服务器。
+
+   Subject to full compliance with this License, the Licensor grants you a
+   non-exclusive, non-transferable, revocable license to:
+   (a) use, copy and modify the Software for personal study, internal evaluation, or
+       your own business operations;
+   (b) run the Software on machines you own or control, including deployment on servers
+       internal to your organization.
+
+3. 限制 / Restrictions
+
+   未经许可方事先书面授权，你不得：
+   (a) 向任何第三方分发、发布、出租、出售、转授权或以其他方式提供本软件或其修改版本，
+       无论是否收取费用，无论以源代码还是二进制形式；
+   (b) 将本软件或其修改版本作为托管服务、SaaS 或 API 提供给第三方使用；
+   (c) 移除、遮蔽或篡改本软件中的版权声明、许可声明或归属标识；
+   (d) 使用许可方的名称、商标或标识为衍生产品背书。
+
+   Without the Licensor's prior written authorization, you may not:
+   (a) distribute, publish, rent, sell, sublicense or otherwise make the Software or any
+       modified version available to any third party, with or without charge, in source
+       or binary form;
+   (b) provide the Software or a modified version to third parties as a hosted service,
+       SaaS or API;
+   (c) remove, obscure or alter any copyright, license or attribution notice in the
+       Software;
+   (d) use the Licensor's name, trademarks or logos to endorse derivative products.
+
+   你制作的修改版本仍受本协议约束，且不得以本软件名义对外发布。
+   Modified versions you create remain subject to this License and may not be published
+   under the name of the Software.
+
+4. 上游规格说明 / Upstream Specification Notice
+
+   本项目为独立重写（"C 方案：只借规格重制"）。仓库中不包含任何上游项目的源代码，
+   仅参考了 fb-labs/ZhiBiao 与 FB208/OpenBidKit_Yibiao 的领域规格（字段口径、核对规则、
+   章节骨架），并以 YAML 规则包形式重新表达。上述上游项目采用 AGPL-3.0 许可；若未来
+   引入其源代码，必须重新评估 AGPL-3.0 的归属与 §13 网络交互义务。
+
+   This project is an independent reimplementation. No upstream source code is included;
+   only domain specifications (field definitions, check rules, chapter skeletons) from
+   fb-labs/ZhiBiao and FB208/OpenBidKit_Yibiao were referenced and re-expressed as YAML
+   rule packages. Those upstream projects are licensed under AGPL-3.0. Introducing their
+   source code in the future requires a fresh review of AGPL-3.0 attribution and §13
+   network-use obligations.
+
+5. 第三方组件 / Third-Party Components
+
+   本软件依赖若干第三方开源组件，它们分别受各自许可约束，详见根目录 NOTICE 文件。
+   本许可不改变、也不限制你对这些第三方组件依据其自身许可享有的权利。
+   The Software depends on third-party open-source components governed by their own
+   licenses, listed in the NOTICE file at the repository root. This License does not
+   alter or restrict your rights to those components under their own terms.
+
+6. 终止 / Termination
+
+   你违反本协议任一条款时，本许可自动终止，你须立即停止使用并销毁本软件的所有副本。
+   许可方可另行以书面形式恢复授权。
+   This License terminates automatically upon any breach. You must immediately stop
+   using the Software and destroy all copies. The Licensor may reinstate the grant in
+   writing.
+
+7. 免责声明 / Disclaimer of Warranty
+
+   本软件按 "现状" 提供，不附带任何明示或默示担保，包括但不限于适销性、特定用途
+   适用性与不侵权担保。本软件用于招投标文书编制辅助，不构成法律、造价或合规意见；
+   使用者须自行审核全部输出内容并对最终投标文件负责。
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+   INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+   PARTICULAR PURPOSE AND NONINFRINGEMENT. The Software assists in preparing tender
+   documents and does not constitute legal, cost or compliance advice; users must review
+   all output and remain responsible for the final submission.
+
+8. 责任限制 / Limitation of Liability
+
+   在任何情况下，许可方均不对因使用或无法使用本软件而产生的任何直接、间接、偶然、
+   特殊或后果性损害承担责任，包括但不限于利润损失、数据丢失或投标失败。
+   IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+   SPECIAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OR INABILITY TO USE THE
+   SOFTWARE, INCLUDING BUT NOT LIMITED TO LOSS OF PROFITS, LOSS OF DATA OR BID FAILURE.
+
+9. 适用法律 / Governing Law
+
+   本协议适用中华人民共和国法律（不含冲突法规则）。因本协议产生的争议，双方应友好
+   协商解决；协商不成的，提交许可方住所地有管辖权的人民法院裁决。
+   This License is governed by the laws of the People's Republic of China, excluding its
+   conflict-of-law rules. Disputes shall first be resolved through friendly negotiation;
+   failing that, they shall be submitted to the competent court at the Licensor's
+   domicile.
+
+联系方式 / Contact: 通过本仓库的 GitHub Issues 联系版权持有人。
+Contact the copyright holder via the GitHub Issues of this repository.

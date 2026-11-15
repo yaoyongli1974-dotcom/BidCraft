@@ -1,0 +1,86 @@
+BidCraft — Third-Party Notices
+Copyright (c) 2026 yaoyongli1974-dotcom. All rights reserved.
+
+BidCraft 本身以专有许可发布（见根目录 LICENSE）。本文件列出其运行时依赖的第三方
+开源组件及其许可。各组件版权归其各自作者所有；本文件不修改、不替代各组件自身许可。
+BidCraft itself is proprietary (see LICENSE). This file lists third-party open-source
+components used by the Software. Each component remains under its own license; this
+notice does not modify or replace those licenses. Full license texts are distributed by
+the respective packages and are available from the upstream projects.
+
+== Python 运行时依赖 / Python runtime dependencies ==
+
+FastAPI                         MIT License
+Starlette                       BSD-3-Clause
+Uvicorn                         BSD-3-Clause
+python-multipart                Apache-2.0
+Pydantic / pydantic-core        MIT License
+annotated-types                 MIT License
+typing_extensions               PSF-2.0
+SQLAlchemy                      MIT License
+PyYAML                          MIT License
+python-docx                     MIT License
+lxml                            BSD-3-Clause
+openpyxl / et_xmlfile           MIT License
+pypdf                           BSD-3-Clause
+pdfplumber                      MIT License
+pdfminer.six                    MIT License
+Pillow                          MIT-CMU
+pypdfium2                       BSD-3-Clause / Apache-2.0 / dependency licenses
+httpx                           BSD-3-Clause
+httpcore / h11                  BSD-3-Clause / MIT License
+anyio                           MIT License
+certifi                         MPL-2.0
+idna                            BSD-3-Clause
+charset-normalizer              MIT License
+Typer                           MIT License
+click                           BSD-3-Clause
+shellingham                     ISC License
+Rich                            MIT License
+Pygments                        BSD-2-Clause
+markdown-it-py / mdurl          MIT License
+cryptography                    Apache-2.0 OR BSD-3-Clause
+cffi / pycparser                MIT-0 / BSD-3-Clause
+qrcode                          BSD License (python-qrcode)
+opentelemetry-api               Apache-2.0
+
+== Python 开发/测试依赖（不进生产镜像）/ Dev & test only ==
+
+pytest / pluggy / iniconfig      MIT License
+packaging                       Apache-2.0 OR BSD-2-Clause
+ruff                            MIT License
+
+== Web 客户端 / Web client (web/package.json) ==
+
+React / React DOM               MIT License
+React Router (react-router-dom) MIT License
+lucide-react                    ISC License
+Vite                            MIT License
+TypeScript                      Apache-2.0
+@vitejs/plugin-react            MIT License
+@types/node, @types/react,
+@types/react-dom                MIT License
+esbuild (Vite 依赖)              MIT License
+rollup (Vite 依赖)               MIT License
+
+== 系统级依赖（Docker 镜像）/ System packages (Docker image) ==
+
+LibreOffice                     MPL-2.0
+Poppler (poppler-utils)         GPL-2.0
+Tesseract OCR                   Apache-2.0
+Noto CJK fonts                  SIL Open Font License 1.1
+Debian base image               Debian Free Software Guidelines (various)
+
+系统级组件以独立进程/工具形式调用，不静态链接进 BidCraft 代码；其许可义务由镜像
+分发方在再分发镜像时自行遵守（尤其 GPL-2.0 的 Poppler 与 MPL-2.0 的 LibreOffice）。
+System packages are invoked as separate executables and are not statically linked into
+BidCraft. Anyone redistributing the Docker image must independently satisfy their
+licenses (notably GPL-2.0 for Poppler and MPL-2.0 for LibreOffice).
+
+== 上游规格参考 / Upstream specification references ==
+
+fb-labs/ZhiBiao                 AGPL-3.0（仅参考领域规格，未包含源代码）
+FB208/OpenBidKit_Yibiao         AGPL-3.0（仅参考领域规格，未包含源代码）
+
+本仓库不包含上述 AGPL 项目的源代码。详见 LICENSE 第 4 条。
+No source code from these AGPL projects is included. See LICENSE section 4.

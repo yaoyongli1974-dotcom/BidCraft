@@ -20,7 +20,7 @@ npm install
 npm run dev
 ```
 
-Vite 开发服务器运行在 `http://127.0.0.1:5173`，并把 `/health`、`/packages`、`/projects`、`/jobs`、`/api`、`/auth`、`/billing/summary`、`/billing/orders`、`/billing/redeem`、`/admin/models`、`/admin/kbs`、`/admin/users`、`/admin/billing`、`/admin/redeem-codes` 代理到后端（默认 `http://127.0.0.1:8000`）。目标地址可覆盖：
+Vite 开发服务器运行在 `http://127.0.0.1:5173`，并把 `/health`、`/packages`、`/projects`、`/jobs`、`/api`、`/auth`、`/billing/*`、`/admin/models`、`/admin/kbs`、`/admin/users`、`/admin/billing`、`/admin/redeem-codes`、`/admin/rule-packages`、`/admin/quotas`、`/admin/plugins`、`/admin/audit` 代理到后端（默认 `http://127.0.0.1:8000`）。目标地址可覆盖：
 
 ```bash
 BIDCRAFT_API_TARGET=http://127.0.0.1:8765 npm run dev
@@ -32,7 +32,7 @@ BIDCRAFT_API_TARGET=http://127.0.0.1:8765 npm run dev
 npm run build
 ```
 
-构建产物输出到 **`../bidcraft/web_dist`**，`base: '/'`。后端将静态文件与 API 同源托管；非 API 路径回退到 `index.html`，因此 `/app/...` 深链接可以刷新。
+路由页面使用 `React.lazy` 按需加载：首屏只下载应用外壳与当前页面，工作台各页签在打开时才加载。`vite.config.ts` 将 React / React Router 与 `lucide-react` 拆成独立 chunk。构建产物输出到 **`../bidcraft/web_dist`**，`base: '/'`。后端将静态文件与 API 同源托管；非 API 路径回退到 `index.html`，因此 `/app/...` 深链接可以刷新。
 
 路由约定：
 
@@ -41,7 +41,14 @@ npm run build
 - `/billing`：账户与充值（需登录；只读成员可查看，不能购买/兑换）
 - `/`：项目列表（需登录）
 - `/app/projects/:ref`：项目工作台（概览）
-- `/app/projects/:ref/sources|ledger|outline|draft|check|export`：工作台各页
+- `/app/projects/:ref/sources`：招标文件
+- `/app/projects/:ref/ledger`：事实台账
+- `/app/projects/:ref/boq`：清单对齐
+- `/app/projects/:ref/outline`：目录大纲
+- `/app/projects/:ref/draft`：正文
+- `/app/projects/:ref/check`：核对
+- `/app/projects/:ref/export`：导出
+- `/app/projects/:ref/collab`：协作与审计
 - `/admin`：管理控制台（仅超级管理员；非管理员显示 403 状态）
 - API 始终在根路径 `/health`、`/packages`、`/projects`、`/jobs`、`/auth`、`/billing/*`、`/admin/*`
 
@@ -61,12 +68,16 @@ npm run build
 
 ## 管理控制台
 
-仅超级管理员可进入 `/admin`，非管理员显示 403 页面。三个分区：
+仅超级管理员可进入 `/admin`，非管理员显示 403 页面。八个分区：
 
 - **模型配置**：按对话 / 图片 / 向量分段与计数；默认对话模型醒目标记；密钥只显示“已配置/未配置”；连接测试显示成功/失败、延迟与后端原始消息；图片模型用于正文配图；测试按钮只验证端点连通性，实际生成在正文页图片占位触发。
 - **知识库**：本地目录与第三方接口分组；显示路径/端点、片段数、索引时间、密钥状态与测试结果；本地库支持确认后重建索引并显示索引片段数。
+- **规则包**：行业规则包、YAML 校验与项目类型；内置包只读、覆盖包可恢复。
+- **定额库**：企业综合单价维护、分类筛选与匹配测试。
 - **用户与权限**：创建、编辑、启用/停用、删除成员；显示点数并可增减（正数增加、负数扣除）；角色说明与密码重置；后端保护性 400 错误原样展示。
+- **审计日志**：全站写操作与成员变更的倒序记录，支持按项目过滤。
 - **计费与充值**：注册赠送与每章消耗设置、充值套餐编辑、兑换码生成与复制、外部用户 / 营收 / 流通点数指标、最近订单与兑换码。
+- **插件市场**：MCP 客户端插件的本机命令 / HTTP 工具接入、启用状态与连通性测试。
 
 ## 功能
 
@@ -80,7 +91,7 @@ npm run build
 ### 项目工作台
 
 - 持久上下文头部：项目名称、规则包、招标人、项目编号、状态、保存/模型状态
-- 七个一级页签：概览、招标文件、事实台账、目录大纲、正文、核对、导出
+- 九个一级页签：概览、招标文件、事实台账、清单对齐、目录大纲、正文、核对、导出、协作
 - 概览：七步推进清单、下一步 CTA、事实/章节/门禁/问题统计、最近文件与问题
 - 招标文件：拖拽/选择上传、上传进度、解析状态、页数/大小/备注、重新解析确认、原件下载、OCR 提示
 - 事实台账：
@@ -100,6 +111,8 @@ npm run build
 ### 交互与可访问性
 
 - 全站键盘焦点态、跳过导航、模态焦点陷阱、Esc 关闭
+- 页签（台账分类、管理控制台）支持左右方向键 / Home / End 切换与 roving tabindex，页签与面板通过 `aria-controls` / `aria-labelledby` 关联
+- 路由切换后焦点移到页面标题（懒加载期间落到主内容区），应用级错误边界提供重新加载与错误摘要
 - `Ctrl/Cmd + S` 保存正文/大纲
 - 事实台账内按 `/` 聚焦搜索
 - 确认弹窗、Toast、骨架屏、空状态、错误重试
@@ -112,7 +125,8 @@ npm run build
 web/
   index.html
   package.json
-  vite.config.ts
+  vite.config.ts          # Vite + Vitest 配置（含 dev 代理与 chunk 拆分）
+  eslint.config.js
   tsconfig.json
   README.md
   src/
@@ -120,16 +134,16 @@ web/
     App.tsx                # Browser router + 登录守卫
     components/            # 外壳、弹窗、用户菜单、密码、AuthGate、反馈
     context/               # auth / toast / confirm / health / help
-    lib/                   # API client、类型、格式化、hooks、Markdown 渲染
+    lib/                   # API client、类型、格式化、查询缓存、hooks、Markdown 渲染
+    test/                  # Vitest setup（Testing Library + jsdom）
     pages/
       LoginPage.tsx
+      RegisterPage.tsx
       ProjectsPage.tsx
       WorkspacePage.tsx
-      LoginPage.tsx
-      RegisterPage.tsx
       BillingPage.tsx
-      admin/               # 控制台 + 模型 / 知识库 / 用户 / 计费表单
-      tabs/                # 七个工作台页面
+      admin/               # 控制台 + 模型 / 知识库 / 规则包 / 定额 / 用户 / 计费 / 审计 / 插件
+      tabs/                # 九个工作台页面
     styles/                # global / workspace / responsive / auth-admin / billing
     lib/markdown.css
 ```
@@ -138,6 +152,8 @@ web/
 
 - 同源请求，不配置 API base URL；所有请求使用相对根路径并携带会话 Cookie
 - JSON 与 401 处理集中在 `apiFetch`；登录、`/auth/me`、登出不会触发 401 跳转循环
+- 所有 multipart 上传统一走 `uploadForm`（进度回调、401 重新登录、403 / 网络错误均转成 `ApiError`）
+- `useQuery` 带 30 秒模块级缓存、同 key 并发去重与过期响应丢弃；登录、登出、改密会清空缓存
 - `/admin/models`、`/admin/kbs`、`/admin/users`、`/admin/billing`、`/admin/redeem-codes` 均通过统一客户端返回并刷新
 - `/projects/{ref}/images` 提供章节配图的列出、生成与删除；`url` 是受 SPA 路径守卫允许的相对路径
 - `/billing/summary` 返回余额、套餐、流水、订单与微信支付开关；模拟支付与真实二维码支付共用同一订单面板
@@ -170,13 +186,20 @@ web/
 ## 验证
 
 ```bash
+npm run lint      # ESLint（typescript-eslint + react-hooks + react-refresh）
+npm run test      # Vitest + Testing Library（jsdom）
 npm run typecheck
 npm run build
 ```
 
-构建体积（2026-11，生产压缩）：
+构建体积（2026-11，生产压缩，以构建输出为准）：
 
-- JS：约 474 kB（gzip 146 kB）
-- CSS：约 157 kB（gzip 28 kB）
+- 入口 `index`：约 77 kB（gzip 26 kB）
+- React / React Router chunk：约 208 kB（gzip 68 kB）
+- `lucide-react` chunk：约 47 kB（gzip 9 kB）
+- 其余路由与工作台页签各自按需加载（约 2–113 kB，最大为管理控制台）
+- 样式：约 215 kB（gzip 37 kB），正文页专属样式另按需加载
+
+路由级代码分割前，单一 JS 入口约 658 kB（gzip 205 kB）。现在首屏只加载外壳、当前路由与上述公共 chunk。具体数值以每次构建输出为准。
 
 视觉检查覆盖：登录、注册、微信模拟登录、账户与充值、管理控制台、项目工作台、正文写作、图片占位生成/图库/插入/删除、Markdown 图片预览、DOCX 图片导出、402 点数不足，以及 1440 / 1024 / 768 / 390 宽度。

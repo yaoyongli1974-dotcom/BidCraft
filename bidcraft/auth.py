@@ -194,7 +194,7 @@ def login(db, username: str, password: str, *, user_agent: str = "", ip: str = "
     key = _throttle_key(username)
     if len(_recent_failures(key)) >= _FAILURE_LIMIT:
         raise PermissionError("尝试次数过多，请 5 分钟后再试")
-    user = db.scalar(select(User).where(User.username == username.strip()))
+    user = db.scalar(select(User).where(func.lower(User.username) == key).limit(1))
     if user is None or not user.active or not verify_password(password, user.password_hash):
         _recent_failures(key).append(datetime.now(UTC).timestamp())
         raise PermissionError("用户名或密码不正确")

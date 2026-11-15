@@ -32,7 +32,7 @@ import { useLocalStorageState, useQuery } from '../../lib/hooks'
 import type { ExportRecord } from '../../lib/types'
 import { Badge } from '../../components/Badge'
 import { Button } from '../../components/Button'
-import { EmptyState, Skeleton } from '../../components/Feedback'
+import { EmptyState, ErrorState, Skeleton } from '../../components/Feedback'
 import { StatTile, TabHeading } from '../../components/Workbench'
 
 type StepState = 'done' | 'current' | 'warn' | 'pending'
@@ -434,6 +434,12 @@ export function OverviewTab() {
                 <Skeleton height={34} />
                 <Skeleton height={34} />
               </div>
+            ) : issuesQuery.error && !issuesQuery.data ? (
+              <ErrorState
+                message={`核对问题暂时无法读取：${issuesQuery.error}`}
+                onRetry={issuesQuery.refresh}
+                compact
+              />
             ) : recentIssues.length > 0 ? (
               <ul className="mini-issue-list">
                 {recentIssues.map((issue, index) => {

@@ -35,6 +35,7 @@ MAX_FILE_BYTES = 25 * 1024 * 1024
 CHUNK_CHARS = 900
 OVERLAP_CHARS = 120
 TIMEOUT = 20.0
+MAX_API_RESPONSE_BYTES = 2 * 1024 * 1024
 
 _CJK = re.compile(r"[\u3400-\u9fff]+")
 _WORD = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.+-]*")
@@ -54,6 +55,16 @@ class Passage:
 
 def _embed_key(endpoint) -> str:
     return f"{endpoint.config_id}:{endpoint.model_name}"
+
+
+def _check_response_size(response: httpx.Response, *, label: str = "知识库接口") -> None:
+    """Reject oversized upstream payloads before parsing them."""
+
+    declared = (response.headers.get("content-length") or "").strip()
+    if declared.isdigit() and int(declared) > MAX_API_RESPONSE_BYTES:
+        raise KnowledgeError(f"{label}响应过大（超过 2MB）")
+    if len(response.content or b"") > MAX_API_RESPONSE_BYTES:
+        raise KnowledgeError(f"{label}响应过大（超过 2MB）")
 
 
 def _vector_fields(kb: KnowledgeBase, db) -> dict:
@@ -272,11 +283,15 @@ def embed_texts(endpoint, texts: list[str]) -> list[list[float]]:
                 timeout=timeout,
             )
             response.raise_for_status()
+            _check_response_size(response, label="向量接口")
             payload = response.json()
         except httpx.HTTPStatusError as exc:
-            raise KnowledgeError(
-                f"向量接口 HTTP {exc.response.status_code}: {exc.response.text[:200]}"
-            ) from exc
+            logger.warning(
+                "向量接口 HTTP %s: %s",
+                exc.response.status_code,
+                (exc.response.text or "")[:500],
+            )
+            raise KnowledgeError(f"向量接口 HTTP {exc.response.status_code}") from exc
         except (httpx.HTTPError, ValueError) as exc:
             raise KnowledgeError(f"向量接口失败：{exc}") from exc
         data = payload.get("data") if isinstance(payload, dict) else None
@@ -485,6 +500,7 @@ def search_api(db, kb: KnowledgeBase, query: str, limit: int) -> list[Passage]:
                 timeout=TIMEOUT,
             )
             response.raise_for_status()
+            _check_response_size(response)
             return _passages_from_items(kb, response.json().get("records") or [], limit)
 
         if kb.provider == "ragflow":
@@ -501,6 +517,7 @@ def search_api(db, kb: KnowledgeBase, query: str, limit: int) -> list[Passage]:
                 timeout=TIMEOUT,
             )
             response.raise_for_status()
+            _check_response_size(response)
             payload = response.json()
             data = payload.get("data") or {}
             chunks = data.get("chunks") or []
@@ -513,15 +530,19 @@ def search_api(db, kb: KnowledgeBase, query: str, limit: int) -> list[Passage]:
             timeout=TIMEOUT,
         )
         response.raise_for_status()
+        _check_response_size(response)
         payload = response.json()
         items = payload.get("results") or payload.get("data") or payload.get("documents") or []
         if isinstance(items, dict):
             items = items.get("results") or items.get("items") or []
         return _passages_from_items(kb, list(items), limit)
     except httpx.HTTPStatusError as exc:
-        raise KnowledgeError(
-            f"知识库接口 HTTP {exc.response.status_code}: {exc.response.text[:200]}"
-        ) from exc
+        logger.warning(
+            "知识库接口 HTTP %s: %s",
+            exc.response.status_code,
+            (exc.response.text or "")[:500],
+        )
+        raise KnowledgeError(f"知识库接口 HTTP {exc.response.status_code}") from exc
     except (httpx.HTTPError, ValueError) as exc:
         raise KnowledgeError(f"知识库接口失败：{exc}") from exc
 

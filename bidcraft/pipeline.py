@@ -62,20 +62,24 @@ def add_source(db: Session, project: Project, file_path: str | Path, role: str =
         while target.exists():
             target = target_dir / f"{stem}-{index}{suffix}"
             index += 1
-    shutil.copy2(path, target)
-    digest = hashlib.sha256(target.read_bytes()).hexdigest()
-    source = SourceFile(
-        project_id=project.id,
-        role=role,
-        filename=path.name,
-        stored_path=str(target),
-        size=target.stat().st_size,
-        mime=path.suffix.lower(),
-        checksum=digest,
-        parse_state="pending",
-    )
-    db.add(source)
-    db.flush()
+    try:
+        shutil.copy2(path, target)
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        source = SourceFile(
+            project_id=project.id,
+            role=role,
+            filename=path.name,
+            stored_path=str(target),
+            size=target.stat().st_size,
+            mime=path.suffix.lower(),
+            checksum=digest,
+            parse_state="pending",
+        )
+        db.add(source)
+        db.flush()
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
     return source
 
 

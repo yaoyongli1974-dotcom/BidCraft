@@ -36,6 +36,7 @@ from .config import settings
 PROTOCOL_VERSION = "2024-11-05"
 CLIENT_NAME = "bidcraft-plugin-client"
 DEFAULT_TIMEOUT = 20.0
+MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 #: 子进程只用最小环境变量，避免把数据库、模型密钥等传给第三方插件。
 _FALLBACK_PATH = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
@@ -388,6 +389,11 @@ def _http_post(plugin: PluginRef, message: dict[str, Any]) -> dict[str, Any] | N
         raise PluginError(f"插件 {plugin.name} 连接失败：{exc}") from exc
     if response.status_code >= 400:
         raise PluginError(f"插件 {plugin.name} 返回 HTTP {response.status_code}")
+    declared = (response.headers.get("content-length") or "").strip()
+    if (declared.isdigit() and int(declared) > MAX_RESPONSE_BYTES) or (
+        len(response.content or b"") > MAX_RESPONSE_BYTES
+    ):
+        raise PluginError(f"插件 {plugin.name} 响应过大（超过 2MB）")
     try:
         data = response.json()
     except ValueError:

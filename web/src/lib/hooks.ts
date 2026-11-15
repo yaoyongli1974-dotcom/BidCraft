@@ -11,6 +11,14 @@ import { getPackages, messageOf } from '../lib/api'
 import { readStorage, writeStorage } from '../lib/format'
 import type { AuditEntry, AuditPage, PackageInfo } from '../lib/types'
 import { useConfirm } from '../context/ConfirmContext'
+import {
+  QUERY_STALE_TIME,
+  ensureQueryEntry,
+  peekQueryEntry,
+  releaseQuery,
+  storeQueryData,
+  subscribeQuery,
+} from './queryCache'
 
 interface QueryState<T> {
   key: string
@@ -28,18 +36,33 @@ export interface QueryResult<T> {
   setData: Dispatch<SetStateAction<T | undefined>>
 }
 
+export interface QueryOptions {
+  enabled?: boolean
+  /** How long cached data stays usable before a remount refetches. */
+  staleTime?: number
+}
+
 /**
- * Small request hook. `key` must uniquely describe the request parameters;
- * changing it clears stale data so views never show another project's content.
+ * Small request hook backed by a module-level cache. `key` must uniquely
+ * describe the request parameters; changing it shows the cached value for the
+ * new key instead of the previous project's content.
+ *
+ * Concurrent mounts with the same key share one in-flight request, cached data
+ * is reused for `staleTime`, and responses that arrive after an unmount or a
+ * key/refresh change are ignored so they can never overwrite newer data.
  */
 export function useQuery<T>(
   key: string,
-  fetcher: () => Promise<T>,
-  options: { enabled?: boolean } = {},
+  fetcher: (signal?: AbortSignal) => Promise<T>,
+  options: QueryOptions = {},
 ): QueryResult<T> {
-  const { enabled = true } = options
+  const { enabled = true, staleTime = QUERY_STALE_TIME } = options
   const fetcherRef = useRef(fetcher)
   fetcherRef.current = fetcher
+  const keyRef = useRef(key)
+  keyRef.current = key
+  const dataRef = useRef<T | undefined>(undefined)
+  const forceRef = useRef(false)
   const [nonce, setNonce] = useState(0)
   const [state, setState] = useState<QueryState<T>>({
     key,
@@ -61,42 +84,108 @@ export function useQuery<T>(
       }))
       return
     }
+
+    const force = forceRef.current
+    forceRef.current = false
     let active = true
+
+    const cached = peekQueryEntry<T>(key)
+    const cachedData = cached?.data
+    const isFresh =
+      cachedData !== undefined &&
+      !force &&
+      Date.now() - (cached?.ts ?? 0) < staleTime
+
+    const commit = (next: T) => {
+      if (!active) return
+      dataRef.current = next
+      setState({ key, data: next, error: null, pending: false })
+    }
+    const fail = (error: unknown) => {
+      if (!active) return
+      setState((current) => ({
+        key,
+        data: current.key === key ? current.data : cachedData,
+        error: messageOf(error),
+        pending: false,
+      }))
+    }
+
+    // Cross-component updates (another hook refreshing the same key) also land
+    // here, so two tabs showing one outline stay in sync.
+    const unsubscribe = subscribeQuery(key, (next) => commit(next as T))
+
+    if (isFresh) {
+      commit(cachedData as T)
+      return () => {
+        active = false
+        unsubscribe()
+      }
+    }
+
+    dataRef.current = cachedData
     setState((current) => ({
       key,
-      data: current.key === key ? current.data : undefined,
+      data: current.key === key ? current.data : cachedData,
       error: null,
       pending: true,
     }))
-    fetcherRef
-      .current()
-      .then((data) => {
-        if (!active) return
-        setState({ key, data, error: null, pending: false })
+
+    const entry = ensureQueryEntry(key)
+    let promise: Promise<unknown>
+    if (!force && entry.promise) {
+      // Deduplicate: a sibling already asked for this exact key.
+      promise = entry.promise
+    } else {
+      entry.promise = null
+      entry.controller?.abort()
+      const controller = new AbortController()
+      entry.controller = controller
+      entry.requestId += 1
+      const requestId = entry.requestId
+      const created = fetcherRef.current(controller.signal).then((data) => {
+        const current = peekQueryEntry<T>(key)
+        // Ignore late responses from a replaced request (refresh or key move).
+        if (current && current.requestId === requestId) storeQueryData(key, data)
+        return data
       })
-      .catch((error: unknown) => {
-        if (!active) return
-        setState((current) => ({
-          key,
-          data: current.key === key ? current.data : undefined,
-          error: messageOf(error),
-          pending: false,
-        }))
-      })
+      entry.promise = created
+      const settle = () => {
+        const current = peekQueryEntry(key)
+        if (current?.requestId === requestId) {
+          current.promise = null
+          current.controller = null
+        }
+      }
+      void created.then(settle, settle)
+      promise = created
+    }
+
+    entry.waiters += 1
+    promise.then(undefined, fail)
+
     return () => {
       active = false
+      unsubscribe()
+      releaseQuery(key)
     }
-  }, [key, nonce, enabled])
+  }, [key, nonce, enabled, staleTime])
 
-  const refresh = useCallback(() => setNonce((value) => value + 1), [])
+  const refresh = useCallback(() => {
+    forceRef.current = true
+    setNonce((value) => value + 1)
+  }, [])
+
   const setData = useCallback<Dispatch<SetStateAction<T | undefined>>>((value) => {
-    setState((current) => {
-      const next =
-        typeof value === 'function'
-          ? (value as (previous: T | undefined) => T | undefined)(current.data)
-          : value
-      return { ...current, data: next, pending: false, error: null }
-    })
+    const currentKey = keyRef.current
+    const previous = dataRef.current
+    const next =
+      typeof value === 'function'
+        ? (value as (previous: T | undefined) => T | undefined)(previous)
+        : value
+    dataRef.current = next
+    setState((current) => ({ ...current, data: next, pending: false, error: null }))
+    if (next !== undefined) storeQueryData(currentKey, next)
   }, [])
 
   return {

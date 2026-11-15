@@ -8,6 +8,7 @@ controls when serving a team.
 
 import io
 import json
+import logging
 import math
 import re
 import shutil
@@ -17,11 +18,12 @@ import time
 import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
+from sqlalchemy.orm import Session
 
 from . import (
     __version__,
@@ -82,13 +84,24 @@ from .rules.loader import (
 
 SEVERITY_ORDER = {"blocking": 0, "critical": 1, "major": 2, "minor": 3, "info": 4}
 
+logger = logging.getLogger("bidcraft.api")
+
+MAX_TENDER_UPLOAD_BYTES = 50 * 1024 * 1024
+MAX_BOQ_UPLOAD_BYTES = 20 * 1024 * 1024
+TENDER_UPLOAD_SUFFIXES = frozenset({".pdf", ".docx", ".txt", ".md", ".xlsx", ".xlsm"})
+BOQ_UPLOAD_SUFFIXES = frozenset({".xlsx", ".xlsm"})
+UPLOAD_CHUNK_BYTES = 1024 * 1024
+MAX_PAGE_SIZE = 1000
+BATCH_STALE_SECONDS = 2 * 3600
+STARTUP_INTERRUPTED_MESSAGE = "服务重启，任务已中断"
+
 # Roles that represent tender documents (the BOQ workbook is managed separately
 # by the 清单对齐 feature and must never show up as a tender source).
 TENDER_SOURCE_ROLES = ("tender", "annex")
 
 
 class ProjectCreate(BaseModel):
-    name: str = Field(min_length=1)
+    name: str = Field(min_length=1, max_length=80)
     package: str = "weakcurrent-cabling"
     # 标段/包件：仅作项目元信息，不参与多包件共享台账（后续迭代）。
     bid_section: str = ""
@@ -128,27 +141,27 @@ class RulePackageValidateRequest(BaseModel):
 
 class FactUpdate(BaseModel):
     value: str
-    status: str = "confirmed"
+    status: Literal["extracted", "confirmed", "manual", "missing", "conflict"] = "confirmed"
 
 
 class OutlineRequest(BaseModel):
     mode: str = "auto"
-    words: int = 30000
+    words: int = Field(default=30000, ge=1000, le=200000)
 
 
 class OutlineChapter(BaseModel):
     id: str | None = None
-    heading: str = Field(min_length=1)
+    heading: str = Field(min_length=1, max_length=200)
     intent: str = ""
-    target_words: int = 1200
+    target_words: int = Field(default=1200, ge=100, le=50000)
 
 
 class OutlineSave(BaseModel):
-    chapters: list[OutlineChapter]
+    chapters: list[OutlineChapter] = Field(default_factory=list, max_length=200)
 
 
 class ChapterSave(BaseModel):
-    body: str
+    body: str = Field(max_length=200000)
     base_revision: int | None = None
 
 
@@ -201,6 +214,15 @@ class PricePolicyUpdate(BaseModel):
     round_digits: int | None = None
 
 
+class ImagePolicyUpdate(BaseModel):
+    max_total: int | None = None
+    style: str | None = None
+    size: str | None = None
+    captions: bool | None = None
+    caption_prefix: str | None = None
+    width_cm: float | None = None
+
+
 class QuotaCreate(BaseModel):
     name: str = ""
     spec: str = ""
@@ -244,7 +266,7 @@ class RedeemRequest(BaseModel):
 
 
 class CreditAdjust(BaseModel):
-    amount: int
+    amount: int = Field(ge=-10**9, le=10**9)
     note: str = ""
 
 
@@ -374,6 +396,113 @@ PROJECT_WRITE_ROLES = {"owner", "editor", "admin"}
 MEMBER_ROLES = {"editor", "viewer"}
 
 
+def _safe_filename(name: str | None, fallback: str) -> str:
+    """Return the basename of an uploaded file, or ``fallback`` when empty."""
+
+    value = Path((name or "").replace("\\", "/")).name.strip()
+    if not value or value in {".", ".."}:
+        return fallback
+    return value
+
+
+def _page_bounds(limit: int, offset: int) -> tuple[int, int]:
+    return max(1, min(int(limit), MAX_PAGE_SIZE)), max(0, int(offset))
+
+
+async def _save_upload(file, target: Path, *, max_bytes: int, detail: str) -> int:
+    """Stream an upload to disk, aborting as soon as it exceeds ``max_bytes``."""
+
+    total = 0
+    with target.open("wb") as handle:
+        while True:
+            chunk = await file.read(UPLOAD_CHUNK_BYTES)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                handle.close()
+                target.unlink(missing_ok=True)
+                raise _http_error(413, detail)
+            handle.write(chunk)
+    return total
+
+
+def _discard_source(db: Session, source: SourceFile) -> None:
+    """Remove a copied source file and its pending row after a failed parse."""
+
+    Path(source.stored_path).unlink(missing_ok=True)
+    try:
+        db.delete(source)
+        db.flush()
+    except Exception:  # noqa: BLE001 - the request is already failing
+        logger.warning("删除失败上传的源文件记录失败", exc_info=True)
+
+
+def _fail_job(db: Session, job: Job, message: str, error: str | None = None) -> None:
+    """Mark a job failed and publish the matching SSE event."""
+
+    detail = error or message
+    job.status = "failed"
+    job.message = message
+    job.result = {"error": detail}
+    jobs.publish_event(job.id, "failed", {**jobs.job_payload(job), "error": detail}, db=db)
+    db.flush()
+
+
+def _cancel_stale_jobs(
+    db: Session,
+    kinds: list[str],
+    timeout_seconds: int,
+    *,
+    project_id: str | None = None,
+    stale_message: str = "任务超时中断，已允许重新执行",
+) -> Job | None:
+    """Return the live job for ``kinds``; auto-fail it once it is stale.
+
+    ``project_id=None`` matches project-less batch jobs.  A ``None`` return means
+    the caller may enqueue a new job.
+    """
+
+    statement = select(Job).where(
+        Job.kind.in_(kinds), Job.status.in_(["queued", "running"])
+    )
+    if project_id is None:
+        statement = statement.where(Job.project_id.is_(None))
+    else:
+        statement = statement.where(Job.project_id == project_id)
+    running = db.scalar(statement.order_by(Job.created_at.desc()))
+    if running is None:
+        return None
+    last = running.updated_at or running.created_at
+    if last is not None and datetime.now(UTC).replace(tzinfo=None) - last < timedelta(
+        seconds=timeout_seconds
+    ):
+        return running
+    _fail_job(
+        db,
+        running,
+        stale_message,
+        (
+            f"任务超过 {timeout_seconds // 3600} 小时无进度，已标记为中断"
+            if timeout_seconds >= 3600
+            else f"任务超过 {max(1, timeout_seconds // 60)} 分钟无进度，已标记为中断"
+        ),
+    )
+    return None
+
+
+def _recover_interrupted_jobs() -> int:
+    """Fail every job that was queued/running when the process last stopped."""
+
+    with session_scope() as db:
+        rows = list(
+            db.scalars(select(Job).where(Job.status.in_(["queued", "running"])))
+        )
+        for row in rows:
+            _fail_job(db, row, STARTUP_INTERRUPTED_MESSAGE, STARTUP_INTERRUPTED_MESSAGE)
+        return len(rows)
+
+
 def _bid_package_payload(package: BidPackage, has_boq: bool = False) -> dict[str, Any]:
     return {
         "id": package.id,
@@ -385,7 +514,7 @@ def _bid_package_payload(package: BidPackage, has_boq: bool = False) -> dict[str
     }
 
 
-def _project(db, ref: str) -> tuple[Project, str]:
+def _project(db: Session, ref: str) -> tuple[Project, str]:
     """Resolve a project the caller may see, plus their effective project role.
 
     Roles: ``admin`` (super administrator, any project), ``owner`` (project
@@ -717,6 +846,9 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
                     return
                 delta["text"] = ""
                 delta["last"] = time.monotonic()
+                # Release any pending chapter writes before opening the short
+                # delta session: SQLite allows a single writer at a time.
+                work_db.commit()
                 with session_scope() as delta_db:
                     jobs.publish_event(
                         job_id,
@@ -827,21 +959,14 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
                     db=done_db,
                 )
                 done_db.flush()
-    except Exception as exc:  # noqa: BLE001 - surfaced to the UI
+    except Exception:  # noqa: BLE001 - surfaced to the UI as a stable message
+        logger.exception("生成任务 %s 失败", job_id)
+        failed_message = "生成失败：模型服务不可用或响应异常，详情见服务日志"
         with session_scope() as db:
             row = db.get(Job, job_id)
             if row is not None:
-                row.status = "failed"
-                row.message = str(exc)
-                row.result = {"error": str(exc)}
                 _job_refund(db, row, 0)
-                jobs.publish_event(
-                    job_id,
-                    "failed",
-                    {**jobs.job_payload(row), "error": str(exc)},
-                    db=db,
-                )
-                db.flush()
+                _fail_job(db, row, failed_message)
 
 
 def _run_image_batch_job(job_id: str, project_id: str, targets: list[dict[str, Any]]) -> None:
@@ -999,20 +1124,13 @@ def _run_image_batch_job(job_id: str, project_id: str, targets: list[dict[str, A
                     db=db,
                 )
                 db.flush()
-    except Exception as exc:  # noqa: BLE001 - surfaced to the UI
+    except Exception:  # noqa: BLE001 - surfaced to the UI as a stable message
+        logger.exception("配图任务 %s 失败", job_id)
+        failed_message = "配图任务失败：图片服务不可用或响应异常，详情见服务日志"
         with session_scope() as db:
             job = db.get(Job, job_id)
             if job is not None:
-                job.status = "failed"
-                job.message = str(exc)
-                job.result = {"error": str(exc)}
-                jobs.publish_event(
-                    job_id,
-                    "failed",
-                    {**jobs.job_payload(job), "error": str(exc)},
-                    db=db,
-                )
-                db.flush()
+                _fail_job(db, job, failed_message)
 
 
 def _run_batch_check_job(job_id: str, project_ids: list[str]) -> None:
@@ -1112,20 +1230,13 @@ def _run_batch_check_job(job_id: str, project_ids: list[str]) -> None:
                     {**jobs.job_payload(job), "report": job.result},
                     db=db,
                 )
-    except Exception as exc:  # noqa: BLE001 - surfaced to the UI
+    except Exception:  # noqa: BLE001 - surfaced to the UI as a stable message
+        logger.exception("批量核对任务 %s 失败", job_id)
+        failed_message = "批量核对失败：服务内部错误，详情见服务日志"
         with session_scope() as db:
             job = db.get(Job, job_id)
             if job is not None:
-                job.status = "failed"
-                job.message = str(exc)
-                job.result = {"error": str(exc)}
-                jobs.publish_event(
-                    job_id,
-                    "failed",
-                    {**jobs.job_payload(job), "error": str(exc)},
-                    db=db,
-                )
-                db.flush()
+                _fail_job(db, job, failed_message)
 
 
 def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None:
@@ -1255,20 +1366,13 @@ def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None
                     {**jobs.job_payload(job), "report": job.result},
                     db=db,
                 )
-    except Exception as exc:  # noqa: BLE001 - surfaced to the UI
+    except Exception:  # noqa: BLE001 - surfaced to the UI as a stable message
+        logger.exception("批量导出任务 %s 失败", job_id)
+        failed_message = "批量导出失败：服务内部错误，详情见服务日志"
         with session_scope() as db:
             job = db.get(Job, job_id)
             if job is not None:
-                job.status = "failed"
-                job.message = str(exc)
-                job.result = {"error": str(exc)}
-                jobs.publish_event(
-                    job_id,
-                    "failed",
-                    {**jobs.job_payload(job), "error": str(exc)},
-                    db=db,
-                )
-                db.flush()
+                _fail_job(db, job, failed_message)
 
 
 def create_app():
@@ -1289,6 +1393,15 @@ def create_app():
 
     init_db()
     auth.ensure_admin()
+    try:
+        with session_scope() as db:
+            auth.purge_expired_sessions(db)
+    except Exception:  # noqa: BLE001 - startup must not fail on cleanup
+        logger.exception("清理过期会话失败")
+    try:
+        _recover_interrupted_jobs()
+    except Exception:  # noqa: BLE001 - startup must not fail on cleanup
+        logger.exception("恢复中断任务失败")
     app = FastAPI(title="BidCraft", version=__version__, description="投标文件编制系统")
 
     @app.middleware("http")
@@ -1357,6 +1470,7 @@ def create_app():
                     user_agent=request.headers.get("user-agent", ""),
                     ip=request.client.host if request.client else "",
                 )
+                auth.purge_expired_sessions(db)
             except PermissionError as exc:
                 status = 429 if "次数过多" in str(exc) else 401
                 raise HTTPException(status_code=status, detail=str(exc)) from exc
@@ -1415,6 +1529,7 @@ def create_app():
             try:
                 user = wechat.login_or_register(db, profile)
                 token = auth.create_session(db, user)
+                auth.purge_expired_sessions(db)
             except (ValueError, wechat.WeChatError) as exc:
                 return RedirectResponse(
                     f"/login?reason=wechat&message={quote(str(exc))}", status_code=302
@@ -1522,10 +1637,13 @@ def create_app():
             elif wechatpay.available():
                 try:
                     order.code_url = wechatpay.create_native(order)
-                except wechatpay.PaymentError as exc:
+                except wechatpay.PaymentError:
+                    logger.exception("微信支付下单失败（订单 %s）", order.out_trade_no)
                     order.status = "closed"
                     db.flush()
-                    raise HTTPException(status_code=502, detail=f"微信支付下单失败：{exc}") from exc
+                    raise HTTPException(
+                        status_code=502, detail="微信支付下单失败，详情见服务日志"
+                    ) from None
             else:
                 raise HTTPException(status_code=503, detail="微信支付未配置")
             return billing.order_payload(order)
@@ -1649,10 +1767,18 @@ def create_app():
             row.is_default = False
 
     @app.get("/admin/models")
-    def list_models(request: Request) -> list[dict[str, Any]]:
+    def list_models(request: Request, limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
         require_super(request)
+        capped, start = _page_bounds(limit, offset)
         with session_scope() as db:
-            rows = list(db.scalars(select(ModelConfig).order_by(ModelConfig.kind, ModelConfig.name)))
+            rows = list(
+                db.scalars(
+                    select(ModelConfig)
+                    .order_by(ModelConfig.kind, ModelConfig.name)
+                    .limit(capped)
+                    .offset(start)
+                )
+            )
             return [model_config.model_payload(row) for row in rows]
 
     @app.post("/admin/models", status_code=201)
@@ -1741,10 +1867,18 @@ def create_app():
             return {"ok": ok, "message": message, "latency_ms": latency}
 
     @app.get("/admin/kbs")
-    def list_kbs(request: Request) -> list[dict[str, Any]]:
+    def list_kbs(request: Request, limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
         require_super(request)
+        capped, start = _page_bounds(limit, offset)
         with session_scope() as db:
-            rows = list(db.scalars(select(KnowledgeBase).order_by(KnowledgeBase.name)))
+            rows = list(
+                db.scalars(
+                    select(KnowledgeBase)
+                    .order_by(KnowledgeBase.name)
+                    .limit(capped)
+                    .offset(start)
+                )
+            )
             return [knowledge.kb_payload(row, db) for row in rows]
 
     @app.post("/admin/kbs", status_code=201)
@@ -1964,10 +2098,17 @@ def create_app():
         return [dict(item) for item in plugins.PLUGIN_CATALOG]
 
     @app.get("/admin/plugins")
-    def list_plugins(request: Request) -> list[dict[str, Any]]:
+    def list_plugins(
+        request: Request, limit: int = 500, offset: int = 0
+    ) -> list[dict[str, Any]]:
         require_super(request)
+        capped, start = _page_bounds(limit, offset)
         with session_scope() as db:
-            rows = list(db.scalars(select(Plugin).order_by(Plugin.name)))
+            rows = list(
+                db.scalars(
+                    select(Plugin).order_by(Plugin.name).limit(capped).offset(start)
+                )
+            )
             return [plugins.plugin_payload(row) for row in rows]
 
     @app.post("/admin/plugins", status_code=201)
@@ -2096,17 +2237,22 @@ def create_app():
         return {"ok": ok, "message": message, "tools": tools}
 
     @app.get("/admin/billing")
-    def admin_billing(request: Request) -> dict[str, Any]:
+    def admin_billing(request: Request, limit: int = 50) -> dict[str, Any]:
         require_super(request)
+        capped = max(1, min(200, int(limit)))
         with session_scope() as db:
             settings_payload = billing.billing_settings(db)
             orders = list(
                 db.scalars(
-                    select(RechargeOrder).order_by(RechargeOrder.created_at.desc()).limit(50)
+                    select(RechargeOrder)
+                    .order_by(RechargeOrder.created_at.desc())
+                    .limit(capped)
                 )
             )
             codes = list(
-                db.scalars(select(RedeemCode).order_by(RedeemCode.created_at.desc()).limit(50))
+                db.scalars(
+                    select(RedeemCode).order_by(RedeemCode.created_at.desc()).limit(capped)
+                )
             )
             return {
                 "settings": settings_payload,
@@ -2183,10 +2329,20 @@ def create_app():
             }
 
     @app.get("/admin/users")
-    def list_users(request: Request) -> list[dict[str, Any]]:
+    def list_users(
+        request: Request, limit: int = 500, offset: int = 0
+    ) -> list[dict[str, Any]]:
         require_super(request)
+        capped, start = _page_bounds(limit, offset)
         with session_scope() as db:
-            rows = list(db.scalars(select(User).order_by(User.created_at)))
+            rows = list(
+                db.scalars(
+                    select(User)
+                    .order_by(User.created_at)
+                    .limit(capped)
+                    .offset(start)
+                )
+            )
             return [auth.user_payload(row) for row in rows]
 
     @app.post("/admin/users", status_code=201)
@@ -2411,7 +2567,9 @@ def create_app():
         return round(price, 4)
 
     @app.get("/admin/quotas")
-    def list_quotas(request: Request, search: str = "", limit: int = 100) -> list[dict[str, Any]]:
+    def list_quotas(
+        request: Request, search: str = "", limit: int = 100, offset: int = 0
+    ) -> list[dict[str, Any]]:
         require_super(request)
         term = (search or "").strip()
         with session_scope() as db:
@@ -2424,9 +2582,12 @@ def create_app():
                     | QuotaItem.category.ilike(pattern)
                 )
             capped = max(1, min(int(limit), 500))
+            start = max(0, int(offset))
             rows = list(
                 db.scalars(
-                    statement.order_by(QuotaItem.name, QuotaItem.id).limit(capped)
+                    statement.order_by(QuotaItem.name, QuotaItem.id)
+                    .limit(capped)
+                    .offset(start)
                 )
             )
             return [boq.quota_payload(row) for row in rows]
@@ -2547,18 +2708,27 @@ def create_app():
         }
 
     @app.get("/packages")
-    def packages() -> list[dict[str, Any]]:
+    def packages(limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
         """Selectable industry packages (the abstract base package is hidden)."""
-        return [item for item in list_packages() if not item.get("abstract")]
+        capped, start = _page_bounds(limit, offset)
+        return [item for item in list_packages() if not item.get("abstract")][
+            start : start + capped
+        ]
 
     # ------------------------------------------------------------ projects
     @app.get("/projects")
-    def projects() -> list[dict[str, Any]]:
+    def projects(limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
+        capped, start = _page_bounds(limit, offset)
         with session_scope() as db:
             user = current_user() or {}
             if user.get("role") == auth.ROLE_SUPER_ADMIN:
                 rows = list(
-                    db.scalars(select(Project).order_by(Project.updated_at.desc()))
+                    db.scalars(
+                        select(Project)
+                        .order_by(Project.updated_at.desc())
+                        .limit(capped)
+                        .offset(start)
+                    )
                 )
                 return [
                     _project_payload(item, _project_stats(db, item.id), "admin")
@@ -2588,7 +2758,7 @@ def create_app():
             )
             return [
                 _project_payload(item, _project_stats(db, item.id), role)
-                for item, role in ordered
+                for item, role in ordered[start : start + capped]
             ]
 
     @app.post("/projects", status_code=201)
@@ -2620,6 +2790,14 @@ def create_app():
                 raise HTTPException(status_code=400, detail="没有可操作的项目")
             user = current_user() or {}
             project_ids = [project.id for project in projects]
+            if _cancel_stale_jobs(
+                db,
+                ["batch_check"],
+                BATCH_STALE_SECONDS,
+                project_id=None,
+                stale_message="批量核对任务超时中断，已允许重新提交",
+            ) is not None:
+                raise HTTPException(status_code=409, detail="已有批量核对任务在运行")
             job = Job(
                 project_id=None,
                 kind="batch_check",
@@ -2662,6 +2840,14 @@ def create_app():
                 raise HTTPException(status_code=400, detail="没有可操作的项目")
             user = current_user() or {}
             project_ids = [project.id for project in projects]
+            if _cancel_stale_jobs(
+                db,
+                ["batch_export"],
+                BATCH_STALE_SECONDS,
+                project_id=None,
+                stale_message="批量导出任务超时中断，已允许重新提交",
+            ) is not None:
+                raise HTTPException(status_code=409, detail="已有批量导出任务在运行")
             job = Job(
                 project_id=None,
                 kind="batch_export",
@@ -2807,7 +2993,10 @@ def create_app():
         return member
 
     @app.get("/projects/{ref}/members")
-    def project_members(ref: str) -> list[dict[str, Any]]:
+    def project_members(
+        ref: str, limit: int = 500, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        capped, start = _page_bounds(limit, offset)
         with session_scope() as db:
             project, _role = _project(db, ref)
             items: list[dict[str, Any]] = []
@@ -2829,7 +3018,7 @@ def create_app():
                 .order_by(ProjectMember.created_at)
             ).all()
             items.extend(_member_payload(member, user) for member, user in rows)
-            return items
+            return items[start : start + capped]
 
     @app.post("/projects/{ref}/members", status_code=201)
     def add_project_member(ref: str, payload: MemberCreate) -> dict[str, Any]:
@@ -2986,12 +3175,15 @@ def create_app():
         return HTTPException(status_code=status, detail=str(exc))
 
     @app.get("/projects/{ref}/images")
-    def project_images(ref: str, node_id: str = "") -> list[dict[str, Any]]:
+    def project_images(
+        ref: str, node_id: str = "", limit: int = 500, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        capped, start = _page_bounds(limit, offset)
         with session_scope() as db:
             project, _role = _project(db, ref)
+            assets = images.list_assets(db, project.id, node_id=node_id or None)
             return [
-                images.asset_payload(asset)
-                for asset in images.list_assets(db, project.id, node_id=node_id or None)
+                images.asset_payload(asset) for asset in assets[start : start + capped]
             ]
 
     @app.post("/projects/{ref}/images/generate-missing", status_code=202)
@@ -3006,30 +3198,14 @@ def create_app():
             targets = images.image_batch_targets(plan, include_failed=include_failed)
             if not targets:
                 raise HTTPException(status_code=409, detail="没有需要生成的配图")
-            running = db.scalar(
-                select(Job).where(
-                    Job.project_id == project.id,
-                    Job.kind == "images",
-                    Job.status.in_(["queued", "running"]),
-                )
-            )
-            if running is not None:
-                stale_after = timedelta(hours=2)
-                last = running.updated_at or running.created_at
-                if (
-                    last is not None
-                    and datetime.now(UTC).replace(tzinfo=None) - last < stale_after
-                ):
-                    raise HTTPException(status_code=409, detail="该项目已有配图任务在运行")
-                running.status = "failed"
-                running.message = "配图任务超时中断，已允许重新生成"
-                running.result = {"error": "任务超过 2 小时无进度，已标记为中断"}
-                jobs.publish_event(
-                    running.id,
-                    "failed",
-                    {**jobs.job_payload(running), "error": running.result["error"]},
-                    db=db,
-                )
+            if _cancel_stale_jobs(
+                db,
+                ["images"],
+                2 * 3600,
+                project_id=project.id,
+                stale_message="配图任务超时中断，已允许重新生成",
+            ) is not None:
+                raise HTTPException(status_code=409, detail="该项目已有配图任务在运行")
             job = Job(
                 project_id=project.id,
                 kind="images",
@@ -3114,7 +3290,7 @@ def create_app():
                     db,
                     project,
                     label=label,
-                    filename=file.filename or "",
+                    filename=_safe_filename(file.filename, "image.png"),
                     content=content,
                     node_id=node_id,
                 )
@@ -3130,8 +3306,10 @@ def create_app():
             return images.get_policy(project)
 
     @app.put("/projects/{ref}/image-policy")
-    def update_image_policy(ref: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        body = payload if isinstance(payload, dict) else {}
+    def update_image_policy(
+        ref: str, payload: ImagePolicyUpdate | None = None
+    ) -> dict[str, Any]:
+        body = payload.model_dump(exclude_unset=True) if payload is not None else {}
         with session_scope() as db:
             project, _role = _project(db, ref)
             _require_write(_role)
@@ -3193,12 +3371,14 @@ def create_app():
 
     # ------------------------------------------------------------- sources
     @app.get("/projects/{ref}/sources")
-    def sources(ref: str) -> list[dict[str, Any]]:
+    def sources(
+        ref: str, limit: int = 500, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        capped, start = _page_bounds(limit, offset)
         with session_scope() as db:
             project, _role = _project(db, ref)
-            return [
-                _source_payload(source)
-                for source in db.scalars(
+            rows = list(
+                db.scalars(
                     select(SourceFile)
                     .where(
                         SourceFile.project_id == project.id,
@@ -3206,23 +3386,39 @@ def create_app():
                     )
                     .order_by(SourceFile.created_at)
                 )
-            ]
+            )
+            return [_source_payload(source) for source in rows[start : start + capped]]
 
     @app.post("/projects/{ref}/sources")
     async def upload(ref: str, file: UploadFile = File(...)) -> dict[str, Any]:
-        filename = Path(file.filename or "tender").name
+        raw_name = (file.filename or "").strip()
+        if raw_name and raw_name not in {"/", "\\"}:
+            suffix = Path(raw_name).suffix.lower()
+            if suffix not in TENDER_UPLOAD_SUFFIXES:
+                raise HTTPException(
+                    status_code=400,
+                    detail="招标文件仅支持 PDF/DOCX/TXT/MD/XLSX/XLSM 格式",
+                )
+        filename = _safe_filename(raw_name, "upload.bin")
         with tempfile.TemporaryDirectory(prefix="bidcraft-api-") as tmp:
             target = Path(tmp) / filename
-            with target.open("wb") as handle:
-                shutil.copyfileobj(file.file, handle)
+            await _save_upload(
+                file,
+                target,
+                max_bytes=MAX_TENDER_UPLOAD_BYTES,
+                detail="招标文件不能超过 50MB",
+            )
             with session_scope() as db:
                 project, _role = _project(db, ref)
                 _require_write(_role)
-                add_source(db, project, target)
+                source = add_source(db, project, target)
                 try:
                     ledger, info = parse_project(db, project.id)
-                except ValueError as exc:
-                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                except Exception as exc:
+                    _discard_source(db, source)
+                    if isinstance(exc, ValueError):
+                        raise HTTPException(status_code=400, detail=str(exc)) from exc
+                    raise
                 audit(db, project.id, "source.upload", {"filename": filename})
                 return {
                     "project": _project_payload(project, _project_stats(db, project.id)),
@@ -3238,9 +3434,10 @@ def create_app():
             source = db.get(SourceFile, source_id)
             if source is None or source.project_id != project.id:
                 raise LookupError(f"文件不存在: {source_id}")
-            path = Path(source.stored_path)
-            if not path.is_file():
-                raise LookupError(f"原件已丢失: {source.filename}")
+            root = (settings.project_dir(project.id) / "sources").resolve()
+            path = Path(source.stored_path).resolve()
+            if root not in path.parents or not path.is_file():
+                raise LookupError(f"原件不存在: {source.filename}")
             return FileResponse(path, filename=source.filename)
 
     @app.post("/projects/{ref}/parse")
@@ -3338,7 +3535,7 @@ def create_app():
                 node.position = position
                 node.heading = item.heading.strip()
                 node.intent = item.intent
-                node.target_words = max(200, min(20000, item.target_words))
+                node.target_words = max(100, min(50000, item.target_words))
                 keep.add(node.id)
             removed = [node_id for node_id in existing if node_id not in keep]
             if removed:
@@ -3501,27 +3698,14 @@ def create_app():
             problems = ledger_gate(ledger)
             if problems:
                 raise HTTPException(status_code=409, detail={"missing_required": problems})
-            running = db.scalar(
-                select(Job).where(
-                    Job.project_id == project.id,
-                    Job.kind == "generate",
-                    Job.status.in_(["queued", "running"]),
-                )
-            )
-            if running is not None:
-                stale_after = timedelta(minutes=30)
-                last = running.updated_at or running.created_at
-                if last is not None and datetime.now(UTC).replace(tzinfo=None) - last < stale_after:
-                    raise HTTPException(status_code=409, detail="该项目已有生成任务在运行")
-                running.status = "failed"
-                running.message = "任务超时中断，已允许重新生成"
-                running.result = {"error": "任务超过 30 分钟无进度，已标记为中断"}
-                jobs.publish_event(
-                    running.id,
-                    "failed",
-                    {**jobs.job_payload(running), "error": running.result["error"]},
-                    db=db,
-                )
+            if _cancel_stale_jobs(
+                db,
+                ["generate"],
+                30 * 60,
+                project_id=project.id,
+                stale_message="生成任务超时中断，已允许重新生成",
+            ) is not None:
+                raise HTTPException(status_code=409, detail="该项目已有生成任务在运行")
             user = billing_user(db)
             client = _generation_client(db)
             count = _pending_chapters(db, project.id, force=force)
@@ -3656,8 +3840,9 @@ def create_app():
             ):
                 raise LookupError("任务不存在")
             zip_path = str((job.result or {}).get("zip_path") or "")
-            path = Path(zip_path) if zip_path else None
-            if path is None or not path.is_file():
+            root = (settings.home / "output").resolve()
+            path = Path(zip_path).resolve() if zip_path else None
+            if path is None or root not in path.parents or not path.is_file():
                 raise LookupError("导出包不存在")
         return FileResponse(path, filename=path.name)
 
@@ -3676,14 +3861,15 @@ def create_app():
             }
 
     @app.get("/projects/{ref}/issues")
-    def issues(ref: str) -> list[dict[str, Any]]:
+    def issues(ref: str, limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
+        capped, start = _page_bounds(limit, offset)
         with session_scope() as db:
             project, _role = _project(db, ref)
             rows = list(
                 db.scalars(select(Issue).where(Issue.project_id == project.id))
             )
             rows.sort(key=lambda row: SEVERITY_ORDER.get(row.level, 9))
-            return [_issue_payload(row) for row in rows]
+            return [_issue_payload(row) for row in rows[start : start + capped]]
 
     # -------------------------------------------------------------- export
     @app.post("/projects/{ref}/export")
@@ -3773,12 +3959,18 @@ def create_app():
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/projects/{ref}/packages")
-    def package_list(ref: str) -> list[dict[str, Any]]:
+    def package_list(
+        ref: str, limit: int = 500, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        capped, start = _page_bounds(limit, offset)
         with session_scope() as db:
             project, _role = _project(db, ref)
             rows = _bid_packages(db, project.id)
             counts = _boq_package_ids(db, project.id, [row.id for row in rows])
-            return [_bid_package_payload(row, row.id in counts) for row in rows]
+            return [
+                _bid_package_payload(row, row.id in counts)
+                for row in rows[start : start + capped]
+            ]
 
     @app.post("/projects/{ref}/packages", status_code=201)
     def package_create(ref: str, payload: PackageCreate) -> dict[str, Any]:
@@ -3894,11 +4086,23 @@ def create_app():
         sheet: str = Form(""),
         package_id: str = Form(""),
     ) -> dict[str, Any]:
-        filename = Path(file.filename or "boq.xlsx").name
+        raw_name = (file.filename or "").strip()
+        if raw_name and raw_name not in {"/", "\\"}:
+            suffix = Path(raw_name).suffix.lower()
+            if suffix not in BOQ_UPLOAD_SUFFIXES:
+                raise HTTPException(
+                    status_code=400,
+                    detail="工程量清单仅支持 .xlsx / .xlsm 文件",
+                )
+        filename = _safe_filename(raw_name, "boq.xlsx")
         with tempfile.TemporaryDirectory(prefix="bidcraft-boq-") as tmp:
             target = Path(tmp) / filename
-            with target.open("wb") as handle:
-                shutil.copyfileobj(file.file, handle)
+            await _save_upload(
+                file,
+                target,
+                max_bytes=MAX_BOQ_UPLOAD_BYTES,
+                detail="工程量清单不能超过 20MB",
+            )
             with session_scope() as db:
                 project, _role = _project(db, ref)
                 _require_write(_role)

@@ -13,6 +13,7 @@ or from the project's material ledger.
 from __future__ import annotations
 
 import difflib
+import logging
 import math
 import re
 import unicodedata
@@ -26,6 +27,8 @@ from sqlalchemy.orm import Session
 from .config import settings
 from .models import BidPackage, BoqSnapshot, Material, Project, QuotaItem, SourceFile
 from .pipeline import add_source
+
+logger = logging.getLogger("bidcraft.boq")
 
 # --------------------------------------------------------------------- parser
 
@@ -198,6 +201,7 @@ def parse_boq(path: str | Path, sheet: str | None = None) -> ParsedBoq:
     try:
         workbook = load_workbook(str(source), data_only=True, read_only=False)
     except Exception as exc:
+        logger.warning("无法读取 Excel 文件 %s", source.name, exc_info=True)
         raise ValueError(f"无法读取 Excel 文件（{source.name}）：{exc}") from exc
 
     names = list(workbook.sheetnames)
@@ -213,6 +217,7 @@ def parse_boq(path: str | Path, sheet: str | None = None) -> ParsedBoq:
         try:
             parsed = _parse_sheet(workbook[name], name)
         except Exception as exc:
+            logger.warning("工作表「%s」读取失败", name, exc_info=True)
             raise ValueError(f"工作表「{name}」读取失败：{exc}") from exc
         if parsed is None or not parsed.items:
             continue

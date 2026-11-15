@@ -19,11 +19,12 @@ import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from sqlalchemy import select
 
+from . import netguard
 from .config import settings
 from .generation.writer import count_words
 from .models import ImageAsset, ModelConfig, OutlineNode, Project, Section
@@ -662,12 +663,44 @@ def _project_package_title(project: Project) -> str:
 
 
 def _download(url: str) -> bytes:
+    """Download a generated image with manual redirects and a hard byte cap.
+
+    The first URL comes from the administrator-configured image provider, so it
+    may legitimately point at a private service.  Every redirect target is
+    untrusted: its scheme and resolved address are checked before the next
+    request.  Bodies are streamed so an oversized response is aborted without
+    being held in memory.
+    """
+
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ImageError("图片下载地址不合法，仅支持 http/https")
-    response = httpx.get(url, timeout=TIMEOUT, follow_redirects=True)
-    response.raise_for_status()
-    return response.content
+    current = url
+    for hop in range(4):  # initial request + at most three redirects
+        if hop:
+            try:
+                netguard.check_redirect_target(current)
+            except netguard.NetworkError as exc:
+                raise ImageError(str(exc)) from exc
+        with httpx.stream(
+            "GET", current, timeout=TIMEOUT, follow_redirects=False
+        ) as response:
+            if response.is_redirect:
+                location = response.headers.get("location", "")
+                if not location:
+                    raise ImageError("图片下载跳转缺少目标地址")
+                current = urljoin(current, location)
+                continue
+            response.raise_for_status()
+            chunks: list[bytes] = []
+            total = 0
+            for chunk in response.iter_bytes():
+                total += len(chunk)
+                if total > MAX_GENERATED_BYTES:
+                    raise ImageError("图片文件超过 12MB 限制")
+                chunks.append(chunk)
+            return b"".join(chunks)
+    raise ImageError("图片下载跳转次数过多")
 
 
 def _request_image(

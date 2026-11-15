@@ -1,10 +1,33 @@
+# VCS / CI / editor metadata
+.git
+.gitignore
+.github
+.opencode
+
+# local state, caches, secrets
 .venv
 .bidcraft
 .pytest_cache
 .ruff_cache
+.mypy_cache
 **/__pycache__
+**/*.pyc
+secret.key
+.env
+.env.*
+
+# tests & docs are not needed inside the image
 tests
 docs
+
+# web deps/build artifacts are produced during the docker build
 web/node_modules
 web/dist
 bidcraft/web_dist
+
+# local data / exports
+projects
+*.db
+*.sqlite3
+*.md
+!README.md

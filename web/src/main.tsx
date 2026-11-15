@@ -12,6 +12,7 @@ import { ConfirmProvider } from './context/ConfirmContext'
 import { AuthProvider } from './context/AuthContext'
 import { HealthProvider } from './context/HealthContext'
 import { HelpProvider } from './context/HelpContext'
+import { ErrorBoundary } from './components/ErrorBoundary'
 
 const container = document.getElementById('root')
 if (!container) throw new Error('未找到 #root 挂载点')
@@ -22,7 +23,9 @@ createRoot(container).render(
       <AuthProvider>
         <HealthProvider>
           <HelpProvider>
-            <RouterProvider router={router} />
+            <ErrorBoundary>
+              <RouterProvider router={router} />
+            </ErrorBoundary>
           </HelpProvider>
         </HealthProvider>
       </AuthProvider>

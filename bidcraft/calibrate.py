@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,8 @@ from .ledger import build_ledger, ledger_summary
 from .parsing.extract import extract
 from .parsing.loader import ParsedDocument, load_document
 from .rules.loader import Package, load_package
+
+logger = logging.getLogger("bidcraft.calibrate")
 
 # loader.load_document 支持的后缀；loader 目前未导出 SUPPORTED 常量，这里保持一致。
 SUPPORTED_SUFFIXES = {".pdf", ".docx", ".txt", ".md", ".markdown", ".xlsx", ".xlsm"}
@@ -36,6 +39,7 @@ def _load_calibration_packages() -> tuple[list[Package], Package]:
         try:
             packages.append(load_package(name))
         except Exception:  # noqa: BLE001, S112 - 单个规则包损坏不应阻断校准
+            logger.warning("校准跳过损坏的规则包 %s", name, exc_info=True)
             continue
     return packages, load_package(FALLBACK_PACKAGE)
 
@@ -99,6 +103,7 @@ def _calibrate_file(
     try:
         parsed = load_document(path)
     except Exception as exc:  # noqa: BLE001 - 单文件异常不得中断整目录
+        logger.warning("校准无法解析文件 %s", display, exc_info=True)
         return {
             "file": display,
             "pages": 0,
@@ -138,6 +143,7 @@ def _calibrate_file(
         ledger = build_ledger(package, extracted, source_filename=display)
         summary = ledger_summary(ledger)
     except Exception as exc:  # noqa: BLE001 - 抽取失败同样只记录单文件错误
+        logger.warning("校准抽取失败 %s", display, exc_info=True)
         return {
             "file": display,
             "pages": parsed.page_count,

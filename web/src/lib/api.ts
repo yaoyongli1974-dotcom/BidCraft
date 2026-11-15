@@ -226,6 +226,74 @@ const jsonBody = (data: unknown): RequestInit => ({
   body: JSON.stringify(data),
 })
 
+// ---------------------------------------------------------------- upload transport
+
+interface UploadOptions {
+  onProgress?: (percent: number) => void
+  /** Friendly message used when the request never reaches the server. */
+  networkMessage?: string
+}
+
+/**
+ * Shared multipart upload transport. Uploads cannot use `fetch` (no upload
+ * progress), so every multipart call goes through this helper instead of
+ * hand-rolling XHR: 401 still triggers the global re-auth event, 403 and other
+ * failures surface as the same `ApiError` shape as JSON requests, and progress
+ * reporting stays consistent.
+ */
+export function uploadForm<T>(
+  path: string,
+  form: FormData,
+  options: UploadOptions = {},
+): Promise<T> {
+  const { onProgress, networkMessage } = options
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', path)
+    xhr.responseType = 'text'
+    xhr.withCredentials = true
+    if (onProgress) {
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          onProgress(Math.round((event.loaded / event.total) * 100))
+        }
+      }
+    }
+    xhr.onload = () => {
+      const text = xhr.responseText || ''
+      const body: unknown = (() => {
+        try {
+          return text ? JSON.parse(text) : null
+        } catch {
+          return text
+        }
+      })()
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve((body || {}) as T)
+        return
+      }
+      if (xhr.status === 401) notifyUnauthorized(path)
+      const fallback =
+        xhr.status === 403 ? '当前账号没有执行此操作的权限。' : xhr.statusText
+      const detail =
+        body && typeof body === 'object' && 'detail' in body
+          ? (body as { detail: unknown }).detail
+          : text || fallback
+      reject(new ApiError(xhr.status, detail))
+    }
+    xhr.onerror = () =>
+      reject(
+        new ApiError(
+          0,
+          null,
+          networkMessage || '上传失败：无法连接本地服务，请确认后端已启动。',
+        ),
+      )
+    xhr.onabort = () => reject(new ApiError(0, null, '上传已取消。'))
+    xhr.send(form)
+  })
+}
+
 // ---------------------------------------------------------------- health & packages
 
 export const getHealth = () => request<Health>('/health')
@@ -765,42 +833,13 @@ export function uploadSource(
   file: File,
   onProgress?: (percent: number) => void,
 ): Promise<UploadResult> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest()
-    xhr.open('POST', `/projects/${encodeURIComponent(ref)}/sources`)
-    xhr.responseType = 'text'
-    xhr.withCredentials = true
-    xhr.upload.onprogress = (event) => {
-      if (event.lengthComputable && onProgress) {
-        onProgress(Math.round((event.loaded / event.total) * 100))
-      }
-    }
-    xhr.onload = () => {
-      const text = xhr.responseText || ''
-      let body: unknown = null
-      try {
-        body = text ? JSON.parse(text) : null
-      } catch {
-        body = text
-      }
-      if (xhr.status >= 200 && xhr.status < 300) {
-        resolve((body || {}) as UploadResult)
-      } else {
-        if (xhr.status === 401) notifyUnauthorized(`/projects/${ref}/sources`)
-        const detail =
-          body && typeof body === 'object' && 'detail' in body
-            ? (body as { detail: unknown }).detail
-            : text || xhr.statusText
-        reject(new ApiError(xhr.status, detail))
-      }
-    }
-    xhr.onerror = () =>
-      reject(new ApiError(0, null, '上传失败：无法连接本地服务，请确认后端已启动。'))
-    xhr.onabort = () => reject(new ApiError(0, null, '上传已取消。'))
-    const form = new FormData()
-    form.append('file', file)
-    xhr.send(form)
-  })
+  const form = new FormData()
+  form.append('file', file)
+  return uploadForm<UploadResult>(
+    `/projects/${encodeURIComponent(ref)}/sources`,
+    form,
+    { onProgress },
+  )
 }
 
 export const parseProject = (ref: string) =>
@@ -1321,40 +1360,14 @@ export function uploadImage(
   file: File,
   meta: { label: string; node_id?: string },
 ): Promise<ImageAsset> {
-  return new Promise((resolve, reject) => {
-    const path = `/projects/${encodeURIComponent(ref)}/images/upload`
-    const xhr = new XMLHttpRequest()
-    xhr.open('POST', path)
-    xhr.responseType = 'text'
-    xhr.withCredentials = true
-    xhr.onload = () => {
-      const text = xhr.responseText || ''
-      let body: unknown = null
-      try {
-        body = text ? JSON.parse(text) : null
-      } catch {
-        body = text
-      }
-      if (xhr.status >= 200 && xhr.status < 300) {
-        resolve((body || {}) as ImageAsset)
-      } else {
-        if (xhr.status === 401) notifyUnauthorized(path)
-        const detail =
-          body && typeof body === 'object' && 'detail' in body
-            ? (body as { detail: unknown }).detail
-            : text || xhr.statusText
-        reject(new ApiError(xhr.status, detail))
-      }
-    }
-    xhr.onerror = () =>
-      reject(new ApiError(0, null, '上传失败：无法连接本地服务，请确认后端已启动。'))
-    xhr.onabort = () => reject(new ApiError(0, null, '上传已取消。'))
-    const form = new FormData()
-    form.append('file', file)
-    form.append('label', meta.label)
-    if (meta.node_id) form.append('node_id', meta.node_id)
-    xhr.send(form)
-  })
+  const form = new FormData()
+  form.append('file', file)
+  form.append('label', meta.label)
+  if (meta.node_id) form.append('node_id', meta.node_id)
+  return uploadForm<ImageAsset>(
+    `/projects/${encodeURIComponent(ref)}/images/upload`,
+    form,
+  )
 }
 
 export const deleteImage = (ref: string, imageId: string) =>
@@ -1486,55 +1499,17 @@ export function uploadBoq(
   onProgress?: (percent: number) => void,
   packageId?: string | null,
 ): Promise<BoqPayload> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest()
-    xhr.open('POST', `/projects/${encodeURIComponent(ref)}/boq`)
-    xhr.responseType = 'text'
-    xhr.withCredentials = true
-    xhr.upload.onprogress = (event) => {
-      if (event.lengthComputable && onProgress) {
-        onProgress(Math.round((event.loaded / event.total) * 100))
-      }
-    }
-    xhr.onload = () => {
-      const text = xhr.responseText || ''
-      let body: unknown = null
-      try {
-        body = text ? JSON.parse(text) : null
-      } catch {
-        body = text
-      }
-      if (xhr.status >= 200 && xhr.status < 300) {
-        resolve({
-          snapshot: normalizeBoqSnapshot(
-            body && typeof body === 'object' ? (body as BoqPayload).snapshot : null,
-          ),
-          rows: Array.isArray((body as BoqPayload | null)?.rows)
-            ? ((body as BoqPayload).rows.map(normalizeBoqRow).filter(Boolean) as BoqRow[])
-            : [],
-          summary: normalizeBoqSummary((body as BoqPayload | null)?.summary),
-          ledger_summary: (body as BoqPayload | null)?.ledger_summary,
-        })
-      } else {
-        if (xhr.status === 401) notifyUnauthorized(`/projects/${ref}/boq`)
-        const detail =
-          body && typeof body === 'object' && 'detail' in body
-            ? (body as { detail: unknown }).detail
-            : text || xhr.statusText
-        reject(new ApiError(xhr.status, detail))
-      }
-    }
-    xhr.onerror = () =>
-      reject(new ApiError(0, null, '上传失败：无法连接本地服务，请确认后端已启动。'))
-    xhr.onabort = () => reject(new ApiError(0, null, '上传已取消。'))
-    const form = new FormData()
-    form.append('file', file)
-    const sheetName = (sheet || '').trim()
-    if (sheetName) form.append('sheet', sheetName)
-    const packageValue = (packageId || '').trim()
-    if (packageValue) form.append('package_id', packageValue)
-    xhr.send(form)
-  })
+  const form = new FormData()
+  form.append('file', file)
+  const sheetName = (sheet || '').trim()
+  if (sheetName) form.append('sheet', sheetName)
+  const packageValue = (packageId || '').trim()
+  if (packageValue) form.append('package_id', packageValue)
+  return uploadForm<Partial<BoqPayload>>(
+    `/projects/${encodeURIComponent(ref)}/boq`,
+    form,
+    { onProgress },
+  ).then(normalizeBoqPayload)
 }
 
 export const applyBoq = (

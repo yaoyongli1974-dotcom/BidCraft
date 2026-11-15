@@ -120,7 +120,7 @@ export function ProjectsPage() {
   const [editing, setEditing] = useState<Project | null>(null)
   const selectAllRef = useRef<HTMLInputElement>(null)
 
-  const projects = projectsQuery.data || []
+  const projects = useMemo(() => projectsQuery.data || [], [projectsQuery.data])
   const packageMap = useMemo(() => {
     const map = new Map<string, PackageInfo>()
     packages.forEach((pkg) => map.set(pkg.name, pkg))
@@ -226,7 +226,6 @@ export function ProjectsPage() {
     const jobId = batch.id
     const kind = batch.kind
     let cancelled = false
-    let timer: number | undefined
     let finished = false
     let errors = 0
 
@@ -253,7 +252,7 @@ export function ProjectsPage() {
         )
         if (!terminal || finished) return
         finished = true
-        if (timer) window.clearInterval(timer)
+        window.clearInterval(timer)
 
         if (job.status === 'failed') {
           toast.error(
@@ -304,7 +303,7 @@ export function ProjectsPage() {
         if (cancelled) return
         errors += 1
         if (errors < 3) return
-        if (timer) window.clearInterval(timer)
+        window.clearInterval(timer)
         const message = messageOf(error)
         setBatch((current) =>
           current && current.id === jobId
@@ -315,11 +314,11 @@ export function ProjectsPage() {
       }
     }
 
+    const timer = window.setInterval(() => void tick(), 1600)
     void tick()
-    timer = window.setInterval(() => void tick(), 1600)
     return () => {
       cancelled = true
-      if (timer) window.clearInterval(timer)
+      window.clearInterval(timer)
     }
     // Poll per job id only; status transitions must not restart the interval.
     // eslint-disable-next-line react-hooks/exhaustive-deps

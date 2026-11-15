@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState, type KeyboardEvent } from 'react'
 import { Link } from 'react-router-dom'
 import {
   ArrowLeft,
@@ -116,6 +116,7 @@ export function AdminConsole() {
 function AdminWorkspace() {
   const { health, refresh: refreshHealth } = useHealth()
   const [tab, setTab] = useState<AdminTab>('models')
+  const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({})
   const modelsQuery = useQuery('admin:models', getModels)
   const kbsQuery = useQuery('admin:knowledge-bases', getKnowledgeBases)
   const rulePackagesQuery = useQuery('admin:rule-packages', () => getRulePackages(true))
@@ -142,6 +143,36 @@ function AdminWorkspace() {
     plugins: undefined,
   }
   const currentTab = ADMIN_TABS.find((item) => item.id === tab) || ADMIN_TABS[0]
+
+  // WAI-ARIA horizontal tabs: arrows wrap, Home/End jump to the edges.
+  const onTabKeyDown = (
+    event: KeyboardEvent<HTMLButtonElement>,
+    index: number,
+  ) => {
+    const total = ADMIN_TABS.length
+    let nextIndex: number
+    switch (event.key) {
+      case 'ArrowRight':
+        nextIndex = (index + 1) % total
+        break
+      case 'ArrowLeft':
+        nextIndex = (index - 1 + total) % total
+        break
+      case 'Home':
+        nextIndex = 0
+        break
+      case 'End':
+        nextIndex = total - 1
+        break
+      default:
+        return
+    }
+    event.preventDefault()
+    const next = ADMIN_TABS[nextIndex]
+    if (!next) return
+    setTab(next.id)
+    tabRefs.current[next.id]?.focus()
+  }
 
   return (
     <div className="admin-page">
@@ -208,17 +239,24 @@ function AdminWorkspace() {
 
       <div className="admin-tabs-wrap">
         <nav className="admin-tabs" role="tablist" aria-label="管理控制台分类">
-          {ADMIN_TABS.map((item) => {
+          {ADMIN_TABS.map((item, index) => {
             const Icon = item.icon
             const count = tabCounts[item.id]
             return (
               <button
                 key={item.id}
+                id={`admin-tab-${item.id}`}
+                ref={(element) => {
+                  tabRefs.current[item.id] = element
+                }}
                 type="button"
                 role="tab"
                 aria-selected={tab === item.id}
+                aria-controls="admin-tabpanel"
+                tabIndex={tab === item.id ? 0 : -1}
                 className={`admin-tab ${tab === item.id ? 'is-active' : ''}`}
                 onClick={() => setTab(item.id)}
+                onKeyDown={(event) => onTabKeyDown(event, index)}
               >
                 <Icon size={16} aria-hidden />
                 <span>{item.label}</span>
@@ -230,7 +268,12 @@ function AdminWorkspace() {
         <p className="admin-tab-description">{currentTab.description}</p>
       </div>
 
-      <div className="admin-panel" role="tabpanel">
+      <div
+        className="admin-panel"
+        id="admin-tabpanel"
+        role="tabpanel"
+        aria-labelledby={`admin-tab-${tab}`}
+      >
         {tab === 'models' && (
           <AdminModelsTab
             models={models}

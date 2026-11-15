@@ -811,5 +811,131 @@ def schema_cmd(
     console.print(f"内置契约：{SCHEMA_PATH}")
 
 
+def _format_bytes(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{size} B"
+
+
+def _print_backups(directory: Path) -> None:
+    from datetime import datetime
+
+    items = (
+        sorted(directory.glob("*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if directory.is_dir()
+        else []
+    )
+    if not items:
+        console.print(f"[dim]还没有备份：{directory}[/dim]")
+        return
+    table = Table(title=f"备份 · {directory}")
+    table.add_column("文件")
+    table.add_column("大小", justify="right")
+    table.add_column("修改时间")
+    for item in items:
+        stat = item.stat()
+        table.add_row(
+            item.name,
+            _format_bytes(stat.st_size),
+            datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+        )
+    console.print(table)
+
+
+@app.command()
+def backup(
+    output: Path | None = typer.Option(
+        None, "--output", "-o", help="输出目录（自动命名）或 .zip 文件路径"
+    ),
+    list_existing: bool = typer.Option(False, "--list", help="列出已有备份后退出"),
+) -> None:
+    """在线备份数据库与 secret.key（一致性快照打包为 zip）。"""
+    import sqlite3
+    import tempfile
+    import zipfile
+    from datetime import UTC, datetime
+
+    backup_dir = settings.home / "backups"
+    if list_existing:
+        _print_backups(backup_dir)
+        return
+
+    db_path = settings.home / "bidcraft.db"
+    if not db_path.is_file():
+        console.print(f"[red]数据库不存在：{db_path}[/red]")
+        console.print("[dim]请先运行 bidcraft init 或 bidcraft doctor 初始化。[/dim]")
+        raise typer.Exit(1)
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    default_name = f"bidcraft-{stamp}.zip"
+    if output is None:
+        target = backup_dir / default_name
+    elif output.is_dir() or output.suffix.lower() != ".zip":
+        target = output / default_name
+    else:
+        target = output
+    if target.exists():
+        console.print(f"[red]目标文件已存在：{target}[/red]")
+        raise typer.Exit(1)
+
+    secret_path = settings.home / "secret.key"
+    includes_secret = secret_path.is_file()
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="bidcraft-backup-") as tmp:
+            snapshot = Path(tmp) / "bidcraft.db"
+            # SQLite 在线备份 API：在源库事务一致性点复制，不写原库。
+            source = sqlite3.connect(str(db_path), timeout=30)
+            try:
+                dest = sqlite3.connect(str(snapshot))
+                try:
+                    source.backup(dest)
+                    check = dest.execute("PRAGMA quick_check").fetchone()
+                finally:
+                    dest.close()
+            finally:
+                source.close()
+            if not check or check[0] != "ok":
+                detail = check[0] if check else "无结果"
+                raise RuntimeError(f"快照完整性校验失败：{detail}")
+
+            db_bytes = snapshot.stat().st_size
+            manifest = {
+                "version": __version__,
+                "created_at": datetime.now(UTC).isoformat(),
+                "db_bytes": db_bytes,
+                "includes_secret_key": includes_secret,
+                "bidcraft_home": str(settings.home),
+            }
+            with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.write(snapshot, "bidcraft.db")
+                if includes_secret:
+                    archive.write(secret_path, "secret.key")
+                archive.writestr(
+                    "manifest.json",
+                    json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+                )
+    except Exception as exc:  # noqa: BLE001
+        if target.is_file():
+            target.unlink(missing_ok=True)
+        console.print(f"[red]备份失败：{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    size = target.stat().st_size
+    console.print(f"[green]备份完成[/green] {target}")
+    console.print(
+        f"大小 {_format_bytes(size)}（{size:,} 字节）· "
+        f"secret.key：{'已包含' if includes_secret else '未找到（跳过）'}"
+    )
+    console.print(
+        "[dim]恢复：停止服务 → 解压 zip → 将 bidcraft.db 与 secret.key 放回 "
+        "BIDCRAFT_HOME → 启动服务。[/dim]"
+    )
+
+
 if __name__ == "__main__":
     app()

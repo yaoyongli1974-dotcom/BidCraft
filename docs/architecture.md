@@ -41,8 +41,34 @@
 
 客户端零安装。服务端内置 Cookie 会话与 RBAC：超级管理员管理用户、模型与知识库；
 投标经理读写项目；只读成员只能查看。跨网段/公网部署仍应启用 TLS
-（`BIDCRAFT_SECURE_COOKIE=1`）并限制来源。项目数据集中在 `BIDCRAFT_HOME`，备份该
-目录即可完成全量备份；`secret.key` 必须一并备份，否则模型/知识库密钥无法解密。
+（`BIDCRAFT_SECURE_COOKIE=1`）并限制来源。
+
+### 备份与恢复
+
+项目数据集中在 `BIDCRAFT_HOME`：`bidcraft.db`（SQLite，WAL 模式）、
+`projects/<id>/`（招标原件、清单原件、`images/` 配图）、`packages/`（管理员规则包覆盖）、
+`output/`（导出件）以及 `secret.key`（模型/知识库密钥的 Fernet 主密钥）。
+
+**不要直接 `cp`/`tar` 运行中的整个目录**：WAL 模式下主库文件与 `-wal`/`-shm`
+需整体一致，拷贝跨越写事务会得到撕裂快照，恢复后可能丢数据或直接打不开。
+推荐：
+
+1. **内置备份命令**（无需停服）：
+   `bidcraft backup` 使用 SQLite 在线备份 API 把 `bidcraft.db` 复制为临时一致性
+   快照，连同 `secret.key`（存在时）与 `manifest.json`（版本、创建时间、库大小、
+   是否含密钥、`BIDCRAFT_HOME`）打包为
+   `BIDCRAFT_HOME/backups/bidcraft-<YYYYmmdd-HHMMSS>.zip`。`-o/--output` 可指定
+   目录（自动命名）或 `.zip` 文件路径，`--list` 列出已有备份。临时快照在结束后
+   自动清理，不写原库。
+2. **停服冷备**（最稳妥）：停止服务（或容器）后整目录打包，重启即恢复一致性；
+3. **手工在线 `.backup`**：`sqlite3 $BIDCRAFT_HOME/bidcraft.db ".backup '/backup/bidcraft.db'"`
+   取一致库快照，再用 `rsync` 同步 `projects/ packages/ output/ secret.key`。
+   文件按增量写入，业务上可接受与库快照存在几秒偏差（库记录是权威索引）。
+
+`secret.key` 必须随库一起备份，否则已加密的模型/知识库 API Key 无法解密，只能重新录入。
+恢复时保持 `BIDCRAFT_HOME` 路径不变，并确保文件属主为运行用户（容器内 uid 10001）。
+恢复步骤：**停服 → 解压备份 zip → 把 `bidcraft.db` 与 `secret.key` 放回
+`BIDCRAFT_HOME` → 启动服务**。命令不自动还原，避免误覆盖线上数据。
 
 ## 2. 组件
 
@@ -229,7 +255,8 @@ SSE 不可用时回退到约 1.6 秒一次的任务轮询。刷新页面后通�
 - 模型/知识库 API Key 使用 `BIDCRAFT_HOME/secret.key`（0600）做 Fernet 加密，
   管理 API 只返回 `has_api_key`。请把该文件纳入备份并限制目录权限。
 - 公网部署仍建议在反向代理层增加 TLS、来源限制、请求体大小与速率限制。
-- 事实台账、原件、导出件均在本地文件系统；备份与删除由运维控制。
+- 事实台账、原件、导出件均在本地文件系统；备份见「局域网模式 › 备份与恢复」，
+  删除由运维控制。
 - 上游 AGPL 项目仅作行为/规格参考，本仓库不包含其源代码。
 
 ## 7. 扩展路径

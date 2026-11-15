@@ -84,13 +84,23 @@ def _patch_http(monkeypatch, server, download=None) -> None:
     monkeypatch.setattr(images.httpx, "post", fake_post)
     if download is not None:
 
-        def fake_get(url, **kwargs):
+        class _Stream:
+            def __init__(self, response):
+                self.response = response
+
+            def __enter__(self):
+                return self.response
+
+            def __exit__(self, *_exc):
+                return False
+
+        def fake_stream(method, url, **kwargs):
             kwargs.pop("timeout", None)
             kwargs.pop("follow_redirects", None)
-            request = httpx.Request("GET", url)
-            return _fake_transport(download).handle_request(request)
+            request = httpx.Request(method, url)
+            return _Stream(_fake_transport(download).handle_request(request))
 
-        monkeypatch.setattr(images.httpx, "get", fake_get)
+        monkeypatch.setattr(images.httpx, "stream", fake_stream)
 
 
 def _client():

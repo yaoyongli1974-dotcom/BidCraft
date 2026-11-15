@@ -311,7 +311,7 @@ export function DraftTab() {
   const caretRef = useRef<{ start: number; end: number } | null>(null)
   const pendingCaret = useRef<number | null>(null)
 
-  const outline = outlineQuery.data || []
+  const outline = useMemo(() => outlineQuery.data || [], [outlineQuery.data])
   const selectedChapter = outline.find((chapter) => chapter.id === selectedId) || null
   const dirty = Boolean(selectedId) && loadedId === selectedId && body !== savedBody
   const stats = projectStats(project)
@@ -333,8 +333,11 @@ export function DraftTab() {
   jobActiveRef.current = jobActive
   const applyingPlanRef = useRef(applyingImagePlan)
   applyingPlanRef.current = applyingImagePlan
-  const images = imagesQuery.data || []
-  const projectImages = projectImagesQuery.data || []
+  const images = useMemo(() => imagesQuery.data || [], [imagesQuery.data])
+  const projectImages = useMemo(
+    () => projectImagesQuery.data || [],
+    [projectImagesQuery.data],
+  )
   const allImages = useMemo(() => {
     const seen = new Set<string>()
     return [...projectImages, ...images].filter((image) => {
@@ -999,8 +1002,14 @@ export function DraftTab() {
           toast.info('已恢复生成进度', '正在接续实时流；断线时自动回退到轮询。')
         }
       })
-      .catch(() => {
-        // Re-attach is best-effort; normal generation still exposes its job id.
+      .catch((error: unknown) => {
+        if (cancelled) return
+        // Re-attach is best-effort; normal generation still exposes its job id,
+        // but the writer should know that progress may not be live.
+        toast.warning(
+          '未能恢复生成进度',
+          `后台任务可能仍在运行，可稍后刷新本章查看结果。${messageOf(error)}`,
+        )
       })
     return () => {
       cancelled = true
@@ -1021,8 +1030,13 @@ export function DraftTab() {
           toast.info('已恢复配图任务', '正在接续后台生成进度。')
         }
       })
-      .catch(() => {
-        // Re-attach is best-effort.
+      .catch((error: unknown) => {
+        if (cancelled) return
+        // Same as above for image batches: tell the writer instead of hiding it.
+        toast.warning(
+          '未能恢复配图任务',
+          `后台配图可能仍在生成，可稍后在配图计划中刷新。${messageOf(error)}`,
+        )
       })
     return () => {
       cancelled = true
@@ -1040,7 +1054,6 @@ export function DraftTab() {
       return
     const jobId = current.id
     let cancelled = false
-    let timer: number | undefined
     let finished = false
     let errors = 0
     const tick = async () => {
@@ -1052,7 +1065,7 @@ export function DraftTab() {
         if (next.status !== 'done' && next.status !== 'failed') return
         if (finished) return
         finished = true
-        if (timer) window.clearInterval(timer)
+        window.clearInterval(timer)
         refreshImageDataRef.current()
         if (next.status === 'failed') {
           autoApplyAfterBatch.current = false
@@ -1092,7 +1105,7 @@ export function DraftTab() {
         if (cancelled) return
         errors += 1
         if (errors < 3) return
-        if (timer) window.clearInterval(timer)
+        window.clearInterval(timer)
         const message = messageOf(error)
         setImageBatchJob((currentJob) =>
           currentJob
@@ -1102,11 +1115,11 @@ export function DraftTab() {
         toast.error('无法读取配图进度', message)
       }
     }
+    const timer = window.setInterval(() => void tick(), 1600)
     void tick()
-    timer = window.setInterval(() => void tick(), 1600)
     return () => {
       cancelled = true
-      if (timer) window.clearInterval(timer)
+      window.clearInterval(timer)
     }
   }, [imageBatchJob?.id, toast])
 

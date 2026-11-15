@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: python (lint + pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install Python
+        run: uv python install 3.13
+
+      - name: Sync dependencies (locked)
+        # api 额外依赖供 tests/test_api*.py 使用（缺失时会被 importorskip 静默跳过）。
+        run: uv sync --frozen --python 3.13 --extra api --extra dev
+
+      - name: Lint (ruff)
+        run: uv run --frozen ruff check bidcraft tests
+
+      - name: Test (pytest)
+        run: uv run --frozen pytest -q
+
+  web:
+    name: web (lint + test + build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        # package-lock.json 尚未生成时回退到 npm install。
+        run: npm ci || npm install
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm run test
+
+      - name: Build (tsc + vite)
+        run: npm run build

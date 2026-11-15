@@ -336,6 +336,52 @@
   margin: 0 auto 16px;
 }
 
+/* Error boundary detail disclosure: readable, collapsed by default. */
+.error-boundary-details {
+  margin-top: 20px;
+  text-align: left;
+  border-top: 1px dashed var(--line);
+  padding-top: 14px;
+}
+
+.error-boundary-details summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  list-style: none;
+}
+
+.error-boundary-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.error-boundary-details[open] summary svg {
+  transform: rotate(180deg);
+}
+
+.error-boundary-details summary svg {
+  transition: transform 0.15s ease;
+}
+
+.error-boundary-details pre {
+  margin-top: 10px;
+  max-height: 220px;
+  overflow: auto;
+  padding: 12px;
+  border-radius: 8px;
+  background: rgba(28, 40, 35, 0.05);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* ------------------------------------------------------------------ shared tab */
 
 .tab-content {

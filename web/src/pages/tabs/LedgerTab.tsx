@@ -88,6 +88,7 @@ export function LedgerTab() {
   const [savedKey, setSavedKey] = useState<string | null>(null)
   const [rowError, setRowError] = useState<{ key: string; message: string } | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
+  const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({})
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({})
   const lastScrolledRef = useRef<string | null>(null)
   const ledger = ledgerQuery.data
@@ -105,7 +106,7 @@ export function LedgerTab() {
     confirmLabel: '放弃修改并离开',
   })
 
-  const facts = ledger?.facts || []
+  const facts = useMemo(() => ledger?.facts || [], [ledger?.facts])
   const missingKeys = useMemo(
     () => facts.filter((fact) => fact.required && !fact.value).map((fact) => fact.key),
     [facts],
@@ -113,7 +114,10 @@ export function LedgerTab() {
   const missingCount = facts.length
     ? missingKeys.length
     : (project.missing_required?.length || 0)
-  const missingList = missingKeys.length ? missingKeys : project.missing_required || []
+  const missingList = useMemo(
+    () => (missingKeys.length ? missingKeys : project.missing_required || []),
+    [missingKeys, project.missing_required],
+  )
 
   const stats = useMemo(() => {
     const filled = facts.filter((fact) => Boolean(fact.value)).length
@@ -227,8 +231,8 @@ export function LedgerTab() {
     lastScrolledRef.current = null
   }
 
-  const changeTab = async (tab: LedgerTab) => {
-    if (tab === activeTab) return
+  const changeTab = async (tab: LedgerTab): Promise<boolean> => {
+    if (tab === activeTab) return true
     if (edit) {
       const accepted = await confirm({
         title: '放弃未保存的修改？',
@@ -236,7 +240,7 @@ export function LedgerTab() {
         confirmLabel: '放弃并切换',
         tone: 'warning',
       })
-      if (!accepted) return
+      if (!accepted) return false
       setEdit(null)
       setRowError(null)
     }
@@ -246,6 +250,7 @@ export function LedgerTab() {
     setOnlyRequired(false)
     setSavedKey(null)
     setCollapsedGroups({})
+    return true
   }
 
   const startEdit = async (fact: Fact) => {
@@ -329,6 +334,37 @@ export function LedgerTab() {
     { id: 'risks', label: '废标风险', count: ledger?.risks.length || 0, icon: ShieldAlert },
   ]
 
+  // WAI-ARIA horizontal tabs: arrows wrap, Home/End jump to the edges.
+  const onTabKeyDown = (
+    event: KeyboardEvent<HTMLButtonElement>,
+    index: number,
+  ) => {
+    const total = tabItems.length
+    let nextIndex: number
+    switch (event.key) {
+      case 'ArrowRight':
+        nextIndex = (index + 1) % total
+        break
+      case 'ArrowLeft':
+        nextIndex = (index - 1 + total) % total
+        break
+      case 'Home':
+        nextIndex = 0
+        break
+      case 'End':
+        nextIndex = total - 1
+        break
+      default:
+        return
+    }
+    event.preventDefault()
+    const next = tabItems[nextIndex]
+    if (!next) return
+    void changeTab(next.id).then((changed) => {
+      if (changed) tabRefs.current[next.id]?.focus()
+    })
+  }
+
   return (
     <div className="tab-content ledger-page">
       <TabHeading
@@ -400,14 +436,21 @@ export function LedgerTab() {
 
       <section className="ledger-card">
         <div className="ledger-tabs" role="tablist" aria-label="台账分类">
-          {tabItems.map((tab) => (
+          {tabItems.map((tab, index) => (
             <button
               key={tab.id}
+              id={`ledger-tab-${tab.id}`}
+              ref={(element) => {
+                tabRefs.current[tab.id] = element
+              }}
               type="button"
               role="tab"
               aria-selected={activeTab === tab.id}
+              aria-controls="ledger-tabpanel"
+              tabIndex={activeTab === tab.id ? 0 : -1}
               className={className('ledger-tab', activeTab === tab.id && 'is-active')}
               onClick={() => void changeTab(tab.id)}
+              onKeyDown={(event) => onTabKeyDown(event, index)}
             >
               <tab.icon size={14} aria-hidden />
               <span>{tab.label}</span>
@@ -416,6 +459,11 @@ export function LedgerTab() {
           ))}
         </div>
 
+        <div
+          id="ledger-tabpanel"
+          role="tabpanel"
+          aria-labelledby={`ledger-tab-${activeTab}`}
+        >
         <div className="ledger-toolbar">
           <label className="search-field search-field--grow">
             <Search size={15} aria-hidden />
@@ -587,6 +635,7 @@ export function LedgerTab() {
             projectFormatSections={ledger?.template_sections || []}
           />
         )}
+        </div>
       </section>
 
       <p className="ledger-footnote">
