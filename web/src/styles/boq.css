@@ -1570,3 +1570,18 @@
     font-size: 10.5px;
   }
 }
+
+/* R11 报价版本对比 */
+.boq-diff { display: grid; gap: 12px; }
+.boq-diff-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.boq-diff-overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+.boq-diff-side { padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper-2, #faf7f0); }
+.boq-diff-side strong { display: block; font-size: 13px; }
+.boq-diff-side span { display: block; margin-top: 4px; font-size: 12px; color: var(--muted); }
+.boq-diff-group { border-top: 1px solid var(--line); padding-top: 8px; }
+.boq-diff-group h4 { margin: 0 0 6px; font-size: 13px; }
+.boq-diff-group.is-warn h4 { color: var(--warn, #b45309); }
+.boq-diff-group.is-info h4 { color: var(--info, #1d4ed8); }
+.boq-diff-group ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.boq-diff-group li { display: flex; justify-content: space-between; gap: 12px; font-size: 12.5px; }
+.boq-diff-empty { font-size: 12.5px; color: var(--muted); }

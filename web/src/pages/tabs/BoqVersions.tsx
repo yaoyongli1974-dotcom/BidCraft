@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
-import { ChevronRight, History, RotateCcw, Save, Trash2 } from 'lucide-react'
-import type { BoqPayload, BoqQuoteVersion } from '../../lib/types'
+import { ChevronRight, GitCompare, History, RotateCcw, Save, Trash2 } from 'lucide-react'
+import type { BoqPayload, BoqQuoteVersion, BoqVersionDiff } from '../../lib/types'
 import {
   createBoqVersion,
   deleteBoqVersion,
+  getBoqVersionDiff,
   listBoqVersions,
   messageOf,
   restoreBoqVersion,
@@ -11,6 +12,7 @@ import {
 import { className, formatDate, formatMoney } from '../../lib/format'
 import { useQuery } from '../../lib/hooks'
 import { Button } from '../../components/Button'
+import { Modal } from '../../components/Modal'
 import { useConfirm } from '../../context/useConfirm'
 import { useToast } from '../../context/useToast'
 
@@ -32,6 +34,41 @@ function versionTotal(version: BoqQuoteVersion): { label: string; value: number 
  * 「报价版本」折叠面板：保存当前单价快照、恢复或删除历史版本。
  * 版本跟随当前包件（package_id），只记录单价与汇总，不改动台账与对齐结果。
  */
+function diffSummaryTotal(summary: BoqVersionDiff['summary_a']): number {
+  const withTax = (summary as { total_with_tax?: number | null } | null)?.total_with_tax
+  const total = (summary as { total_amount?: number | null } | null)?.total_amount
+  if (typeof withTax === 'number') return withTax
+  return typeof total === 'number' ? total : 0
+}
+
+function DiffGroup({
+  title,
+  tone,
+  items,
+}: {
+  title: string
+  tone: 'warn' | 'info'
+  items: BoqVersionDiff['added']
+}) {
+  if (!items.length) return null
+  return (
+    <div className={className('boq-diff-group', `is-${tone}`)}>
+      <h4>
+        {title}
+        <span>{items.length}</span>
+      </h4>
+      <ul>
+        {items.map((item) => (
+          <li key={item.key}>
+            <span>{item.name || item.key}</span>
+            <span className="mono">¥{formatMoney(item.unit_price)}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 export function QuoteVersionsPanel({
   projectRef,
   packageId,
@@ -145,6 +182,44 @@ export function QuoteVersionsPanel({
     }
   }
 
+  const [diffVersion, setDiffVersion] = useState<BoqQuoteVersion | null>(null)
+  const [diffOther, setDiffOther] = useState('current')
+  const [diffData, setDiffData] = useState<BoqVersionDiff | null>(null)
+  const [diffLoading, setDiffLoading] = useState(false)
+  const [diffError, setDiffError] = useState<string | null>(null)
+
+  const loadDiff = async (versionId: string, other: string) => {
+    setDiffLoading(true)
+    setDiffError(null)
+    try {
+      const result = await getBoqVersionDiff(
+        projectRef,
+        versionId,
+        other === 'current' ? undefined : other,
+      )
+      setDiffData(result)
+    } catch (error) {
+      setDiffData(null)
+      setDiffError(messageOf(error))
+    } finally {
+      setDiffLoading(false)
+    }
+  }
+
+  const openDiff = (version: BoqQuoteVersion) => {
+    setDiffVersion(version)
+    setDiffOther('current')
+    setDiffData(null)
+    void loadDiff(version.id, 'current')
+  }
+
+  const closeDiff = () => {
+    setDiffVersion(null)
+    setDiffData(null)
+    setDiffError(null)
+    setDiffLoading(false)
+  }
+
   return (
     <details className="price-policy boq-versions">
       <summary>
@@ -249,6 +324,15 @@ export function QuoteVersionsPanel({
                   >
                     <Button
                       size="sm"
+                      variant="ghost"
+                      icon={<GitCompare size={12} />}
+                      title="与当前清单或其他版本对比（只读可用）"
+                      onClick={() => openDiff(version)}
+                    >
+                      对比
+                    </Button>
+                    <Button
+                      size="sm"
                       variant="secondary"
                       icon={<RotateCcw size={12} />}
                       loading={busyId === version.id}
@@ -283,6 +367,92 @@ export function QuoteVersionsPanel({
           版本只记录当前包件的单价与汇总；恢复会覆盖当前单价，但不改动台账与清单对齐结果。最多保留 20 个版本。
         </p>
       </div>
+
+      {diffVersion && (
+        <Modal
+          open
+          onClose={closeDiff}
+          title="报价版本对比"
+          size="lg"
+          footer={
+            <Button variant="ghost" onClick={closeDiff}>
+              关闭
+            </Button>
+          }
+        >
+          <div className="boq-diff">
+            <div className="price-policy-field">
+              <label htmlFor="boq-diff-other">对比对象</label>
+              <select
+                id="boq-diff-other"
+                value={diffOther}
+                onChange={(event) => void loadDiff(diffVersion.id, event.target.value)}
+              >
+                <option value="current">当前清单</option>
+                {versions
+                  .filter((item) => item.id !== diffVersion.id)
+                  .map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name}
+                    </option>
+                  ))}
+              </select>
+            </div>
+
+            {diffLoading ? (
+              <p className="price-policy-message">正在计算差异…</p>
+            ) : diffError ? (
+              <p className="price-policy-message">{diffError}</p>
+            ) : diffData ? (
+              <>
+                <div className="boq-diff-overview">
+                  <span>
+                    版本「{diffVersion.name}」
+                    <strong className="mono">
+                      {diffData.count_a} 条 / ¥{formatMoney(diffSummaryTotal(diffData.summary_a))}
+                    </strong>
+                  </span>
+                  <span>
+                    {diffData.other_id === 'current' ? '当前清单' : '对比版本'}
+                    <strong className="mono">
+                      {diffData.count_b} 条 / ¥{formatMoney(diffSummaryTotal(diffData.summary_b))}
+                    </strong>
+                  </span>
+                </div>
+
+                {diffData.added.length === 0 &&
+                diffData.removed.length === 0 &&
+                diffData.changed.length === 0 ? (
+                  <p className="price-policy-message">两侧单价一致，无差异。</p>
+                ) : (
+                  <>
+                    <DiffGroup title="仅版本有" tone="warn" items={diffData.added} />
+                    <DiffGroup title="仅对比侧有" tone="info" items={diffData.removed} />
+                    {diffData.changed.length > 0 && (
+                      <div className="boq-diff-group">
+                        <h4>
+                          单价变化
+                          <span>{diffData.changed.length}</span>
+                        </h4>
+                        <ul>
+                          {diffData.changed.map((item) => (
+                            <li key={item.key}>
+                              <span>{item.name || item.key}</span>
+                              <span className="mono">
+                                ¥{formatMoney(item.from)} → ¥{formatMoney(item.to)}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </>
+                )}
+              </>
+            ) : null}
+          </div>
+        </Modal>
+      )}
     </details>
   )
 }

@@ -378,13 +378,23 @@ def _call_plugin_tool(
         return _tool_error_text(f"插件 {plugin.name} 已禁用")
     if not plugins.allows(plugin, tool_name):
         return _tool_error_text(f"插件 {plugin.name} 未授权工具 {tool_name}（不在 allowlist 中）")
+    ok = True
     try:
         result = plugins.call_tool(plugin, tool_name, arguments)
     except plugins.PluginError as exc:
-        return _tool_error_text(str(exc))
+        ok = False
+        payload = _tool_error_text(str(exc))
     except Exception as exc:  # noqa: BLE001 - 插件异常不得中断服务
-        return _tool_error_text(f"插件 {plugin.name} 调用失败：{exc}")
-    return _plugin_result(result)
+        ok = False
+        payload = _tool_error_text(f"插件 {plugin.name} 调用失败：{exc}")
+    else:
+        payload = _plugin_result(result)
+        ok = not payload.get("isError")
+    from .db import session_scope
+
+    with session_scope() as db:
+        plugins.record_call(db, plugin.id, tool_name, ok)
+    return payload
 
 
 def _handle_tools_call(params: Any, *, readonly: bool) -> dict[str, Any]:

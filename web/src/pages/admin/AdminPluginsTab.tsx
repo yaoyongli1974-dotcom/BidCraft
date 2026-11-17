@@ -404,6 +404,16 @@ export function AdminPluginsTab() {
                             全部工具
                           </Badge>
                         )}
+                        {(plugin.fail_streak ?? 0) > 0 && (
+                          <Badge tone="warn" subtle>
+                            连续失败 {plugin.fail_streak}
+                          </Badge>
+                        )}
+                        {plugin.auto_disabled && (
+                          <Badge tone="danger" subtle>
+                            自动停用
+                          </Badge>
+                        )}
                       </div>
                       <div className="plugin-endpoint mono" title={endpoint || undefined}>
                         {endpoint || (
@@ -457,6 +467,16 @@ export function AdminPluginsTab() {
                           {plugin.enabled ? '已启用' : '已停用'}
                         </span>
                       </label>
+                      {plugin.auto_disabled && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          disabled={togglingId === plugin.id}
+                          onClick={() => void toggleEnabled(plugin, true)}
+                        >
+                          重新启用
+                        </Button>
+                      )}
                       {/* 展开的测试面板已经展示了结果，避免同一行重复两遍说明。 */}
                       {!result && (
                         <>

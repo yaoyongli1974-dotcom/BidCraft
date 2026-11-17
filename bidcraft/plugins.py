@@ -152,6 +152,8 @@ def plugin_payload(row: Any) -> dict[str, Any]:
         "last_test_ok": getattr(row, "last_test_ok", None),
         "last_test_at": _iso(getattr(row, "last_test_at", None)),
         "last_test_message": getattr(row, "last_test_message", "") or "",
+        "fail_streak": int(getattr(row, "fail_streak", 0) or 0),
+        "auto_disabled": bool(getattr(row, "auto_disabled", False)),
         "created_at": _iso(getattr(row, "created_at", None)),
         "updated_at": _iso(getattr(row, "updated_at", None)),
     }
@@ -479,7 +481,7 @@ def list_tools(plugin: Any) -> list[dict[str, Any]]:
 
 
 def call_tool(plugin: Any, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
-    """调用插件工具，原样返回 MCP result。"""
+    """调用插件工具，原样返回 MCP result；同一插件串行执行。"""
     ref = snapshot(plugin)
     tool = (name or "").strip()
     if not tool:
@@ -487,8 +489,55 @@ def call_tool(plugin: Any, name: str, arguments: dict[str, Any] | None = None) -
     args = arguments if isinstance(arguments, dict) else {}
     if not allows(ref, tool):
         raise PluginError(f"插件 {ref.name} 未授权工具 {tool}")
-    with _session(ref) as session:
+    with _call_lock(ref.id), _session(ref) as session:
         return session.call_tool(tool, args)
+
+
+_CALL_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _call_lock(plugin_id: str) -> threading.Lock:
+    return _CALL_LOCKS.setdefault(plugin_id or "anonymous", threading.Lock())
+
+
+def record_outcome(db: Any, row: Any, ok: bool) -> None:
+    """累计连续失败；≥3 次自动停用，成功重置计数。"""
+    if ok:
+        row.fail_streak = 0
+        row.auto_disabled = False
+    else:
+        row.fail_streak = (row.fail_streak or 0) + 1
+        if row.fail_streak >= 3:
+            row.enabled = False
+            row.auto_disabled = True
+            row.last_test_message = "连续失败 3 次，已自动停用"
+    db.flush()
+
+
+def reset_guard(db: Any, row: Any) -> None:
+    row.fail_streak = 0
+    row.auto_disabled = False
+    db.flush()
+
+
+def record_call(db: Any, plugin_id: str, tool: str, ok: bool) -> None:
+    """MCP 聚合调用后落库失败计数并写审计（独立短事务由调用方提供）。"""
+    from .models import AuditLog, Plugin
+
+    row = db.get(Plugin, plugin_id)
+    if row is None:
+        return
+    record_outcome(db, row, ok)
+    db.add(
+        AuditLog(
+            project_id=None,
+            username="system",
+            display_name="system",
+            action="plugin.call",
+            detail={"plugin": row.name, "tool": tool, "ok": ok},
+        )
+    )
+    db.flush()
 
 
 def test_plugin(plugin: Any) -> tuple[bool, str, list[str]]:

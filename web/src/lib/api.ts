@@ -21,6 +21,9 @@ import type {
   BoqSnapshot,
   BoqSummary,
   BoqVersionDeleteResult,
+  BoqVersionDiff,
+  BoqVersionDiffChanged,
+  BoqVersionDiffEntry,
   ChapterConflict,
   CreditAdjustResult,
   KnowledgeBase,
@@ -1723,6 +1726,51 @@ export async function deleteBoqVersion(
   }
 }
 
+function normalizeBoqVersionDiffEntry(value: unknown): BoqVersionDiffEntry {
+  const raw = value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+  return {
+    key: asText(raw.key),
+    name: asText(raw.name),
+    unit_price: asNumber(raw.unit_price, 0),
+    amount: raw.amount === null || raw.amount === undefined ? null : asNumber(raw.amount, 0),
+  }
+}
+
+function normalizeBoqVersionDiffChanged(value: unknown): BoqVersionDiffChanged {
+  const raw = value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+  return {
+    key: asText(raw.key),
+    name: asText(raw.name),
+    from: asNumber(raw.from, 0),
+    to: asNumber(raw.to, 0),
+    from_amount: raw.from_amount === null || raw.from_amount === undefined ? null : asNumber(raw.from_amount, 0),
+    to_amount: raw.to_amount === null || raw.to_amount === undefined ? null : asNumber(raw.to_amount, 0),
+  }
+}
+
+export async function getBoqVersionDiff(
+  ref: string,
+  versionId: string,
+  other?: string | null,
+): Promise<BoqVersionDiff> {
+  const query = other && other !== 'current' ? `?other=${encodeURIComponent(other)}` : ''
+  const data = await request<unknown>(
+    `/projects/${encodeURIComponent(ref)}/boq/versions/${encodeURIComponent(versionId)}/diff${query}`,
+  )
+  const raw = data && typeof data === 'object' ? (data as Record<string, unknown>) : {}
+  return {
+    version_id: asText(raw.version_id),
+    other_id: asText(raw.other_id),
+    added: asArray<unknown>(raw.added, 'added').map(normalizeBoqVersionDiffEntry),
+    removed: asArray<unknown>(raw.removed, 'removed').map(normalizeBoqVersionDiffEntry),
+    changed: asArray<unknown>(raw.changed, 'changed').map(normalizeBoqVersionDiffChanged),
+    summary_a: normalizeBoqSummary(raw.summary_a),
+    summary_b: normalizeBoqSummary(raw.summary_b),
+    count_a: asNumber(raw.count_a, 0),
+    count_b: asNumber(raw.count_b, 0),
+  }
+}
+
 export async function exportBoq(
   ref: string,
   packageId?: string | null,
@@ -2082,6 +2130,8 @@ function normalizePlugin(value: unknown): Plugin {
           ? null
           : asBool(raw.last_test_ok),
     last_test_message: asText(raw.last_test_message),
+    fail_streak: asNumber(raw.fail_streak, 0),
+    auto_disabled: asBool(raw.auto_disabled),
     tools: normalizePluginTools(raw.tools),
     created_at: typeof raw.created_at === 'string' ? raw.created_at : null,
     updated_at: typeof raw.updated_at === 'string' ? raw.updated_at : null,

@@ -68,6 +68,7 @@ def _migrate_columns(engine) -> None:
             ("avatar_url", "VARCHAR(500) DEFAULT ''"),
         ],
         "boq_snapshots": [("prices", "JSON"), ("package_id", "VARCHAR(36)")],
+        "plugins": [("fail_streak", "INTEGER DEFAULT 0"), ("auto_disabled", "BOOLEAN DEFAULT 0")],
         "image_assets": [("options", "JSON")],
         "sections": [("revision", "INTEGER DEFAULT 0")],
         "kb_chunks": [

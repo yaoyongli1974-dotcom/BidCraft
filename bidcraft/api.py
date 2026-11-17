@@ -2342,6 +2342,8 @@ def create_app():
             if data.get("enabled") is not None:
                 row.enabled = bool(data["enabled"])
                 changed.append("enabled")
+                if row.enabled:
+                    plugins.reset_guard(db, row)
             plugin_validate(row.transport, row.command or "", row.url or "")
             db.flush()
             audit(
@@ -2380,6 +2382,7 @@ def create_app():
                 row.last_test_at = datetime.now(UTC).replace(tzinfo=None)
                 row.last_test_ok = ok
                 row.last_test_message = message[:1000]
+                plugins.record_outcome(db, row, ok)
                 audit(
                     db,
                     None,
@@ -4377,6 +4380,17 @@ def create_app():
             if version is None:
                 raise LookupError("版本不存在")
             return boq.version_payload(version, include_prices=True)
+
+    @app.get("/projects/{ref}/boq/versions/{version_id}/diff")
+    def boq_version_diff(
+        ref: str, version_id: str, other: str | None = None
+    ) -> dict[str, Any]:
+        with session_scope() as db:
+            project, _role = _project(db, ref)
+            try:
+                return boq.diff_version(db, project, version_id, other)
+            except boq.BoqConflictError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/projects/{ref}/boq/versions/{version_id}/restore")
     def boq_version_restore(ref: str, version_id: str) -> dict[str, Any]:

@@ -850,6 +850,38 @@ export interface BoqVersionDeleteResult {
   id: string
 }
 
+/** 版本对比中的单条价格项。 */
+export interface BoqVersionDiffEntry {
+  key: string
+  name: string
+  unit_price: number | null
+  amount: number | null
+}
+
+/** 版本对比中双方都存在但单价不同的项。 */
+export interface BoqVersionDiffChanged {
+  key: string
+  name: string
+  from: number | null
+  to: number | null
+  from_amount: number | null
+  to_amount: number | null
+}
+
+/** `GET /projects/{ref}/boq/versions/{id}/diff` 的响应。 */
+export interface BoqVersionDiff {
+  version_id: string
+  /** `"current"` 或另一版本 id。 */
+  other_id: string
+  added: BoqVersionDiffEntry[]
+  removed: BoqVersionDiffEntry[]
+  changed: BoqVersionDiffChanged[]
+  summary_a: BoqSummary
+  summary_b: BoqSummary
+  count_a: number
+  count_b: number
+}
+
 // ---------------------------------------------------------------- 企业定额库
 
 /** 管理员维护的定额条目；清单套价只使用这里的单价。 */
@@ -971,6 +1003,10 @@ export interface Plugin {
   last_test_at?: string | null
   last_test_ok?: boolean | null
   last_test_message?: string
+  /** 连续失败次数；达到阈值后端会自动停用插件。 */
+  fail_streak?: number
+  /** 因连续失败被自动停用（与手动停用区分）。 */
+  auto_disabled?: boolean
   /** 后端若在列表里带上工具清单（非契约必选字段），用于展示工具数。 */
   tools?: string[]
   created_at?: string | null

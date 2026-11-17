@@ -809,6 +809,82 @@ def delete_version(db: Session, project: Project, version_id: str) -> None:
     db.flush()
 
 
+def diff_version(
+    db: Session,
+    project: Project,
+    version_id: str,
+    other: str | None = None,
+) -> dict[str, Any]:
+    """Compare one saved version against the current snapshot or another version."""
+    version = get_version(db, project.id, version_id)
+    if version is None:
+        raise LookupError("版本不存在")
+    prices_a = dict(version.prices or {})
+    if other in (None, "", "current"):
+        snapshot = get_snapshot(db, project.id, version.package_id)
+        if snapshot is None:
+            raise BoqConflictError("尚未上传工程量清单，请先导入清单文件")
+        prices_b = dict(snapshot.prices or {})
+        other_id = "current"
+        summary_b = dict(
+            build_payload(db, project.id, version.package_id).get("summary") or {}
+        )
+    else:
+        counterpart = get_version(db, project.id, other)
+        if counterpart is None:
+            raise LookupError("对比版本不存在")
+        if counterpart.package_id != version.package_id:
+            raise LookupError("对比版本不属于同一包件")
+        prices_b = dict(counterpart.prices or {})
+        other_id = counterpart.id
+        summary_b = dict(counterpart.summary or {})
+    rows = build_payload(db, project.id, version.package_id).get("rows") or []
+    meta = {row["key"]: row for row in rows if row.get("boq_row") is not None}
+
+    def amount(key: str, price: Any) -> float | None:
+        qty = (meta.get(key) or {}).get("qty")
+        if qty is None or price is None:
+            return None
+        return round(float(qty) * float(price), 2)
+
+    def entry(key: str, price: Any) -> dict[str, Any]:
+        return {
+            "key": key,
+            "name": (meta.get(key) or {}).get("name", ""),
+            "unit_price": price,
+            "amount": amount(key, price),
+        }
+
+    added = [entry(key, prices_a[key]) for key in sorted(prices_a) if key not in prices_b]
+    removed = [
+        entry(key, prices_b[key]) for key in sorted(prices_b) if key not in prices_a
+    ]
+    changed = []
+    for key in sorted(prices_a):
+        if key in prices_b and prices_a[key] != prices_b[key]:
+            changed.append(
+                {
+                    "key": key,
+                    "name": (meta.get(key) or {}).get("name", ""),
+                    "from": prices_a[key],
+                    "to": prices_b[key],
+                    "from_amount": amount(key, prices_a[key]),
+                    "to_amount": amount(key, prices_b[key]),
+                }
+            )
+    return {
+        "version_id": version.id,
+        "other_id": other_id,
+        "added": added,
+        "removed": removed,
+        "changed": changed,
+        "summary_a": dict(version.summary or {}),
+        "summary_b": summary_b,
+        "count_a": len(prices_a),
+        "count_b": len(prices_b),
+    }
+
+
 def find_row(rows: list[dict[str, Any]], boq_row: int) -> dict[str, Any] | None:
     for row in rows:
         if row["boq_row"] == boq_row:
