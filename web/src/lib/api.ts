@@ -71,6 +71,8 @@ import type {
   RulePackageSummary,
   RulePackageValidation,
   SourceFile,
+  TermInput,
+  TermItem,
   TestResult,
   UploadResult,
   User,
@@ -2045,6 +2047,108 @@ export async function matchQuotas(name: string, spec = ''): Promise<QuotaMatch[]
     })
     .filter((item): item is QuotaMatch => item !== null)
 }
+
+// ---------------------------------------------------------------- admin: 企业术语库
+
+const TERM_KINDS = ['replace', 'forbidden'] as const
+const TERM_SOURCE_MAX = 120
+const TERM_TARGET_MAX = 120
+const TERM_NOTE_MAX = 200
+
+/** 后端只认 replace / forbidden；旧数据或脏值统一回退到 replace。 */
+function normalizeTermKind(value: unknown): 'replace' | 'forbidden' {
+  return value === 'forbidden' ? 'forbidden' : 'replace'
+}
+
+/**
+ * 归一化一条术语。列表接口返回的是平铺数组，字段可能来自旧版本，
+ * 因此这里补齐默认值并按后端列宽截断，避免超长文本被静默拒绝。
+ */
+export function normalizeTerm(value: unknown): TermItem {
+  const source = value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+  return {
+    id: asText(source.id),
+    kind: normalizeTermKind(source.kind),
+    source: asText(source.source).slice(0, TERM_SOURCE_MAX),
+    target: asText(source.target).slice(0, TERM_TARGET_MAX),
+    note: asText(source.note).slice(0, TERM_NOTE_MAX),
+    enabled: asLooseBool(source.enabled, true),
+    created_at: typeof source.created_at === 'string' ? source.created_at : null,
+    updated_at: typeof source.updated_at === 'string' ? source.updated_at : null,
+  }
+}
+
+function termItems(data: unknown): unknown[] {
+  const items = asArray<unknown>(data, 'items')
+  if (items.length) return items
+  return asArray<unknown>(data, 'terms')
+}
+
+export interface TermQuery {
+  search?: string
+  kind?: string
+  limit?: number
+  offset?: number
+}
+
+export async function getTerms(query: TermQuery = {}): Promise<TermItem[]> {
+  const params = new URLSearchParams()
+  const search = (query.search || '').trim()
+  if (search) params.set('search', search)
+  const kind = (query.kind || '').trim()
+  if (TERM_KINDS.includes(kind as (typeof TERM_KINDS)[number])) params.set('kind', kind)
+  params.set('limit', String(query.limit ?? 200))
+  if (query.offset !== undefined && query.offset > 0) {
+    params.set('offset', String(Math.round(query.offset)))
+  }
+  const data = await request<unknown>(`/admin/terms?${params.toString()}`)
+  return termItems(data)
+    .map(normalizeTerm)
+    .filter((item) => item.id && item.source)
+}
+
+function termPayload(input: TermInput): Record<string, unknown> {
+  return {
+    kind: normalizeTermKind(input.kind),
+    source: (input.source || '').trim().slice(0, TERM_SOURCE_MAX),
+    target: (input.target || '').trim().slice(0, TERM_TARGET_MAX),
+    note: (input.note || '').trim().slice(0, TERM_NOTE_MAX),
+    enabled: input.enabled ?? true,
+  }
+}
+
+export async function createTerm(input: TermInput): Promise<TermItem> {
+  const data = await request<unknown>('/admin/terms', jsonBody(termPayload(input)))
+  return normalizeTerm(data)
+}
+
+/** PATCH 只提交调用方给出的字段，未传的字段保持后端原值。 */
+export async function updateTerm(
+  id: string,
+  patch: Partial<TermInput>,
+): Promise<TermItem> {
+  const body: Record<string, unknown> = {}
+  if (patch.kind !== undefined) body.kind = normalizeTermKind(patch.kind)
+  if (patch.source !== undefined) {
+    body.source = patch.source.trim().slice(0, TERM_SOURCE_MAX)
+  }
+  if (patch.target !== undefined) {
+    body.target = patch.target.trim().slice(0, TERM_TARGET_MAX)
+  }
+  if (patch.note !== undefined) body.note = patch.note.trim().slice(0, TERM_NOTE_MAX)
+  if (patch.enabled !== undefined) body.enabled = patch.enabled
+  const data = await request<unknown>(`/admin/terms/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+  return normalizeTerm(data)
+}
+
+export const deleteTerm = (id: string) =>
+  request<{ deleted?: boolean; id?: string }>(
+    `/admin/terms/${encodeURIComponent(id)}`,
+    { method: 'DELETE' },
+  )
 
 // ---------------------------------------------------------------- admin: 插件市场（MCP 客户端）
 

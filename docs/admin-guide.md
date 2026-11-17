@@ -270,3 +270,14 @@ run_check、export_document、search_knowledge），供 Claude Desktop / Cursor 
 - 「测试连通性」在模拟模式下直接通过；真实模式下校验三要素完整并探测开放平台可达性。
 - 配置优先级：管理页（数据库）> 环境变量 `BIDCRAFT_WECHAT_APP_ID/APP_SECRET/REDIRECT_URI`、`BIDCRAFT_WECHAT_MOCK`。仅管理页启用后来源显示为「管理控制台」。
 - 所有修改记审计 `wechat.config`（仅超级管理员）。
+
+## 企业术语库
+
+`/admin` → **术语库** 维护公司统一表述：
+
+- **禁用表述**：正文命中即产出核对问题，级别 `major`；
+- **建议替换**：命中且未统一为推荐写法时产出 `minor` 建议；
+- 两者类别均为「术语规范」，编号 `TERM-001` 起递增，证据含 `source/target/quote`（原文截取 ≤80 字）；
+- 跨章节按（级别 + 原表述）去重，单次核对最多 200 条；停用（`enabled=false`）的术语不参与核对；
+- 列表支持搜索与类型筛选，编辑弹窗可改类型/原表述/推荐表述/备注/启用，删除会二次确认（可改为停用）；
+- 所有修改记审计 `term.create` / `term.update` / `term.delete`（仅超级管理员）。

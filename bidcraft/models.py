@@ -191,6 +191,29 @@ class QuotaItem(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class TermItem(Base):
+    """Enterprise terminology entry (企业术语库) maintained by a super admin.
+
+    ``kind="forbidden"`` marks a 禁用词 that must not appear in the response
+    body; ``kind="replace"`` records the preferred wording for ``source`` so
+    the checker can flag bodies that still use the old term without the new
+    one. Only enabled rows participate in checking.
+    """
+
+    __tablename__ = "term_items"
+    __table_args__ = (UniqueConstraint("kind", "source", name="uq_term_kind_source"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    # replace | forbidden
+    kind: Mapped[str] = mapped_column(String(12), nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    target: Mapped[str] = mapped_column(String(120), default="")
+    note: Mapped[str] = mapped_column(String(200), default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class Parameter(Base):
     __tablename__ = "parameters"
 

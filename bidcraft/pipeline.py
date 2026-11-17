@@ -7,6 +7,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from . import terms
 from .config import settings
 from .ledger import build_ledger, load_ledger, save_ledger
 from .models import Issue, Project, SourceFile
@@ -15,6 +16,7 @@ from .parsing.loader import Table, load_document
 from .rules import store as package_store
 from .rules.engine import run_checks
 from .rules.loader import load_package
+from .schemas import CheckResult
 
 
 def create_project(db: Session, name: str, package: str = "weakcurrent-cabling") -> Project:
@@ -151,6 +153,25 @@ def parse_project(db: Session, project_id: str) -> tuple[object, dict]:
     return ledger, {"notes": notes, "tables": len(tables), "pages": len(pages)}
 
 
+def _term_results(db: Session, sections: list[dict]) -> list[CheckResult]:
+    """Turn terminology findings into check results for the issue ledger."""
+
+    return [
+        CheckResult(
+            code=finding["id"],
+            level=finding["level"],
+            category=finding["category"],
+            message=finding["message"],
+            location=finding["location"],
+            finding=finding["message"],
+            recommendation=finding["recommendation"],
+            evidence=finding["evidence"],
+            passed=False,
+        )
+        for finding in terms.scan_sections(db, sections, limit=terms.MAX_SCAN_FINDINGS)
+    ]
+
+
 def check_project(db: Session, project_id: str) -> tuple[list, dict]:
     from .generation.outline import load_outline
 
@@ -161,6 +182,7 @@ def check_project(db: Session, project_id: str) -> tuple[list, dict]:
     ledger = load_ledger(db, project_id)
     nodes = load_outline(db, project_id)
     all_results = run_checks(package, ledger, nodes, include_passed=True)
+    all_results.extend(_term_results(db, nodes))
     results = [result for result in all_results if not result.passed]
     db.query(Issue).filter(Issue.project_id == project_id).delete()
     for result in results:

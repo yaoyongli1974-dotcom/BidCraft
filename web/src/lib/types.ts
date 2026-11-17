@@ -934,6 +934,32 @@ export interface QuotaFillResult {
   applied: number
 }
 
+// ---------------------------------------------------------------- 企业术语库
+
+/** `replace` 建议替换的目标写法；`forbidden` 是禁止出现在正文里的表述。 */
+export type TermKind = 'replace' | 'forbidden'
+
+/** 管理员维护的术语条目；只有启用的条目参与正文检查。 */
+export interface TermItem {
+  id: string
+  kind: TermKind | string
+  source: string
+  target: string
+  note: string
+  enabled: boolean
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+/** 新建 / 编辑术语时提交的字段；`target` 仅对 replace 有意义。 */
+export interface TermInput {
+  kind: TermKind | string
+  source: string
+  target?: string
+  note?: string
+  enabled?: boolean
+}
+
 // ---------------------------------------------------------------- 调价策略
 
 /** 报价币种，与后端的枚举保持一致。 */

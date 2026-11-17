@@ -3284,6 +3284,52 @@
   justify-content: flex-end;
 }
 
+/* 企业术语库 */
+
+.terms-table {
+  min-width: 760px;
+}
+
+.term-kind-col {
+  width: 110px;
+}
+
+.term-enabled-col {
+  width: 64px;
+  text-align: center;
+}
+
+.term-enabled-col .quota-switch {
+  justify-content: center;
+}
+
+.term-flow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.term-flow > svg {
+  flex: 0 0 auto;
+  color: var(--faint);
+}
+
+.term-source {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.term-target {
+  color: var(--jade);
+  font-weight: 600;
+}
+
+.term-target.is-empty {
+  color: var(--faint);
+  font-weight: 400;
+}
+
 /* 匹配测试 */
 
 .quota-match {

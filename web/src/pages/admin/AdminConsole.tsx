@@ -2,6 +2,7 @@ import { useRef, useState, type KeyboardEvent } from 'react'
 import { Link } from 'react-router-dom'
 import {
   ArrowLeft,
+  BookMarked,
   BookOpen,
   Cpu,
   Layers,
@@ -22,6 +23,7 @@ import {
   getModels,
   getQuotas,
   getRulePackages,
+  getTerms,
   getUsers,
 } from '../../lib/api'
 import { formatNumber, roleMeta } from '../../lib/format'
@@ -29,6 +31,7 @@ import { Badge } from '../../components/Badge'
 import { AdminModelsTab } from './AdminModelsTab'
 import { AdminKnowledgeTab } from './AdminKnowledgeTab'
 import { AdminQuotaTab } from './AdminQuotaTab'
+import { AdminTermsTab } from './AdminTermsTab'
 import { AdminRulePackagesTab } from './AdminRulePackagesTab'
 import { AdminUsersTab } from './AdminUsersTab'
 import { AdminBillingTab } from './AdminBillingTab'
@@ -41,6 +44,7 @@ type AdminTab =
   | 'knowledge'
   | 'packages'
   | 'quotas'
+  | 'terms'
   | 'users'
   | 'audit'
   | 'billing'
@@ -78,6 +82,12 @@ const ADMIN_TABS: AdminTabDef[] = [
     label: '定额库',
     icon: LibraryBig,
     description: '企业综合单价、分类维护与匹配测试',
+  },
+  {
+    id: 'terms',
+    label: '术语库',
+    icon: BookMarked,
+    description: '企业用词规范：禁用表述与建议替换',
   },
   {
     id: 'users',
@@ -130,12 +140,14 @@ function AdminWorkspace() {
   const kbsQuery = useQuery('admin:knowledge-bases', getKnowledgeBases)
   const rulePackagesQuery = useQuery('admin:rule-packages', () => getRulePackages(true))
   const quotasQuery = useQuery('admin:quotas', () => getQuotas('', 100))
+  const termsQuery = useQuery('admin:terms', () => getTerms({ limit: 200 }))
   const usersQuery = useQuery('admin:users', getUsers)
 
   const models = modelsQuery.data || []
   const kbs = kbsQuery.data || []
   const rulePackages = rulePackagesQuery.data || []
   const quotas = quotasQuery.data || []
+  const terms = termsQuery.data || []
   const users = usersQuery.data || []
   const chatModels = models.filter((model) => model.kind === 'chat')
   const activeUsers = users.filter((user) => user.active)
@@ -146,6 +158,7 @@ function AdminWorkspace() {
     knowledge: kbsQuery.loading ? undefined : kbs.length,
     packages: rulePackagesQuery.loading ? undefined : visiblePackages.length,
     quotas: quotasQuery.loading ? undefined : quotas.length,
+    terms: termsQuery.loading ? undefined : terms.length,
     users: usersQuery.loading ? undefined : users.length,
     audit: undefined,
     billing: undefined,
@@ -319,6 +332,15 @@ function AdminWorkspace() {
             refreshing={quotasQuery.refreshing}
             error={quotasQuery.error}
             refresh={quotasQuery.refresh}
+          />
+        )}
+        {tab === 'terms' && (
+          <AdminTermsTab
+            terms={terms}
+            loading={termsQuery.loading}
+            refreshing={termsQuery.refreshing}
+            error={termsQuery.error}
+            refresh={termsQuery.refresh}
           />
         )}
         {tab === 'users' && (

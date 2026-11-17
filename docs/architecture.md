@@ -76,9 +76,9 @@
 |---|---|---|
 | 客户端 | React 18 + TypeScript + Vite | 项目列表与类型分组/标段筛选/批量核对导出、上传、台账校订、清单对齐与报价、大纲、章节编辑、章节配图、项目图库与配图计划、整篇配图策略、规则包管理、协作成员与审计、核对、导出 |
 | HTTP 层 | FastAPI + uvicorn | REST、静态资源托管、SPA 深链接回退、后台任务；另有 `bidcraft mcp` stdio JSON-RPC 服务供外部 Agent 接入 |
-| 领域层 | `pipeline` / `ledger` / `parsing` / `rules` / `generation` / `boq` / `images` / `plugins` / `calibrate` | 解析（含可选 OCR）、事实台账、规则包加载/覆盖、规则核对、清单对齐与报价（包件、定额、调价）、正文生成、配图与整篇排版策略、MCP 客户端插件（stdio/http 会话与工具调用）、只读回归校准 |
+| 领域层 | `pipeline` / `ledger` / `parsing` / `rules` / `generation` / `boq` / `images` / `plugins` / `calibrate` / `terms` | 解析（含可选 OCR）、事实台账、规则包加载/覆盖、规则核对、清单对齐与报价（包件、定额、调价）、正文生成、配图与整篇排版策略、MCP 客户端插件（stdio/http 会话与工具调用）、只读回归校准、企业术语库与禁用表述核对 |
 | 认证 | scrypt + Cookie 会话 + RBAC | 超级管理员/投标经理/只读成员；项目成员 editor/viewer；用户管理与会话吊销 |
-| 持久化 | SQLAlchemy + SQLite（WAL） | 项目、来源、事实、材料、参数、评分、要求、风险、清单快照（含用户单价与 `package_id`）、包件（`bid_packages`）、企业定额（`quota_items`）、插件配置（`plugins`）、图片资产（含生成参数）、大纲、章节（含 revision）、问题、任务与事件、用户、模型、知识库、项目成员、操作审计；新表由 `create_all` 建表，`boq_snapshots.package_id` 由 `db._migrate_columns` 追加并建索引；调价策略存 `project.meta["price_policy"]` |
+| 持久化 | SQLAlchemy + SQLite（WAL） | 项目、来源、事实、材料、参数、评分、要求、风险、清单快照（含用户单价与 `package_id`）、包件（`bid_packages`）、企业定额（`quota_items`）、插件配置（`plugins`）、术语库（`term_items`）、微信开放平台配置（`wechat_config`，密钥加密存 `app_secret_enc`）、图片资产（含生成参数）、大纲、章节（含 revision）、问题、任务与事件、用户、模型、知识库、项目成员、操作审计；新表由 `create_all` 建表，`boq_snapshots.package_id` 由 `db._migrate_columns` 追加并建索引；调价策略存 `project.meta["price_policy"]` |
 | 文件存储 | `BIDCRAFT_HOME/projects/<id>/`、`BIDCRAFT_HOME/packages/`、`BIDCRAFT_HOME/output/` | 招标原件、清单原件、配图（`images/`）、导出件、批量导出 zip；管理员规则包覆盖与 `hidden.json` |
 | 文档转换 | python-docx + LibreOffice/UNO | DOCX（含配图嵌入）、PDF（刷新 TOC 页码）、XLSX |
 | 模型 | 管理端配置 + OpenAI 兼容 HTTP 客户端 | 默认对话模型生成；默认图片模型按章节生成配图；向量模型可配置测试；不可用时确定性兜底 |
@@ -164,7 +164,7 @@ SSE 不可用时回退到约 1.6 秒一次的任务轮询。刷新页面后通�
 | 分组 | 端点 |
 |---|---|
 | 认证 | `POST /auth/login`、`POST /auth/logout`、`GET /auth/me`、`POST /auth/password` |
-| 管理 | `/admin/models`、`/admin/kbs`、`/admin/users`、`/admin/rule-packages`（含校验/隐藏/恢复）、`/admin/quotas`（CRUD/搜索/匹配测试）、`/admin/plugins`（CRUD/测试/预设目录），仅超级管理员 |
+| 管理 | `/admin/models`、`/admin/kbs`、`/admin/users`、`/admin/rule-packages`（含校验/隐藏/恢复）、`/admin/quotas`（CRUD/搜索/匹配测试）、`/admin/plugins`（CRUD/测试/预设目录）、`/admin/terms`（CRUD/搜索/启停）、`/admin/wechat`（读取/保存/连通性测试），仅超级管理员 |
 | 元信息 | `GET /health`、`GET /packages`、`GET /docs` |
 | 项目 | `GET/POST /projects`、`GET/PATCH/DELETE /projects/{ref}`（PATCH 改名称/标段） |
 | 来源 | `GET /projects/{ref}/sources`、`POST /projects/{ref}/sources`、`POST /projects/{ref}/parse` |

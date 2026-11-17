@@ -7,15 +7,18 @@ import {
   apiFetch,
   cnyTotalWithTax,
   createBoqVersion,
+  createTerm,
   deleteBoqVersion,
   errorDetailText,
   getBoqVersion,
+  getTerms,
   listBoqVersions,
   messageOf,
   normalizeBoqQuoteVersion,
   normalizeBoqSummary,
   normalizeImagePolicy,
   normalizePricePolicy,
+  normalizeTerm,
   reindexKnowledgeBase,
   restoreBoqVersion,
   roundTo,
@@ -352,6 +355,104 @@ describe('normalizeImagePolicy', () => {
     const policy = normalizeImagePolicy({ size: '1200x800', captions: 'false' })
     expect(policy.size).toBe('1200x800')
     expect(policy.captions).toBe(false)
+  })
+})
+
+describe('enterprise terms', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const jsonResponse = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+  it('normalizes kind, enabled and column widths', () => {
+    const term = normalizeTerm({
+      id: 't-1',
+      kind: 'unknown',
+      source: '甲'.repeat(130),
+      target: '乙'.repeat(130),
+      note: '备'.repeat(210),
+    })
+    expect(term.kind).toBe('replace')
+    expect(term.enabled).toBe(true)
+    expect(term.source).toHaveLength(120)
+    expect(term.target).toHaveLength(120)
+    expect(term.note).toHaveLength(200)
+
+    const forbidden = normalizeTerm({
+      id: 't-2',
+      kind: 'forbidden',
+      source: '绝对领先',
+      enabled: 'false',
+    })
+    expect(forbidden.kind).toBe('forbidden')
+    expect(forbidden.enabled).toBe(false)
+    expect(forbidden.target).toBe('')
+    expect(forbidden.created_at).toBeNull()
+  })
+
+  it('builds the query string for the flat list endpoint', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse([
+        { id: 't-1', kind: 'forbidden', source: '绝对领先', enabled: true },
+        { id: 't-2', kind: 'replace', source: '甲方', target: '招标人' },
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const terms = await getTerms({
+      search: ' 甲方 ',
+      kind: 'forbidden',
+      limit: 50,
+      offset: 100,
+    })
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      '/admin/terms?search=%E7%94%B2%E6%96%B9&kind=forbidden&limit=50&offset=100',
+    )
+    expect(terms).toHaveLength(2)
+    expect(terms[1]).toMatchObject({
+      id: 't-2',
+      kind: 'replace',
+      source: '甲方',
+      target: '招标人',
+      enabled: true,
+    })
+  })
+
+  it('posts a normalized create payload', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse(
+        { id: 't-3', kind: 'replace', source: '甲方', target: '招标人', enabled: false },
+        201,
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const created = await createTerm({
+      kind: 'replace',
+      source: ' 甲方 ',
+      target: ' 招标人 ',
+      note: ' 统一称呼 ',
+      enabled: false,
+    })
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(fetchMock.mock.calls[0][0]).toBe('/admin/terms')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({
+      kind: 'replace',
+      source: '甲方',
+      target: '招标人',
+      note: '统一称呼',
+      enabled: false,
+    })
+    expect(created.id).toBe('t-3')
+    expect(created.enabled).toBe(false)
   })
 })
 

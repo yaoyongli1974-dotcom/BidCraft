@@ -35,6 +35,7 @@ from . import (
     knowledge,
     model_config,
     plugins,
+    terms,
     wechat,
     wechatpay,
 )
@@ -70,6 +71,7 @@ from .models import (
     ScoringItem,
     Section,
     SourceFile,
+    TermItem,
     User,
 )
 from .pipeline import add_source, check_project, create_project, parse_project, resolve_project
@@ -249,6 +251,22 @@ class QuotaUpdate(BaseModel):
     unit_price: float | None = None
     category: str | None = None
     note: str | None = None
+
+
+class TermCreate(BaseModel):
+    kind: str = ""
+    source: str = ""
+    target: str = ""
+    note: str = ""
+    enabled: bool = True
+
+
+class TermUpdate(BaseModel):
+    kind: str | None = None
+    source: str | None = None
+    target: str | None = None
+    note: str | None = None
+    enabled: bool | None = None
 
 
 class PackageCreate(BaseModel):
@@ -2839,6 +2857,98 @@ def create_app():
             db.delete(quota)
             db.flush()
             return {"deleted": True, "id": quota_id}
+
+    # ----------------------------------------------------------------- terms
+    @app.get("/admin/terms")
+    def list_terms(
+        request: Request,
+        search: str = "",
+        kind: str = "",
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        require_super(request)
+        capped, start = _page_bounds(limit, offset)
+        with session_scope() as db:
+            try:
+                rows = terms.list_terms(
+                    db, search=search, kind=kind, limit=capped, offset=start
+                )
+            except terms.TermError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return [terms.term_payload(row) for row in rows]
+
+    @app.post("/admin/terms", status_code=201)
+    def create_term(payload: TermCreate, request: Request) -> dict[str, Any]:
+        require_super(request)
+        with session_scope() as db:
+            try:
+                row = terms.create_term(
+                    db,
+                    kind=payload.kind,
+                    source=payload.source,
+                    target=payload.target,
+                    note=payload.note,
+                    enabled=payload.enabled,
+                )
+            except terms.TermExists as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except terms.TermError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            audit(
+                db,
+                None,
+                "term.create",
+                {"term_id": row.id, "kind": row.kind, "source": row.source},
+            )
+            return terms.term_payload(row)
+
+    @app.patch("/admin/terms/{term_id}")
+    def update_term(term_id: str, payload: TermUpdate, request: Request) -> dict[str, Any]:
+        require_super(request)
+        with session_scope() as db:
+            row = db.get(TermItem, term_id)
+            if row is None:
+                raise LookupError(f"术语不存在：{term_id}")
+            changes = {
+                field: getattr(payload, field)
+                for field in ("kind", "source", "target", "note", "enabled")
+                if getattr(payload, field) is not None
+            }
+            try:
+                terms.update_term(db, row, **changes)
+            except terms.TermExists as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except terms.TermError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            audit(
+                db,
+                None,
+                "term.update",
+                {
+                    "term_id": row.id,
+                    "kind": row.kind,
+                    "source": row.source,
+                    "changed": sorted(changes),
+                },
+            )
+            return terms.term_payload(row)
+
+    @app.delete("/admin/terms/{term_id}")
+    def delete_term(term_id: str, request: Request) -> dict[str, Any]:
+        require_super(request)
+        with session_scope() as db:
+            row = db.get(TermItem, term_id)
+            if row is None:
+                raise LookupError(f"术语不存在：{term_id}")
+            audit(
+                db,
+                None,
+                "term.delete",
+                {"term_id": row.id, "kind": row.kind, "source": row.source},
+            )
+            terms.delete_term(db, row)
+            return {"deleted": True, "id": term_id}
 
     # ------------------------------------------------------ wechat config
     class WechatConfigUpdate(BaseModel):

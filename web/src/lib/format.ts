@@ -728,6 +728,9 @@ export const ACTION_LABELS: Record<string, string> = {
   'quota.create': '新增定额',
   'quota.update': '更新定额',
   'quota.delete': '删除定额',
+  'term.create': '新增术语',
+  'term.update': '更新术语',
+  'term.delete': '删除术语',
   'price.policy': '调整调价策略',
   'image.generate': '生成配图',
   'image.upload': '上传配图',
@@ -775,7 +778,13 @@ export function auditActionTone(action?: string): Tone {
   if (key === 'check.run') return 'warn'
   if (key === 'boq.adjust' || key === 'price.policy') return 'warn'
   if (key === 'export.run') return 'info'
-  if (key.startsWith('package.') || key.startsWith('quota.')) return 'info'
+  if (
+    key.startsWith('package.') ||
+    key.startsWith('quota.') ||
+    key.startsWith('term.')
+  ) {
+    return 'info'
+  }
   if (key.endsWith('.upload') || key.endsWith('.generate')) return 'success'
   return 'neutral'
 }
