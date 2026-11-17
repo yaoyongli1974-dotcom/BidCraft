@@ -6,6 +6,7 @@ import {
   Cpu,
   Layers,
   LibraryBig,
+  MessageCircle,
   Plug,
   ScrollText,
   ShieldAlert,
@@ -33,6 +34,7 @@ import { AdminUsersTab } from './AdminUsersTab'
 import { AdminBillingTab } from './AdminBillingTab'
 import { AdminAuditTab } from './AdminAuditTab'
 import { AdminPluginsTab } from './AdminPluginsTab'
+import { AdminWechatTab } from './AdminWechatTab'
 
 type AdminTab =
   | 'models'
@@ -42,6 +44,7 @@ type AdminTab =
   | 'users'
   | 'audit'
   | 'billing'
+  | 'wechat'
   | 'plugins'
 
 interface AdminTabDef {
@@ -100,6 +103,12 @@ const ADMIN_TABS: AdminTabDef[] = [
     icon: Plug,
     description: 'MCP 客户端插件：本机命令与 HTTP 服务的工具接入',
   },
+  {
+    id: 'wechat',
+    label: '微信开放平台',
+    icon: MessageCircle,
+    description: '扫码登录的 AppID、密钥、回调地址与模拟模式',
+  },
 ]
 
 export function AdminConsole() {
@@ -140,6 +149,7 @@ function AdminWorkspace() {
     users: usersQuery.loading ? undefined : users.length,
     audit: undefined,
     billing: undefined,
+    wechat: undefined,
     plugins: undefined,
   }
   const currentTab = ADMIN_TABS.find((item) => item.id === tab) || ADMIN_TABS[0]
@@ -323,6 +333,7 @@ function AdminWorkspace() {
         {tab === 'audit' && <AdminAuditTab />}
         {tab === 'billing' && <AdminBillingTab />}
         {tab === 'plugins' && <AdminPluginsTab />}
+        {tab === 'wechat' && <AdminWechatTab />}
       </div>
     </div>
   )

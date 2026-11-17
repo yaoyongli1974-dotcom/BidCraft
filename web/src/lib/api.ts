@@ -53,6 +53,8 @@ import type {
   ParseResult,
   Plugin,
   PluginCatalogEntry,
+  WechatConfig,
+  WechatConfigInput,
   PluginInput,
   PluginTestResult,
   PricePolicy,
@@ -2232,4 +2234,33 @@ export async function getPluginCatalog(): Promise<PluginCatalogEntry[]> {
   return list
     .map(normalizePluginCatalogEntry)
     .filter((item): item is PluginCatalogEntry => item !== null)
+}
+
+// ---------------------------------------------------------------- admin: wechat
+
+function normalizeWechatConfig(value: unknown): WechatConfig {
+  const raw = value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+  return {
+    app_id: asText(raw.app_id),
+    has_secret: asBool(raw.has_secret),
+    redirect_uri: asText(raw.redirect_uri),
+    enabled: asBool(raw.enabled),
+    mock: asBool(raw.mock),
+    available: asBool(raw.available),
+    source: asText(raw.source, 'env'),
+  }
+}
+
+export async function getWechatConfig(): Promise<WechatConfig> {
+  return normalizeWechatConfig(await request<unknown>('/admin/wechat'))
+}
+
+export async function updateWechatConfig(input: WechatConfigInput): Promise<WechatConfig> {
+  return normalizeWechatConfig(await request<unknown>('/admin/wechat', jsonBody(input)))
+}
+
+export async function testWechatConfig(): Promise<{ ok: boolean; message: string }> {
+  const raw = await request<unknown>('/admin/wechat/test', { method: 'POST' })
+  const data = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  return { ok: asBool(data.ok), message: asText(data.message) }
 }

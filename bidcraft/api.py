@@ -2840,6 +2840,96 @@ def create_app():
             db.flush()
             return {"deleted": True, "id": quota_id}
 
+    # ------------------------------------------------------ wechat config
+    class WechatConfigUpdate(BaseModel):
+        app_id: str | None = None
+        app_secret: str | None = None
+        clear_secret: bool = False
+        redirect_uri: str | None = None
+        enabled: bool | None = None
+        mock: bool | None = None
+
+    def wechat_config_payload(db) -> dict[str, Any]:
+        from .models import WechatConfig
+
+        row = db.get(WechatConfig, "default")
+        cfg = wechat.effective(db)
+        return {
+            "app_id": (row.app_id if row else settings.wechat_app_id) or "",
+            "has_secret": bool(row.app_secret_enc) if row else bool(settings.wechat_app_secret),
+            "redirect_uri": (row.redirect_uri if row else settings.wechat_redirect_uri) or "",
+            "enabled": bool(row.enabled) if row else False,
+            "mock": bool(cfg["mock"]),
+            "available": wechat.available(db),
+            "source": cfg["source"],
+        }
+
+    @app.get("/admin/wechat")
+    def admin_get_wechat(request: Request) -> dict[str, Any]:
+        require_super(request)
+        with session_scope() as db:
+            return wechat_config_payload(db)
+
+    @app.put("/admin/wechat")
+    def admin_update_wechat(payload: WechatConfigUpdate, request: Request) -> dict[str, Any]:
+        require_super(request)
+        from .models import WechatConfig
+        from .security import encrypt_secret
+
+        with session_scope() as db:
+            row = db.get(WechatConfig, "default")
+            if row is None:
+                row = WechatConfig(id="default")
+                db.add(row)
+            changed: list[str] = []
+            if payload.app_id is not None:
+                row.app_id = payload.app_id.strip()[:120]
+                changed.append("app_id")
+            if payload.clear_secret:
+                row.app_secret_enc = ""
+                changed.append("clear_secret")
+            elif payload.app_secret:
+                row.app_secret_enc = encrypt_secret(payload.app_secret)
+                changed.append("app_secret")
+            if payload.redirect_uri is not None:
+                row.redirect_uri = payload.redirect_uri.strip()[:500]
+                changed.append("redirect_uri")
+            if payload.enabled is not None:
+                row.enabled = bool(payload.enabled)
+                changed.append("enabled")
+            if payload.mock is not None:
+                row.mock = bool(payload.mock)
+                changed.append("mock")
+            if not changed:
+                raise HTTPException(status_code=400, detail="没有需要更新的字段")
+            db.flush()
+            audit(db, None, "wechat.config", {"keys": changed})
+            return wechat_config_payload(db)
+
+    @app.post("/admin/wechat/test")
+    def admin_test_wechat(request: Request) -> dict[str, Any]:
+        require_super(request)
+        import httpx
+
+        with session_scope() as db:
+            cfg = wechat.effective(db)
+        if cfg["mock"]:
+            return {"ok": True, "message": "模拟模式可用：登录会生成本地测试账号，不访问微信服务器"}
+        if not (cfg["app_id"] and cfg["app_secret"] and cfg["redirect_uri"]):
+            return {"ok": False, "message": "未配置完整的 AppID / AppSecret / 回调地址"}
+        try:
+            response = httpx.get(
+                wechat.AUTHORIZE_URL,
+                params={"appid": cfg["app_id"], "redirect_uri": cfg["redirect_uri"]},
+                timeout=wechat.TIMEOUT,
+            )
+        except httpx.HTTPError:
+            logger.exception("微信开放平台连通性测试失败")
+            return {"ok": False, "message": "无法连接微信开放平台，请检查网络或稍后重试"}
+        if response.status_code >= 500:
+            return {"ok": False, "message": f"微信开放平台返回 {response.status_code}，请稍后重试"}
+        return {"ok": True, "message": "配置完整，微信开放平台可达；请用真实扫码验证回调"}
+
     # ---------------------------------------------------------------- meta
     @app.get("/health")
     def health() -> dict[str, Any]:

@@ -1044,6 +1044,27 @@ export interface PluginCatalogEntry {
   url: string
 }
 
+/** Administrator view of WeChat Open Platform settings (`/admin/wechat`). */
+export interface WechatConfig {
+  app_id: string
+  has_secret: boolean
+  redirect_uri: string
+  enabled: boolean
+  mock: boolean
+  available: boolean
+  /** Where the effective settings come from: stored config or environment. */
+  source: 'db' | 'env' | string
+}
+
+export interface WechatConfigInput {
+  app_id?: string
+  app_secret?: string
+  clear_secret?: boolean
+  redirect_uri?: string
+  enabled?: boolean
+  mock?: boolean
+}
+
 /** Payload of a 409 response from `PUT /projects/{ref}/chapters/{node_id}`. */
 export interface ChapterConflict {
   current_revision: number

@@ -258,3 +258,15 @@ run_check、export_document、search_knowledge），供 Claude Desktop / Cursor 
 - 项目级成员权限与操作审计已内置：owner 管理成员，写操作按 editor/viewer 门禁，
   关键操作写入 `audit_logs`（项目页「协作」与管理端「审计日志」可查）。
   公网多人场景仍建议配合反向代理与网络隔离。
+
+## 微信开放平台
+
+`/admin` →「微信开放平台」可配置扫码登录，保存后立即生效（无需重启）：
+
+- **AppID / AppSecret**：开放平台「网站应用」凭据。密钥使用 `secret.key` 加密入库，接口只返回 `has_secret`，不回显明文；可勾选「清除已保存的密钥」。
+- **授权回调地址**：必须与开放平台登记的授权回调域一致，且为公网可达的 HTTPS 地址。
+- **启用微信扫码登录**：关闭时 `/health.wechat_login=false`，登录/注册页不显示微信入口，`/auth/wechat/start` 返回 400。
+- **模拟模式**：不访问微信服务器，扫码跳转 `/auth/wechat/mock` 生成本地测试账号，用于内网联调。
+- 「测试连通性」在模拟模式下直接通过；真实模式下校验三要素完整并探测开放平台可达性。
+- 配置优先级：管理页（数据库）> 环境变量 `BIDCRAFT_WECHAT_APP_ID/APP_SECRET/REDIRECT_URI`、`BIDCRAFT_WECHAT_MOCK`。仅管理页启用后来源显示为「管理控制台」。
+- 所有修改记审计 `wechat.config`（仅超级管理员）。

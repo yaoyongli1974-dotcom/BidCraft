@@ -743,6 +743,15 @@ export const ACTION_LABELS: Record<string, string> = {
   'package.update': '更新规则包',
   'package.delete': '删除规则包',
   'package.restore': '恢复规则包',
+  'plugin.create': '新增插件',
+  'plugin.update': '更新插件',
+  'plugin.delete': '删除插件',
+  'plugin.test': '测试插件',
+  'plugin.call': '调用插件工具',
+  'boq.version_save': '保存报价版本',
+  'boq.version_restore': '恢复报价版本',
+  'boq.version_delete': '删除报价版本',
+  'wechat.config': '更新微信开放平台配置',
 }
 
 /** Unknown keys fall back to the raw action key so new backend actions stay visible. */

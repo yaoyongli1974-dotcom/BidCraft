@@ -32,24 +32,61 @@ class WeChatError(RuntimeError):
     pass
 
 
-def configured() -> bool:
-    return bool(settings.wechat_app_id and settings.wechat_app_secret and settings.wechat_redirect_uri)
+def get_config(db):
+    from .models import WechatConfig
+
+    return db.get(WechatConfig, "default")
 
 
-def available() -> bool:
-    return configured() or settings.wechat_mock
+def effective(db=None) -> dict:
+    from .security import decrypt_secret
+
+    if db is not None:
+        row = get_config(db)
+    else:
+        from .db import session_scope
+
+        with session_scope() as session:
+            row = get_config(session)
+    if row is not None and row.enabled and (
+        row.mock or (row.app_id and row.app_secret_enc and row.redirect_uri)
+    ):
+        return {
+            "app_id": row.app_id or "",
+            "app_secret": decrypt_secret(row.app_secret_enc) if row.app_secret_enc else "",
+            "redirect_uri": row.redirect_uri or "",
+            "mock": bool(row.mock) or settings.wechat_mock,
+            "source": "db",
+        }
+    return {
+        "app_id": settings.wechat_app_id,
+        "app_secret": settings.wechat_app_secret,
+        "redirect_uri": settings.wechat_redirect_uri,
+        "mock": settings.wechat_mock,
+        "source": "env",
+    }
 
 
-def authorize_url(next_path: str = "/") -> str:
-    if not configured():
+def configured(db=None) -> bool:
+    cfg = effective(db)
+    return bool(cfg["app_id"] and cfg["app_secret"] and cfg["redirect_uri"])
+
+
+def available(db=None) -> bool:
+    return configured(db) or effective(db)["mock"]
+
+
+def authorize_url(next_path: str = "/", db=None) -> str:
+    cfg = effective(db)
+    if not (cfg["app_id"] and cfg["app_secret"] and cfg["redirect_uri"]):
         raise WeChatError("微信扫码登录尚未配置")
     state = sign_state(
         {"n": secrets.token_urlsafe(8), "next": _safe_next(next_path)}, ttl_seconds=600
     )
     query = urlencode(
         {
-            "appid": settings.wechat_app_id,
-            "redirect_uri": settings.wechat_redirect_uri,
+            "appid": cfg["app_id"],
+            "redirect_uri": cfg["redirect_uri"],
             "response_type": "code",
             "scope": "snsapi_login",
             "state": state,
@@ -73,15 +110,16 @@ def verify_state_token(token: str) -> str:
     return _safe_next(str(payload.get("next") or "/"))
 
 
-def exchange_code(code: str) -> dict:
-    if not configured():
+def exchange_code(code: str, db=None) -> dict:
+    cfg = effective(db)
+    if not (cfg["app_id"] and cfg["app_secret"] and cfg["redirect_uri"]):
         raise WeChatError("微信扫码登录尚未配置")
     try:
         response = httpx.get(
             TOKEN_URL,
             params={
-                "appid": settings.wechat_app_id,
-                "secret": settings.wechat_app_secret,
+                "appid": cfg["app_id"],
+                "secret": cfg["app_secret"],
                 "code": code,
                 "grant_type": "authorization_code",
             },

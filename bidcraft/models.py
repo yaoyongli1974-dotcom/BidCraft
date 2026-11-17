@@ -481,6 +481,20 @@ class Plugin(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class WechatConfig(Base):
+    """管理端微信开放平台配置（单行，id 固定 default）。"""
+
+    __tablename__ = "wechat_config"
+
+    id: Mapped[str] = mapped_column(String(20), primary_key=True, default="default")
+    app_id: Mapped[str] = mapped_column(String(120), default="")
+    app_secret_enc: Mapped[str] = mapped_column(Text, default="")
+    redirect_uri: Mapped[str] = mapped_column(String(500), default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    mock: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class CreditTransaction(Base):
     __tablename__ = "credit_transactions"
 
