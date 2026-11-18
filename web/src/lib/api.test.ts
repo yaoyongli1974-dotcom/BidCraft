@@ -13,8 +13,10 @@ import {
   createTerm,
   deleteBoqVersion,
   errorDetailText,
+  exportPluginPackage,
   getBoqVersion,
   getTerms,
+  importPluginPackage,
   listBoqVersions,
   messageOf,
   normalizeBoqQuoteVersion,
@@ -756,5 +758,115 @@ describe('plugin resource limits', () => {
       mem_limit_mb: 256,
       cpu_seconds: 5,
     })
+  })
+})
+
+describe('plugin packages', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const jsonResponse = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+  const zipResponse = (disposition?: string) =>
+    new Response('zip-bytes', {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/zip',
+        ...(disposition ? { 'Content-Disposition': disposition } : {}),
+      },
+    })
+
+  it('downloads the package with GET and the attachment filename', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      zipResponse('attachment; filename="filesystem.bidplugin.zip"'),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { blob, filename } = await exportPluginPackage('p/1', 'filesystem')
+    expect(fetchMock.mock.calls[0][0]).toBe('/admin/plugins/p%2F1/package')
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.method ?? 'GET').toBe('GET')
+    expect(init.body).toBeUndefined()
+    expect(filename).toBe('filesystem.bidplugin.zip')
+    expect(await blob.text()).toBe('zip-bytes')
+  })
+
+  it('falls back to a safe <name>.bidplugin.zip filename', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) => zipResponse()),
+    )
+    expect((await exportPluginPackage('p-2', 'my/plugin')).filename).toBe(
+      'my_plugin.bidplugin.zip',
+    )
+    expect((await exportPluginPackage('p-2')).filename).toBe('plugin.bidplugin.zip')
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+        zipResponse("attachment; filename*=UTF-8''%E8%AE%B0%E5%BF%86.bidplugin.zip"),
+      ),
+    )
+    expect((await exportPluginPackage('p-3', '记忆')).filename).toBe('记忆.bidplugin.zip')
+  })
+
+  it('imports as multipart file with the on_conflict query', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({ id: 'p-9', name: 'memory', transport: 'stdio', mem_limit_mb: 99999 }, 201),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const file = new File(['zip'], 'memory.bidplugin.zip', { type: 'application/zip' })
+
+    const created = await importPluginPackage(file)
+    expect(fetchMock.mock.calls[0][0]).toBe('/admin/plugins/import?on_conflict=replace')
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.method).toBe('POST')
+    const form = init.body as FormData
+    expect(form).toBeInstanceOf(FormData)
+    const sent = form.get('file') as File
+    expect(sent.name).toBe('memory.bidplugin.zip')
+    expect(await sent.text()).toBe('zip')
+    expect(created.created).toBe(true)
+    expect(created.plugin.name).toBe('memory')
+    // 归一化仍然生效：越界的资源上限被 clamp。
+    expect(created.plugin.mem_limit_mb).toBe(PLUGIN_MEM_LIMIT.max)
+
+    await importPluginPackage(file, 'skip')
+    expect(fetchMock.mock.calls[1][0]).toBe('/admin/plugins/import?on_conflict=skip')
+  })
+
+  it('reports an upgrade on 200 and surfaces the backend detail on failure', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({ id: 'p-9', name: 'memory', transport: 'stdio' }, 200),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const file = new File(['zip'], 'memory.bidplugin.zip', { type: 'application/zip' })
+    const result = await importPluginPackage(file)
+    expect(result.created).toBe(false)
+    expect(result.plugin.id).toBe('p-9')
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+        jsonResponse({ detail: '已存在同名插件，且选择了跳过' }, 409),
+      ),
+    )
+    await expect(importPluginPackage(file, 'skip')).rejects.toMatchObject({
+      status: 409,
+      message: '已存在同名插件，且选择了跳过',
+    })
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+        jsonResponse({ detail: '插件包过大' }, 400),
+      ),
+    )
+    await expect(importPluginPackage(file)).rejects.toBeInstanceOf(ApiError)
   })
 })

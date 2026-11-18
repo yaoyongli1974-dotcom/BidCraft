@@ -3593,7 +3593,8 @@
 .plugin-row {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 188px 206px;
+  /* 行内操作新增「导出包」，操作列加宽 30px 让四个控件仍在一行。 */
+  grid-template-columns: minmax(0, 1fr) 188px 236px;
   gap: 12px 14px;
   align-items: start;
   padding: 13px 17px;

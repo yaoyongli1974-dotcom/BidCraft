@@ -61,6 +61,8 @@ stdio 插件子进程受资源限制：内存上限（`mem_limit_mb`，64–4096
 | `DELETE /admin/plugins/{id}` | `{"deleted": true, "id": ...}` |
 | `POST /admin/plugins/{id}/test` | `{ok, message, tools: [工具名]}`，同时写 `last_test_*`；失败 `ok=false` 不返回 5xx |
 | `GET /admin/plugins/catalog` | 预设模板（name/description/transport/command/args/url） |
+| `GET /admin/plugins/{id}/package` | 导出 `.bidplugin.zip`（内含 `manifest.json`） |
+| `POST /admin/plugins/import` | multipart `file` 上传插件包；`on_conflict=replace`（默认）/`skip`；新建 201、覆盖升级 200、skip 冲突 409；包非法 400 |
 
 ```bash
 curl -b cookie.txt -X POST http://127.0.0.1:8000/admin/plugins \
@@ -72,7 +74,18 @@ curl -b cookie.txt -X POST http://127.0.0.1:8000/admin/plugins \
 
 `args` / `tool_allowlist` 接受数组、JSON 文本或逗号分隔字符串；`env` 接受 JSON 对象
 或 JSON 文本（管理端表单可以直接提交文本）。所有变更写审计
-`plugin.create/update/delete/test`（`project_id = NULL`）。
+`plugin.create/update/delete/test/import`（`project_id = NULL`）。
+
+## 插件包（.bidplugin）
+
+导出/导入使用 zip 包，固定含 `manifest.json`（`format="bidcraft-plugin"`、`version=1`）：
+name/transport/command/args/env/url/enabled/tool_allowlist/mem_limit_mb/cpu_seconds。
+
+- 包 ≤5MB；manifest 非法（format/transport/缺 name/超限等）→ 400；导入端校验比在线表单
+  更紧且**拒绝而非截断**（args ≤20 项/每项 ≤200、env ≤40 键/键 ≤60/值 ≤200、
+  allowlist ≤200 项/每项 ≤120、command/url ≤500）；仅资源限制走 clamp。
+- 同名默认 `on_conflict=replace` 覆盖升级（enabled=True 时清零失败计数）；`skip` 冲突 409。
+- **env 随包明文导出**：分享前检查并剔除密钥；导入后建议重新「测试」确认连通性。
 
 ## 聚合行为
 
@@ -142,4 +155,6 @@ export BIDCRAFT_PLUGIN_TIMEOUT=45
 非零退出/进程回收）、http（`httpx.MockTransport` 验证握手顺序与错误）、
 管理 API CRUD/409/400/403/test 写 `last_test_*`/catalog/审计、
 MCP 聚合（前缀、allowlist、失败跳过、只读拒绝、调用路由）。
+`tests/test_plugin_sandbox.py` 覆盖资源限制 clamp 与 preexec 沙箱、临时目录清理；
+`tests/test_plugin_pack.py` 覆盖插件包导出/导入/升级/skip 冲突/非法包校验/审计。
 测试不依赖 `npx`/`uvx`。

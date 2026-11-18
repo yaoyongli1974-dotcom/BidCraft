@@ -201,6 +201,91 @@ def allows(plugin: Any, tool_name: str) -> bool:
     return not ref.tool_allowlist or tool_name in ref.tool_allowlist
 
 
+def plugin_name(value: Any) -> str:
+    """插件名规范化：去空白、非空、≤60 字符、不含双下划线（工具名前缀分隔符）。
+
+    与管理端表单同规则；非法时抛 ``ValueError``，由调用方决定转成什么状态码。
+    """
+    name = str(value or "").strip()
+    if not name:
+        raise ValueError("插件名称不能为空")
+    if len(name) > 60:
+        raise ValueError("插件名称不能超过 60 个字符")
+    if "__" in name:
+        raise ValueError("插件名称不能包含双下划线（用于工具名前缀分隔）")
+    return name
+
+
+def plugin_transport(value: Any, *, default: str = "stdio") -> str:
+    transport = str(value or default).strip().lower()
+    if transport not in {"stdio", "http"}:
+        raise ValueError("transport 只能是 stdio/http")
+    return transport
+
+
+def plugin_validate(transport: str, command: str, url: str) -> None:
+    if transport == "stdio" and not command:
+        raise ValueError("stdio 插件必须填写 command")
+    if transport == "http":
+        if not url:
+            raise ValueError("http 插件必须填写 url")
+        if not url.startswith(("http://", "https://")):
+            raise ValueError("插件 url 必须以 http:// 或 https:// 开头")
+
+
+def plugin_items(
+    value: Any, *, field: str, limits: int = 64, item_max: int | None = 200
+) -> list[str]:
+    """接受数组、JSON 文本或逗号分隔字符串，去空去重后返回。
+
+    ``item_max`` 为 None 时不截断单项，交给调用方自行判定长度是否非法。
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError:
+            decoded = [part.strip() for part in text.split(",")]
+        value = decoded
+    if not isinstance(value, list):
+        raise ValueError(  # noqa: TRY004 - API 统一转 400
+            f"{field} 必须是数组、JSON 文本或逗号分隔字符串"
+        )
+    items: list[str] = []
+    for item in value:
+        if item is None:
+            continue
+        text = str(item).strip()
+        if text and text not in items:
+            items.append(text[:item_max] if item_max else text)
+    return items[:limits]
+
+
+def plugin_env(value: Any, *, field: str = "env") -> dict[str, str]:
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{field} 必须是 JSON 对象") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"{field} 必须是 JSON 对象")  # noqa: TRY004 - API 统一转 400
+    env: dict[str, str] = {}
+    for key, item in value.items():
+        name = str(key).strip()[:80]
+        if name:
+            env[name] = str(item)[:2000]
+    return env
+
+
 def plugin_payload(row: Any) -> dict[str, Any]:
     """管理端序列化；env 可能含密钥，此 payload 只允许超管路由返回。"""
     ref = snapshot(row)

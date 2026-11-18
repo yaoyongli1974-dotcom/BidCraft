@@ -2420,6 +2420,80 @@ export async function testPlugin(id: string): Promise<PluginTestResult> {
   }
 }
 
+/** 同名插件已存在时的处理方式：覆盖升级或直接跳过。 */
+export type PluginImportConflict = 'replace' | 'skip'
+
+export interface PluginImportResult {
+  plugin: Plugin
+  /** 后端 201 表示新建，200 表示升级；用于给出「已创建/已升级」提示。 */
+  created: boolean
+}
+
+/** 下载单个插件包：后端返回 zip 附件，文件名以 Content-Disposition 为准。 */
+export async function exportPluginPackage(
+  id: string,
+  name?: string,
+): Promise<{ blob: Blob; filename: string }> {
+  const path = `/admin/plugins/${encodeURIComponent(id)}/package`
+  let response: Response
+  try {
+    response = await fetch(path, { credentials: 'same-origin', headers: { Accept: '*/*' } })
+  } catch {
+    throw new ApiError(
+      0,
+      null,
+      '无法连接本地服务。请确认 BidCraft 后端已启动，且当前页面由它托管。',
+    )
+  }
+  if (!response.ok) {
+    if (response.status === 401) notifyUnauthorized(path)
+    throw await readError(response)
+  }
+  const blob = await response.blob()
+  // 插件名可能带路径分隔符或引号：兜底文件名只保留安全字符。
+  const safeName = (name || '').trim().replace(/[\\/:*?"<>|]+/g, '_')
+  const filename =
+    filenameFromDisposition(response.headers.get('Content-Disposition')) ||
+    `${safeName || 'plugin'}.bidplugin.zip`
+  return { blob, filename }
+}
+
+/**
+ * 导入 .bidplugin 插件包（multipart 字段 `file`）。用 fetch 而不是 uploadForm，
+ * 因为需要读取 201/200 区分「新建/升级」，文件本身受后端 5MB 限制、无需上传进度。
+ */
+export async function importPluginPackage(
+  file: File,
+  onConflict: PluginImportConflict = 'replace',
+): Promise<PluginImportResult> {
+  const path = `/admin/plugins/import?on_conflict=${encodeURIComponent(onConflict)}`
+  const form = new FormData()
+  form.append('file', file, file.name)
+  let response: Response
+  try {
+    response = await fetch(path, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { Accept: 'application/json' },
+      body: form,
+    })
+  } catch {
+    throw new ApiError(
+      0,
+      null,
+      '无法连接本地服务。请确认 BidCraft 后端已启动，且当前页面由它托管。',
+    )
+  }
+  if (!response.ok) {
+    if (response.status === 401) notifyUnauthorized(path)
+    // readError 会取出后端的中文 detail（包非法 400 / 同名 skip 409）。
+    throw await readError(response)
+  }
+  const created = response.status === 201
+  const data = (await response.json()) as unknown
+  return { plugin: normalizePlugin(data), created }
+}
+
 function normalizePluginCatalogEntry(value: unknown): PluginCatalogEntry | null {
   if (!value || typeof value !== 'object') return null
   const raw = value as Record<string, unknown>

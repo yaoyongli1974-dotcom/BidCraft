@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import {
   AlertTriangle,
   CheckCircle2,
+  Download,
   Loader2,
   Pencil,
   Plug,
@@ -9,6 +10,7 @@ import {
   RefreshCw,
   ShieldCheck,
   Trash2,
+  Upload,
   X,
   XCircle,
 } from 'lucide-react'
@@ -16,8 +18,11 @@ import type { Plugin, PluginCatalogEntry, PluginTestResult } from '../../lib/typ
 import {
   ApiError,
   deletePlugin,
+  downloadBlob,
+  exportPluginPackage,
   getPluginCatalog,
   getPlugins,
+  importPluginPackage,
   messageOf,
   testPlugin,
   updatePlugin,
@@ -80,6 +85,9 @@ export function AdminPluginsTab() {
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [testResults, setTestResults] = useState<Record<string, PluginTestResult>>({})
   const [actionError, setActionError] = useState<string | null>(null)
+  const [importing, setImporting] = useState(false)
+  const [exportingId, setExportingId] = useState<string | null>(null)
+  const importInputRef = useRef<HTMLInputElement>(null)
 
   const load = useCallback(async (silent: boolean) => {
     if (silent) setRefreshing(true)
@@ -239,6 +247,60 @@ export function AdminPluginsTab() {
     })
   }
 
+  const importPackage = async (file: File) => {
+    if (importing) return
+    setImporting(true)
+    setActionError(null)
+    try {
+      // 同名默认按 replace 覆盖升级；skip 语义由后端以 409 返回。
+      const { plugin, created } = await importPluginPackage(file)
+      toast.success(
+        created ? '插件已创建' : '插件已升级',
+        `${plugin.name} · 来自 ${file.name}`,
+      )
+      // 导入后配置可能变化，旧的工具数与测试结果不再可信。
+      setTestResults({})
+      void load(true)
+    } catch (err) {
+      const message = messageOf(err)
+      setActionError(message)
+      toast.error('导入插件包失败', message)
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  const onImportSelected = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    // 清空选择，保证同一个文件失败后可以再次选中。
+    event.target.value = ''
+    if (!file || importing) return
+    if (!/\.zip$/i.test(file.name)) {
+      const message = '请选择 .zip 格式的插件包（.bidplugin.zip）。'
+      setActionError(message)
+      toast.error('导入插件包失败', message)
+      return
+    }
+    void importPackage(file)
+  }
+
+  const exportPackage = async (plugin: Plugin) => {
+    if (exportingId) return
+    setExportingId(plugin.id)
+    setActionError(null)
+    try {
+      const { blob, filename } = await exportPluginPackage(plugin.id, plugin.name)
+      downloadBlob(blob, filename)
+      toast.success('插件包已导出', `${plugin.name} · ${filename}`)
+    } catch (err) {
+      const message = messageOf(err)
+      setActionError(message)
+      toast.error('导出插件包失败', message)
+    } finally {
+      setExportingId(null)
+    }
+  }
+
   return (
     <div className="admin-plugins">
       <div className="admin-tab-head">
@@ -320,6 +382,24 @@ export function AdminPluginsTab() {
               <span className="admin-list-caption">
                 对话中显示为 <span className="mono">插件名__工具名</span>
               </span>
+              <input
+                ref={importInputRef}
+                type="file"
+                accept=".zip,application/zip,application/x-zip-compressed"
+                className="sr-only"
+                aria-label="选择插件包文件"
+                onChange={onImportSelected}
+              />
+              <Button
+                variant="secondary"
+                size="sm"
+                icon={<Upload size={13} />}
+                loading={importing}
+                disabled={deletingId !== null}
+                onClick={() => importInputRef.current?.click()}
+              >
+                {importing ? '正在导入…' : '导入插件包'}
+              </Button>
               <button
                 type="button"
                 className="text-btn"
@@ -521,6 +601,17 @@ export function AdminPluginsTab() {
                       >
                         编辑
                       </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        icon={<Download size={12} />}
+                        loading={exportingId === plugin.id}
+                        disabled={Boolean(testingId) || deletingId !== null}
+                        onClick={() => void exportPackage(plugin)}
+                        title={`导出 ${plugin.name}.bidplugin.zip`}
+                      >
+                        导出包
+                      </Button>
                       <IconButton
                         label={`删除插件 ${plugin.name}`}
                         tone="danger"
@@ -551,6 +642,8 @@ export function AdminPluginsTab() {
           <div className="admin-footnote">
             测试会真实启动一次子进程或请求该端点，超时与握手失败会以服务端返回的中文原因显示在行内。
             插件配置只写入本机数据库；停用的插件不会参与对话的工具聚合，但测试仍可正常使用。
+            「导入插件包」读取 <span className="mono">.bidplugin.zip</span>，同名插件默认按包内配置覆盖升级；
+            导出的包含命令、参数与环境变量，分享前请确认其中没有密钥。
           </div>
         </>
       )}

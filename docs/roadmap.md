@@ -18,7 +18,7 @@
 | 多包件共享台账 | ✅ | `models.py`、`boq.py`、`/projects/{ref}/packages`、`web/` | 同项目多包件独立清单快照与报价、事实台账共享不复制；首包自动收养旧快照；分包导出文件名含包件名 |
 | 企业定额库与调价 | ✅ | `models.py`、`boq.py`、`/admin/quotas`、`web/` | 定额 CRUD/模糊匹配；清单定额套用 dry-run 预览与按勾选写入；项目调价策略（系数/小数位）与按系数调价；报价汇总增调整后合计 |
 | 回归校准 | ✅ | `calibrate.py`、`bidcraft calibrate`、`tests/fixtures/regression/` | 只读扫描目录统计字段命中/必填命中率/材料行/OCR 需求；真实招标别名增量；仿真 fixtures 与报告 JSON；不写库不建项目 |
-| 插件市场（MCP 客户端） | ✅ | `plugins.py`、`/admin/plugins`、`mcp.py`、`docs/plugins.md` | 超管注册 stdio/http MCP 插件、连通性测试与工具白名单；`bidcraft mcp` 聚合插件工具（`{插件}__{工具}` 前缀），单插件失败跳过，只读模式拒绝插件调用 |
+| 插件市场（MCP 客户端） | ✅ | `plugins.py`、`plugin_pack.py`、`/admin/plugins`、`mcp.py`、`docs/plugins.md` | 超管注册 stdio/http MCP 插件、连通性测试与工具白名单；`bidcraft mcp` 聚合插件工具（`{插件}__{工具}` 前缀），单插件失败跳过，只读模式拒绝插件调用；`.bidplugin` 插件包导入/导出与同名覆盖升级 |
 | 报价版本与汇率 | ✅ | `models.py`、`boq.py`、`/projects/{ref}/boq/versions`、`web/` | 报价版本快照/恢复/删除（上限 20、包件隔离）；版本与当前清单或另一版本 diff（新增/移除/变动 + 两侧汇总）；税率与币种、汇率折算人民币含税合计；导出增税率/税额/汇率/人民币合计行 |
 | 报价审批流 | ✅ | `boq.py`、`/projects/{ref}/boq/versions/{id}/submit|review|unapprove`、`web/` | 版本状态机 draft→submitted→approved/rejected：可编辑成员提交（备注），负责人/超管定稿或驳回（意见），approved 可撤销回草稿；同包件至多一个定稿、定稿新版自动退旧版；rejected 重提清空上轮意见；审计 quote.submit/approve/reject/unapprove；前端状态徽标与双版本并排审阅 |
 | 微信开放平台管理 | ✅ | `models.py`、`wechat.py`、`/admin/wechat`、`web/` | 管理端配置 AppID/AppSecret（加密存库不回显）、回调地址、启用与模拟模式；连通性测试；保存即热生效（`/health.wechat_login` 与登录页入口）；审计 `wechat.config` |
@@ -26,7 +26,7 @@
 | C7 可插拔 Agent / API | ✅ | `generation/agent.py`、`bidcraft/api.py`、`bidcraft/mcp.py` | OpenAI 兼容端点；FastAPI + 后台生成任务；MCP stdio 服务 |
 | C8 行业包 | ✅ 8 个行业包 + 通用基包 | `bidcraft/resources/packages/*.yaml` | 弱电（综合布线/安防/BA）+ 消防、安装、土建、暖通、装修；管理员可在 `/admin` 维护 YAML 覆盖包 |
 | 规则包管理 | ✅ | `rules/store.py`、`/admin/rule-packages`、`web/` | 超级管理员创建/修改/隐藏/恢复规则包；新建时可填写名称、唯一包名并选择工程类型；内置包只读，用户覆盖写入 `BIDCRAFT_HOME/packages`；保存前校验继承、字段、大纲与核对表达式 |
-| C9 回归/部署 | ✅ 基本 | `tests/`、`Dockerfile`、`web/` | 375 个测试；Docker 多阶段构建 Web（含 OCR 依赖）；本地/局域网两种部署 |
+| C9 回归/部署 | ✅ 基本 | `tests/`、`Dockerfile`、`web/` | 388 个测试；Docker 多阶段构建 Web（含 OCR 依赖）；本地/局域网两种部署 |
 | SSE 流式进度 | ✅ | `bidcraft/jobs.py`、`/jobs/{id}/events`、`web/` | 章节/逐字事件持久化；Last-Event-ID 断线续传；SSE 失败回退轮询；刷新后重新挂接任务 |
 | Excel 清单双向对齐 | ✅ | `boq.py`、`export/boq_xlsx.py`、`/projects/{ref}/boq`、`web/` | 清单导入与表头识别、材料模糊匹配、缺项/多项/数量·单位·规格差异、差异回写、响应表导出 |
 | 清单报价 | ✅ | `boq.py`、`/projects/{ref}/boq/price`、`export/boq_xlsx.py`、`web/` | 逐行单价录入/清除、按清单数量计算合价、已报价/未报价/缺数量统计、报价汇总与响应表价格列；不自动生成价格 |
@@ -48,7 +48,7 @@
 
 ## 明确未做（按优先级）
 
-1. **插件自动安装与系统级隔离**：stdio 子进程已受资源限制（内存/CPU/umask/一次性工作目录），
+1. **插件远程市场自动安装与系统级隔离**：`.bidplugin` 本地插件包导入/导出与同名覆盖升级已支持；
    但仍在服务端操作系统用户下运行，未做容器或网络级隔离，也没有从远程市场自动安装的流程。
 2. **真实招标件持续回归基线扩充**：`bidcraft calibrate` 已能跑真实目录，但仓库内只有仿真
    fixtures；真实件需用户自行提供并持续积累成基线。
@@ -57,4 +57,4 @@
 
 1. 用真实招标件跑 `bidcraft calibrate`，按字段命中率与别名缺口扩充回归基线与 `FIELD_ALIAS_AUGMENT`。
 2. 报价与文档进阶：审批多级流转、真实招标件回归基线扩充。
-3. 插件自动安装：提供受控的插件安装与升级流程（远程市场校验、依赖声明与回滚）。
+3. 插件远程市场：受控的自动安装与升级流程（远程源校验、依赖声明与回滚）。

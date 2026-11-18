@@ -222,7 +222,7 @@ export BIDCRAFT_WECHAT_PAY_MOCK=1         # 本地演示支付
 | 批量操作与标段 | ✅ | 项目列表多选后批量核对/批量导出（docx/md/xlsx，后台 Job，zip 打包下载）；项目可填标段/包件并按标段筛选；`PATCH /projects/{ref}` 改名称/标段 |
 | 多包件共享台账 | ✅ | 项目内多包件/标段独立清单快照与分包导出（`{项目名}-{包件名}-清单响应表.xlsx`），台账材料项目级共享不复制；首包自动收养既有清单；包件增删改与权限审计 |
 | 企业定额库与调价 | ✅ | 超管维护企业定额（名称/规格/单位/单价/分类），清单按相似度匹配定额并 dry-run 预览后套用单价；项目调价策略（系数 0.1–10、小数位 0–4）与按系数调价；报价汇总含调整后合计 |
-| 插件市场（MCP 客户端） | ✅ | 超管注册 stdio/http MCP 插件（预设 filesystem/fetch/memory/time），连通性测试与工具白名单；`bidcraft mcp` 聚合插件工具（`{插件}__{工具}` 前缀），只读模式拒绝插件写调用；stdio 子进程受资源限制（内存 64–4096 MB 默认 512、CPU 1–120 秒默认 10、umask 077、一次性临时工作目录）；见 `docs/plugins.md` |
+| 插件市场（MCP 客户端） | ✅ | 超管注册 stdio/http MCP 插件（预设 filesystem/fetch/memory/time），连通性测试与工具白名单；`bidcraft mcp` 聚合插件工具（`{插件}__{工具}` 前缀），只读模式拒绝插件写调用；stdio 子进程受资源限制（内存 64–4096 MB 默认 512、CPU 1–120 秒默认 10、umask 077、一次性临时工作目录）；`.bidplugin` 插件包导入/导出（同名默认覆盖升级）；见 `docs/plugins.md` |
 | 回归校准 | ✅ | `bidcraft calibrate <dir>` 只读扫描真实/仿真招标文件，统计字段命中、必填命中率、材料行数与 OCR 需求，输出 JSON 报告；不写库不建项目；见 `docs/calibration.md` |
 | 规则包管理 | ✅ | 超级管理员在 `/admin` 创建/修改/隐藏/恢复 YAML 规则包；新建时可填写规则包名称、唯一包名并选择工程类型，YAML 自动同步；内置包只读，用户覆盖写入 `BIDCRAFT_HOME/packages`；保存前校验继承、字段、大纲与核对表达式；新建项目按弱电/消防/安装/土建/暖通/装修分组 |
 | SSE 流式进度 | ✅ | 后台生成任务持久化章节/逐字事件，`Last-Event-ID` 断线续传；刷新后自动重新挂接，SSE 不可用时回退轮询 |
@@ -237,7 +237,7 @@ export BIDCRAFT_WECHAT_PAY_MOCK=1         # 本地演示支付
 | 微信开放平台管理 | ✅ | 管理控制台配置 AppID/AppSecret（加密存库不回显）、回调地址、启用与模拟模式、连通性测试；保存即热生效，登录页自动出现扫码入口 |
 | 企业术语库 | ✅ | 管理端维护「禁用表述 / 建议替换」术语；项目核对自动产出 `TERM-###` 问题（禁用词 major、替换建议 minor，含原文证据与建议） |
 
-未做（按评估建议留到完整版）：插件自动安装与系统级隔离（子进程已受资源限制，但无容器/网络隔离与远程市场自动安装）、真实招标件的持续回归基线扩充。
+未做（按评估建议留到完整版）：插件远程市场自动安装与系统级隔离（受控本地插件包导入/导出已支持；无容器/网络隔离）、真实招标件的持续回归基线扩充。
 
 ## 目录
 
@@ -348,7 +348,8 @@ DOCX 图注编号与版心宽度、批量生成默认风格尺寸；`tests/test_
 `tests/test_security.py`、`tests/test_wechatpay.py`、`tests/test_jobs_unit.py`、
 `tests/test_store_unit.py` 覆盖上传限额/SSRF/分页等加固、在线备份、异步重建索引、
 加密与支付签名、任务工具与规则包存储；`tests/test_quote_approval.py`、`tests/test_plugin_sandbox.py`
-覆盖报价审批状态机与插件资源限制沙箱（当前全量 **375 passed**）。
+覆盖报价审批状态机与插件资源限制沙箱；`tests/test_plugin_pack.py` 覆盖插件包导出/导入/
+升级/冲突与非法包校验（当前全量 **388 passed**）。
 
 前端验证：`cd web && npm run build`（TypeScript 编译 + Vite 产物输出到
 `bidcraft/web_dist`），随后 `bidcraft serve --open` 做浏览器全流程验收。

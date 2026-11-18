@@ -7,7 +7,6 @@ controls when serving a team.
 """
 
 import io
-import json
 import logging
 import math
 import re
@@ -34,6 +33,7 @@ from . import (
     jobs,
     knowledge,
     model_config,
+    plugin_pack,
     plugins,
     terms,
     wechat,
@@ -2204,82 +2204,35 @@ def create_app():
 
     # --------------------------------------------------------------- plugins
     def plugin_name(value: str | None) -> str:
-        name = (value or "").strip()
-        if not name:
-            raise HTTPException(status_code=400, detail="插件名称不能为空")
-        if len(name) > 60:
-            raise HTTPException(status_code=400, detail="插件名称不能超过 60 个字符")
-        if "__" in name:
-            raise HTTPException(
-                status_code=400, detail="插件名称不能包含双下划线（用于工具名前缀分隔）"
-            )
-        return name
+        try:
+            return plugins.plugin_name(value)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def plugin_transport(value: str | None, *, default: str = "stdio") -> str:
-        transport = (value or default).strip().lower()
-        if transport not in {"stdio", "http"}:
-            raise HTTPException(status_code=400, detail="transport 只能是 stdio/http")
-        return transport
+        try:
+            return plugins.plugin_transport(value, default=default)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def plugin_validate(transport: str, command: str, url: str) -> None:
-        if transport == "stdio" and not command:
-            raise HTTPException(status_code=400, detail="stdio 插件必须填写 command")
-        if transport == "http":
-            if not url:
-                raise HTTPException(status_code=400, detail="http 插件必须填写 url")
-            if not url.startswith(("http://", "https://")):
-                raise HTTPException(
-                    status_code=400, detail="插件 url 必须以 http:// 或 https:// 开头"
-                )
+        try:
+            plugins.plugin_validate(transport, command, url)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def plugin_items(value, *, field: str, limits: int = 64) -> list[str]:
         """接受数组、JSON 文本或逗号分隔字符串，去空去重后返回。"""
-        if value is None:
-            return []
-        if isinstance(value, str):
-            text = value.strip()
-            if not text:
-                return []
-            try:
-                decoded = json.loads(text)
-            except json.JSONDecodeError:
-                decoded = [part.strip() for part in text.split(",")]
-            value = decoded
-        if not isinstance(value, list):
-            raise HTTPException(
-                status_code=400, detail=f"{field} 必须是数组、JSON 文本或逗号分隔字符串"
-            )
-        items: list[str] = []
-        for item in value:
-            if item is None:
-                continue
-            text = str(item).strip()
-            if text and text not in items:
-                items.append(text[:200])
-        return items[:limits]
+        try:
+            return plugins.plugin_items(value, field=field, limits=limits)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def plugin_env(value, *, field: str = "env") -> dict[str, str]:
-        if value is None:
-            return {}
-        if isinstance(value, str):
-            text = value.strip()
-            if not text:
-                return {}
-            try:
-                decoded = json.loads(text)
-            except json.JSONDecodeError as exc:
-                raise HTTPException(
-                    status_code=400, detail=f"{field} 必须是 JSON 对象"
-                ) from exc
-            value = decoded
-        if not isinstance(value, dict):
-            raise HTTPException(status_code=400, detail=f"{field} 必须是 JSON 对象")
-        env: dict[str, str] = {}
-        for key, item in value.items():
-            name = str(key).strip()[:80]
-            if name:
-                env[name] = str(item)[:2000]
-        return env
+        try:
+            return plugins.plugin_env(value, field=field)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/admin/plugins/catalog")
     def plugin_catalog(request: Request) -> list[dict[str, Any]]:
@@ -2435,6 +2388,70 @@ def create_app():
                     },
                 )
         return {"ok": ok, "message": message, "tools": tools}
+
+    @app.get("/admin/plugins/{plugin_id}/package")
+    def export_plugin_package(plugin_id: str, request: Request) -> Response:
+        """导出 .bidplugin 插件包（zip 附件下载）。"""
+        require_super(request)
+        with session_scope() as db:
+            row = db.get(Plugin, plugin_id)
+            if row is None:
+                raise HTTPException(status_code=404, detail="插件不存在")
+            data = plugin_pack.export_package(row)
+            name = row.name
+        filename = f"{name}.bidplugin.zip"
+        # HTTP 头只能放 ASCII：非 ASCII 名走 RFC 5987 的 filename*。
+        ascii_name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._-") or "plugin"
+        disposition = (
+            f'attachment; filename="{ascii_name}.bidplugin.zip"; '
+            f"filename*=UTF-8''{quote(filename, safe='')}"
+        )
+        return Response(
+            content=data,
+            media_type="application/zip",
+            headers={"Content-Disposition": disposition},
+        )
+
+    @app.post("/admin/plugins/import")
+    async def import_plugin_package(
+        request: Request,
+        response: Response,
+        file: UploadFile = File(...),
+        on_conflict: str = "replace",
+    ) -> dict[str, Any]:
+        """导入插件包：新建 201，同名升级 200，skip 冲突 409。"""
+        require_super(request)
+        if on_conflict not in {"replace", "skip"}:
+            raise HTTPException(status_code=400, detail="on_conflict 只能是 replace/skip")
+        data = await file.read()
+        await file.close()
+        if len(data) > plugin_pack.MAX_PACKAGE_BYTES:
+            raise HTTPException(status_code=400, detail="插件包过大（超过 5MB）")
+        try:
+            manifest = plugin_pack.parse_package(data)
+            with session_scope() as db:
+                row, created = plugin_pack.apply_manifest(
+                    db, manifest, on_conflict=on_conflict
+                )
+                payload = plugins.plugin_payload(row)
+                audit(
+                    db,
+                    None,
+                    "plugin.import",
+                    {
+                        "plugin_id": row.id,
+                        "name": row.name,
+                        "transport": row.transport,
+                        "created": created,
+                        "updated": not created,
+                    },
+                )
+        except plugin_pack.PluginPackConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        response.status_code = 201 if created else 200
+        return payload
 
     @app.get("/admin/billing")
     def admin_billing(request: Request, limit: int = 50) -> dict[str, Any]:
