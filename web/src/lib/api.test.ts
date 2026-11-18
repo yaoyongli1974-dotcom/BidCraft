@@ -13,6 +13,7 @@ import {
   createPlugin,
   createTerm,
   deleteBoqVersion,
+  duplicateProject,
   errorDetailText,
   exportPluginPackage,
   getBoqVersion,
@@ -573,6 +574,100 @@ describe('boq quote versions', () => {
     expect(normalizeApprovalChain(undefined)).toEqual([])
     expect(normalizeApprovalChain('u-1')).toEqual([])
     expect(normalizeApprovalChain([])).toEqual([])
+  })
+})
+
+describe('project duplicate (R22)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const jsonResponse = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+  it('posts to the duplicate endpoint with both include flags defaulting to true', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse(
+        {
+          id: 'p-new',
+          name: '项目 副本',
+          package: 'pkg-1',
+          status: 'draft',
+          my_role: 'owner',
+        },
+        201,
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const created = await duplicateProject('p/1')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0][0]).toBe('/projects/p%2F1/duplicate')
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.method).toBe('POST')
+    // name 缺省不发送，由后端默认「源名 副本」。
+    expect(JSON.parse(String(init.body))).toEqual({
+      include_boq: true,
+      include_images: true,
+    })
+    expect(created).toMatchObject({ id: 'p-new', name: '项目 副本', my_role: 'owner' })
+  })
+
+  it('sends a custom name and explicit false for both include flags', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({ id: 'p-new', name: '复用模板', package: 'pkg-1', status: 'draft' }, 201),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await duplicateProject('proj-1', {
+      name: '复用模板',
+      includeBoq: false,
+      includeImages: false,
+    })
+    expect(fetchMock.mock.calls[0][0]).toBe('/projects/proj-1/duplicate')
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({
+      name: '复用模板',
+      include_boq: false,
+      include_images: false,
+    })
+  })
+
+  it('keeps the other flag true when only one include flag is disabled', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({ id: 'p-new', name: '项目 副本', package: 'pkg-1', status: 'draft' }, 201),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await duplicateProject('proj-1', { includeImages: false })
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(JSON.parse(String(init.body))).toEqual({
+      include_boq: true,
+      include_images: false,
+    })
+  })
+
+  it('surfaces 400/403 Chinese detail through ApiError', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ detail: '项目名称不能为空' }, 400))
+      .mockResolvedValueOnce(jsonResponse({ detail: '只读成员不能复制项目' }, 403))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(duplicateProject('proj-1', { name: '  ' })).rejects.toMatchObject({
+      name: 'ApiError',
+      status: 400,
+      message: '项目名称不能为空',
+    })
+    await expect(duplicateProject('proj-1')).rejects.toMatchObject({
+      name: 'ApiError',
+      status: 403,
+      message: '只读成员不能复制项目',
+    })
   })
 })
 

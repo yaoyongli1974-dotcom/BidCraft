@@ -67,6 +67,7 @@ import type {
   QuoteVersionStatus,
   Project,
   ProjectDetail,
+  ProjectDuplicateInput,
   QuotaFillResult,
   QuotaInput,
   QuotaItem,
@@ -722,6 +723,23 @@ export const createProject = (name: string, pkg: string, bidSection = '') =>
   request<Project>(
     '/projects',
     jsonBody({ name, package: pkg, bid_section: bidSection.trim() }),
+  )
+
+/**
+ * R22 项目复制（模板复用）：POST /projects/{ref}/duplicate → 201，
+ * 返回与 POST /projects 同形状的项目 payload（复制者成为新项目 owner）。
+ * name 缺省时后端默认「源名 副本」；include_boq/include_images 缺省 true。
+ * 台账/大纲/正文/源文件始终复制；报价版本与审批记录不复制。
+ * 400 名称非法（detail 中文）、403 只读成员，错误经 ApiError/messageOf 透出。
+ */
+export const duplicateProject = (ref: string, input: ProjectDuplicateInput = {}) =>
+  request<Project>(
+    `/projects/${encodeURIComponent(ref)}/duplicate`,
+    jsonBody({
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      include_boq: input.includeBoq ?? true,
+      include_images: input.includeImages ?? true,
+    }),
   )
 
 /**

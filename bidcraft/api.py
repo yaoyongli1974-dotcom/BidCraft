@@ -42,6 +42,7 @@ from . import (
 from .config import settings
 from .context import current_user, set_current_user
 from .db import init_db, session_scope
+from .duplicate import duplicate_project
 from .export.docx import export_docx, export_markdown
 from .generation.agent import ModelClient
 from .generation.outline import build_outline, load_outline, save_outline
@@ -117,6 +118,14 @@ class ProjectUpdate(BaseModel):
     # [{approvers: [用户id], mode?: "all"|"any"}]（≤5 级，仅 owner 可改）；
     # 空列表=单级负责人审批。双格式解析与校验在 handler 内完成。
     approval_chain: list[str] | list[dict[str, Any]] | None = None
+
+
+class ProjectDuplicate(BaseModel):
+    # R22 项目复制：name 缺省/空白 → 「源项目名 副本」；长度校验在
+    # duplicate_project 内完成（超 255 → ValueError → 400，而非 422）。
+    name: str | None = None
+    include_boq: bool = True
+    include_images: bool = True
 
 
 class BatchIdsRequest(BaseModel):
@@ -3456,6 +3465,47 @@ def create_app():
             audit(db, None, "project.delete", {"name": project_name, "project_id": project_id})
         shutil.rmtree(project_dir, ignore_errors=True)
         return {"deleted": True, "id": project_id}
+
+    @app.post("/projects/{ref}/duplicate", status_code=201)
+    def duplicate_project_route(ref: str, payload: ProjectDuplicate) -> dict[str, Any]:
+        """R22 项目复制（模板复用）：台账/大纲/正文始终复制，BOQ 与配图可选。
+
+        报价版本与审批记录、核对问题、任务、交付、成员授权、审计日志不复制；
+        复制者成为新项目 owner。复制失败时清理已创建的新项目目录。
+        """
+
+        with session_scope() as db:
+            project, _role = _project(db, ref)
+            _require_write(_role)
+            try:
+                new = duplicate_project(
+                    db,
+                    project,
+                    name=payload.name,
+                    owner_id=(current_user() or {}).get("id"),
+                    include_boq=payload.include_boq,
+                    include_images=payload.include_images,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except Exception as exc:
+                new_id = getattr(exc, "duplicate_project_id", "")
+                if new_id:
+                    shutil.rmtree(settings.home / "projects" / new_id, ignore_errors=True)
+                raise
+            audit(
+                db,
+                new.id,
+                "project.duplicate",
+                {
+                    "source_id": project.id,
+                    "name": new.name,
+                    "include_boq": payload.include_boq,
+                    "include_images": payload.include_images,
+                },
+            )
+            _, my_role = _project(db, new.id)
+            return _project_payload(new, _project_stats(db, new.id), my_role)
 
     # ------------------------------------------------------------- members
     def _member_payload(member: ProjectMember, user: User | None) -> dict[str, Any]:

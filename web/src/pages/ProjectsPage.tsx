@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Copy,
   Download,
   Eye,
   FileStack,
@@ -50,6 +51,7 @@ import { Button, IconButton } from '../components/Button'
 import { EmptyState, ErrorState, ProgressBar, Skeleton } from '../components/Feedback'
 import { NewProjectModal } from '../components/NewProjectModal'
 import { EditProjectModal } from '../components/EditProjectModal'
+import { DuplicateProjectModal } from '../components/DuplicateProjectModal'
 import { useToast } from '../context/useToast'
 import { useConfirm } from '../context/useConfirm'
 import { useHelp } from '../context/useHelp'
@@ -118,6 +120,7 @@ export function ProjectsPage() {
   const [report, setReport] = useState<BatchReport | null>(null)
   const [reportOpen, setReportOpen] = useState(false)
   const [editing, setEditing] = useState<Project | null>(null)
+  const [duplicating, setDuplicating] = useState<Project | null>(null)
   const selectAllRef = useRef<HTMLInputElement>(null)
 
   const projects = useMemo(() => projectsQuery.data || [], [projectsQuery.data])
@@ -660,7 +663,7 @@ export function ProjectsPage() {
             <Eye size={15} />
             <strong>只读成员</strong>
             <span>
-              可以查看现有项目、台账与正文，不能新建、删除、上传、编辑、生成、核对或导出。
+              可以查看现有项目、台账与正文，不能新建、复制、删除、上传、编辑、生成、核对或导出。
             </span>
           </div>
         )}
@@ -1008,6 +1011,7 @@ export function ProjectsPage() {
                 onToggleSelect={() => toggleSelect(project.id)}
                 onDelete={() => handleDelete(project)}
                 onEdit={() => setEditing(project)}
+                onDuplicate={() => setDuplicating(project)}
               />
             ))}
             <div className="project-table-foot">
@@ -1049,6 +1053,17 @@ export function ProjectsPage() {
           projectsQuery.refresh()
         }}
       />
+
+      <DuplicateProjectModal
+        project={duplicating}
+        onClose={() => setDuplicating(null)}
+        onDuplicated={(project) => {
+          setDuplicating(null)
+          toast.success('已创建副本', `「${project.name}」已就绪，源项目不受影响。`)
+          projectsQuery.refresh()
+          navigate(`/app/projects/${project.id}`)
+        }}
+      />
     </div>
   )
 }
@@ -1079,6 +1094,7 @@ function ProjectRow({
   onToggleSelect,
   onDelete,
   onEdit,
+  onDuplicate,
 }: {
   project: Project
   packageTitle?: string
@@ -1089,6 +1105,7 @@ function ProjectRow({
   onToggleSelect: () => void
   onDelete: () => void
   onEdit: () => void
+  onDuplicate: () => void
 }) {
   const stats = normaliseListStats(project)
   const status = projectStatus(project.status)
@@ -1100,6 +1117,9 @@ function ProjectRow({
     canWrite &&
     (!project.my_role || project.my_role === 'owner' || project.my_role === 'admin')
   const canEdit = canWrite && project.my_role !== 'viewer'
+  // R22 复制与编辑同权限：owner/editor/admin 可复制，viewer 隐藏入口；
+  // 旧后端省略 my_role 时按可写处理（与 canEdit 一致）。
+  const canDuplicate = canWrite && project.my_role !== 'viewer'
 
   return (
     <div
@@ -1199,6 +1219,14 @@ function ProjectRow({
             <span className="action-divider" aria-hidden />
             <IconButton label={`编辑项目 ${project.name}`} onClick={onEdit}>
               <Pencil size={14} />
+            </IconButton>
+          </>
+        )}
+        {canDuplicate && (
+          <>
+            <span className="action-divider" aria-hidden />
+            <IconButton label={`复制项目 ${project.name}`} onClick={onDuplicate}>
+              <Copy size={14} />
             </IconButton>
           </>
         )}

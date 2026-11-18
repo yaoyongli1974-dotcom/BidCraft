@@ -4,7 +4,7 @@
   .project-table-head,
   .project-row {
     grid-template-columns:
-      24px minmax(190px, 1.5fr) minmax(130px, 1.05fr) 90px minmax(132px, 0.85fr) 128px;
+      24px minmax(190px, 1.5fr) minmax(130px, 1.05fr) 90px minmax(132px, 0.85fr) 184px;
     gap: 13px;
   }
 

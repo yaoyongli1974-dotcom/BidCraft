@@ -2383,7 +2383,7 @@ select:focus-visible {
   display: grid;
   grid-template-columns:
     24px minmax(200px, 1.5fr) minmax(150px, 1.05fr) 96px minmax(110px, 0.75fr)
-    minmax(150px, 0.95fr) minmax(135px, 0.9fr) 94px 136px;
+    minmax(150px, 0.95fr) minmax(135px, 0.9fr) 94px 184px;
   gap: 16px;
   align-items: center;
   padding: 0 20px;

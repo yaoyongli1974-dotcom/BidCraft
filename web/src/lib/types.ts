@@ -295,6 +295,13 @@ export interface Project {
   approval_chain?: ApprovalStage[]
 }
 
+/** R22 项目复制入参：name 缺省由后端取「源名 副本」；两个开关缺省 true。 */
+export interface ProjectDuplicateInput {
+  name?: string
+  includeBoq?: boolean
+  includeImages?: boolean
+}
+
 export interface LedgerSummary {
   fields_total?: number
   fields_filled?: number

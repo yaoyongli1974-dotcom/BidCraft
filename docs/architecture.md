@@ -76,7 +76,7 @@
 |---|---|---|
 | 客户端 | React 18 + TypeScript + Vite | 项目列表与类型分组/标段筛选/批量核对导出、上传、台账校订、清单对齐与报价、大纲、章节编辑、章节配图、项目图库与配图计划、整篇配图策略、规则包管理、协作成员与审计、核对、导出 |
 | HTTP 层 | FastAPI + uvicorn | REST、静态资源托管、SPA 深链接回退、后台任务；另有 `bidcraft mcp` stdio JSON-RPC 服务供外部 Agent 接入 |
-| 领域层 | `pipeline` / `ledger` / `parsing` / `rules` / `generation` / `boq` / `images` / `plugins` / `calibrate` / `terms` / `plugin_pack` | 解析（含可选 OCR）、事实台账、规则包加载/覆盖、规则核对、清单对齐与报价（包件、定额、调价）、正文生成、配图与整篇排版策略、MCP 客户端插件（stdio/http 会话与工具调用，stdio 子进程受 RLIMIT_AS/RLIMIT_CPU/umask 0o077 与一次性临时工作目录约束）、只读回归校准、企业术语库与禁用表述核对、`.bidplugin` 插件包导出/导入校验与受控安装 |
+| 领域层 | `pipeline` / `ledger` / `parsing` / `rules` / `generation` / `boq` / `images` / `plugins` / `calibrate` / `terms` / `plugin_pack` / `duplicate` | 解析（含可选 OCR）、事实台账、规则包加载/覆盖、规则核对、清单对齐与报价（包件、定额、调价）、正文生成、配图与整篇排版策略、MCP 客户端插件（stdio/http 会话与工具调用，stdio 子进程受 RLIMIT_AS/RLIMIT_CPU/umask 0o077 与一次性临时工作目录约束）、只读回归校准、企业术语库与禁用表述核对、`.bidplugin` 插件包导出/导入校验与受控安装、项目复制（深拷贝与外键重映射） |
 | 认证 | scrypt + Cookie 会话 + RBAC | 超级管理员/投标经理/只读成员；项目成员 editor/viewer；用户管理与会话吊销 |
 | 持久化 | SQLAlchemy + SQLite（WAL） | 项目、来源、事实、材料、参数、评分、要求、风险、清单快照（含用户单价与 `package_id`）、包件（`bid_packages`）、企业定额（`quota_items`）、插件配置（`plugins`，含资源限制 `mem_limit_mb`/`cpu_seconds`）、术语库（`term_items`）、微信开放平台配置（`wechat_config`，密钥加密存 `app_secret_enc`）、图片资产（含生成参数）、大纲、章节（含 revision）、问题、任务与事件、用户、模型、知识库、项目成员、操作审计；报价版本（`boq_quote_versions`，含审批状态、痕迹与逐级审批记录 `approvals`）；新表由 `create_all` 建表，`boq_snapshots.package_id`、`boq_quote_versions` 七个审批列与 `approvals` 由 `db._migrate_columns` 追加并回填；调价策略存 `project.meta["price_policy"]`，审批链存 `project.meta["approval_chain"]`（≤5 级阶段快照 `{approvers:[{id,name}],mode:all|any,min_amount?}`，每级 1–5 人，可选金额门槛（总额达到才生效），负责人 PATCH 配置，兼容旧扁平格式） |
 | 文件存储 | `BIDCRAFT_HOME/projects/<id>/`、`BIDCRAFT_HOME/packages/`、`BIDCRAFT_HOME/output/` | 招标原件、清单原件、配图（`images/`）、导出件、批量导出 zip；管理员规则包覆盖与 `hidden.json` |
@@ -169,7 +169,7 @@ SSE 不可用时回退到约 1.6 秒一次的任务轮询。刷新页面后通�
 | 认证 | `POST /auth/login`、`POST /auth/logout`、`GET /auth/me`、`POST /auth/password` |
 | 管理 | `/admin/models`、`/admin/kbs`、`/admin/users`、`/admin/rule-packages`（含校验/隐藏/恢复）、`/admin/quotas`（CRUD/搜索/匹配测试）、`/admin/plugins`（CRUD/测试/预设目录/`.bidplugin` 包导入导出）、`/admin/terms`（CRUD/搜索/启停）、`/admin/wechat`（读取/保存/连通性测试），仅超级管理员 |
 | 元信息 | `GET /health`、`GET /packages`、`GET /docs` |
-| 项目 | `GET/POST /projects`、`GET/PATCH/DELETE /projects/{ref}`（PATCH 改名称/标段） |
+| 项目 | `GET/POST /projects`、`GET/PATCH/DELETE /projects/{ref}`（PATCH 改名称/标段）、`POST /projects/{ref}/duplicate`（复制为新项目：原件/台账/大纲/正文必选，清单报价与配图可选，版本与审批记录不复制） |
 | 来源 | `GET /projects/{ref}/sources`、`POST /projects/{ref}/sources`、`POST /projects/{ref}/parse` |
 | 台账 | `GET /projects/{ref}/ledger`、`PATCH /projects/{ref}/facts/{key}` |
 | 清单 | `GET/POST/DELETE /projects/{ref}/boq`、`POST /projects/{ref}/boq/apply`、`POST /projects/{ref}/boq/price`、`POST /projects/{ref}/boq/export`（均接受 `package_id`） |
