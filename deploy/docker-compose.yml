@@ -1,0 +1,26 @@
+# BidCraft 生产部署（配合 1Panel / OpenResty 反向代理）
+# 用法：
+#   1. 镜像：docker build -t bidcraft:0.4.8 .   （或 docker load 导入离线镜像）
+#   2. 数据目录：mkdir -p /opt/bidcraft/data && chown -R 10001:10001 /opt/bidcraft/data
+#   3. 在本目录放置 .env（参考 .env.example），然后 docker compose up -d
+#   4. 1Panel 网站（OpenResty）反向代理 http://127.0.0.1:8000，并启用 HTTPS。
+services:
+  bidcraft:
+    image: bidcraft:0.4.8
+    container_name: bidcraft
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"   # 只对本机回环暴露，公网走 OpenResty TLS 反代
+    volumes:
+      - /opt/bidcraft/data:/data
+    environment:
+      TZ: Asia/Shanghai
+      BIDCRAFT_ADMIN_PASSWORD: ${BIDCRAFT_ADMIN_PASSWORD:?在 .env 中设置}
+      # HTTPS 反代后必须为 1；仅 HTTP 访问（如备案期间用 IP）时设为 0，否则浏览器不回传会话 Cookie 导致无法登录
+      BIDCRAFT_SECURE_COOKIE: ${BIDCRAFT_SECURE_COOKIE:-1}
+    mem_limit: 4g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
