@@ -1039,6 +1039,10 @@ export interface Plugin {
   enabled: boolean
   /** 空数组表示不限制，聚合时暴露该插件的全部工具。 */
   tool_allowlist: string[]
+  /** stdio 子进程内存上限（MB），范围 64–4096，缺省 512。 */
+  mem_limit_mb: number
+  /** stdio 子进程 CPU 时间上限（秒），范围 1–120，缺省 10。 */
+  cpu_seconds: number
   last_test_at?: string | null
   last_test_ok?: boolean | null
   last_test_message?: string
@@ -1062,6 +1066,10 @@ export interface PluginInput {
   url?: string
   enabled?: boolean
   tool_allowlist?: string[]
+  /** 内存上限（MB），64–4096；省略时后端使用默认值 512。 */
+  mem_limit_mb?: number
+  /** CPU 时间上限（秒），1–120；省略时后端使用默认值 10。 */
+  cpu_seconds?: number
 }
 
 /** `POST /admin/plugins/{id}/test` 的结果；失败时 ok=false 但仍返回说明。 */

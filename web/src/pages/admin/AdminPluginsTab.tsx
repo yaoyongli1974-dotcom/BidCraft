@@ -437,6 +437,10 @@ export function AdminPluginsTab() {
                             {envCount} 项
                           </span>
                         )}
+                        <span title="stdio 子进程的资源上限">
+                          <span className="admin-meta-label">资源</span>
+                          {plugin.mem_limit_mb} MB · {plugin.cpu_seconds} 秒
+                        </span>
                         <span>
                           <span className="admin-meta-label">更新</span>
                           {formatRelative(plugin.updated_at)}

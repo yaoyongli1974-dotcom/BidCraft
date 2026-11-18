@@ -77,7 +77,12 @@ def _migrate_columns(engine) -> None:
             ("reviewed_by", "VARCHAR(80) DEFAULT ''"),
             ("reviewed_at", "DATETIME"),
         ],
-        "plugins": [("fail_streak", "INTEGER DEFAULT 0"), ("auto_disabled", "BOOLEAN DEFAULT 0")],
+        "plugins": [
+            ("fail_streak", "INTEGER DEFAULT 0"),
+            ("auto_disabled", "BOOLEAN DEFAULT 0"),
+            ("mem_limit_mb", "INTEGER DEFAULT 512"),
+            ("cpu_seconds", "INTEGER DEFAULT 10"),
+        ],
         "image_assets": [("options", "JSON")],
         "sections": [("revision", "INTEGER DEFAULT 0")],
         "kb_chunks": [

@@ -504,6 +504,9 @@ class Plugin(Base):
     url: Mapped[str] = mapped_column(String(500), default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     tool_allowlist: Mapped[list] = mapped_column(JSON, default=list)
+    #: 轻量沙箱参数：stdio 子进程的地址空间上限（MB）与 CPU 时间上限（秒）。
+    mem_limit_mb: Mapped[int] = mapped_column(Integer, default=512)
+    cpu_seconds: Mapped[int] = mapped_column(Integer, default=10)
     last_test_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_test_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     last_test_message: Mapped[str] = mapped_column(Text, default="")

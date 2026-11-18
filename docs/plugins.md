@@ -32,6 +32,11 @@ MCP 客户端 ──stdio──> bidcraft mcp（mcp.py）
 
 单请求超时读 `BIDCRAFT_PLUGIN_TIMEOUT`（默认 20 秒，配置层 clamp 到 5–120）。
 
+stdio 插件子进程受资源限制：内存上限（`mem_limit_mb`，64–4096 MB，默认 512）映射
+`RLIMIT_AS`、CPU 时间（`cpu_seconds`，1–120 秒，默认 10）映射 `RLIMIT_CPU`；子进程 umask
+为 077，并在一次性临时目录（`bidcraft-plugin-*`，运行结束即删除）中运行。管理端保存时
+越界或非法值回退默认值（512/10），HTTP 插件忽略这两个字段。
+
 ## 数据模型
 
 表 `plugins`（`bidcraft/models.py::Plugin`，由 `create_all` 自动创建）：

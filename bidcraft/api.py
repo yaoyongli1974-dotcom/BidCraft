@@ -408,6 +408,9 @@ class PluginCreate(BaseModel):
     url: str = ""
     enabled: bool = True
     tool_allowlist: list[str] | str | None = None
+    # 轻量沙箱：越界/非法由 plugins.clamp_* 回退默认值，不返回 400。
+    mem_limit_mb: int | None = None
+    cpu_seconds: int | None = None
 
 
 class PluginUpdate(BaseModel):
@@ -419,6 +422,8 @@ class PluginUpdate(BaseModel):
     url: str | None = None
     enabled: bool | None = None
     tool_allowlist: list[str] | str | None = None
+    mem_limit_mb: int | None = None
+    cpu_seconds: int | None = None
 
 
 def _iso(value) -> str | None:
@@ -2318,6 +2323,8 @@ def create_app():
                 url=url,
                 enabled=bool(payload.enabled),
                 tool_allowlist=allowlist,
+                mem_limit_mb=plugins.clamp_mem_limit(payload.mem_limit_mb),
+                cpu_seconds=plugins.clamp_cpu_seconds(payload.cpu_seconds),
             )
             db.add(row)
             db.flush()
@@ -2371,6 +2378,12 @@ def create_app():
                 changed.append("enabled")
                 if row.enabled:
                     plugins.reset_guard(db, row)
+            if data.get("mem_limit_mb") is not None:
+                row.mem_limit_mb = plugins.clamp_mem_limit(data["mem_limit_mb"])
+                changed.append("mem_limit_mb")
+            if data.get("cpu_seconds") is not None:
+                row.cpu_seconds = plugins.clamp_cpu_seconds(data["cpu_seconds"])
+                changed.append("cpu_seconds")
             plugin_validate(row.transport, row.command or "", row.url or "")
             db.flush()
             audit(

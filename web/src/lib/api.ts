@@ -2290,7 +2290,24 @@ function normalizePluginTools(value: unknown): string[] {
     .filter(Boolean)
 }
 
-function normalizePlugin(value: unknown): Plugin {
+/** 插件资源限制的合法区间与缺省值，与后端契约保持一致。 */
+export const PLUGIN_MEM_LIMIT = { min: 64, max: 4096, default: 512 } as const
+export const PLUGIN_CPU_SECONDS = { min: 1, max: 120, default: 10 } as const
+
+/** 数字输入可能带字符串或 null：非法值回退缺省，其余四舍五入后 clamp 进区间。 */
+function normalizePluginLimit(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  if (value === undefined || value === null || value === '') return fallback
+  const parsed = asNumber(value, Number.NaN)
+  if (!Number.isFinite(parsed)) return fallback
+  return clampNumber(Math.round(parsed), min, max)
+}
+
+export function normalizePlugin(value: unknown): Plugin {
   const raw = value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
   const command = asText(raw.command)
   const url = asText(raw.url)
@@ -2312,6 +2329,18 @@ function normalizePlugin(value: unknown): Plugin {
     url,
     enabled: raw.enabled === undefined || raw.enabled === null ? true : asBool(raw.enabled),
     tool_allowlist: asStringList(raw.tool_allowlist),
+    mem_limit_mb: normalizePluginLimit(
+      raw.mem_limit_mb,
+      PLUGIN_MEM_LIMIT.default,
+      PLUGIN_MEM_LIMIT.min,
+      PLUGIN_MEM_LIMIT.max,
+    ),
+    cpu_seconds: normalizePluginLimit(
+      raw.cpu_seconds,
+      PLUGIN_CPU_SECONDS.default,
+      PLUGIN_CPU_SECONDS.min,
+      PLUGIN_CPU_SECONDS.max,
+    ),
     last_test_at: typeof raw.last_test_at === 'string' ? raw.last_test_at : null,
     last_test_ok:
       typeof raw.last_test_ok === 'boolean'

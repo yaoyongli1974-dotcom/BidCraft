@@ -19,16 +19,24 @@ from __future__ import annotations
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Self
 
 import httpx
 from httpx import HTTPError
+
+try:  # POSIX 才有 resource；Windows 上跳过资源限制。
+    import resource
+except ImportError:  # pragma: no cover - 非 POSIX 平台
+    resource = None  # type: ignore[assignment]
 
 from . import __version__
 from .config import settings
@@ -37,8 +45,14 @@ PROTOCOL_VERSION = "2024-11-05"
 CLIENT_NAME = "bidcraft-plugin-client"
 DEFAULT_TIMEOUT = 20.0
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+#: 轻量沙箱：内存（MB）与 CPU 时间（秒）的允许区间及默认值。
+MEM_LIMIT_RANGE = (64, 4096)
+CPU_SECONDS_RANGE = (1, 120)
+DEFAULT_MEM_LIMIT_MB = 512
+DEFAULT_CPU_SECONDS = 10
 #: 子进程只用最小环境变量，避免把数据库、模型密钥等传给第三方插件。
 _FALLBACK_PATH = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+_IS_POSIX = os.name == "posix"
 
 #: 内置预设：只提供一份可编辑的模板，绝不自动安装或启用。
 PLUGIN_CATALOG: list[dict[str, Any]] = [
@@ -94,6 +108,53 @@ def timeout_seconds() -> float:
     return value if value > 0 else DEFAULT_TIMEOUT
 
 
+def _clamp_int(value: Any, bounds: tuple[int, int], default: int) -> int:
+    """把配置值收敛到区间内；非法或越界一律回退默认值，不抛错。"""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    low, high = bounds
+    return number if low <= number <= high else default
+
+
+def clamp_mem_limit(value: Any) -> int:
+    """内存上限（MB）：64–4096，缺省/非法/越界回退 512。"""
+    return _clamp_int(value, MEM_LIMIT_RANGE, DEFAULT_MEM_LIMIT_MB)
+
+
+def clamp_cpu_seconds(value: Any) -> int:
+    """CPU 时间上限（秒）：1–120，缺省/非法/越界回退 10。"""
+    return _clamp_int(value, CPU_SECONDS_RANGE, DEFAULT_CPU_SECONDS)
+
+
+def _apply_limits(mem_mb: int, cpu_s: int) -> Callable[[], None]:
+    """返回供 ``Popen(preexec_fn=...)`` 使用的子进程预执行钩子（POSIX）。
+
+    在 fork 之后、exec 之前在子进程里生效：限制地址空间与 CPU 时间，
+    并把 umask 收紧到 0o077。任何一项设置失败都不阻止插件启动。
+    """
+    mem_bytes = mem_mb * 1024 * 1024
+    cpu_seconds = cpu_s
+
+    def _limits() -> None:
+        if resource is not None:
+            for limit, value in (
+                (resource.RLIMIT_AS, mem_bytes),
+                (resource.RLIMIT_CPU, cpu_seconds),
+            ):
+                try:
+                    resource.setrlimit(limit, (value, value))
+                except (ValueError, OSError):
+                    pass
+        try:
+            os.umask(0o077)
+        except OSError:
+            pass
+
+    return _limits
+
+
 @dataclass(slots=True)
 class PluginRef:
     """与数据库解耦的插件快照，子进程/HTTP 调用期间不需要持有 session。"""
@@ -107,6 +168,8 @@ class PluginRef:
     url: str = ""
     enabled: bool = True
     tool_allowlist: list[str] = field(default_factory=list)
+    mem_limit_mb: int = DEFAULT_MEM_LIMIT_MB
+    cpu_seconds: int = DEFAULT_CPU_SECONDS
 
 
 def snapshot(plugin: Any) -> PluginRef:
@@ -127,6 +190,8 @@ def snapshot(plugin: Any) -> PluginRef:
             for item in (getattr(plugin, "tool_allowlist", None) or [])
             if str(item).strip()
         ],
+        mem_limit_mb=clamp_mem_limit(getattr(plugin, "mem_limit_mb", None)),
+        cpu_seconds=clamp_cpu_seconds(getattr(plugin, "cpu_seconds", None)),
     )
 
 
@@ -154,6 +219,8 @@ def plugin_payload(row: Any) -> dict[str, Any]:
         "last_test_message": getattr(row, "last_test_message", "") or "",
         "fail_streak": int(getattr(row, "fail_streak", 0) or 0),
         "auto_disabled": bool(getattr(row, "auto_disabled", False)),
+        "mem_limit_mb": ref.mem_limit_mb,
+        "cpu_seconds": ref.cpu_seconds,
         "created_at": _iso(getattr(row, "created_at", None)),
         "updated_at": _iso(getattr(row, "updated_at", None)),
     }
@@ -201,6 +268,7 @@ class _StdioSession:
     def __init__(self, plugin: PluginRef) -> None:
         self.plugin = plugin
         self.proc: subprocess.Popen[str] | None = None
+        self._workdir: str | None = None
         self._lines: queue.Queue[str | None] = queue.Queue()
         self._next_id = 0
 
@@ -222,6 +290,13 @@ class _StdioSession:
         if not self.plugin.command:
             raise PluginError(f"插件 {self.plugin.name} 未配置 command")
         argv = [self.plugin.command, *self.plugin.args]
+        # 每次调用独立的临时工作目录，进程结束后删除，避免插件写脏服务目录。
+        self._workdir = tempfile.mkdtemp(prefix="bidcraft-plugin-")
+        sandbox: dict[str, Any] = {}
+        if _IS_POSIX:
+            sandbox["preexec_fn"] = _apply_limits(
+                self.plugin.mem_limit_mb, self.plugin.cpu_seconds
+            )
         try:
             self.proc = subprocess.Popen(
                 argv,
@@ -232,8 +307,11 @@ class _StdioSession:
                 encoding="utf-8",
                 bufsize=1,
                 env=_child_env(self.plugin),
+                cwd=self._workdir,
+                **sandbox,
             )
         except (OSError, ValueError) as exc:
+            self._cleanup_workdir()
             raise PluginError(f"插件 {self.plugin.name} 启动失败：{exc}") from exc
         threading.Thread(
             target=self._pump,
@@ -255,27 +333,36 @@ class _StdioSession:
     def close(self) -> None:
         proc = self.proc
         self.proc = None
-        if proc is None:
-            return
         try:
-            if proc.stdin is not None:
-                try:
-                    proc.stdin.close()
-                except (BrokenPipeError, OSError):
-                    pass
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+            if proc is None:
+                return
+            try:
+                if proc.stdin is not None:
+                    try:
+                        proc.stdin.close()
+                    except (BrokenPipeError, OSError):
+                        pass
+                if proc.poll() is None:
+                    proc.terminate()
                     try:
                         proc.wait(timeout=5)
                     except subprocess.TimeoutExpired:
-                        pass
+                        proc.kill()
+                        try:
+                            proc.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            pass
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
         finally:
-            if proc.poll() is None:
-                proc.kill()
+            self._cleanup_workdir()
+
+    def _cleanup_workdir(self) -> None:
+        workdir = self._workdir
+        self._workdir = None
+        if workdir:
+            shutil.rmtree(workdir, ignore_errors=True)
 
     # -- 协议 ---------------------------------------------------------
     def _send(self, message: dict[str, Any]) -> None:

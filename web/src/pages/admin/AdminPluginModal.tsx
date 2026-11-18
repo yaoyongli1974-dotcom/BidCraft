@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, Plug } from 'lucide-react'
 import type { Plugin, PluginCatalogEntry, PluginInput } from '../../lib/types'
-import { createPlugin, messageOf, updatePlugin } from '../../lib/api'
+import {
+  createPlugin,
+  messageOf,
+  PLUGIN_CPU_SECONDS,
+  PLUGIN_MEM_LIMIT,
+  updatePlugin,
+} from '../../lib/api'
 import { className } from '../../lib/format'
 import { Modal } from '../../components/Modal'
 import { Button } from '../../components/Button'
@@ -87,6 +93,15 @@ function uniqueList(items: string[]): string[] {
   return Array.from(new Set(items))
 }
 
+/** 资源限制输入：空白视为使用缺省值，非整数或越界返回 null（由调用方提示）。 */
+function parseLimit(text: string, min: number, max: number): number | null {
+  const trimmed = text.trim()
+  if (!trimmed) return null
+  const value = Number(trimmed)
+  if (!Number.isInteger(value) || value < min || value > max) return null
+  return value
+}
+
 /** 新建 / 编辑一个 MCP 插件。transport 决定显示 command+args+env 还是 url。 */
 export function AdminPluginModal({
   open,
@@ -103,6 +118,8 @@ export function AdminPluginModal({
   const [envText, setEnvText] = useState('')
   const [url, setUrl] = useState('')
   const [allowlistText, setAllowlistText] = useState('')
+  const [memLimitText, setMemLimitText] = useState(String(PLUGIN_MEM_LIMIT.default))
+  const [cpuSecondsText, setCpuSecondsText] = useState(String(PLUGIN_CPU_SECONDS.default))
   const [enabled, setEnabled] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -129,6 +146,8 @@ export function AdminPluginModal({
       )
       setUrl(plugin.url)
       setAllowlistText(plugin.tool_allowlist.join(', '))
+      setMemLimitText(String(plugin.mem_limit_mb ?? PLUGIN_MEM_LIMIT.default))
+      setCpuSecondsText(String(plugin.cpu_seconds ?? PLUGIN_CPU_SECONDS.default))
       setEnabled(plugin.enabled)
     } else {
       setName('')
@@ -138,6 +157,8 @@ export function AdminPluginModal({
       setEnvText('')
       setUrl('')
       setAllowlistText('')
+      setMemLimitText(String(PLUGIN_MEM_LIMIT.default))
+      setCpuSecondsText(String(PLUGIN_CPU_SECONDS.default))
       setEnabled(true)
     }
   }, [open, state])
@@ -155,13 +176,19 @@ export function AdminPluginModal({
     !/^https?:\/\//i.test(url.trim())
   const argsInvalid = transport === 'stdio' && Boolean(parsedArgs.error)
   const envInvalid = transport === 'stdio' && Boolean(parsedEnv.error)
+  const memLimit = parseLimit(memLimitText, PLUGIN_MEM_LIMIT.min, PLUGIN_MEM_LIMIT.max)
+  const cpuSeconds = parseLimit(cpuSecondsText, PLUGIN_CPU_SECONDS.min, PLUGIN_CPU_SECONDS.max)
+  const memLimitInvalid = memLimitText.trim() !== '' && memLimit === null
+  const cpuSecondsInvalid = cpuSecondsText.trim() !== '' && cpuSeconds === null
   const canSubmit =
     !nameMissing &&
     !commandMissing &&
     !urlMissing &&
     !urlInvalid &&
     !argsInvalid &&
-    !envInvalid
+    !envInvalid &&
+    !memLimitInvalid &&
+    !cpuSecondsInvalid
 
   const placeholders = useMemo(
     () =>
@@ -206,12 +233,22 @@ export function AdminPluginModal({
       setError(parsedEnv.error)
       return
     }
+    if (memLimitInvalid) {
+      setError(`内存上限需要是 ${PLUGIN_MEM_LIMIT.min}–${PLUGIN_MEM_LIMIT.max} 之间的整数。`)
+      return
+    }
+    if (cpuSecondsInvalid) {
+      setError(`CPU 时间需要是 ${PLUGIN_CPU_SECONDS.min}–${PLUGIN_CPU_SECONDS.max} 之间的整数。`)
+      return
+    }
 
     const payload: PluginInput = {
       name: name.trim(),
       transport,
       enabled,
       tool_allowlist: allowlist,
+      mem_limit_mb: memLimit ?? PLUGIN_MEM_LIMIT.default,
+      cpu_seconds: cpuSeconds ?? PLUGIN_CPU_SECONDS.default,
     }
     if (transport === 'stdio') {
       payload.command = command.trim()
@@ -523,6 +560,81 @@ export function AdminPluginModal({
               )}
             </div>
           )}
+
+          <div className="plugin-resource-group admin-form-span">
+            <div className="plugin-resource-head">
+              <span className="plugin-form-label">资源限制</span>
+              <span className="field-hint">仅对 stdio 子进程生效，HTTP 插件忽略</span>
+            </div>
+            <div className="form-field">
+              <label htmlFor="plugin-mem-limit">
+                内存上限 <span className="optional-mark">MB</span>
+              </label>
+              <input
+                id="plugin-mem-limit"
+                className={className(
+                  'input',
+                  'input--mono',
+                  touched && memLimitInvalid && 'input--error',
+                )}
+                type="number"
+                min={PLUGIN_MEM_LIMIT.min}
+                max={PLUGIN_MEM_LIMIT.max}
+                step={1}
+                inputMode="numeric"
+                value={memLimitText}
+                onChange={(event) => {
+                  setMemLimitText(event.target.value)
+                  if (error) setError(null)
+                }}
+                placeholder={String(PLUGIN_MEM_LIMIT.default)}
+                disabled={saving}
+              />
+              <p className="field-hint">
+                {PLUGIN_MEM_LIMIT.min}–{PLUGIN_MEM_LIMIT.max} MB，留空按{' '}
+                {PLUGIN_MEM_LIMIT.default} MB。
+              </p>
+              {touched && memLimitInvalid && (
+                <span className="field-error">
+                  需为 {PLUGIN_MEM_LIMIT.min}–{PLUGIN_MEM_LIMIT.max} 之间的整数。
+                </span>
+              )}
+            </div>
+            <div className="form-field">
+              <label htmlFor="plugin-cpu-seconds">
+                CPU 时间 <span className="optional-mark">秒</span>
+              </label>
+              <input
+                id="plugin-cpu-seconds"
+                className={className(
+                  'input',
+                  'input--mono',
+                  touched && cpuSecondsInvalid && 'input--error',
+                )}
+                type="number"
+                min={PLUGIN_CPU_SECONDS.min}
+                max={PLUGIN_CPU_SECONDS.max}
+                step={1}
+                inputMode="numeric"
+                value={cpuSecondsText}
+                onChange={(event) => {
+                  setCpuSecondsText(event.target.value)
+                  if (error) setError(null)
+                }}
+                placeholder={String(PLUGIN_CPU_SECONDS.default)}
+                disabled={saving}
+              />
+              <p className="field-hint">
+                {PLUGIN_CPU_SECONDS.min}–{PLUGIN_CPU_SECONDS.max} 秒，留空按{' '}
+                {PLUGIN_CPU_SECONDS.default} 秒。
+              </p>
+              {touched && cpuSecondsInvalid && (
+                <span className="field-error">
+                  需为 {PLUGIN_CPU_SECONDS.min}–{PLUGIN_CPU_SECONDS.max} 之间的整数。
+                </span>
+              )}
+            </div>
+          </div>
 
           <div className="form-field admin-form-span">
             <label htmlFor="plugin-allowlist">

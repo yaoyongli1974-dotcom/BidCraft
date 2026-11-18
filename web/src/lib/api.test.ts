@@ -3,10 +3,13 @@ import {
   ApiError,
   DEFAULT_IMAGE_POLICY,
   DEFAULT_PRICE_POLICY,
+  PLUGIN_CPU_SECONDS,
+  PLUGIN_MEM_LIMIT,
   UNAUTHORIZED_EVENT,
   apiFetch,
   cnyTotalWithTax,
   createBoqVersion,
+  createPlugin,
   createTerm,
   deleteBoqVersion,
   errorDetailText,
@@ -17,6 +20,7 @@ import {
   normalizeBoqQuoteVersion,
   normalizeBoqSummary,
   normalizeImagePolicy,
+  normalizePlugin,
   normalizePricePolicy,
   normalizeTerm,
   reindexKnowledgeBase,
@@ -25,6 +29,7 @@ import {
   roundTo,
   submitBoqVersion,
   unapproveBoqVersion,
+  updatePlugin,
   uploadForm,
 } from './api'
 
@@ -664,5 +669,92 @@ describe('request cancellation', () => {
     expect(result.legacy?.indexed).toBe(4)
     expect(result.legacy?.vector?.embedded).toBe(2)
     expect(result.legacy?.vector?.model).toBe('bge')
+  })
+})
+
+describe('plugin resource limits', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const jsonResponse = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+  it('defaults missing limits and clamps out-of-range values', () => {
+    const fallback = normalizePlugin({ id: 'p-0', name: 'filesystem', transport: 'stdio' })
+    expect(fallback.mem_limit_mb).toBe(PLUGIN_MEM_LIMIT.default)
+    expect(fallback.cpu_seconds).toBe(PLUGIN_CPU_SECONDS.default)
+
+    const parsed = normalizePlugin({
+      id: 'p-1',
+      name: 'filesystem',
+      mem_limit_mb: '1024',
+      cpu_seconds: '30',
+    })
+    expect(parsed.mem_limit_mb).toBe(1024)
+    expect(parsed.cpu_seconds).toBe(30)
+
+    const low = normalizePlugin({ id: 'p-2', name: 'low', mem_limit_mb: 1, cpu_seconds: 0 })
+    expect(low.mem_limit_mb).toBe(PLUGIN_MEM_LIMIT.min)
+    expect(low.cpu_seconds).toBe(PLUGIN_CPU_SECONDS.min)
+
+    const high = normalizePlugin({
+      id: 'p-3',
+      name: 'high',
+      mem_limit_mb: 99999,
+      cpu_seconds: 999,
+    })
+    expect(high.mem_limit_mb).toBe(PLUGIN_MEM_LIMIT.max)
+    expect(high.cpu_seconds).toBe(PLUGIN_CPU_SECONDS.max)
+
+    const invalid = normalizePlugin({
+      id: 'p-4',
+      name: 'invalid',
+      mem_limit_mb: 'lots',
+      cpu_seconds: null,
+    })
+    expect(invalid.mem_limit_mb).toBe(PLUGIN_MEM_LIMIT.default)
+    expect(invalid.cpu_seconds).toBe(PLUGIN_CPU_SECONDS.default)
+  })
+
+  it('sends both limits when creating and updating a plugin', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({
+        id: 'p-5',
+        name: 'memory',
+        transport: 'stdio',
+        mem_limit_mb: 2048,
+        cpu_seconds: 45,
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await createPlugin({
+      name: 'memory',
+      transport: 'stdio',
+      command: 'npx',
+      mem_limit_mb: 2048,
+      cpu_seconds: 45,
+    })
+    const createInit = fetchMock.mock.calls[0][1] as RequestInit
+    expect(fetchMock.mock.calls[0][0]).toBe('/admin/plugins')
+    expect(createInit.method).toBe('POST')
+    expect(JSON.parse(String(createInit.body))).toMatchObject({
+      name: 'memory',
+      mem_limit_mb: 2048,
+      cpu_seconds: 45,
+    })
+
+    await updatePlugin('p/5', { mem_limit_mb: 256, cpu_seconds: 5 })
+    const updateInit = fetchMock.mock.calls[1][1] as RequestInit
+    expect(fetchMock.mock.calls[1][0]).toBe('/admin/plugins/p%2F5')
+    expect(updateInit.method).toBe('PATCH')
+    expect(JSON.parse(String(updateInit.body))).toEqual({
+      mem_limit_mb: 256,
+      cpu_seconds: 5,
+    })
   })
 })

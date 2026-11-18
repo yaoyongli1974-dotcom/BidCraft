@@ -2473,6 +2473,11 @@
     grid-column: 1;
   }
 
+  .plugin-resource-group {
+    grid-column: 1;
+    grid-template-columns: 1fr;
+  }
+
   .admin-role-reference {
     display: none;
   }
@@ -3877,6 +3882,24 @@
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.01em;
+}
+
+.plugin-resource-group {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 11px 16px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-raised);
+}
+
+.plugin-resource-head {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .plugin-presets {
