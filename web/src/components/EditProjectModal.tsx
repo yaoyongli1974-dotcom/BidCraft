@@ -9,12 +9,23 @@ interface EditProjectModalProps {
   project: Project | null
   onClose: () => void
   onSaved: (project: Project) => void
+  /** R23 仅负责人/管理员可设为模板；旧后端省略 my_role 时由调用方决定。 */
+  isOwner?: boolean
+  /** 当前模板标记（project.is_template），用于初始化复选框。 */
+  isTemplate?: boolean
 }
 
 /** 轻量编辑：只改项目名称与标段/包件，其余信息由解析与台账维护。 */
-export function EditProjectModal({ project, onClose, onSaved }: EditProjectModalProps) {
+export function EditProjectModal({
+  project,
+  onClose,
+  onSaved,
+  isOwner = false,
+  isTemplate = false,
+}: EditProjectModalProps) {
   const [name, setName] = useState('')
   const [bidSection, setBidSection] = useState('')
+  const [templateFlag, setTemplateFlag] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -22,23 +33,27 @@ export function EditProjectModal({ project, onClose, onSaved }: EditProjectModal
     if (!project) return
     setName(project.name)
     setBidSection(project.bid_section || '')
+    setTemplateFlag(isTemplate)
     setError(null)
     setSubmitting(false)
-  }, [project])
+  }, [project, isTemplate])
 
   const trimmedName = name.trim()
   const trimmedSection = bidSection.trim()
+  const templateChanged = isOwner && templateFlag !== isTemplate
   const dirty =
     Boolean(project) &&
     (trimmedName !== (project?.name || '') ||
-      trimmedSection !== (project?.bid_section || ''))
+      trimmedSection !== (project?.bid_section || '') ||
+      templateChanged)
   const canSubmit = Boolean(project) && trimmedName.length > 0 && dirty && !submitting
 
   const submit = async () => {
     if (!project || !canSubmit) return
-    const patch: { name?: string; bid_section?: string } = {}
+    const patch: { name?: string; bid_section?: string; is_template?: boolean } = {}
     if (trimmedName !== project.name) patch.name = trimmedName
     if (trimmedSection !== (project.bid_section || '')) patch.bid_section = trimmedSection
+    if (templateChanged) patch.is_template = templateFlag
     setSubmitting(true)
     setError(null)
     try {
@@ -114,6 +129,26 @@ export function EditProjectModal({ project, onClose, onSaved }: EditProjectModal
           />
           <p className="field-hint">不超过 60 个字符；清空即取消标段标识。</p>
         </div>
+
+        {isOwner && (
+          <div className="form-field">
+            <div className="admin-check-row">
+              <label className="admin-check">
+                <input
+                  id="edit-project-template"
+                  type="checkbox"
+                  checked={templateFlag}
+                  onChange={(event) => setTemplateFlag(event.target.checked)}
+                  disabled={submitting}
+                />
+                <span>
+                  <strong>设为模板</strong>
+                  <small>模板全员可见，可从模板创建新项目</small>
+                </span>
+              </label>
+            </div>
+          </div>
+        )}
 
         {error && (
           <div className="form-alert" role="alert">

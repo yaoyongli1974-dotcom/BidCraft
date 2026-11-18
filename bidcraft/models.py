@@ -39,6 +39,8 @@ class Project(Base):
     status: Mapped[str] = mapped_column(String(24), default="intake")
     buyer: Mapped[str] = mapped_column(String(255), default="")
     meta: Mapped[dict] = mapped_column(JSON, default=dict)
+    # R23 项目模板库：设为模板后全员可浏览并从模板创建新项目。
+    is_template: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 

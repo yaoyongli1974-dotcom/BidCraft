@@ -58,7 +58,10 @@ def _migrate_columns(engine) -> None:
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
     additions: dict[str, list[tuple[str, str]]] = {
-        "projects": [("owner_id", "VARCHAR(36)")],
+        "projects": [
+            ("owner_id", "VARCHAR(36)"),
+            ("is_template", "BOOLEAN NOT NULL DEFAULT 0"),
+        ],
         "users": [
             ("credits", "INTEGER DEFAULT 0"),
             ("is_external", "BOOLEAN DEFAULT FALSE"),

@@ -19,8 +19,10 @@ import {
   getBoqVersion,
   getPendingApprovals,
   getProject,
+  getProjectTemplates,
   getTerms,
   importPluginPackage,
+  instantiateTemplate,
   listBoqVersions,
   messageOf,
   normalizeApprovalChain,
@@ -668,6 +670,176 @@ describe('project duplicate (R22)', () => {
       status: 403,
       message: '只读成员不能复制项目',
     })
+  })
+})
+
+describe('project templates (R23)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const jsonResponse = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+  it('reads the flat template list from GET /projects/templates and normalizes items', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse([
+        {
+          id: 'p-tpl',
+          name: '市政模板',
+          package: 'pkg-1',
+          is_template: true,
+          updated_at: '2026-11-18T09:00:00',
+          owner_name: '张三',
+        },
+        { id: 'p-tpl-2', name: '货物模板', package: 'pkg-2', is_template: true },
+        { name: '缺 id 的脏数据' },
+        null,
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const items = await getProjectTemplates()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0][0]).toBe('/projects/templates')
+    const init = fetchMock.mock.calls[0][1] as RequestInit | undefined
+    expect(init?.method ?? 'GET').toBe('GET')
+    expect(items).toEqual([
+      {
+        id: 'p-tpl',
+        name: '市政模板',
+        package: 'pkg-1',
+        is_template: true,
+        updated_at: '2026-11-18T09:00:00',
+        owner_name: '张三',
+      },
+      {
+        id: 'p-tpl-2',
+        name: '货物模板',
+        package: 'pkg-2',
+        is_template: true,
+        updated_at: null,
+        owner_name: null,
+      },
+    ])
+  })
+
+  it('returns an empty list when the backend has no template endpoint (404)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ detail: 'Not Found' }, 404)),
+    )
+    await expect(getProjectTemplates()).resolves.toEqual([])
+  })
+
+  it('degrades to an empty list when the SPA fallback returns HTML', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response('<!doctype html><html></html>', {
+          status: 200,
+          headers: { 'Content-Type': 'text/html' },
+        }),
+      ),
+    )
+    await expect(getProjectTemplates()).resolves.toEqual([])
+  })
+
+  it('propagates non-404 template list failures', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ detail: '服务器错误' }, 500)),
+    )
+    await expect(getProjectTemplates()).rejects.toMatchObject({
+      status: 500,
+      message: '服务器错误',
+    })
+  })
+
+  it('instantiates with both include flags defaulting to true and no name', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse(
+        {
+          id: 'p-new',
+          name: '市政模板 副本',
+          package: 'pkg-1',
+          status: 'draft',
+          my_role: 'owner',
+          is_template: false,
+        },
+        201,
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const created = await instantiateTemplate('tpl/1')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0][0]).toBe('/projects/templates/tpl%2F1/instantiate')
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.method).toBe('POST')
+    // name 缺省不发送，由后端默认「模板名 副本」。
+    expect(JSON.parse(String(init.body))).toEqual({
+      include_boq: true,
+      include_images: true,
+    })
+    expect(created).toMatchObject({ id: 'p-new', name: '市政模板 副本', my_role: 'owner' })
+  })
+
+  it('instantiates with a custom name and explicit false for both include flags', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({ id: 'p-new', name: '新项目', package: 'pkg-1', status: 'draft' }, 201),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await instantiateTemplate('tpl-1', {
+      name: '新项目',
+      includeBoq: false,
+      includeImages: false,
+    })
+    expect(fetchMock.mock.calls[0][0]).toBe('/projects/templates/tpl-1/instantiate')
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({
+      name: '新项目',
+      include_boq: false,
+      include_images: false,
+    })
+  })
+
+  it('surfaces 404 (not a template) and 400 (bad name) through ApiError', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ detail: '模板不存在' }, 404))
+      .mockResolvedValueOnce(jsonResponse({ detail: '项目名称不能为空' }, 400))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(instantiateTemplate('tpl-x')).rejects.toMatchObject({
+      name: 'ApiError',
+      status: 404,
+      message: '模板不存在',
+    })
+    await expect(instantiateTemplate('tpl-1', { name: '  ' })).rejects.toMatchObject({
+      name: 'ApiError',
+      status: 400,
+      message: '项目名称不能为空',
+    })
+  })
+
+  it('passes is_template through the project PATCH body', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({ id: 'p-1', name: '项目', is_template: true }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const updated = await updateProject('p/1', { is_template: true })
+    expect(fetchMock.mock.calls[0][0]).toBe('/projects/p%2F1')
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(String(init.body))).toEqual({ is_template: true })
+    expect(updated.is_template).toBe(true)
   })
 })
 

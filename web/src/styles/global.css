@@ -1093,6 +1093,17 @@ select:focus-visible {
   height: 32px;
 }
 
+/* 表单内的整行下拉（如从模板创建选择模板）。 */
+.select-field--block {
+  display: flex;
+  width: 100%;
+}
+
+.select-field--block select {
+  flex: 1;
+  min-width: 0;
+}
+
 .select-field select:focus {
   outline: none;
 }
@@ -1273,6 +1284,12 @@ select:focus-visible {
   border: 1px solid rgba(159, 53, 40, 0.16);
   color: var(--vermilion-deep);
   font-size: 12.5px;
+}
+
+.form-alert .text-btn {
+  margin-left: 8px;
+  color: inherit;
+  border-bottom-color: currentColor;
 }
 
 .inline-error {

@@ -68,6 +68,8 @@ import type {
   Project,
   ProjectDetail,
   ProjectDuplicateInput,
+  ProjectInstantiateInput,
+  ProjectTemplate,
   QuotaFillResult,
   QuotaInput,
   QuotaItem,
@@ -743,17 +745,77 @@ export const duplicateProject = (ref: string, input: ProjectDuplicateInput = {})
   )
 
 /**
+ * R23 模板列表：GET /projects/templates → 平铺数组（仅 is_template=True，
+ * updated_at 降序、上限 200，登录即可浏览）。旧后端没有该接口时返回 404，
+ * 或 SPA 兜底把未知路径回成 index.html（200 + HTML 导致 JSON 解析失败），
+ * 两种情况都按「无模板」降级为空列表。
+ */
+export async function getProjectTemplates(signal?: AbortSignal): Promise<ProjectTemplate[]> {
+  let data: unknown
+  try {
+    data = await request<unknown>('/projects/templates', undefined, signal)
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return []
+    if (error instanceof SyntaxError) return []
+    throw error
+  }
+  return asArray<unknown>(data, 'templates')
+    .map(normalizeProjectTemplate)
+    .filter((item): item is ProjectTemplate => item !== null)
+}
+
+/** 归一化一条模板轻量项；缺 id 的脏数据整体丢弃。 */
+function normalizeProjectTemplate(value: unknown): ProjectTemplate | null {
+  if (!value || typeof value !== 'object') return null
+  const raw = value as Record<string, unknown>
+  const id = asText(raw.id).trim()
+  if (!id) return null
+  return {
+    id,
+    name: asText(raw.name) || '未命名模板',
+    package: asText(raw.package),
+    is_template: asBool(raw.is_template),
+    updated_at: typeof raw.updated_at === 'string' ? raw.updated_at : null,
+    owner_name: typeof raw.owner_name === 'string' && raw.owner_name ? raw.owner_name : null,
+  }
+}
+
+/**
+ * R23 从模板创建：POST /projects/templates/{id}/instantiate → 201，
+ * 返回与 POST /projects 同形状的项目 payload（创建者成为新项目 owner，
+ * 无需模板成员关系）。name 缺省时后端默认「模板名 副本」；
+ * include_boq/include_images 缺省 true。台账/大纲/正文/源文件始终复制；
+ * 报价版本与审批记录不复制。404 模板不存在或已取消模板、400 名称非法，
+ * 错误经 ApiError/messageOf 透出。
+ */
+export const instantiateTemplate = (id: string, input: ProjectInstantiateInput = {}) =>
+  request<Project>(
+    `/projects/templates/${encodeURIComponent(id)}/instantiate`,
+    jsonBody({
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      include_boq: input.includeBoq ?? true,
+      include_images: input.includeImages ?? true,
+    }),
+  )
+
+/**
  * Rename a project, change its 标段/包件 or set the quote approval chain.
  * Send only the fields that changed: the server rejects a payload where every
  * key is absent. `approval_chain` is the v2 stage list (≤5 stages, each with
  * 1–5 user ids, an all/any mode and an optional R21 `min_amount` threshold,
  * owner only); an empty array clears the chain back to single-stage owner
  * review. The echo is normalised to v2 even when an older server still replies
- * with the flat R18 format.
+ * with the flat R18 format. R23 `is_template` toggles the project template flag
+ * (owner/admin only); templates are visible to every member.
  */
 export const updateProject = async (
   ref: string,
-  patch: { name?: string; bid_section?: string; approval_chain?: ApprovalStageInput[] },
+  patch: {
+    name?: string
+    bid_section?: string
+    approval_chain?: ApprovalStageInput[]
+    is_template?: boolean
+  },
 ): Promise<Project> => {
   const data = await request<Project>(`/projects/${encodeURIComponent(ref)}`, {
     method: 'PATCH',

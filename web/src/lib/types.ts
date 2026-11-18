@@ -291,6 +291,8 @@ export interface Project {
   stats?: Partial<ProjectStats>
   /** Present on `GET /projects` and `GET /projects/{ref}`; omitted by older servers. */
   my_role?: ProjectRole
+  /** R23 项目模板标记：模板全员可见，可从模板创建新项目。旧后端可能省略。 */
+  is_template?: boolean
   /** 有序报价审批链（≤5 级，每级 1–5 人会签/或签）；空数组或缺省 = 负责人单级审批。旧后端可能省略或回显扁平格式，读取时归一为 v2。 */
   approval_chain?: ApprovalStage[]
 }
@@ -300,6 +302,20 @@ export interface ProjectDuplicateInput {
   name?: string
   includeBoq?: boolean
   includeImages?: boolean
+}
+
+/** R23 从模板创建入参：与复制同形状；name 缺省由后端取「模板名 副本」。 */
+export type ProjectInstantiateInput = ProjectDuplicateInput
+
+/** R23 模板列表轻量项（GET /projects/templates 平铺数组）。 */
+export interface ProjectTemplate {
+  id: string
+  name: string
+  package: string
+  is_template: boolean
+  updated_at: string | null
+  /** 负责人 display_name || username；后端可空。 */
+  owner_name: string | null
 }
 
 export interface LedgerSummary {

@@ -11,6 +11,7 @@ import {
   Eye,
   FileStack,
   FolderOpen,
+  LayoutTemplate,
   ListChecks,
   Pencil,
   Plus,
@@ -52,6 +53,7 @@ import { EmptyState, ErrorState, ProgressBar, Skeleton } from '../components/Fee
 import { NewProjectModal } from '../components/NewProjectModal'
 import { EditProjectModal } from '../components/EditProjectModal'
 import { DuplicateProjectModal } from '../components/DuplicateProjectModal'
+import { InstantiateTemplateModal } from '../components/InstantiateTemplateModal'
 import { useToast } from '../context/useToast'
 import { useConfirm } from '../context/useConfirm'
 import { useHelp } from '../context/useHelp'
@@ -121,6 +123,7 @@ export function ProjectsPage() {
   const [reportOpen, setReportOpen] = useState(false)
   const [editing, setEditing] = useState<Project | null>(null)
   const [duplicating, setDuplicating] = useState<Project | null>(null)
+  const [instantiateOpen, setInstantiateOpen] = useState(false)
   const selectAllRef = useRef<HTMLInputElement>(null)
 
   const projects = useMemo(() => projectsQuery.data || [], [projectsQuery.data])
@@ -642,6 +645,16 @@ export function ProjectsPage() {
                 <option value="name">名称排序</option>
               </select>
             </label>
+            {/* R23 从模板创建仅需登录（无需模板成员关系）；全局只读角色被平台写保护拦截，故隐藏入口。 */}
+            {canWrite && (
+              <Button
+                variant="secondary"
+                icon={<LayoutTemplate size={15} />}
+                onClick={() => setInstantiateOpen(true)}
+              >
+                从模板创建
+              </Button>
+            )}
             {canWrite ? (
               <Button
                 variant="secondary"
@@ -1046,6 +1059,8 @@ export function ProjectsPage() {
 
       <EditProjectModal
         project={editing}
+        isOwner={editing?.my_role === 'owner' || editing?.my_role === 'admin'}
+        isTemplate={Boolean(editing?.is_template)}
         onClose={() => setEditing(null)}
         onSaved={(project) => {
           setEditing(null)
@@ -1060,6 +1075,17 @@ export function ProjectsPage() {
         onDuplicated={(project) => {
           setDuplicating(null)
           toast.success('已创建副本', `「${project.name}」已就绪，源项目不受影响。`)
+          projectsQuery.refresh()
+          navigate(`/app/projects/${project.id}`)
+        }}
+      />
+
+      <InstantiateTemplateModal
+        open={instantiateOpen}
+        onClose={() => setInstantiateOpen(false)}
+        onCreated={(project) => {
+          setInstantiateOpen(false)
+          toast.success('已从模板创建项目', `「${project.name}」已就绪，模板不受影响。`)
           projectsQuery.refresh()
           navigate(`/app/projects/${project.id}`)
         }}
@@ -1144,6 +1170,11 @@ function ProjectRow({
             {project.name}
           </Link>
           <BidSectionBadge value={project.bid_section} />
+          {project.is_template && (
+            <Badge tone="accent" subtle title="项目模板：全员可见，可从模板创建新项目">
+              模板
+            </Badge>
+          )}
           {project.my_role && (
             <Badge tone={projectRoleMeta(project.my_role).tone} subtle>
               {projectRoleMeta(project.my_role).label}

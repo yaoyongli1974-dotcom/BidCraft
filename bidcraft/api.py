@@ -114,6 +114,8 @@ class ProjectCreate(BaseModel):
 class ProjectUpdate(BaseModel):
     name: str | None = None
     bid_section: str | None = None
+    # R23 设为模板/取消模板（仅 owner/admin）。
+    is_template: bool | None = None
     # R19 审批链：兼容 R18 扁平用户 id 列表与 v2 阶段列表
     # [{approvers: [用户id], mode?: "all"|"any"}]（≤5 级，仅 owner 可改）；
     # 空列表=单级负责人审批。双格式解析与校验在 handler 内完成。
@@ -122,6 +124,14 @@ class ProjectUpdate(BaseModel):
 
 class ProjectDuplicate(BaseModel):
     # R22 项目复制：name 缺省/空白 → 「源项目名 副本」；长度校验在
+    # duplicate_project 内完成（超 255 → ValueError → 400，而非 422）。
+    name: str | None = None
+    include_boq: bool = True
+    include_images: bool = True
+
+
+class ProjectInstantiate(BaseModel):
+    # R23 从模板创建：形状同 ProjectDuplicate，名称校验同样在
     # duplicate_project 内完成（超 255 → ValueError → 400，而非 422）。
     name: str | None = None
     include_boq: bool = True
@@ -788,6 +798,7 @@ def _project_payload(
         "package": project.package,
         "status": project.status,
         "buyer": project.buyer,
+        "is_template": bool(project.is_template),
         "owner_id": project.owner_id,
         "my_role": my_role,
         "number": (project.meta or {}).get("number", ""),
@@ -3289,6 +3300,90 @@ def create_app():
         worker.start()
         return {"job_id": job_id}
 
+    # R23 模板库：静态 "templates" 段必须先于 /projects/{ref} 等动态路由注册，
+    # 否则 "templates" 会被当作项目 ref。
+    @app.get("/projects/templates")
+    def project_templates() -> list[dict[str, Any]]:
+        """模板列表：登录即可浏览（含 viewer），仅模板、updated_at 降序上限 200。"""
+
+        with session_scope() as db:
+            rows = list(
+                db.scalars(
+                    select(Project)
+                    .where(Project.is_template.is_(True))
+                    .order_by(Project.updated_at.desc())
+                    .limit(200)
+                )
+            )
+            owner_ids = {item.owner_id for item in rows if item.owner_id}
+            owners = (
+                {
+                    user.id: user
+                    for user in db.scalars(select(User).where(User.id.in_(list(owner_ids))))
+                }
+                if owner_ids
+                else {}
+            )
+            items: list[dict[str, Any]] = []
+            for item in rows:
+                owner = owners.get(item.owner_id) if item.owner_id else None
+                items.append(
+                    {
+                        "id": item.id,
+                        "name": item.name,
+                        "package": item.package,
+                        "is_template": True,
+                        "updated_at": _iso(item.updated_at),
+                        "owner_name": (owner.display_name or owner.username)
+                        if owner is not None
+                        else None,
+                    }
+                )
+            return items
+
+    @app.post("/projects/templates/{template_id}/instantiate", status_code=201)
+    def instantiate_template(
+        template_id: str, payload: ProjectInstantiate
+    ) -> dict[str, Any]:
+        """R23 从模板创建：登录即可（无需成员关系），创建者成为新项目 owner。
+
+        复用 R22 深拷贝：台账/大纲/正文始终复制，BOQ 与配图可选；报价版本、
+        问题、任务、成员授权、审计不复制。新项目不是模板。失败时清理新目录。
+        """
+
+        with session_scope() as db:
+            template = db.get(Project, template_id)
+            if template is None or not template.is_template:
+                raise LookupError("模板不存在")
+            try:
+                new = duplicate_project(
+                    db,
+                    template,
+                    name=payload.name,
+                    owner_id=(current_user() or {}).get("id"),
+                    include_boq=payload.include_boq,
+                    include_images=payload.include_images,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except Exception as exc:
+                new_id = getattr(exc, "duplicate_project_id", "")
+                if new_id:
+                    shutil.rmtree(settings.home / "projects" / new_id, ignore_errors=True)
+                raise
+            audit(
+                db,
+                new.id,
+                "project.instantiate",
+                {
+                    "template_id": template.id,
+                    "name": new.name,
+                    "include_boq": payload.include_boq,
+                    "include_images": payload.include_images,
+                },
+            )
+            return _project_payload(new, _project_stats(db, new.id), "owner")
+
     @app.get("/projects/{ref}")
     def project_detail(ref: str) -> dict[str, Any]:
         with session_scope() as db:
@@ -3315,7 +3410,7 @@ def create_app():
 
     @app.patch("/projects/{ref}")
     def update_project(ref: str, payload: ProjectUpdate) -> dict[str, Any]:
-        """Rename a project, set its bid section (标段/包件) or approval chain.
+        """Rename a project, set its bid section (标段/包件), approval chain or template flag.
 
         ``approval_chain`` 双格式（R19，仅 owner/admin）：① R18 扁平用户 id
         列表 → 每 id 一个单审批人 all 阶段；② v2 阶段列表
@@ -3421,6 +3516,10 @@ def create_app():
                 meta["approval_chain"] = chain
                 project.meta = meta
                 keys.append("approval_chain")
+            if "is_template" in updates:
+                _require_owner(my_role)
+                project.is_template = bool(updates["is_template"])
+                keys.append("is_template")
             audit(db, project.id, "project.update", {"keys": keys})
             return _project_payload(project, _project_stats(db, project.id), my_role)
 

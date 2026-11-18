@@ -169,7 +169,7 @@ SSE 不可用时回退到约 1.6 秒一次的任务轮询。刷新页面后通�
 | 认证 | `POST /auth/login`、`POST /auth/logout`、`GET /auth/me`、`POST /auth/password` |
 | 管理 | `/admin/models`、`/admin/kbs`、`/admin/users`、`/admin/rule-packages`（含校验/隐藏/恢复）、`/admin/quotas`（CRUD/搜索/匹配测试）、`/admin/plugins`（CRUD/测试/预设目录/`.bidplugin` 包导入导出）、`/admin/terms`（CRUD/搜索/启停）、`/admin/wechat`（读取/保存/连通性测试），仅超级管理员 |
 | 元信息 | `GET /health`、`GET /packages`、`GET /docs` |
-| 项目 | `GET/POST /projects`、`GET/PATCH/DELETE /projects/{ref}`（PATCH 改名称/标段）、`POST /projects/{ref}/duplicate`（复制为新项目：原件/台账/大纲/正文必选，清单报价与配图可选，版本与审批记录不复制） |
+| 项目 | `GET/POST /projects`、`GET/PATCH/DELETE /projects/{ref}`（PATCH 改名称/标段/审批链/模板标记）、`POST /projects/{ref}/duplicate`（复制为新项目：原件/台账/大纲/正文必选，清单报价与配图可选，版本与审批记录不复制）、`GET /projects/templates`（模板列表，登录即可）、`POST /projects/templates/{id}/instantiate`（从模板创建，无需成员身份） |
 | 来源 | `GET /projects/{ref}/sources`、`POST /projects/{ref}/sources`、`POST /projects/{ref}/parse` |
 | 台账 | `GET /projects/{ref}/ledger`、`PATCH /projects/{ref}/facts/{key}` |
 | 清单 | `GET/POST/DELETE /projects/{ref}/boq`、`POST /projects/{ref}/boq/apply`、`POST /projects/{ref}/boq/price`、`POST /projects/{ref}/boq/export`（均接受 `package_id`） |
