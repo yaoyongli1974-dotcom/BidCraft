@@ -703,6 +703,71 @@ QUOTE_VERSION_STATUSES = ("draft", "submitted", "approved", "rejected")
 QUOTE_REVIEW_DECISIONS = ("approve", "reject")
 
 
+def normalize_chain(raw: Any) -> list[dict[str, Any]]:
+    """Normalize a stored approval chain into the R19 v2 stage format.
+
+    R18 flat entries ``{id, name}`` become single-approver ``all`` stages;
+    v2 stages ``{approvers: [{id, name}], mode}`` are kept as-is with a
+    missing/invalid ``mode`` falling back to ``all``. Malformed entries are
+    ignored so legacy or hand-edited meta never breaks review.
+    """
+    stages: list[dict[str, Any]] = []
+    for entry in list(raw or []):
+        if not isinstance(entry, dict):
+            continue
+        if "approvers" in entry:
+            approvers: list[dict[str, str]] = []
+            for person in list(entry.get("approvers") or []):
+                if not isinstance(person, dict):
+                    continue
+                user_id = str(person.get("id") or "").strip()
+                if not user_id:
+                    continue
+                approvers.append({"id": user_id, "name": str(person.get("name") or "")})
+            if not approvers:
+                continue
+            mode = entry.get("mode")
+            if mode not in ("all", "any"):
+                mode = "all"
+            stages.append({"approvers": approvers, "mode": mode})
+        else:
+            user_id = str(entry.get("id") or "").strip()
+            if not user_id:
+                continue
+            stages.append(
+                {
+                    "approvers": [{"id": user_id, "name": str(entry.get("name") or "")}],
+                    "mode": "all",
+                }
+            )
+    return stages
+
+
+def completed_stages(chain: list[dict[str, Any]], approvals: list[dict]) -> int:
+    """Count leading fully signed-off stages (R19 all/any semantics).
+
+    A stage is complete when its approve-record count reaches ``1`` (any) or
+    ``len(approvers)`` (all); the scan stops at the first incomplete stage, so
+    the result is also the index of the current pending level.
+    """
+    completed = 0
+    for index, stage in enumerate(chain):
+        approvers = stage.get("approvers") or []
+        count = len(
+            [
+                r
+                for r in approvals
+                if r.get("decision") == "approve" and r.get("stage") == index
+            ]
+        )
+        needed = 1 if stage.get("mode") == "any" else len(approvers)
+        if needed > 0 and count >= needed:
+            completed += 1
+        else:
+            break
+    return completed
+
+
 def version_payload(
     version: BoqQuoteVersion,
     *,
@@ -716,8 +781,7 @@ def version_payload(
     """
     prices = dict(version.prices or {})
     approvals = list(version.approvals or [])
-    chain = list(((project.meta or {}).get("approval_chain") or []) if project else [])
-    approved_count = len([r for r in approvals if r.get("decision") == "approve"])
+    chain = normalize_chain((project.meta or {}).get("approval_chain")) if project else []
     payload: dict[str, Any] = {
         "id": version.id,
         "name": version.name,
@@ -737,7 +801,7 @@ def version_payload(
         "reviewed_at": version.reviewed_at.isoformat() if version.reviewed_at else None,
         "approvals": approvals,
         "approval_stage": (
-            approved_count
+            completed_stages(chain, approvals)
             if (version.status or "draft") == "submitted" and chain
             else 0
         ),
@@ -897,17 +961,19 @@ def review_version(
 ) -> dict[str, Any]:
     """Approve or reject a submitted version; final approval withdraws the old one.
 
-    R18 多级流转：``project.meta["approval_chain"]`` 非空时按链逐级审批，
-    当前级审批人（或全局超管）才可操作；空链沿用旧的单级负责人审批。
+    R19 并行会签：``project.meta["approval_chain"]`` 归一为 v2 阶段列表后按
+    「已完成阶段数」逐级流转——会签(all)级需全部审批人通过、或签(any)级任一
+    通过即推进；当前级审批人（或全局超管）才可操作，会签级已批者再批被拒。
+    空链沿用旧的单级负责人审批。
     """
     if decision not in QUOTE_REVIEW_DECISIONS:
         raise ValueError("decision 只能是 approve 或 reject")
     version = get_version(db, project.id, version_id)
     if version is None:
         raise LookupError("版本不存在")
-    chain = list((project.meta or {}).get("approval_chain") or [])
+    chain = normalize_chain((project.meta or {}).get("approval_chain"))
     approvals = list(version.approvals or [])
-    stage = len([r for r in approvals if r.get("decision") == "approve"])
+    stage = completed_stages(chain, approvals)
     # Authorization precedes the state check so an unauthorized caller gets 403
     # even on a draft (matching the old route-level owner gate), while an
     # authorized reviewer still sees the 409 state-machine conflict.
@@ -915,13 +981,21 @@ def review_version(
         if role != "owner" and not is_super:
             raise BoqForbiddenError("仅项目负责人可审批报价")
     else:
-        expected_id = str(chain[stage].get("id") or "") if stage < len(chain) else ""
-        if not is_super and (not expected_id or actor_id != expected_id):
-            raise BoqForbiddenError(f"当前需第 {stage + 1} 级审批人审批，您不是该级审批人")
+        current = chain[stage] if stage < len(chain) else {"approvers": [], "mode": "all"}
+        approver_ids = {str(p.get("id") or "") for p in current["approvers"]}
+        if not is_super:
+            if actor_id not in approver_ids:
+                raise BoqForbiddenError(f"当前需第 {stage + 1} 级审批人审批，您不是该级审批人")
+            if current["mode"] == "all" and any(
+                r.get("decision") == "approve"
+                and r.get("stage") == stage
+                and str(r.get("user_id") or "") == actor_id
+                for r in approvals
+            ):
+                raise BoqForbiddenError(f"您已完成本级审批（第 {stage + 1} 级）")
     if (version.status or "draft") != "submitted":
         raise BoqConflictError("仅待审版本可审批")
     now = utcnow()
-    final_approve = decision == "approve" and (not chain or stage + 1 >= len(chain))
     if chain:
         approvals.append(
             {
@@ -934,6 +1008,11 @@ def review_version(
             }
         )
         version.approvals = approvals
+        final_approve = (
+            decision == "approve" and completed_stages(chain, approvals) >= len(chain)
+        )
+    else:
+        final_approve = decision == "approve"
     if decision == "approve" and not final_approve:
         # Intermediate level: stays submitted, review_* untouched until the
         # last level signs off.

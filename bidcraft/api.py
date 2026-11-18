@@ -113,8 +113,10 @@ class ProjectCreate(BaseModel):
 class ProjectUpdate(BaseModel):
     name: str | None = None
     bid_section: str | None = None
-    # R18 审批链：有序用户 id 列表（≤5，仅 owner 可改）；空列表=单级负责人审批。
-    approval_chain: list[str] | None = None
+    # R19 审批链：兼容 R18 扁平用户 id 列表与 v2 阶段列表
+    # [{approvers: [用户id], mode?: "all"|"any"}]（≤5 级，仅 owner 可改）；
+    # 空列表=单级负责人审批。双格式解析与校验在 handler 内完成。
+    approval_chain: list[str] | list[dict[str, Any]] | None = None
 
 
 class BatchIdsRequest(BaseModel):
@@ -782,7 +784,7 @@ def _project_payload(
         "number": (project.meta or {}).get("number", ""),
         "tender_number": (project.meta or {}).get("tender_number", ""),
         "bid_section": (project.meta or {}).get("bid_section", "") or "",
-        "approval_chain": list((project.meta or {}).get("approval_chain") or []),
+        "approval_chain": boq.normalize_chain((project.meta or {}).get("approval_chain")),
         "created_at": _iso(project.created_at),
         "updated_at": _iso(project.updated_at),
         "stats": stats or {},
@@ -3305,9 +3307,12 @@ def create_app():
     def update_project(ref: str, payload: ProjectUpdate) -> dict[str, Any]:
         """Rename a project, set its bid section (标段/包件) or approval chain.
 
-        ``approval_chain`` 为有序用户 id 列表（≤5，去重保序，仅 owner/admin）；
-        写入 meta 时解析为 [{id, name}] 快照（name=display_name||username），
-        此后用户改名不追更；空列表清空审批链，回到单级负责人审批。
+        ``approval_chain`` 双格式（R19，仅 owner/admin）：① R18 扁平用户 id
+        列表 → 每 id 一个单审批人 all 阶段；② v2 阶段列表
+        [{approvers: [用户id], mode?: "all"|"any"}]。校验：阶段 ≤5、级内
+        1–5 人去重保序、users 存在性、mode ∈ all|any（默认 all）。写入 meta
+        时统一存 v2 阶段快照（name=display_name||username），此后用户改名不
+        追更；空列表清空审批链，回到单级负责人审批。
         """
 
         updates = payload.model_dump(exclude_unset=True)
@@ -3333,28 +3338,61 @@ def create_app():
                 keys.append("bid_section")
             if "approval_chain" in updates:
                 _require_owner(my_role)
-                seen: set[str] = set()
-                ordered: list[str] = []
-                for raw_id in updates["approval_chain"] or []:
-                    user_id = str(raw_id or "").strip()
-                    if user_id and user_id not in seen:
-                        seen.add(user_id)
-                        ordered.append(user_id)
-                if len(ordered) > 5:
+                raw_chain = updates["approval_chain"] or []
+                # R19 双格式：v2 阶段列表原样解析；R18 扁平用户 id 列表先整链
+                # 去重保序，再每 id 一个单审批人 all 阶段（语义同 R18）。
+                if raw_chain and isinstance(raw_chain[0], dict):
+                    raw_stages: list[Any] = list(raw_chain)
+                else:
+                    flat_seen: set[str] = set()
+                    flat_ordered: list[str] = []
+                    for raw_id in raw_chain:
+                        user_id = str(raw_id or "").strip()
+                        if user_id and user_id not in flat_seen:
+                            flat_seen.add(user_id)
+                            flat_ordered.append(user_id)
+                    raw_stages = [{"approvers": [uid]} for uid in flat_ordered]
+                if len(raw_stages) > 5:
                     raise HTTPException(status_code=400, detail="审批链最多 5 级")
-                chain: list[dict[str, str]] = []
-                for user_id in ordered:
-                    approver = db.get(User, user_id)
-                    if approver is None:
+                chain: list[dict[str, Any]] = []
+                for raw_stage in raw_stages:
+                    if not isinstance(raw_stage, dict):
                         raise HTTPException(
-                            status_code=400, detail=f"审批人不存在: {user_id}"
+                            status_code=400, detail="审批阶段需为 {approvers, mode} 对象"
                         )
-                    chain.append(
-                        {
-                            "id": user_id,
-                            "name": approver.display_name or approver.username,
-                        }
-                    )
+                    mode = raw_stage.get("mode", "all")
+                    if mode not in ("all", "any"):
+                        raise HTTPException(
+                            status_code=400, detail="审批模式只能是 all（会签）或 any（或签）"
+                        )
+                    raw_approvers = raw_stage.get("approvers")
+                    if not isinstance(raw_approvers, list):
+                        raise HTTPException(
+                            status_code=400, detail="每级审批人需为 1–5 个用户 id"
+                        )
+                    seen: set[str] = set()
+                    ordered: list[str] = []
+                    for raw_id in raw_approvers:
+                        user_id = str(raw_id or "").strip()
+                        if user_id and user_id not in seen:
+                            seen.add(user_id)
+                            ordered.append(user_id)
+                    if not ordered or len(ordered) > 5:
+                        raise HTTPException(status_code=400, detail="每级审批人需为 1–5 个")
+                    approvers: list[dict[str, str]] = []
+                    for user_id in ordered:
+                        approver = db.get(User, user_id)
+                        if approver is None:
+                            raise HTTPException(
+                                status_code=400, detail=f"审批人不存在: {user_id}"
+                            )
+                        approvers.append(
+                            {
+                                "id": user_id,
+                                "name": approver.display_name or approver.username,
+                            }
+                        )
+                    chain.append({"approvers": approvers, "mode": mode})
                 meta["approval_chain"] = chain
                 project.meta = meta
                 keys.append("approval_chain")
@@ -4726,8 +4764,8 @@ def create_app():
             user = current_user() or {}
             actor = user.get("display_name") or user.get("username") or ""
             try:
-                # R18：授权下沉到 boq.review_version——空链仅 owner/超管，
-                # 非空链按当前级审批人（或超管）逐级放行。
+                # R19：授权下沉到 boq.review_version——空链仅 owner/超管，
+                # 非空链按当前级审批人（或超管）放行，会签/或签按阶段模式推进。
                 result = boq.review_version(
                     db,
                     project,

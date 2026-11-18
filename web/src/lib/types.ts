@@ -214,10 +214,25 @@ export interface ProjectStats {
 /** The caller's role inside one project. `admin` is a global super administrator. */
 export type ProjectRole = 'owner' | 'editor' | 'viewer' | 'admin'
 
-/** 报价审批链的一级：用户 id 与保存时的姓名快照（改名不追更）。 */
+/** 报价审批链的一名审批人：用户 id 与保存时的姓名快照（改名不追更）。 */
 export interface ApprovalChainEntry {
   id: string
   name: string
+}
+
+/** 一级审批的通过规则：all=会签（全部通过），any=或签（任一通过）。 */
+export type ApprovalMode = 'all' | 'any'
+
+/** 报价审批链的一级（v2）：1–5 名审批人 + 通过模式。 */
+export interface ApprovalStage {
+  approvers: ApprovalChainEntry[]
+  mode: ApprovalMode
+}
+
+/** PATCH approval_chain 的 v2 入参：每级只发用户 id 列表与模式。 */
+export interface ApprovalStageInput {
+  approvers: string[]
+  mode?: ApprovalMode
 }
 
 /** 报价版本逐级审批的一条记录。 */
@@ -246,8 +261,8 @@ export interface Project {
   stats?: Partial<ProjectStats>
   /** Present on `GET /projects` and `GET /projects/{ref}`; omitted by older servers. */
   my_role?: ProjectRole
-  /** 有序报价审批链（≤5 级）；空数组或缺省 = 负责人单级审批。旧后端可能省略。 */
-  approval_chain?: ApprovalChainEntry[]
+  /** 有序报价审批链（≤5 级，每级 1–5 人会签/或签）；空数组或缺省 = 负责人单级审批。旧后端可能省略或回显扁平格式，读取时归一为 v2。 */
+  approval_chain?: ApprovalStage[]
 }
 
 export interface LedgerSummary {

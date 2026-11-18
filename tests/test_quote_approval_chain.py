@@ -1,9 +1,10 @@
-"""报价审批多级流转：项目审批链（R18）。
+"""报价审批多级流转：项目审批链（R18，R19 起回显 v2 阶段格式）。
 
-Covers the contract's A5 matrix: PATCH approval_chain validation and echo,
-two-stage sequential review (403 for the wrong level, super-admin override),
-mid-chain reject + resubmit restart, empty-chain regression to the R14
-single-owner behavior, payload fields and the legacy-schema migration.
+Covers the contract's A5 matrix: PATCH approval_chain validation and echo
+(R19: single-approver ``all`` stages), two-stage sequential review (403 for
+the wrong level, super-admin override), mid-chain reject + resubmit restart,
+empty-chain regression to the R14 single-owner behavior, payload fields and
+the legacy-schema migration.
 """
 
 from __future__ import annotations
@@ -197,8 +198,8 @@ def test_patch_chain_owner_sets_and_echoes(db, tmp_path):
     )
 
     expected = [
-        {"id": alice_id, "name": "审批甲"},
-        {"id": bob_id, "name": "审批乙"},
+        {"approvers": [{"id": alice_id, "name": "审批甲"}], "mode": "all"},
+        {"approvers": [{"id": bob_id, "name": "审批乙"}], "mode": "all"},
     ]
     assert _chain_payload(admin, project_id) == expected
     # PATCH response itself echoes the chain too
@@ -209,8 +210,8 @@ def test_patch_chain_owner_sets_and_echoes(db, tmp_path):
     dedup = _patch_chain(admin, project_id, [bob_id, alice_id, bob_id])
     assert dedup.status_code == 200, dedup.text
     assert dedup.json()["approval_chain"] == [
-        {"id": bob_id, "name": "审批乙"},
-        {"id": alice_id, "name": "审批甲"},
+        {"approvers": [{"id": bob_id, "name": "审批乙"}], "mode": "all"},
+        {"approvers": [{"id": alice_id, "name": "审批甲"}], "mode": "all"},
     ]
 
     # audit trail records the field
@@ -270,7 +271,9 @@ def test_patch_chain_name_is_a_snapshot(db, tmp_path):
     # rename the user afterwards: the chain keeps the original snapshot
     renamed = admin.patch(f"/admin/users/{alice_id}", json={"display_name": "新名字"})
     assert renamed.status_code == 200, renamed.text
-    assert _chain_payload(admin, project_id) == [{"id": alice_id, "name": "审批甲"}]
+    assert _chain_payload(admin, project_id) == [
+        {"approvers": [{"id": alice_id, "name": "审批甲"}], "mode": "all"}
+    ]
 
 
 # ------------------------------------------------------------------ 两级流转
@@ -373,7 +376,7 @@ def test_super_admin_may_review_any_level(db, tmp_path):
     assert final.status_code == 200, final.text
     assert final.json()["status"] == "approved"
     assert len(final.json()["approvals"]) == 2
-    assert _chain_payload(admin, project_id)[0]["id"] == alice_id
+    assert _chain_payload(admin, project_id)[0]["approvers"][0]["id"] == alice_id
 
 
 def test_final_stage_retires_previous_approved(db, tmp_path):

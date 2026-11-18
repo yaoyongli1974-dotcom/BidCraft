@@ -20,6 +20,7 @@ import {
   importPluginPackage,
   listBoqVersions,
   messageOf,
+  normalizeApprovalChain,
   normalizeBoqQuoteVersion,
   normalizeBoqSummary,
   normalizeImagePolicy,
@@ -442,27 +443,49 @@ describe('boq quote versions', () => {
     ])
   })
 
-  it('patches the approval chain as an ordered user-id list', async () => {
+  it('patches the approval chain as v2 stages with per-stage modes', async () => {
     const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
       jsonResponse({
         id: 'p-1',
         name: '项目',
         approval_chain: [
-          { id: 'u-1', name: '甲' },
-          { id: 'u-2', name: '乙' },
+          {
+            approvers: [
+              { id: 'u-1', name: '甲' },
+              { id: 'u-2', name: '乙' },
+            ],
+            mode: 'all',
+          },
+          { approvers: [{ id: 'u-3', name: '丙' }], mode: 'any' },
         ],
       }),
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    const updated = await updateProject('p/1', { approval_chain: ['u-1', 'u-2'] })
+    const updated = await updateProject('p/1', {
+      approval_chain: [
+        { approvers: ['u-1', 'u-2'], mode: 'all' },
+        { approvers: ['u-3'], mode: 'any' },
+      ],
+    })
     expect(fetchMock.mock.calls[0][0]).toBe('/projects/p%2F1')
     const init = fetchMock.mock.calls[0][1] as RequestInit
     expect(init.method).toBe('PATCH')
-    expect(JSON.parse(String(init.body))).toEqual({ approval_chain: ['u-1', 'u-2'] })
+    expect(JSON.parse(String(init.body))).toEqual({
+      approval_chain: [
+        { approvers: ['u-1', 'u-2'], mode: 'all' },
+        { approvers: ['u-3'], mode: 'any' },
+      ],
+    })
     expect(updated.approval_chain).toEqual([
-      { id: 'u-1', name: '甲' },
-      { id: 'u-2', name: '乙' },
+      {
+        approvers: [
+          { id: 'u-1', name: '甲' },
+          { id: 'u-2', name: '乙' },
+        ],
+        mode: 'all',
+      },
+      { approvers: [{ id: 'u-3', name: '丙' }], mode: 'any' },
     ])
 
     // 空列表 = 清空审批链，回到负责人单级审批；body 必须原样透传。
@@ -471,7 +494,24 @@ describe('boq quote versions', () => {
     expect(JSON.parse(String(clearInit.body))).toEqual({ approval_chain: [] })
   })
 
-  it('normalizes the project approval chain and drops invalid entries', async () => {
+  it('normalizes a legacy flat PATCH echo into v2 stages', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({
+        id: 'p-1',
+        name: '项目',
+        approval_chain: [{ id: 'u-1', name: '甲' }],
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const updated = await updateProject('p/1', {
+      approval_chain: [{ approvers: ['u-1'], mode: 'all' }],
+    })
+    expect(updated.approval_chain).toEqual([
+      { approvers: [{ id: 'u-1', name: '甲' }], mode: 'all' },
+    ])
+  })
+
+  it('normalizes the legacy flat project chain into single-approver all stages', async () => {
     const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
       jsonResponse({
         id: 'p-2',
@@ -482,9 +522,55 @@ describe('boq quote versions', () => {
     vi.stubGlobal('fetch', fetchMock)
     const project = await getProject('p-2')
     expect(project.approval_chain).toEqual([
-      { id: 'u-1', name: '甲' },
-      { id: 'u-2', name: '' },
+      { approvers: [{ id: 'u-1', name: '甲' }], mode: 'all' },
+      { approvers: [{ id: 'u-2', name: '' }], mode: 'all' },
     ])
+  })
+
+  it('normalizes v2 stages with mode whitelist fallback and approver filtering', () => {
+    expect(
+      normalizeApprovalChain([
+        {
+          approvers: [
+            { id: 'u-1', name: '甲' },
+            { name: '无 id' },
+            null,
+            { id: 'u-1', name: '重复' },
+            { id: 'u-2' },
+          ],
+          mode: 'any',
+        },
+        { approvers: [{ id: 'u-3', name: '丙' }] },
+        { approvers: [{ id: 'u-4', name: '丁' }], mode: 'bogus' },
+      ]),
+    ).toEqual([
+      {
+        approvers: [
+          { id: 'u-1', name: '甲' },
+          { id: 'u-2', name: '' },
+        ],
+        mode: 'any',
+      },
+      { approvers: [{ id: 'u-3', name: '丙' }], mode: 'all' },
+      { approvers: [{ id: 'u-4', name: '丁' }], mode: 'all' },
+    ])
+  })
+
+  it('drops stages without valid approvers and non-array chain input', () => {
+    expect(
+      normalizeApprovalChain([
+        { approvers: [], mode: 'any' },
+        { approvers: [{ name: '无 id' }], mode: 'all' },
+        { approvers: 'not-a-list' },
+        null,
+        'u-1',
+        { approvers: [{ id: 'u-1', name: '甲' }], mode: 'any' },
+      ]),
+    ).toEqual([{ approvers: [{ id: 'u-1', name: '甲' }], mode: 'any' }])
+    expect(normalizeApprovalChain(null)).toEqual([])
+    expect(normalizeApprovalChain(undefined)).toEqual([])
+    expect(normalizeApprovalChain('u-1')).toEqual([])
+    expect(normalizeApprovalChain([])).toEqual([])
   })
 })
 

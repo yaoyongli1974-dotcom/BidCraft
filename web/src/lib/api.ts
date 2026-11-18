@@ -3,6 +3,8 @@ import type {
   AdminBillingSettings,
   AdminRulePackage,
   ApprovalChainEntry,
+  ApprovalStage,
+  ApprovalStageInput,
   AuditEntry,
   AuditPage,
   BatchExportFailure,
@@ -724,30 +726,48 @@ export const createProject = (name: string, pkg: string, bidSection = '') =>
 /**
  * Rename a project, change its 标段/包件 or set the quote approval chain.
  * Send only the fields that changed: the server rejects a payload where every
- * key is absent. `approval_chain` is an ordered user-id list (≤5, owner only);
- * an empty array clears the chain back to single-stage owner review.
+ * key is absent. `approval_chain` is the v2 stage list (≤5 stages, each with
+ * 1–5 user ids and an all/any mode, owner only); an empty array clears the
+ * chain back to single-stage owner review. The echo is normalised to v2 even
+ * when an older server still replies with the flat R18 format.
  */
-export const updateProject = (
+export const updateProject = async (
   ref: string,
-  patch: { name?: string; bid_section?: string; approval_chain?: string[] },
-) =>
-  request<Project>(`/projects/${encodeURIComponent(ref)}`, {
+  patch: { name?: string; bid_section?: string; approval_chain?: ApprovalStageInput[] },
+): Promise<Project> => {
+  const data = await request<Project>(`/projects/${encodeURIComponent(ref)}`, {
     method: 'PATCH',
     body: JSON.stringify(patch),
   })
+  return { ...data, approval_chain: normalizeApprovalChain(data.approval_chain) }
+}
 
-/** 审批链回显归一化：只保留带 id 的条目，姓名缺失时留空串。 */
-export function normalizeApprovalChain(value: unknown): ApprovalChainEntry[] {
+/**
+ * 审批链回显归一化为 v2 阶段列表：
+ * - R18 扁平 `{id,name}` → 单审批人 all 阶段；
+ * - v2 `{approvers:[{id,name}],mode}` 原样，mode 白名单外的值回退 all；
+ * - 审批人只保留带 id 的条目（级内去重保序），姓名缺失留空串；
+ * - 无有效审批人的阶段与非法项整体忽略。
+ */
+export function normalizeApprovalChain(value: unknown): ApprovalStage[] {
   if (!Array.isArray(value)) return []
-  const entries: ApprovalChainEntry[] = []
+  const stages: ApprovalStage[] = []
   for (const item of value) {
     if (!item || typeof item !== 'object') continue
     const record = item as Record<string, unknown>
-    const id = asText(record.id).trim()
-    if (!id) continue
-    entries.push({ id, name: asText(record.name) })
+    const rawApprovers = Array.isArray(record.approvers) ? record.approvers : [record]
+    const approvers: ApprovalChainEntry[] = []
+    for (const entry of rawApprovers) {
+      if (!entry || typeof entry !== 'object') continue
+      const entryRecord = entry as Record<string, unknown>
+      const id = asText(entryRecord.id).trim()
+      if (!id || approvers.some((approver) => approver.id === id)) continue
+      approvers.push({ id, name: asText(entryRecord.name) })
+    }
+    if (approvers.length === 0) continue
+    stages.push({ approvers, mode: record.mode === 'any' ? 'any' : 'all' })
   }
-  return entries
+  return stages
 }
 
 export async function getProject(ref: string): Promise<ProjectDetail> {

@@ -18,10 +18,12 @@ import {
 } from 'lucide-react'
 import type {
   ApprovalChainEntry,
+  ApprovalStage,
   BoqPayload,
   BoqQuoteVersion,
   BoqSummary,
   BoqVersionDiff,
+  Member,
   QuoteApprovalRecord,
   QuoteVersionStatus,
 } from '../../lib/types'
@@ -51,6 +53,18 @@ const NAME_MAX = 80
 const NOTE_MAX = 200
 /** 审批链最多 5 级，与后端 PATCH 校验一致。 */
 const CHAIN_MAX = 5
+/** 每级最多 5 名审批人，与后端 PATCH 校验一致。 */
+const APPROVERS_MAX = 5
+
+/** 审批人名单展示：姓名快照优先，缺失时回退用户 id。 */
+function namesOf(entries: ApprovalChainEntry[]): string {
+  return entries.map((entry) => entry.name || entry.id).join('、')
+}
+
+/** 一级的通过模式标签。 */
+function modeLabel(mode: ApprovalStage['mode']): string {
+  return mode === 'any' ? '或签' : '会签'
+}
 
 const STATUS_META: Record<QuoteVersionStatus, { label: string; tone: Tone }> = {
   draft: { label: '草稿', tone: 'neutral' },
@@ -121,9 +135,66 @@ function ApprovalTimeline({ approvals }: { approvals: QuoteApprovalRecord[] }) {
   )
 }
 
+/** 级内添加审批人：候选为尚未加入本级的负责人 / 可编辑成员。 */
+function StageApproverAdd({
+  candidates,
+  disabled,
+  onAdd,
+}: {
+  candidates: Member[]
+  disabled: boolean
+  onAdd: (userId: string) => void
+}) {
+  const [candidateId, setCandidateId] = useState('')
+  const effectiveCandidate = candidates.some((member) => member.user_id === candidateId)
+    ? candidateId
+    : (candidates[0]?.user_id ?? '')
+  const blocked = disabled || candidates.length === 0
+  return (
+    <div className="boq-chain-add">
+      <select
+        value={effectiveCandidate}
+        disabled={blocked}
+        onChange={(event) => setCandidateId(event.target.value)}
+        aria-label="选择要加入本级的成员"
+      >
+        {candidates.length === 0 ? (
+          <option value="">没有可添加的成员</option>
+        ) : (
+          candidates.map((member) => (
+            <option key={member.user_id} value={member.user_id}>
+              {member.display_name || member.username}（{memberRoleMeta(member.role).label}）
+            </option>
+          ))
+        )}
+      </select>
+      <Button
+        size="sm"
+        variant="secondary"
+        icon={<Plus size={13} />}
+        disabled={blocked}
+        title={
+          candidates.length === 0
+            ? '没有可添加的成员'
+            : disabled
+              ? `每级最多 ${APPROVERS_MAX} 名审批人`
+              : '把所选成员加入本级审批'
+        }
+        onClick={() => {
+          if (effectiveCandidate) onAdd(effectiveCandidate)
+          setCandidateId('')
+        }}
+      >
+        添加审批人
+      </Button>
+    </div>
+  )
+}
+
 /**
- * 审批链设置弹窗（仅负责人可见）：候选为负责人与可编辑成员，有序选择 ≤5 级，
- * 支持上移 / 下移 / 移除；保存走 PATCH approval_chain，空链即回到负责人单级审批。
+ * 审批链设置弹窗（仅负责人可见）：≤5 级、每级 1–5 名审批人（候选为负责人与可编辑成员），
+ * 每级可选会签（全部通过）/ 或签（任一通过）；阶段支持上移 / 下移 / 移除。
+ * 保存走 PATCH approval_chain（v2 阶段格式），空链即回到负责人单级审批。
  */
 function ApprovalChainModal({
   projectRef,
@@ -132,56 +203,71 @@ function ApprovalChainModal({
   onSaved,
 }: {
   projectRef: string
-  chain: ApprovalChainEntry[]
+  chain: ApprovalStage[]
   onClose: () => void
   onSaved: () => void
 }) {
   const toast = useToast()
   const membersQuery = useQuery(`members:${projectRef}`, () => getMembers(projectRef))
-  const [draft, setDraft] = useState<ApprovalChainEntry[]>(chain)
-  const [candidateId, setCandidateId] = useState('')
+  const [draft, setDraft] = useState<ApprovalStage[]>(chain)
   const [saving, setSaving] = useState(false)
 
   const candidates = (membersQuery.data ?? []).filter(
     (member) => member.role === 'owner' || member.role === 'editor',
   )
-  const remaining = candidates.filter(
-    (member) => !draft.some((entry) => entry.id === member.user_id),
-  )
-  const effectiveCandidate = remaining.some((member) => member.user_id === candidateId)
-    ? candidateId
-    : (remaining[0]?.user_id ?? '')
+  const membersReady = !membersQuery.loading && !(membersQuery.error && !membersQuery.data)
   const full = draft.length >= CHAIN_MAX
 
-  const addCandidate = () => {
-    const member = remaining.find((item) => item.user_id === effectiveCandidate)
-    if (!member || full) return
-    setDraft([
-      ...draft,
-      { id: member.user_id, name: member.display_name || member.username },
-    ])
-    setCandidateId('')
+  const updateStage = (index: number, patch: Partial<ApprovalStage>) => {
+    setDraft(draft.map((stage, i) => (i === index ? { ...stage, ...patch } : stage)))
   }
 
-  const move = (index: number, delta: number) => {
+  const addStage = () => {
+    if (full) return
+    setDraft([...draft, { approvers: [], mode: 'all' }])
+  }
+
+  const moveStage = (index: number, delta: number) => {
     const target = index + delta
     if (target < 0 || target >= draft.length) return
     const next = [...draft]
-    const [entry] = next.splice(index, 1)
-    next.splice(target, 0, entry)
+    const [stage] = next.splice(index, 1)
+    next.splice(target, 0, stage)
     setDraft(next)
+  }
+
+  const addApprover = (index: number, userId: string) => {
+    const stage = draft[index]
+    const member = candidates.find((item) => item.user_id === userId)
+    if (!stage || !member || stage.approvers.length >= APPROVERS_MAX) return
+    if (stage.approvers.some((entry) => entry.id === userId)) return
+    updateStage(index, {
+      approvers: [
+        ...stage.approvers,
+        { id: member.user_id, name: member.display_name || member.username },
+      ],
+    })
   }
 
   const save = async () => {
     if (saving) return
+    if (draft.some((stage) => stage.approvers.length === 0)) {
+      toast.warning('审批链未填写完整', '每级至少需要 1 名审批人；请添加审批人或移除空级。')
+      return
+    }
     setSaving(true)
     try {
-      await updateProject(projectRef, { approval_chain: draft.map((entry) => entry.id) })
+      await updateProject(projectRef, {
+        approval_chain: draft.map((stage) => ({
+          approvers: stage.approvers.map((entry) => entry.id),
+          mode: stage.mode,
+        })),
+      })
       onSaved()
       toast.success(
         draft.length > 0 ? '审批链已保存' : '审批链已清空',
         draft.length > 0
-          ? `报价提交后将按 ${draft.length} 级逐级审批，全部通过才定稿。`
+          ? `报价提交后将按 ${draft.length} 级逐级审批，每级按会签/或签规则通过后才定稿。`
           : '已恢复为负责人单级审批。',
       )
       onClose()
@@ -210,56 +296,121 @@ function ApprovalChainModal({
     >
       <div className="boq-chain-modal">
         <p className="boq-chain-hint">
-          提交报价后按下列顺序逐级审批，全部通过才定稿；任一级驳回即退回修改，重新提交从第 1
-          级重走。最多 {CHAIN_MAX} 级，候选为负责人与可编辑成员。未设置（保存空链）时为负责人单级审批。
+          提交报价后按下列顺序逐级审批：会签级需全部审批人通过，或签级任一通过即进入下一级；
+          任一级驳回即退回修改，重新提交从第 1 级重走。最多 {CHAIN_MAX} 级、每级最多{' '}
+          {APPROVERS_MAX} 人，候选为负责人与可编辑成员。未设置（保存空链）时为负责人单级审批。
         </p>
 
         {draft.length === 0 ? (
           <p className="boq-chain-empty">尚未设置审批链：当前为负责人单级审批。</p>
         ) : (
           <ol className="boq-chain-list" aria-label="审批链顺序">
-            {draft.map((entry, index) => {
-              const member = candidates.find((item) => item.user_id === entry.id)
-              return (
-                <li key={entry.id} className="boq-chain-item">
+            {draft.map((stage, index) => (
+              <li key={index} className="boq-chain-item">
+                <div className="boq-chain-stage-head">
                   <span className="boq-chain-stage">第 {index + 1} 级</span>
-                  <span className="boq-chain-name" title={entry.name || entry.id}>
-                    {entry.name || entry.id}
-                  </span>
-                  {member ? (
-                    <span className="boq-chain-role">{memberRoleMeta(member.role).label}</span>
-                  ) : (
-                    <span className="boq-chain-warn">已非可写成员</span>
-                  )}
+                  <select
+                    className="boq-chain-mode"
+                    value={stage.mode}
+                    disabled={saving}
+                    onChange={(event) =>
+                      updateStage(index, { mode: event.target.value === 'any' ? 'any' : 'all' })
+                    }
+                    aria-label={`第 ${index + 1} 级审批模式`}
+                  >
+                    <option value="all">会签（全部通过）</option>
+                    <option value="any">或签（任一通过）</option>
+                  </select>
                   <span className="boq-chain-actions">
                     <IconButton
-                      label={`上移「${entry.name || entry.id}」`}
+                      label={`上移第 ${index + 1} 级`}
                       disabled={saving || index === 0}
-                      onClick={() => move(index, -1)}
+                      onClick={() => moveStage(index, -1)}
                     >
                       <ArrowUp size={13} />
                     </IconButton>
                     <IconButton
-                      label={`下移「${entry.name || entry.id}」`}
+                      label={`下移第 ${index + 1} 级`}
                       disabled={saving || index === draft.length - 1}
-                      onClick={() => move(index, 1)}
+                      onClick={() => moveStage(index, 1)}
                     >
                       <ArrowDown size={13} />
                     </IconButton>
                     <IconButton
-                      label={`移除「${entry.name || entry.id}」`}
+                      label={`移除第 ${index + 1} 级`}
                       tone="danger"
                       disabled={saving}
-                      onClick={() => setDraft(draft.filter((item) => item.id !== entry.id))}
+                      onClick={() => setDraft(draft.filter((_, i) => i !== index))}
                     >
                       <X size={13} />
                     </IconButton>
                   </span>
-                </li>
-              )
-            })}
+                </div>
+                {stage.approvers.length === 0 ? (
+                  <p className="boq-chain-warn boq-chain-empty-stage">
+                    尚未添加审批人：保存前每级至少 1 人。
+                  </p>
+                ) : (
+                  <ul className="boq-chain-approvers" aria-label={`第 ${index + 1} 级审批人`}>
+                    {stage.approvers.map((entry) => {
+                      const member = candidates.find((item) => item.user_id === entry.id)
+                      return (
+                        <li key={entry.id} className="boq-chain-approver">
+                          <span className="boq-chain-name" title={entry.name || entry.id}>
+                            {entry.name || entry.id}
+                          </span>
+                          {member ? (
+                            <span className="boq-chain-role">
+                              {memberRoleMeta(member.role).label}
+                            </span>
+                          ) : (
+                            <span className="boq-chain-warn">已非可写成员</span>
+                          )}
+                          <IconButton
+                            label={`从第 ${index + 1} 级移除「${entry.name || entry.id}」`}
+                            tone="danger"
+                            disabled={saving}
+                            onClick={() =>
+                              updateStage(index, {
+                                approvers: stage.approvers.filter(
+                                  (item) => item.id !== entry.id,
+                                ),
+                              })
+                            }
+                          >
+                            <X size={13} />
+                          </IconButton>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                )}
+                {membersReady && (
+                  <StageApproverAdd
+                    candidates={candidates.filter(
+                      (member) => !stage.approvers.some((entry) => entry.id === member.user_id),
+                    )}
+                    disabled={saving || stage.approvers.length >= APPROVERS_MAX}
+                    onAdd={(userId) => addApprover(index, userId)}
+                  />
+                )}
+              </li>
+            ))}
           </ol>
         )}
+
+        <div>
+          <Button
+            size="sm"
+            variant="secondary"
+            icon={<Plus size={13} />}
+            disabled={saving || full}
+            title={full ? `审批链最多 ${CHAIN_MAX} 级` : '追加一个审批级（默认会签）'}
+            onClick={addStage}
+          >
+            添加审批级
+          </Button>
+        </div>
 
         {membersQuery.loading ? (
           <p className="price-policy-message">正在读取项目成员…</p>
@@ -270,37 +421,7 @@ function ApprovalChainModal({
               重试
             </button>
           </div>
-        ) : (
-          <div className="boq-chain-add">
-            <select
-              value={effectiveCandidate}
-              disabled={saving || full || remaining.length === 0}
-              onChange={(event) => setCandidateId(event.target.value)}
-              aria-label="选择要加入审批链的成员"
-            >
-              {remaining.length === 0 ? (
-                <option value="">没有可添加的成员</option>
-              ) : (
-                remaining.map((member) => (
-                  <option key={member.user_id} value={member.user_id}>
-                    {member.display_name || member.username}（
-                    {memberRoleMeta(member.role).label}）
-                  </option>
-                ))
-              )}
-            </select>
-            <Button
-              size="sm"
-              variant="secondary"
-              icon={<Plus size={13} />}
-              disabled={saving || full || remaining.length === 0}
-              title={full ? `审批链最多 ${CHAIN_MAX} 级` : '把所选成员追加为下一级审批人'}
-              onClick={addCandidate}
-            >
-              添加
-            </Button>
-          </div>
-        )}
+        ) : null}
 
         <p className="boq-chain-hint boq-chain-hint--quiet">
           审批人姓名在保存时快照，之后改名不会追更；移除成员不会自动改动已保存的审批链。
@@ -467,8 +588,8 @@ export function QuoteVersionsPanel({
   packageName?: string
   canWrite: boolean
   canReview: boolean
-  /** 项目审批链（有序）；空数组 = 负责人单级审批。 */
-  approvalChain: ApprovalChainEntry[]
+  /** 项目审批链（v2 阶段列表，有序）；空数组 = 负责人单级审批。 */
+  approvalChain: ApprovalStage[]
   /** 仅负责人可设置审批链。 */
   isOwner: boolean
   currentUserId: string
@@ -488,11 +609,56 @@ export function QuoteVersionsPanel({
   const stageOf = (version: BoqQuoteVersion) =>
     Math.min(Math.max(version.approval_stage, 0), Math.max(chainLength - 1, 0))
 
-  /** 定稿/驳回可见性：链非空 → 当前级审批人或超管；链空 → 沿用 canReview。 */
+  /** 某级已通过的审批记录数（会签完成度）。 */
+  const approvedCountAt = (version: BoqQuoteVersion, stageIndex: number) =>
+    version.approvals.filter(
+      (record) => record.stage === stageIndex && record.decision === 'approve',
+    ).length
+
+  /** 当前级待批审批人：会签 = 本级尚未通过者，或签 = 全部审批人。 */
+  const pendingApprovers = (version: BoqQuoteVersion): ApprovalChainEntry[] => {
+    const stageIndex = stageOf(version)
+    const stage = approvalChain[stageIndex]
+    if (!stage) return []
+    if (stage.mode === 'any') return stage.approvers
+    const approvedIds = new Set(
+      version.approvals
+        .filter((record) => record.stage === stageIndex && record.decision === 'approve')
+        .map((record) => record.user_id),
+    )
+    return stage.approvers.filter((entry) => !approvedIds.has(entry.id))
+  }
+
+  /** 本次通过后是否直接定稿：末级且（或签任一即可，或会签只差最后一条通过记录）。 */
+  const willFinalize = (version: BoqQuoteVersion) => {
+    if (!chainActive) return true
+    const stageIndex = stageOf(version)
+    const stage = approvalChain[stageIndex]
+    if (!stage || stageIndex + 1 < chainLength) return false
+    if (stage.mode === 'any') return true
+    return stage.approvers.length - approvedCountAt(version, stageIndex) <= 1
+  }
+
+  /**
+   * 定稿/驳回可见性：链非空 → 当前级审批人（会签级我已批过则隐藏，后端会 403
+   * 「您已完成本级审批」）或超管；链空 → 沿用 canReview。
+   */
   const canReviewVersion = (version: BoqQuoteVersion) => {
     if (!chainActive) return canReview
     if (isSuperAdmin) return true
-    return Boolean(currentUserId) && approvalChain[stageOf(version)]?.id === currentUserId
+    if (!currentUserId) return false
+    const stageIndex = stageOf(version)
+    const stage = approvalChain[stageIndex]
+    if (!stage?.approvers.some((entry) => entry.id === currentUserId)) return false
+    if (stage.mode === 'all') {
+      return !version.approvals.some(
+        (record) =>
+          record.stage === stageIndex &&
+          record.decision === 'approve' &&
+          record.user_id === currentUserId,
+      )
+    }
+    return true
   }
 
   const versionsQuery = useQuery(
@@ -689,28 +855,42 @@ export function QuoteVersionsPanel({
 
   const approvalStage = approval ? stageOf(approval.version) : 0
   const approvalIsFinalStage = approvalStage + 1 >= chainLength
+  const approvalStageInfo = approval ? approvalChain[approvalStage] : undefined
+  const approvalWillFinalize = approval ? willFinalize(approval.version) : true
+  /** 会签级除我之外还差几人通过（超管代批时即全部待批者）。 */
+  const approvalRemaining =
+    approval && approvalStageInfo?.mode === 'all'
+      ? approvalStageInfo.approvers.length - approvedCountAt(approval.version, approvalStage)
+      : 0
+  const approvalOtherNames = approval
+    ? namesOf(pendingApprovers(approval.version).filter((entry) => entry.id !== currentUserId))
+    : ''
   const approvalCopy = approval
     ? approval.kind === 'submit'
       ? {
           title: `提交「${approval.version.name}」审批？`,
           hint: chainActive
-            ? `提交后按审批链逐级审批（共 ${chainLength} 级），全部通过才定稿。可附上报价口径说明。`
+            ? `提交后按审批链逐级审批（共 ${chainLength} 级），每级按会签/或签规则通过后才定稿。可附上报价口径说明。`
             : '提交后版本进入待审状态，审批通过前不能再提交。可附上报价口径说明。',
           field: '提交说明',
           confirm: '提交审批',
         }
       : approval.kind === 'approve'
         ? {
-            title: chainActive && !approvalIsFinalStage
+            title: chainActive && !approvalWillFinalize
               ? `通过「${approval.version.name}」的第 ${approvalStage + 1} 级审批？`
               : `定稿「${approval.version.name}」？`,
             hint: chainActive
-              ? approvalIsFinalStage
+              ? approvalWillFinalize
                 ? '这是最后一级审批：通过后该版本定稿为本包件的现行报价；同一包件的旧定稿版本会自动退回草稿。'
-                : `通过后进入第 ${approvalStage + 2}/${chainLength} 级，由「${approvalChain[approvalStage + 1]?.name || '下一级审批人'}」继续审批；全部通过后才定稿。`
+                : approvalIsFinalStage
+                  ? `这是最后一级（会签）：你通过后还需「${approvalOtherNames || '其他审批人'}」通过，版本才定稿为本包件现行报价。`
+                  : approvalStageInfo?.mode === 'all' && approvalRemaining > 1
+                    ? `本级为会签：你通过后还需「${approvalOtherNames || '其他审批人'}」通过，才进入第 ${approvalStage + 2}/${chainLength} 级。`
+                    : `通过后进入第 ${approvalStage + 2}/${chainLength} 级，由「${namesOf(approvalChain[approvalStage + 1]?.approvers ?? []) || '下一级审批人'}」继续审批；全部通过后才定稿。`
               : '定稿后该版本成为本包件的现行报价；同一包件的旧定稿版本会自动退回草稿。',
             field: '审批意见',
-            confirm: chainActive && !approvalIsFinalStage ? '通过本级' : '定稿',
+            confirm: chainActive && !approvalWillFinalize ? '通过本级' : '定稿',
           }
         : {
             title: `驳回「${approval.version.name}」？`,
@@ -737,12 +917,20 @@ export function QuoteVersionsPanel({
             )
       syncAfterChange(updated)
       if (approval.kind === 'approve' && updated.status === 'submitted') {
-        // 链上中间级通过：版本仍待审，提示进入下一级。
+        // 通过但版本仍待审：会签级可能仍停在原地等其他审批人，否则进入下一级。
         const nextStage = Math.min(updated.approval_stage, Math.max(chainLength - 1, 0))
-        toast.success(
-          '本级审批已通过',
-          `「${approval.version.name}」进入第 ${nextStage + 1}/${chainLength} 级，等待「${approvalChain[nextStage]?.name || '下一级审批人'}」审批。`,
-        )
+        const nextNames = namesOf(pendingApprovers(updated)) || '当前级审批人'
+        if (nextStage === approvalStage && approvalChain[nextStage]?.mode === 'all') {
+          toast.success(
+            '本级审批已通过',
+            `「${approval.version.name}」第 ${nextStage + 1}/${chainLength} 级会签进行中，还需「${nextNames}」通过。`,
+          )
+        } else {
+          toast.success(
+            '本级审批已通过',
+            `「${approval.version.name}」进入第 ${nextStage + 1}/${chainLength} 级，等待「${nextNames}」审批。`,
+          )
+        }
       } else {
         toast.success(
           approval.kind === 'submit'
@@ -763,7 +951,7 @@ export function QuoteVersionsPanel({
       }
       closeApproval()
     } catch (error) {
-      // 403 = 非当前级审批人（detail 含「第 N 级」）；级次可能已被他人推进，刷新列表。
+      // 403 = 非当前级审批人或会签级已批过（detail 原样提示）；级次可能已被他人推进，刷新列表。
       if (error instanceof ApiError && error.status === 403) versionsQuery.refresh()
       toast.error(
         approval.kind === 'submit'
@@ -882,7 +1070,7 @@ export function QuoteVersionsPanel({
               size="sm"
               variant="ghost"
               icon={<ListOrdered size={13} />}
-              title="设置报价审批链：按顺序逐级审批，最多 5 级；未设置时为负责人单级审批"
+              title="设置报价审批链：逐级会签/或签，最多 5 级、每级 5 人；未设置时为负责人单级审批"
               onClick={() => setChainOpen(true)}
             >
               审批链{chainActive ? `（${chainLength} 级）` : ''}
@@ -894,7 +1082,14 @@ export function QuoteVersionsPanel({
           <p className="boq-chain-summary">
             <ListOrdered size={12} aria-hidden />
             <span>
-              审批链：{approvalChain.map((entry) => entry.name || entry.id).join(' → ')}
+              审批链：
+              {approvalChain.map((stage, index) => (
+                <span key={index} className="boq-chain-summary-stage">
+                  {index > 0 && ' → '}
+                  {namesOf(stage.approvers)}
+                  <em className="boq-chain-mode-tag">（{modeLabel(stage.mode)}）</em>
+                </span>
+              ))}
               （共 {chainLength} 级，逐级通过后才定稿）
             </span>
           </p>
@@ -922,7 +1117,9 @@ export function QuoteVersionsPanel({
               const editable = version.status === 'draft' || version.status === 'rejected'
               const reviewable = canReviewVersion(version)
               const stage = stageOf(version)
-              const stageApprover = approvalChain[stage]?.name || ''
+              const stageInfo = approvalChain[stage]
+              const stagePendingNames = submitted ? namesOf(pendingApprovers(version)) : ''
+              const finalizes = willFinalize(version)
               return (
                 <li key={version.id} className="boq-version-item">
                   <div className="boq-version-main">
@@ -932,13 +1129,18 @@ export function QuoteVersionsPanel({
                         {meta.label}
                       </Badge>
                       {submitted && chainActive && (
-                        <Badge
-                          tone="info"
-                          subtle
-                          title={`等待「${stageApprover || '当前级审批人'}」审批（第 ${stage + 1}/${chainLength} 级）`}
-                        >
-                          第 {stage + 1}/{chainLength} 级待审
-                        </Badge>
+                        <>
+                          <Badge
+                            tone="info"
+                            subtle
+                            title={`第 ${stage + 1}/${chainLength} 级（${modeLabel(stageInfo?.mode ?? 'all')}），待批：${stagePendingNames || '当前级审批人'}`}
+                          >
+                            第 {stage + 1}/{chainLength} 级待审
+                          </Badge>
+                          <span className="boq-version-stage-pending">
+                            待批：{stagePendingNames || '当前级审批人'}
+                          </span>
+                        </>
                       )}
                     </div>
                     <span className="boq-version-meta">
@@ -997,13 +1199,13 @@ export function QuoteVersionsPanel({
                           icon={<Check size={12} />}
                           disabled={busy}
                           title={
-                            chainActive && stage + 1 < chainLength
-                              ? `通过第 ${stage + 1}/${chainLength} 级审批，交由下一级继续审批`
+                            chainActive && !finalizes
+                              ? `通过第 ${stage + 1}/${chainLength} 级审批${stage + 1 < chainLength ? '，交由下一级继续审批' : '（会签还需其他审批人通过）'}`
                               : '定稿为本包件现行报价；同包件旧定稿版本自动退回草稿'
                           }
                           onClick={() => openApproval('approve', version)}
                         >
-                          {chainActive && stage + 1 < chainLength ? '通过本级' : '定稿'}
+                          {chainActive && !finalizes ? '通过本级' : '定稿'}
                         </Button>
                         <Button
                           size="sm"
@@ -1022,12 +1224,12 @@ export function QuoteVersionsPanel({
                         className="boq-version-pending"
                         title={
                           chainActive
-                            ? `等待「${stageApprover || '当前级审批人'}」进行第 ${stage + 1}/${chainLength} 级审批`
+                            ? `第 ${stage + 1}/${chainLength} 级（${modeLabel(stageInfo?.mode ?? 'all')}）等待「${stagePendingNames || '当前级审批人'}」审批`
                             : '等待项目负责人或超级管理员审批'
                         }
                       >
                         <ShieldCheck size={12} aria-hidden />
-                        {chainActive ? `等待「${stageApprover || '审批人'}」` : '待审批'}
+                        {chainActive ? `等待「${stagePendingNames || '审批人'}」` : '待审批'}
                       </span>
                     )}
                     {version.status === 'approved' && canWrite && (

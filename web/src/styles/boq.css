@@ -1507,12 +1507,54 @@
 
 .boq-chain-item {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   padding: 6px 8px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--surface);
+}
+
+.boq-chain-stage-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.boq-chain-stage-head .boq-chain-mode {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+}
+
+.boq-chain-approvers {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.boq-chain-approver {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.boq-chain-empty-stage {
+  margin: 0;
+}
+
+.boq-chain-mode-tag {
+  color: var(--faint);
+  font-style: normal;
+}
+
+.boq-version-stage-pending {
+  color: var(--info, #1d4ed8);
+  font-size: 10px;
+  overflow-wrap: anywhere;
 }
 
 .boq-chain-stage {
