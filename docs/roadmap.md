@@ -28,7 +28,7 @@
 | C7 可插拔 Agent / API | ✅ | `generation/agent.py`、`bidcraft/api.py`、`bidcraft/mcp.py` | OpenAI 兼容端点；FastAPI + 后台生成任务；MCP stdio 服务 |
 | C8 行业包 | ✅ 8 个行业包 + 通用基包 | `bidcraft/resources/packages/*.yaml` | 弱电（综合布线/安防/BA）+ 消防、安装、土建、暖通、装修；管理员可在 `/admin` 维护 YAML 覆盖包 |
 | 规则包管理 | ✅ | `rules/store.py`、`/admin/rule-packages`、`web/` | 超级管理员创建/修改/隐藏/恢复规则包；新建时可填写名称、唯一包名并选择工程类型；内置包只读，用户覆盖写入 `BIDCRAFT_HOME/packages`；保存前校验继承、字段、大纲与核对表达式 |
-| C9 回归/部署 | ✅ 基本 | `tests/`、`Dockerfile`、`web/` | 503 个测试；Docker 多阶段构建 Web（含 OCR 依赖）；本地/局域网两种部署 |
+| C9 回归/部署 | ✅ 基本 | `tests/`、`Dockerfile`、`web/` | 514 个测试；Docker 多阶段构建 Web（含 OCR 依赖）；本地/局域网两种部署 |
 | SSE 流式进度 | ✅ | `bidcraft/jobs.py`、`/jobs/{id}/events`、`web/` | 章节/逐字事件持久化；Last-Event-ID 断线续传；SSE 失败回退轮询；刷新后重新挂接任务 |
 | Excel 清单双向对齐 | ✅ | `boq.py`、`export/boq_xlsx.py`、`/projects/{ref}/boq`、`web/` | 清单导入与表头识别、材料模糊匹配、缺项/多项/数量·单位·规格差异、差异回写、响应表导出 |
 | 清单报价 | ✅ | `boq.py`、`/projects/{ref}/boq/price`、`export/boq_xlsx.py`、`web/` | 逐行单价录入/清除、按清单数量计算合价、已报价/未报价/缺数量统计、报价汇总与响应表价格列；不自动生成价格 |
@@ -39,6 +39,9 @@
 | 知识库对接 | ✅ | `knowledge.py`、`/admin/kbs`、`web/` | 本地目录索引；通用/Dify/RAGFlow API；章节检索注入；台账优先 |
 | 向量语义检索 | ✅ 可选 | `knowledge.py`、`model_config.resolve_embedding_endpoint`、`/admin/kbs/{id}/embed`、`web/` | embedding 向量索引与混合重排；换模型自动失效；无模型/失败回退关键词召回 |
 | 注册与计费 | ✅ | `billing.py`、`wechat.py`、`wechatpay.py`、`web/` | 用户名/微信扫码注册、独立项目、按章扣点、兑换码、微信支付 Native/mock |
+| VIP 会员 | ✅ | `billing.py`、`/admin/users/{id}/vip`、`/billing/vip/orders`、`web/` | 超管授予/续期/清除 VIP、自助购买 VIP 套餐（月/季/年，mock 续期不加点）；按章扣点享 VIP 折扣（vip_discount 0.1–1）；VIP 后台任务排队优先 |
+| 子账号共享计费 | ✅ | `accounts.py`、`/account/sub-accounts`、`web/` | VIP 主账号自助创建子账号（sub_account_limit 上限），子账号共享主账号点数余额、不可单独充值/兑换/购买；删除子账号项目自动移交主账号 |
+| 优先级任务队列 | ✅ | `jobqueue.py`、`jobs.py`、`web/` | 后台任务经优先级堆队列调度（VIP=0 优先），并发 `BIDCRAFT_MAX_JOBS`（默认 2，1–8）；job payload 回显 priority/queue_position |
 
 ## 已覆盖的 P0
 

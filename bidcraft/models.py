@@ -343,6 +343,8 @@ class Job(Base):
     message: Mapped[str] = mapped_column(Text, default="")
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
     result: Mapped[dict] = mapped_column(JSON, default=dict)
+    #: 排队优先级：数值越小越先执行（VIP 主账号/子账号=0，普通=1）。
+    priority: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
@@ -383,6 +385,10 @@ class User(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     credits: Mapped[int] = mapped_column(Integer, default=0)
     is_external: Mapped[bool] = mapped_column(Boolean, default=False)
+    #: VIP 到期时间（naive UTC）；None 或已过期表示非 VIP。
+    vip_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    #: 子账号指向主账号 id；主账号为 None。子账号消费计入主账号。
+    parent_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     wechat_openid: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     wechat_unionid: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     wechat_nickname: Mapped[str] = mapped_column(String(120), default="")

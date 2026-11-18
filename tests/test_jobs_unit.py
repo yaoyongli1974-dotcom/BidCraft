@@ -92,10 +92,14 @@ def test_job_payload_shape(db):
         "payload",
         "result",
         "error",
+        "priority",
+        "queue_position",
         "created_at",
         "updated_at",
     }
     assert payload["project_id"] is None
+    assert payload["priority"] == 1
+    assert payload["queue_position"] == 0
     assert payload["kind"] == "kb_reindex"
     assert payload["status"] == "failed"
     assert payload["progress"] == 40

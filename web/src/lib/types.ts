@@ -31,6 +31,10 @@ export interface User {
   active: boolean
   credits?: number
   is_external?: boolean
+  vip_expires_at?: string | null
+  is_vip?: boolean
+  parent_id?: string
+  is_sub?: boolean
   wechat_nickname?: string
   avatar_url?: string
   last_login_at?: string | null
@@ -599,15 +603,29 @@ export interface BillingPackage {
   amount_cents: number
 }
 
+export interface VipPackage {
+  id: string
+  name: string
+  days: number
+  amount_cents: number
+}
+
 export interface BillingSummary {
   balance: number
   chapter_cost: number
   signup_credits: number
   billing_exempt: boolean
   packages: BillingPackage[]
+  is_vip?: boolean
+  vip_expires_at?: string | null
+  vip_packages?: VipPackage[]
+  vip_discount?: number
+  sub_account_limit?: number
+  is_sub?: boolean
+  parent_username?: string
 }
 
-export type CreditKind = 'signup' | 'recharge' | 'redeem' | 'consume' | 'refund' | 'admin'
+export type CreditKind = 'signup' | 'recharge' | 'redeem' | 'consume' | 'refund' | 'admin' | 'vip'
 
 export interface CreditTransaction {
   id: string
@@ -663,6 +681,24 @@ export interface AdminBillingSettings {
   signup_credits: number
   chapter_cost: number
   packages: BillingPackage[]
+  vip_packages?: VipPackage[]
+  vip_discount?: number
+  sub_account_limit?: number
+}
+
+export interface SubAccount {
+  id: string
+  username: string
+  display_name: string
+  active: boolean
+  created_at?: string | null
+  last_login_at?: string | null
+}
+
+export interface SubAccountInput {
+  username: string
+  password: string
+  display_name?: string
 }
 
 export interface AdminBillingStats {

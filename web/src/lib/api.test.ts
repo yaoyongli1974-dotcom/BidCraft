@@ -9,10 +9,14 @@ import {
   apiFetch,
   applicableStages,
   cnyTotalWithTax,
+  createBillingOrder,
   createBoqVersion,
   createPlugin,
+  createSubAccount,
   createTerm,
+  createVipOrder,
   deleteBoqVersion,
+  deleteSubAccount,
   duplicateProject,
   errorDetailText,
   exportPluginPackage,
@@ -20,7 +24,9 @@ import {
   getPendingApprovals,
   getProject,
   getProjectTemplates,
+  getSubAccounts,
   getTerms,
+  grantUserVip,
   importPluginPackage,
   instantiateTemplate,
   listBoqVersions,
@@ -40,6 +46,7 @@ import {
   unapproveBoqVersion,
   updatePlugin,
   updateProject,
+  updateSubAccount,
   uploadForm,
 } from './api'
 
@@ -1544,5 +1551,76 @@ describe('plugin packages', () => {
       ),
     )
     await expect(importPluginPackage(file)).rejects.toBeInstanceOf(ApiError)
+  })
+})
+
+describe('R24 VIP & sub-accounts', () => {
+  afterEach(() => vi.unstubAllGlobals())
+  const jsonResponse = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
+
+  it('grantUserVip posts days/note to the admin vip route', async () => {
+    const fetchMock = vi.fn(async (_p: unknown, _init?: RequestInit) => jsonResponse({ user: { id: 'u1', is_vip: true } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const res = await grantUserVip('u/1', 30, '开通')
+    expect(fetchMock.mock.calls[0][0]).toBe('/admin/users/u%2F1/vip')
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({ days: 30, note: '开通' })
+    expect(res.user).toMatchObject({ id: 'u1', is_vip: true })
+  })
+
+  it('createVipOrder posts package_id', async () => {
+    const fetchMock = vi.fn(async (_p: unknown, _init?: RequestInit) => jsonResponse({ id: 'o1', credits: 0 }))
+    vi.stubGlobal('fetch', fetchMock)
+    await createVipOrder('vip-month')
+    expect(fetchMock.mock.calls[0][0]).toBe('/billing/vip/orders')
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({ package_id: 'vip-month' })
+  })
+
+  it('getSubAccounts GETs the account list', async () => {
+    const fetchMock = vi.fn(async (_p: unknown, _init?: RequestInit) => jsonResponse([{ id: 's1', username: 'sub1' }]))
+    vi.stubGlobal('fetch', fetchMock)
+    const list = await getSubAccounts()
+    expect(fetchMock.mock.calls[0][0]).toBe('/account/sub-accounts')
+    const init = fetchMock.mock.calls[0][1] as RequestInit | undefined
+    expect(init?.method ?? 'GET').toBe('GET')
+    expect(list).toEqual([{ id: 's1', username: 'sub1' }])
+  })
+
+  it('createSubAccount posts the input body', async () => {
+    const fetchMock = vi.fn(async (_p: unknown, _init?: RequestInit) => jsonResponse({ id: 's1' }, 201))
+    vi.stubGlobal('fetch', fetchMock)
+    await createSubAccount({ username: 'worker', password: 'Passw0rd!1', display_name: '员工' })
+    expect(fetchMock.mock.calls[0][0]).toBe('/account/sub-accounts')
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({ username: 'worker', password: 'Passw0rd!1', display_name: '员工' })
+  })
+
+  it('updateSubAccount PATCHes only the provided fields', async () => {
+    const fetchMock = vi.fn(async (_p: unknown, _init?: RequestInit) => jsonResponse({ id: 's/1', active: false }))
+    vi.stubGlobal('fetch', fetchMock)
+    await updateSubAccount('s/1', { active: false })
+    expect(fetchMock.mock.calls[0][0]).toBe('/account/sub-accounts/s%2F1')
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(String(init.body))).toEqual({ active: false })
+  })
+
+  it('deleteSubAccount DELETEs by id', async () => {
+    const fetchMock = vi.fn(async (_p: unknown, _init?: RequestInit) => jsonResponse({ deleted: true, id: 's1' }))
+    vi.stubGlobal('fetch', fetchMock)
+    const res = await deleteSubAccount('s1')
+    expect(fetchMock.mock.calls[0][0]).toBe('/account/sub-accounts/s1')
+    expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe('DELETE')
+    expect(res).toEqual({ deleted: true, id: 's1' })
+  })
+
+  it('surfaces a 403 when a sub-account tries to recharge', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ detail: '子账号费用由主账号承担，无需单独充值' }, 403)))
+    await expect(createBillingOrder('starter')).rejects.toBeInstanceOf(ApiError)
   })
 })

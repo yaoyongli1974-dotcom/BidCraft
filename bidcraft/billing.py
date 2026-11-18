@@ -7,6 +7,7 @@ are written to an append-only transaction log.
 
 from __future__ import annotations
 
+import math
 import secrets
 import string
 from datetime import timedelta
@@ -20,6 +21,12 @@ DEFAULT_PACKAGES = [
     {"id": "starter", "name": "入门包", "credits": 10, "amount_cents": 990},
     {"id": "pro", "name": "专业包", "credits": 50, "amount_cents": 3990},
     {"id": "studio", "name": "工作室包", "credits": 120, "amount_cents": 7990},
+]
+
+DEFAULT_VIP_PACKAGES = [
+    {"id": "vip-month", "name": "VIP 月卡", "days": 30, "amount_cents": 3000},
+    {"id": "vip-quarter", "name": "VIP 季卡", "days": 90, "amount_cents": 8000},
+    {"id": "vip-year", "name": "VIP 年卡", "days": 365, "amount_cents": 29900},
 ]
 
 
@@ -37,15 +44,32 @@ def billing_settings(db) -> dict:
     packages = stored.get("packages")
     if not isinstance(packages, list) or not packages:
         packages = DEFAULT_PACKAGES
+    vip_packages = stored.get("vip_packages")
+    if not isinstance(vip_packages, list) or not vip_packages:
+        vip_packages = DEFAULT_VIP_PACKAGES
+    try:
+        discount = float(stored.get("vip_discount", 0.5))
+    except (TypeError, ValueError):
+        discount = 0.5
+    discount = min(1.0, max(0.1, discount))
+    try:
+        sub_limit = int(stored.get("sub_account_limit", 5))
+    except (TypeError, ValueError):
+        sub_limit = 5
+    sub_limit = min(20, max(0, sub_limit))
     return {
         "signup_credits": int(stored.get("signup_credits", settings.signup_credits)),
         "chapter_cost": int(stored.get("chapter_cost", settings.chapter_cost)),
         "packages": packages,
+        "vip_packages": vip_packages,
+        "vip_discount": discount,
+        "sub_account_limit": sub_limit,
     }
 
 
 def save_billing_settings(db, payload: dict) -> dict:
-    packages = payload.get("packages")
+    current = billing_settings(db)
+    packages = payload.get("packages", current["packages"])
     if not isinstance(packages, list) or not packages:
         raise BillingError("至少需要一个充值套餐")
     normalized = []
@@ -64,9 +88,49 @@ def save_billing_settings(db, payload: dict) -> dict:
         if package["credits"] <= 0 or package["amount_cents"] <= 0:
             raise BillingError("套餐点数与金额必须大于 0")
         normalized.append(package)
-    signup = max(0, int(payload.get("signup_credits", settings.signup_credits)))
-    cost = max(0, int(payload.get("chapter_cost", settings.chapter_cost)))
-    value = {"signup_credits": signup, "chapter_cost": cost, "packages": normalized}
+    vip_packages = payload.get("vip_packages")
+    if vip_packages is None:
+        vip_packages = current["vip_packages"]
+    if not isinstance(vip_packages, list) or not vip_packages:
+        raise BillingError("至少需要一个 VIP 套餐")
+    vip_normalized = []
+    for item in vip_packages:
+        try:
+            package = {
+                "id": str(item["id"]).strip()[:40],
+                "name": str(item["name"]).strip()[:60],
+                "days": int(item["days"]),
+                "amount_cents": int(item["amount_cents"]),
+            }
+        except (KeyError, TypeError, ValueError) as exc:
+            raise BillingError("VIP 套餐字段不完整") from exc
+        if not package["id"] or not package["name"]:
+            raise BillingError("VIP 套餐 ID 与名称不能为空")
+        if package["days"] <= 0 or package["amount_cents"] <= 0:
+            raise BillingError("VIP 套餐天数与金额必须大于 0")
+        vip_normalized.append(package)
+    try:
+        raw_discount = payload.get("vip_discount")
+        discount = float(raw_discount if raw_discount is not None else current["vip_discount"])
+    except (TypeError, ValueError) as exc:
+        raise BillingError("VIP 折扣无效") from exc
+    discount = min(1.0, max(0.1, discount))
+    try:
+        raw_limit = payload.get("sub_account_limit")
+        sub_limit = int(raw_limit if raw_limit is not None else current["sub_account_limit"])
+    except (TypeError, ValueError) as exc:
+        raise BillingError("子账号上限无效") from exc
+    sub_limit = min(20, max(0, sub_limit))
+    signup = max(0, int(payload.get("signup_credits", current["signup_credits"])))
+    cost = max(0, int(payload.get("chapter_cost", current["chapter_cost"])))
+    value = {
+        "signup_credits": signup,
+        "chapter_cost": cost,
+        "packages": normalized,
+        "vip_packages": vip_normalized,
+        "vip_discount": discount,
+        "sub_account_limit": sub_limit,
+    }
     row = db.get(AppSetting, "billing")
     if row is None:
         row = AppSetting(key="billing", value=value)
@@ -79,6 +143,24 @@ def save_billing_settings(db, payload: dict) -> dict:
 
 def billing_exempt(user: User) -> bool:
     return user.role == "super_admin" or not user.is_external
+
+
+def is_vip(user: User) -> bool:
+    return user.vip_expires_at is not None and user.vip_expires_at > utcnow()
+
+
+def billing_account(db, user: User) -> User:
+    """The account that actually pays: a sub-account's parent, else the user."""
+    if user.parent_id:
+        parent = db.get(User, user.parent_id)
+        if parent is not None:
+            return parent
+    return user
+
+
+def queue_priority(db, user: User) -> int:
+    """VIP accounts (including a sub-account's parent) jump the job queue."""
+    return 0 if is_vip(billing_account(db, user)) else 1
 
 
 def add_credits(
@@ -133,17 +215,26 @@ def signup_grant(db, user: User) -> int:
 
 
 def charge_chapters(db, user: User, count: int, *, project_id: str = "", note: str = "") -> int:
-    if count <= 0 or billing_exempt(user):
+    if count <= 0:
         return 0
-    cost = billing_settings(db)["chapter_cost"] * count
+    account = billing_account(db, user)
+    if billing_exempt(account):
+        return 0
+    config = billing_settings(db)
+    cost = config["chapter_cost"] * count
     if cost <= 0:
         return 0
+    if is_vip(account):
+        cost = math.ceil(cost * config["vip_discount"])
+    base_note = note or f"生成 {count} 章"
+    if user.parent_id:
+        base_note = f"子账号 {user.username}：{base_note}"
     add_credits(
         db,
-        user.id,
+        account.id,
         -cost,
         kind="consume",
-        note=note or f"生成 {count} 章",
+        note=base_note,
         ref_type="project",
         ref_id=project_id,
     )
@@ -153,12 +244,16 @@ def charge_chapters(db, user: User, count: int, *, project_id: str = "", note: s
 def refund_chapters(db, user: User, credits: int, *, project_id: str = "") -> int:
     if credits <= 0:
         return 0
+    account = billing_account(db, user)
+    note = "生成未完成退还"
+    if user.parent_id:
+        note = f"子账号 {user.username}：{note}"
     return add_credits(
         db,
-        user.id,
+        account.id,
         credits,
         kind="refund",
-        note="生成未完成退还",
+        note=note,
         ref_type="project",
         ref_id=project_id,
     )
@@ -166,13 +261,22 @@ def refund_chapters(db, user: User, credits: int, *, project_id: str = "") -> in
 
 def summary(db, user: User) -> dict:
     config = billing_settings(db)
-    balance = db.scalar(select(User.credits).where(User.id == user.id)) or 0
+    account = billing_account(db, user)
+    balance = db.scalar(select(User.credits).where(User.id == account.id)) or 0
+    parent = db.get(User, user.parent_id) if user.parent_id else None
     return {
         "balance": balance,
         "chapter_cost": config["chapter_cost"],
         "signup_credits": config["signup_credits"],
-        "billing_exempt": billing_exempt(user),
+        "billing_exempt": billing_exempt(account),
         "packages": config["packages"],
+        "is_vip": is_vip(account),
+        "vip_expires_at": _iso(account.vip_expires_at),
+        "vip_packages": config["vip_packages"],
+        "vip_discount": config["vip_discount"],
+        "sub_account_limit": config["sub_account_limit"],
+        "is_sub": bool(user.parent_id),
+        "parent_username": parent.username if parent is not None else None,
     }
 
 
@@ -241,6 +345,13 @@ def find_package(db, package_id: str) -> dict | None:
     return None
 
 
+def find_vip_package(db, package_id: str) -> dict | None:
+    for package in billing_settings(db)["vip_packages"]:
+        if str(package.get("id")) == package_id:
+            return package
+    return None
+
+
 def create_order(db, user_id: str, package: dict, provider: str = "wechat") -> RechargeOrder:
     out_trade_no = "BC" + utcnow().strftime("%Y%m%d%H%M%S") + _random_code(6)
     order = RechargeOrder(
@@ -250,6 +361,22 @@ def create_order(db, user_id: str, package: dict, provider: str = "wechat") -> R
         credits=int(package["credits"]),
         package_id=str(package["id"]),
         provider=provider,
+    )
+    db.add(order)
+    db.flush()
+    return order
+
+
+def create_vip_order(db, user_id: str, package: dict, provider: str = "wechat") -> RechargeOrder:
+    out_trade_no = "VIP" + utcnow().strftime("%Y%m%d%H%M%S") + _random_code(6)
+    order = RechargeOrder(
+        user_id=user_id,
+        out_trade_no=out_trade_no,
+        amount_cents=int(package["amount_cents"]),
+        credits=0,
+        package_id=str(package["id"]),
+        provider=provider,
+        meta={"kind": "vip", "days": int(package["days"])},
     )
     db.add(order)
     db.flush()
@@ -266,6 +393,29 @@ def mark_paid(db, order: RechargeOrder, *, transaction_id: str = "", provider: s
     order.transaction_id = transaction_id[:80]
     if provider:
         order.provider = provider
+    meta = order.meta if isinstance(order.meta, dict) else {}
+    if meta.get("kind") == "vip":
+        days = max(0, int(meta.get("days", 0)))
+        user = db.get(User, order.user_id)
+        if user is None:
+            raise BillingError("用户不存在")
+        now = utcnow()
+        base = user.vip_expires_at if (user.vip_expires_at and user.vip_expires_at > now) else now
+        user.vip_expires_at = base + timedelta(days=days)
+        balance = db.scalar(select(User.credits).where(User.id == order.user_id)) or 0
+        db.add(
+            CreditTransaction(
+                user_id=order.user_id,
+                amount=0,
+                balance_after=balance,
+                kind="vip",
+                note=f"VIP 续期 {days} 天",
+                ref_type="order",
+                ref_id=order.id,
+            )
+        )
+        db.flush()
+        return True
     add_credits(
         db,
         order.user_id,

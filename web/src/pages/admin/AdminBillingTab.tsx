@@ -19,7 +19,7 @@ import {
   messageOf,
   saveAdminBilling,
 } from '../../lib/api'
-import type { BillingPackage } from '../../lib/types'
+import type { BillingPackage, VipPackage } from '../../lib/types'
 import {
   formatCents,
   formatDate,
@@ -55,6 +55,25 @@ function toDraft(pkg: BillingPackage): PackageDraft {
   }
 }
 
+interface VipPackageDraft {
+  key: string
+  id: string
+  name: string
+  days: string
+  price: string
+}
+
+function toVipDraft(pkg: VipPackage): VipPackageDraft {
+  packageKey += 1
+  return {
+    key: `vip-${packageKey}`,
+    id: pkg.id,
+    name: pkg.name,
+    days: String(pkg.days),
+    price: (pkg.amount_cents / 100).toFixed(2),
+  }
+}
+
 export function AdminBillingTab() {
   const toast = useToast()
   const query = useQuery('admin:billing', getAdminBilling)
@@ -62,6 +81,9 @@ export function AdminBillingTab() {
   const [signup, setSignup] = useState('5')
   const [chapterCost, setChapterCost] = useState('1')
   const [packages, setPackages] = useState<PackageDraft[]>([])
+  const [vipPackages, setVipPackages] = useState<VipPackageDraft[]>([])
+  const [vipDiscount, setVipDiscount] = useState('0.5')
+  const [subLimit, setSubLimit] = useState('5')
   const [saving, setSaving] = useState(false)
   const [settingsError, setSettingsError] = useState<string | null>(null)
   const [codeCount, setCodeCount] = useState('10')
@@ -79,6 +101,9 @@ export function AdminBillingTab() {
     setSignup(String(data.settings.signup_credits))
     setChapterCost(String(data.settings.chapter_cost))
     setPackages(data.settings.packages.map(toDraft))
+    setVipPackages((data.settings.vip_packages || []).map(toVipDraft))
+    setVipDiscount(String(data.settings.vip_discount ?? 0.5))
+    setSubLimit(String(data.settings.sub_account_limit ?? 5))
   }, [data])
 
   const stats = data?.stats
@@ -107,6 +132,23 @@ export function AdminBillingTab() {
     setPackages((current) => current.filter((pkg) => pkg.key !== key))
   }
 
+  const addVipPackage = () => {
+    setVipPackages((current) => [
+      ...current,
+      { key: `vip-new-${Date.now()}`, id: '', name: '', days: '30', price: '30.00' },
+    ])
+  }
+
+  const updateVipPackage = (key: string, patch: Partial<VipPackageDraft>) => {
+    setVipPackages((current) =>
+      current.map((pkg) => (pkg.key === key ? { ...pkg, ...patch } : pkg)),
+    )
+  }
+
+  const removeVipPackage = (key: string) => {
+    setVipPackages((current) => current.filter((pkg) => pkg.key !== key))
+  }
+
   const saveSettings = async () => {
     setSettingsError(null)
     if (packages.length === 0) {
@@ -122,6 +164,14 @@ export function AdminBillingTab() {
         credits: Math.round(Number(pkg.credits)),
         amount_cents: Math.round(Number(pkg.price) * 100),
       })),
+      vip_packages: vipPackages.map((pkg) => ({
+        id: pkg.id.trim(),
+        name: pkg.name.trim(),
+        days: Math.round(Number(pkg.days)),
+        amount_cents: Math.round(Number(pkg.price) * 100),
+      })),
+      vip_discount: Number(vipDiscount),
+      sub_account_limit: Math.round(Number(subLimit)),
     }
     if (
       !Number.isFinite(payload.signup_credits) ||
@@ -137,6 +187,26 @@ export function AdminBillingTab() {
       )
     ) {
       setSettingsError('请检查套餐 ID、名称、点数和价格，点数与价格必须大于 0。')
+      return
+    }
+    if (
+      payload.vip_packages.some(
+        (pkg) =>
+          !pkg.id ||
+          !pkg.name ||
+          !Number.isFinite(pkg.days) ||
+          pkg.days <= 0 ||
+          !Number.isFinite(pkg.amount_cents) ||
+          pkg.amount_cents <= 0,
+      ) ||
+      !Number.isFinite(payload.vip_discount) ||
+      payload.vip_discount < 0.1 ||
+      payload.vip_discount > 1 ||
+      !Number.isFinite(payload.sub_account_limit) ||
+      payload.sub_account_limit < 0 ||
+      payload.sub_account_limit > 20
+    ) {
+      setSettingsError('请检查 VIP 套餐（天数与价格须大于 0）、折扣（0.1–1）与子账号上限（0–20）。')
       return
     }
     setSaving(true)
@@ -373,6 +443,96 @@ export function AdminBillingTab() {
                   </IconButton>
                 </div>
               ))}
+            </div>
+          </div>
+
+          <div className="admin-billing-packages">
+            <div className="admin-billing-packages-head">
+              <strong>VIP 会员套餐</strong>
+              <Button size="sm" variant="ghost" icon={<Plus size={13} />} onClick={addVipPackage}>
+                添加 VIP 套餐
+              </Button>
+            </div>
+            <div className="admin-package-table admin-vip-table">
+              <div className="admin-package-head admin-vip-head">
+                <span>ID</span>
+                <span>名称</span>
+                <span>天数</span>
+                <span>价格（元）</span>
+                <span />
+              </div>
+              {vipPackages.map((pkg) => (
+                <div className="admin-package-row admin-vip-row" key={pkg.key}>
+                  <input
+                    className="input input--sm mono"
+                    value={pkg.id}
+                    onChange={(event) => updateVipPackage(pkg.key, { id: event.target.value })}
+                    placeholder="vip-month"
+                    aria-label="VIP 套餐 ID"
+                  />
+                  <input
+                    className="input input--sm"
+                    value={pkg.name}
+                    onChange={(event) => updateVipPackage(pkg.key, { name: event.target.value })}
+                    placeholder="月卡"
+                    aria-label="VIP 套餐名称"
+                  />
+                  <input
+                    className="input input--sm input--number"
+                    type="number"
+                    min={1}
+                    value={pkg.days}
+                    onChange={(event) => updateVipPackage(pkg.key, { days: event.target.value })}
+                    aria-label="VIP 天数"
+                  />
+                  <input
+                    className="input input--sm input--number"
+                    type="number"
+                    min={0.01}
+                    step={0.01}
+                    value={pkg.price}
+                    onChange={(event) => updateVipPackage(pkg.key, { price: event.target.value })}
+                    aria-label="VIP 价格"
+                  />
+                  <IconButton
+                    label={`删除 VIP 套餐 ${pkg.name || pkg.id}`}
+                    tone="danger"
+                    onClick={() => removeVipPackage(pkg.key)}
+                  >
+                    <Trash2 size={13} />
+                  </IconButton>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="admin-form-grid admin-billing-settings">
+            <div className="form-field">
+              <label htmlFor="billing-vip-discount">VIP 生成折扣</label>
+              <input
+                id="billing-vip-discount"
+                className="input input--number"
+                type="number"
+                min={0.1}
+                max={1}
+                step={0.05}
+                value={vipDiscount}
+                onChange={(event) => setVipDiscount(event.target.value)}
+              />
+              <p className="field-hint">VIP 会员每章消耗按此折扣计（0.1–1，0.5 即半价）。</p>
+            </div>
+            <div className="form-field">
+              <label htmlFor="billing-sub-limit">子账号上限</label>
+              <input
+                id="billing-sub-limit"
+                className="input input--number"
+                type="number"
+                min={0}
+                max={20}
+                value={subLimit}
+                onChange={(event) => setSubLimit(event.target.value)}
+              />
+              <p className="field-hint">每个 VIP 主账号可创建的子账号数（0–20，0 为禁用）。</p>
             </div>
           </div>
 

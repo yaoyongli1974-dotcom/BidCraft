@@ -3,6 +3,7 @@ import { Link, useLocation } from 'react-router-dom'
 import {
   ChevronDown,
   Coins,
+  Crown,
   KeyRound,
   LayoutDashboard,
   LogOut,
@@ -77,6 +78,7 @@ export function UserMenu() {
           <span className="user-trigger-copy">
             <span className="user-trigger-name">{user.display_name || user.username}</span>
             <span className="user-trigger-role">
+              {user.is_vip && <Crown size={11} className="user-vip-crown" aria-hidden />}
               {meta.label} · {user.credits ?? 0} 点
             </span>
           </span>
@@ -95,6 +97,11 @@ export function UserMenu() {
                 <Badge tone={meta.tone} subtle>
                   {meta.label}
                 </Badge>
+                {user.is_vip && (
+                  <Badge tone="accent" subtle>
+                    <Crown size={11} /> VIP 会员
+                  </Badge>
+                )}
                 <span className="user-dropdown-credits">
                   <Coins size={12} /> {user.credits ?? 0} 点
                 </span>

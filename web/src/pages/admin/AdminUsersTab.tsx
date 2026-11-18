@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import {
   Coins,
+  Crown,
   Eye,
   Pencil,
   Plus,
@@ -34,6 +35,7 @@ import {
 } from './AdminShared'
 import { AdminUserModal, type UserModalState } from './AdminUserModal'
 import { AdminCreditModal } from './AdminCreditModal'
+import { AdminVipModal } from './AdminVipModal'
 
 interface UsersTabProps {
   users: User[]
@@ -87,6 +89,7 @@ export function AdminUsersTab({
   const { user: currentUser, syncUser } = useAuth()
   const [modal, setModal] = useState<UserModalState | null>(null)
   const [creditUser, setCreditUser] = useState<User | null>(null)
+  const [vipUser, setVipUser] = useState<User | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
 
@@ -256,6 +259,18 @@ export function AdminUsersTab({
                     <span>
                       {isCurrent ? '当前登录账号' : `创建于 ${formatDate(item.created_at, false)}`}
                     </span>
+                    <span className="admin-user-tags">
+                      {item.is_vip && (
+                        <Badge tone="accent" subtle>
+                          <Crown size={11} /> VIP
+                        </Badge>
+                      )}
+                      {item.is_sub && (
+                        <Badge tone="info" subtle>
+                          子账号
+                        </Badge>
+                      )}
+                    </span>
                   </div>
                 </div>
                 <div className="admin-user-handle mono" role="cell">
@@ -300,6 +315,16 @@ export function AdminUsersTab({
                     onClick={() => setCreditUser(item)}
                   >
                     点数
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    icon={<Crown size={12} />}
+                    disabled={item.is_sub}
+                    title={item.is_sub ? '子账号继承主账号 VIP' : '设置 VIP 会员'}
+                    onClick={() => setVipUser(item)}
+                  >
+                    VIP
                   </Button>
                   <Button
                     variant="ghost"
@@ -352,6 +377,23 @@ export function AdminUsersTab({
             toast.success(
               amount > 0 ? '点数已增加' : '点数已扣除',
               `${saved.display_name || saved.username} · ${amount > 0 ? '+' : ''}${formatNumber(amount)} 点`,
+            )
+          }}
+        />
+      )}
+
+      {vipUser && (
+        <AdminVipModal
+          open
+          user={vipUser}
+          onClose={() => setVipUser(null)}
+          onSaved={(saved) => {
+            setVipUser(null)
+            refresh()
+            void syncUser()
+            toast.success(
+              saved.is_vip ? 'VIP 已设置' : 'VIP 已清除',
+              saved.display_name || saved.username,
             )
           }}
         />

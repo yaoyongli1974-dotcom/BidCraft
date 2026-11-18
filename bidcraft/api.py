@@ -26,10 +26,12 @@ from sqlalchemy.orm import Session
 
 from . import (
     __version__,
+    accounts,
     auth,
     billing,
     boq,
     images,
+    jobqueue,
     jobs,
     knowledge,
     model_config,
@@ -341,6 +343,9 @@ class BillingSettingsPayload(BaseModel):
     signup_credits: int = 5
     chapter_cost: int = 1
     packages: list[dict[str, Any]] = Field(default_factory=list)
+    vip_packages: list[dict[str, Any]] | None = None
+    vip_discount: float | None = None
+    sub_account_limit: int | None = None
 
 
 class LoginRequest(BaseModel):
@@ -364,6 +369,23 @@ class UserUpdate(BaseModel):
     display_name: str | None = None
     password: str | None = Field(default=None, min_length=8, max_length=200)
     role: str | None = None
+    active: bool | None = None
+
+
+class VipGrant(BaseModel):
+    days: int = Field(ge=0, le=3650)
+    note: str = ""
+
+
+class SubAccountCreate(BaseModel):
+    username: str = Field(min_length=3, max_length=40)
+    password: str = Field(min_length=8, max_length=200)
+    display_name: str = ""
+
+
+class SubAccountUpdate(BaseModel):
+    display_name: str | None = None
+    password: str | None = Field(default=None, min_length=8, max_length=200)
     active: bool | None = None
 
 
@@ -1630,6 +1652,7 @@ def create_app():
             "/approvals/",
             "/auth",
             "/billing/",
+            "/account/",
         )
         if not path.startswith(api_prefixes):
             return await call_next(request)
@@ -1811,21 +1834,27 @@ def create_app():
     def billing_summary() -> dict[str, Any]:
         with session_scope() as db:
             user = billing_user(db)
+            account = billing.billing_account(db, user)
             return {
                 "user": auth.user_payload(user),
                 "summary": billing.summary(db, user),
-                "transactions": billing.transactions(db, user.id),
-                "orders": billing.orders(db, user.id),
+                "transactions": billing.transactions(db, account.id),
+                "orders": billing.orders(db, account.id),
                 "wechat_login": wechat.available(),
                 "wechat_mock": settings.wechat_mock,
                 "wechat_pay": wechatpay.available(),
                 "wechat_pay_mock": settings.wechat_pay_mock,
             }
 
+    def _reject_sub_billing(user: User) -> None:
+        if user.parent_id:
+            raise HTTPException(status_code=403, detail="子账号费用由主账号承担，无需单独充值")
+
     @app.post("/billing/orders", status_code=201)
     def create_order(payload: OrderCreate) -> dict[str, Any]:
         with session_scope() as db:
             user = billing_user(db)
+            _reject_sub_billing(user)
             package = billing.find_package(db, payload.package_id)
             if package is None:
                 raise HTTPException(status_code=400, detail="充值套餐不存在")
@@ -1838,6 +1867,32 @@ def create_app():
                     order.code_url = wechatpay.create_native(order)
                 except wechatpay.PaymentError:
                     logger.exception("微信支付下单失败（订单 %s）", order.out_trade_no)
+                    order.status = "closed"
+                    db.flush()
+                    raise HTTPException(
+                        status_code=502, detail="微信支付下单失败，详情见服务日志"
+                    ) from None
+            else:
+                raise HTTPException(status_code=503, detail="微信支付未配置")
+            return billing.order_payload(order)
+
+    @app.post("/billing/vip/orders", status_code=201)
+    def create_vip_order_route(payload: OrderCreate) -> dict[str, Any]:
+        with session_scope() as db:
+            user = billing_user(db)
+            _reject_sub_billing(user)
+            package = billing.find_vip_package(db, payload.package_id)
+            if package is None:
+                raise HTTPException(status_code=400, detail="VIP 套餐不存在")
+            order = billing.create_vip_order(db, user.id, package)
+            if settings.wechat_pay_mock:
+                order.provider = "mock"
+                db.flush()
+            elif wechatpay.available():
+                try:
+                    order.code_url = wechatpay.create_native(order)
+                except wechatpay.PaymentError:
+                    logger.exception("微信支付下单失败（VIP 订单 %s）", order.out_trade_no)
                     order.status = "closed"
                     db.flush()
                     raise HTTPException(
@@ -1890,6 +1945,7 @@ def create_app():
     def redeem(payload: RedeemRequest) -> dict[str, Any]:
         with session_scope() as db:
             user = billing_user(db)
+            _reject_sub_billing(user)
             try:
                 billing.redeem(db, user, payload.code)
             except billing.BillingError as exc:
@@ -1899,6 +1955,55 @@ def create_app():
                 "summary": billing.summary(db, user),
                 "transactions": billing.transactions(db, user.id),
             }
+
+    # ---------------------------------------------------------- sub-accounts
+    @app.get("/account/sub-accounts")
+    def list_sub_accounts_route() -> list[dict[str, Any]]:
+        with session_scope() as db:
+            user = billing_user(db)
+            return accounts.list_sub_accounts(db, user)
+
+    @app.post("/account/sub-accounts", status_code=201)
+    def create_sub_account_route(payload: SubAccountCreate) -> dict[str, Any]:
+        with session_scope() as db:
+            user = billing_user(db)
+            try:
+                sub = accounts.create_sub_account(
+                    db,
+                    user,
+                    username=payload.username,
+                    password=payload.password,
+                    display_name=payload.display_name,
+                )
+            except accounts.AccountError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            audit(db, None, "account.sub_create", {"sub_id": sub.id, "username": sub.username})
+            return accounts.sub_payload(sub)
+
+    @app.patch("/account/sub-accounts/{sub_id}")
+    def update_sub_account_route(sub_id: str, payload: SubAccountUpdate) -> dict[str, Any]:
+        with session_scope() as db:
+            user = billing_user(db)
+            changes = payload.model_dump(exclude_unset=True)
+            try:
+                sub = accounts.update_sub_account(db, user, sub_id, changes)
+            except accounts.AccountError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except LookupError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            audit(db, None, "account.sub_update", {"sub_id": sub.id, "keys": list(changes)})
+            return accounts.sub_payload(sub)
+
+    @app.delete("/account/sub-accounts/{sub_id}")
+    def delete_sub_account_route(sub_id: str) -> dict[str, Any]:
+        with session_scope() as db:
+            user = billing_user(db)
+            try:
+                accounts.delete_sub_account(db, user, sub_id)
+            except LookupError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            audit(db, None, "account.sub_delete", {"sub_id": sub_id})
+            return {"deleted": True, "id": sub_id}
 
     @app.post("/billing/wechat/notify")
     async def wechat_notify(request: Request):
@@ -2523,7 +2628,7 @@ def create_app():
         require_super(request)
         with session_scope() as db:
             try:
-                saved = billing.save_billing_settings(db, payload.model_dump())
+                saved = billing.save_billing_settings(db, payload.model_dump(exclude_unset=True))
             except billing.BillingError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return {"settings": saved, "stats": billing.admin_stats(db)}
@@ -2570,6 +2675,30 @@ def create_app():
                 "user": auth.user_payload(user),
                 "transactions": billing.transactions(db, user.id),
             }
+
+    @app.post("/admin/users/{user_id}/vip")
+    def grant_vip(user_id: str, payload: VipGrant, request: Request) -> dict[str, Any]:
+        require_super(request)
+        with session_scope() as db:
+            user = db.get(User, user_id)
+            if user is None:
+                raise HTTPException(status_code=404, detail="用户不存在")
+            if user.parent_id:
+                raise HTTPException(status_code=400, detail="子账号继承主账号 VIP，不能单独设置")
+            now = datetime.now(UTC).replace(tzinfo=None)
+            if payload.days == 0:
+                user.vip_expires_at = None
+            else:
+                base = user.vip_expires_at if (user.vip_expires_at and user.vip_expires_at > now) else now
+                user.vip_expires_at = base + timedelta(days=payload.days)
+            db.flush()
+            audit(
+                db,
+                None,
+                "user.vip",
+                {"user_id": user.id, "days": payload.days, "note": payload.note},
+            )
+            return {"user": auth.user_payload(user)}
 
     @app.get("/admin/users")
     def list_users(
@@ -3239,15 +3368,17 @@ def create_app():
             db.add(job)
             db.flush()
             job_id = job.id
+            owner_row = db.get(User, user.get("id") or "")
+            job.priority = billing.queue_priority(db, owner_row) if owner_row else 1
+            priority = job.priority
             jobs.publish_event(job_id, "queued", jobs.job_payload(job), db=db)
             audit(db, None, "project.batch_check", {"count": len(project_ids)})
-        worker = threading.Thread(
-            target=_run_batch_check_job,
-            args=(job_id, project_ids),
-            daemon=True,
-            name=f"bidcraft-batch-check-{job_id[:8]}",
+        jobqueue.submit(
+            _run_batch_check_job,
+            (job_id, project_ids),
+            priority=priority,
+            job_id=job_id,
         )
-        worker.start()
         return {"job_id": job_id}
 
     @app.post("/projects/batch-export", status_code=202)
@@ -3289,15 +3420,17 @@ def create_app():
             db.add(job)
             db.flush()
             job_id = job.id
+            owner_row = db.get(User, user.get("id") or "")
+            job.priority = billing.queue_priority(db, owner_row) if owner_row else 1
+            priority = job.priority
             jobs.publish_event(job_id, "queued", jobs.job_payload(job), db=db)
             audit(db, None, "project.batch_export", {"count": len(project_ids), "format": fmt})
-        worker = threading.Thread(
-            target=_run_batch_export_job,
-            args=(job_id, project_ids, fmt),
-            daemon=True,
-            name=f"bidcraft-batch-export-{job_id[:8]}",
+        jobqueue.submit(
+            _run_batch_export_job,
+            (job_id, project_ids, fmt),
+            priority=priority,
+            job_id=job_id,
         )
-        worker.start()
         return {"job_id": job_id}
 
     # R23 模板库：静态 "templates" 段必须先于 /projects/{ref} 等动态路由注册，
@@ -3861,15 +3994,17 @@ def create_app():
             db.add(job)
             db.flush()
             job_id = job.id
+            owner_row = db.get(User, project.owner_id or "")
+            job.priority = billing.queue_priority(db, owner_row) if owner_row else 1
+            priority = job.priority
             jobs.publish_event(job_id, "queued", jobs.job_payload(job), db=db)
             audit(db, project.id, "image.batch", {"count": len(targets)})
-        worker = threading.Thread(
-            target=_run_image_batch_job,
-            args=(job_id, project.id, targets),
-            daemon=True,
-            name=f"bidcraft-images-{job_id[:8]}",
+        jobqueue.submit(
+            _run_image_batch_job,
+            (job_id, project.id, targets),
+            priority=priority,
+            job_id=job_id,
         )
-        worker.start()
         return {"job_id": job_id}
 
     @app.post("/projects/{ref}/images", status_code=201)
@@ -4374,15 +4509,16 @@ def create_app():
             db.add(job)
             db.flush()
             job_id = job.id
+            job.priority = billing.queue_priority(db, user)
+            priority = job.priority
             jobs.publish_event(job_id, "queued", jobs.job_payload(job), db=db)
             audit(db, project.id, "project.generate", {"chapters": count})
-        worker = threading.Thread(
-            target=_run_generation_job,
-            args=(job_id, project.id, force),
-            daemon=True,
-            name=f"bidcraft-generate-{job_id[:8]}",
+        jobqueue.submit(
+            _run_generation_job,
+            (job_id, project.id, force),
+            priority=priority,
+            job_id=job_id,
         )
-        worker.start()
         return {"job_id": job_id}
 
     @app.get("/projects/{ref}/jobs")

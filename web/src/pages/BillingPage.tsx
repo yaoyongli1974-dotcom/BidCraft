@@ -6,6 +6,7 @@ import {
   Clock3,
   Coins,
   CreditCard,
+  Crown,
   Info,
   Loader2,
   QrCode,
@@ -13,21 +14,29 @@ import {
   RefreshCw,
   ShieldCheck,
   Ticket,
+  UserPlus,
+  Users,
   Wallet,
   X,
 } from 'lucide-react'
 import { useAuth } from '../context/useAuth'
+import { useConfirm } from '../context/useConfirm'
 import { useToast } from '../context/useToast'
 import {
   billingOrderQrUrl,
   createBillingOrder,
+  createSubAccount,
+  createVipOrder,
+  deleteSubAccount,
   getBillingOrder,
   getBillingSummary,
+  getSubAccounts,
   messageOf,
   mockPayOrder,
   redeemCreditCode,
+  updateSubAccount,
 } from '../lib/api'
-import type { RechargeOrder } from '../lib/types'
+import type { RechargeOrder, SubAccount } from '../lib/types'
 import {
   creditKindMeta,
   formatCents,
@@ -52,6 +61,7 @@ export function BillingPage() {
   const data = query.data
   const [busyPackage, setBusyPackage] = useState<string | null>(null)
   const [activeOrder, setActiveOrder] = useState<RechargeOrder | null>(null)
+  const [orderIsVip, setOrderIsVip] = useState(false)
   const [paying, setPaying] = useState(false)
   const [orderError, setOrderError] = useState<string | null>(null)
   const [redeemCode, setRedeemCode] = useState('')
@@ -60,6 +70,7 @@ export function BillingPage() {
   const pollErrors = useRef(0)
   const settledOrder = useRef<string | null>(null)
   const readOnly = !canWrite
+  const isSub = Boolean(data?.summary?.is_sub)
 
   useEffect(() => {
     if (data?.user && data.user.credits !== user?.credits) {
@@ -85,7 +96,12 @@ export function BillingPage() {
           } catch {
             // The refreshed billing summary still carries the new balance.
           }
-          toast.success('充值已到账', `+${latest.credits} 点已加入账户余额。`)
+          toast.success(
+            orderIsVip ? 'VIP 会员已续期' : '充值已到账',
+            orderIsVip
+              ? '会员时长已延长，生成享 VIP 折扣并优先排队。'
+              : `+${latest.credits} 点已加入账户余额。`,
+          )
         }
       } catch (error) {
         if (cancelled) return
@@ -130,6 +146,7 @@ export function BillingPage() {
     if (purchaseDisabled) return
     setBusyPackage(packageId)
     setOrderError(null)
+    setOrderIsVip(false)
     settledOrder.current = null
     try {
       const order = await createBillingOrder(packageId)
@@ -148,6 +165,29 @@ export function BillingPage() {
     }
   }
 
+  const startVipOrder = async (packageId: string) => {
+    if (purchaseDisabled || isSub) return
+    setBusyPackage(packageId)
+    setOrderError(null)
+    setOrderIsVip(true)
+    settledOrder.current = null
+    try {
+      const order = await createVipOrder(packageId)
+      setActiveOrder(order)
+      query.refresh()
+      toast.info(
+        data.wechat_pay_mock ? 'VIP 订单已创建，等待模拟支付' : 'VIP 订单已创建，请扫码支付',
+        formatCents(order.amount_cents),
+      )
+    } catch (error) {
+      const message = messageOf(error)
+      setOrderError(message)
+      toast.error('创建 VIP 订单失败', message)
+    } finally {
+      setBusyPackage(null)
+    }
+  }
+
   const mockPay = async () => {
     if (!activeOrder || readOnly) return
     setPaying(true)
@@ -157,7 +197,10 @@ export function BillingPage() {
       setActiveOrder(result.order)
       updateUser(result.user)
       query.refresh()
-      toast.success('模拟支付成功', `+${result.order.credits} 点已加入账户余额。`)
+      toast.success(
+        '模拟支付成功',
+        orderIsVip ? 'VIP 会员时长已延长。' : `+${result.order.credits} 点已加入账户余额。`,
+      )
     } catch (error) {
       const message = messageOf(error)
       setOrderError(message)
@@ -216,11 +259,22 @@ export function BillingPage() {
         }
       />
 
-      {readOnly && (
+      {readOnly && !isSub && (
         <div className="billing-readonly" role="status">
           <ShieldCheck size={15} />
           <strong>只读成员</strong>
           <span>可以查看账户余额、交易与订单，但不能充值或兑换。</span>
+        </div>
+      )}
+
+      {isSub && (
+        <div className="billing-readonly billing-sub-banner" role="status">
+          <Users size={15} />
+          <strong>子账号</strong>
+          <span>
+            费用由主账号{summary.parent_username ? `「${summary.parent_username}」` : ''}
+            统一承担，无需单独充值或兑换；生成消耗计入主账号余额。
+          </span>
         </div>
       )}
 
@@ -243,16 +297,24 @@ export function BillingPage() {
                 内部账号不计费
               </Badge>
             )}
+            {summary.is_vip && (
+              <Badge tone="accent" subtle>
+                <Crown size={11} /> VIP · 生成 {Math.round((summary.vip_discount ?? 1) * 10)} 折
+              </Badge>
+            )}
           </div>
           <div className="billing-balance-note">
-            {summary.billing_exempt
-              ? '你的账号属于内部成员，生成正文不扣点；充值主要用于外部账号或团队备用。'
-              : `当前余额可支持约 ${
-                  summary.chapter_cost > 0 ? Math.floor(balance / summary.chapter_cost) : '∞'
-                } 章生成。`}
+            {summary.is_vip && summary.vip_expires_at
+              ? `VIP 会员有效期至 ${formatDate(summary.vip_expires_at, false)}，生成享折扣并优先排队。`
+              : summary.billing_exempt
+                ? '你的账号属于内部成员，生成正文不扣点；充值主要用于外部账号或团队备用。'
+                : `当前余额可支持约 ${
+                    summary.chapter_cost > 0 ? Math.floor(balance / summary.chapter_cost) : '∞'
+                  } 章生成。`}
           </div>
         </section>
 
+        {!isSub && (
         <section className="billing-redeem-card">
           <div className="billing-card-head">
             <div>
@@ -303,8 +365,10 @@ export function BillingPage() {
             </p>
           )}
         </section>
+        )}
       </div>
 
+      {!isSub && (
       <section className="billing-section">
         <div className="billing-section-head">
           <div>
@@ -363,6 +427,68 @@ export function BillingPage() {
           </div>
         )}
       </section>
+      )}
+
+      {!isSub && (
+      <section className="billing-section">
+        <div className="billing-section-head">
+          <div>
+            <div className="eyebrow">VIP 会员</div>
+            <h2>开通 / 续期 VIP</h2>
+          </div>
+          <span className="billing-section-note">
+            VIP 生成享折扣、任务优先排队，并可创建子账号共享余额。
+          </span>
+        </div>
+        {(summary.vip_packages || []).length === 0 ? (
+          <div className="panel">
+            <EmptyState icon={Crown} compact title="管理员尚未配置 VIP 套餐" />
+          </div>
+        ) : (
+          <div className="billing-package-grid">
+            {(summary.vip_packages || []).map((pkg, index) => (
+              <article
+                key={pkg.id}
+                className={`billing-package-card ${index === 1 ? 'is-featured' : ''}`}
+              >
+                {index === 1 && <span className="billing-package-flag">推荐</span>}
+                <div className="billing-package-name">
+                  <Crown size={14} /> {pkg.name}
+                </div>
+                <div className="billing-package-credits">
+                  {pkg.days}
+                  <span>天</span>
+                </div>
+                <div className="billing-package-price">{formatCents(pkg.amount_cents)}</div>
+                <div className="billing-package-per">
+                  生成 {Math.round((summary.vip_discount ?? 1) * 10)} 折 · 优先排队
+                </div>
+                <Button
+                  variant={index === 1 ? 'primary' : 'secondary'}
+                  block
+                  icon={<Crown size={14} />}
+                  loading={busyPackage === pkg.id}
+                  disabled={purchaseDisabled}
+                  title={
+                    readOnly ? '只读成员不能购买' : !payAvailable ? '支付通道未配置' : undefined
+                  }
+                  onClick={() => void startVipOrder(pkg.id)}
+                >
+                  {summary.is_vip ? '续期' : '开通'}
+                </Button>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+      )}
+
+      {!isSub && canWrite && (
+        <SubAccountsSection
+          limit={summary.sub_account_limit ?? 5}
+          isVip={Boolean(summary.is_vip)}
+        />
+      )}
 
       {activeOrder && (
         <section className="billing-order-panel" aria-live="polite">
@@ -395,8 +521,10 @@ export function BillingPage() {
                 <strong className="mono">{activeOrder.out_trade_no}</strong>
               </div>
               <div>
-                <span>充值点数</span>
-                <strong>{formatNumber(activeOrder.credits)} 点</strong>
+                <span>{orderIsVip ? '会员类型' : '充值点数'}</span>
+                <strong>
+                  {orderIsVip ? 'VIP 续期' : `${formatNumber(activeOrder.credits)} 点`}
+                </strong>
               </div>
               <div>
                 <span>支付金额</span>
@@ -450,8 +578,12 @@ export function BillingPage() {
               <div className="billing-paid-box">
                 <CheckCircle2 size={18} />
                 <div>
-                  <strong>支付成功，点数已到账</strong>
-                  <p>当前余额 {formatNumber(balance)} 点。</p>
+                  <strong>{orderIsVip ? '支付成功，VIP 已续期' : '支付成功，点数已到账'}</strong>
+                  <p>
+                    {orderIsVip
+                      ? '会员时长已延长，生成享折扣并优先排队。'
+                      : `当前余额 ${formatNumber(balance)} 点。`}
+                  </p>
                 </div>
               </div>
             )}
@@ -598,5 +730,222 @@ function BillingSkeleton() {
         ))}
       </div>
     </div>
+  )
+}
+
+function SubAccountsSection({ limit, isVip }: { limit: number; isVip: boolean }) {
+  const toast = useToast()
+  const confirm = useConfirm()
+  const [subs, setSubs] = useState<SubAccount[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [displayName, setDisplayName] = useState('')
+  const [creating, setCreating] = useState(false)
+  const [formError, setFormError] = useState<string | null>(null)
+  const [busyId, setBusyId] = useState<string | null>(null)
+
+  const load = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      setSubs(await getSubAccounts())
+    } catch (err) {
+      setError(messageOf(err))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void load()
+     
+  }, [])
+
+  const create = async () => {
+    if (creating || !isVip) return
+    if (username.trim().length < 3) {
+      setFormError('子账号用户名至少 3 个字符')
+      return
+    }
+    if (password.length < 8) {
+      setFormError('子账号密码至少 8 位')
+      return
+    }
+    setCreating(true)
+    setFormError(null)
+    try {
+      const sub = await createSubAccount({
+        username: username.trim(),
+        password,
+        display_name: displayName.trim(),
+      })
+      setSubs((prev) => [...prev, sub])
+      setUsername('')
+      setPassword('')
+      setDisplayName('')
+      toast.success('子账号已创建', `${sub.username} 的消费将计入你的账户余额。`)
+    } catch (err) {
+      const message = messageOf(err)
+      setFormError(message)
+      toast.error('创建子账号失败', message)
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  const toggle = async (sub: SubAccount) => {
+    setBusyId(sub.id)
+    try {
+      const updated = await updateSubAccount(sub.id, { active: !sub.active })
+      setSubs((prev) => prev.map((item) => (item.id === sub.id ? updated : item)))
+      toast.success(updated.active ? '子账号已启用' : '子账号已停用', updated.username)
+    } catch (err) {
+      toast.error('操作失败', messageOf(err))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const remove = async (sub: SubAccount) => {
+    const ok = await confirm({
+      title: '删除子账号',
+      description: `确定删除子账号「${sub.username}」吗？其名下项目将移交给主账号，此操作不可撤销。`,
+      confirmLabel: '删除',
+      tone: 'danger',
+    })
+    if (!ok) return
+    setBusyId(sub.id)
+    try {
+      await deleteSubAccount(sub.id)
+      setSubs((prev) => prev.filter((item) => item.id !== sub.id))
+      toast.success('子账号已删除', `${sub.username} 的项目已移交给主账号。`)
+    } catch (err) {
+      toast.error('删除失败', messageOf(err))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const atLimit = subs.length >= limit
+
+  return (
+    <section className="billing-section">
+      <div className="billing-section-head">
+        <div>
+          <div className="eyebrow">团队</div>
+          <h2>子账号管理</h2>
+        </div>
+        <span className="billing-section-note">
+          {subs.length} / {limit} · 子账号消费统一计入主账号余额
+        </span>
+      </div>
+
+      {!isVip && (
+        <div className="billing-inline-error" role="status">
+          <Crown size={13} /> 开通 VIP 会员后即可创建子账号，共享账户余额与 VIP 折扣。
+        </div>
+      )}
+
+      {isVip && (
+        <form
+          className="billing-sub-form"
+          onSubmit={(event) => {
+            event.preventDefault()
+            void create()
+          }}
+        >
+          <input
+            className="input"
+            value={username}
+            onChange={(event) => setUsername(event.target.value)}
+            placeholder="子账号用户名（≥3 字符）"
+            maxLength={40}
+            disabled={creating || atLimit}
+            aria-label="子账号用户名"
+          />
+          <input
+            className="input"
+            type="password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            placeholder="密码（≥8 位）"
+            maxLength={200}
+            disabled={creating || atLimit}
+            aria-label="子账号密码"
+          />
+          <input
+            className="input"
+            value={displayName}
+            onChange={(event) => setDisplayName(event.target.value)}
+            placeholder="显示名称（可选）"
+            maxLength={80}
+            disabled={creating || atLimit}
+            aria-label="子账号显示名称"
+          />
+          <Button
+            type="submit"
+            variant="primary"
+            icon={<UserPlus size={14} />}
+            loading={creating}
+            disabled={atLimit}
+            title={atLimit ? `子账号数量已达上限 ${limit}` : undefined}
+          >
+            添加子账号
+          </Button>
+        </form>
+      )}
+      {formError && (
+        <div className="billing-inline-error" role="alert">
+          {formError}
+        </div>
+      )}
+
+      {loading ? (
+        <Skeleton height={80} radius={10} />
+      ) : error ? (
+        <ErrorState message={error} onRetry={() => void load()} />
+      ) : subs.length === 0 ? (
+        <EmptyState
+          icon={Users}
+          compact
+          title="还没有子账号"
+          description={isVip ? '添加子账号后，其生成消费将计入你的账户余额。' : '开通 VIP 后可添加子账号。'}
+        />
+      ) : (
+        <div className="billing-sub-list">
+          {subs.map((sub) => (
+            <article key={sub.id} className="billing-sub-row">
+              <div className="billing-sub-main">
+                <strong>{sub.display_name || sub.username}</strong>
+                <span className="mono subtle">@{sub.username}</span>
+                <Badge tone={sub.active ? 'success' : 'neutral'} subtle>
+                  {sub.active ? '启用' : '停用'}
+                </Badge>
+              </div>
+              <div className="billing-sub-actions">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  loading={busyId === sub.id}
+                  onClick={() => void toggle(sub)}
+                >
+                  {sub.active ? '停用' : '启用'}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  loading={busyId === sub.id}
+                  onClick={() => void remove(sub)}
+                >
+                  删除
+                </Button>
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
   )
 }

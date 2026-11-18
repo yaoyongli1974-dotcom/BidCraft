@@ -16,6 +16,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from . import jobqueue
 from .db import session_scope
 from .models import Job, JobEvent
 
@@ -43,6 +44,8 @@ def job_payload(job: Job) -> dict[str, Any]:
         "payload": job.payload or {},
         "result": job.result or {},
         "error": (job.result or {}).get("error", ""),
+        "priority": getattr(job, "priority", 1),
+        "queue_position": jobqueue.position(job.id) if job.status == "queued" else 0,
         "created_at": _iso(job.created_at),
         "updated_at": _iso(job.updated_at),
     }

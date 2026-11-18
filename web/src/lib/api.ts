@@ -80,6 +80,8 @@ import type {
   RulePackageSummary,
   RulePackageValidation,
   SourceFile,
+  SubAccount,
+  SubAccountInput,
   TermInput,
   TermItem,
   TestResult,
@@ -1475,6 +1477,34 @@ export const adjustUserCredits = (userId: string, amount: number, note = '') =>
   request<CreditAdjustResult>(`/admin/users/${encodeURIComponent(userId)}/credits`, {
     method: 'POST',
     body: JSON.stringify({ amount, note }),
+  })
+
+export const grantUserVip = (userId: string, days: number, note = '') =>
+  request<{ user: User }>(`/admin/users/${encodeURIComponent(userId)}/vip`, {
+    method: 'POST',
+    body: JSON.stringify({ days, note }),
+  })
+
+export const createVipOrder = (packageId: string) =>
+  request<RechargeOrder>('/billing/vip/orders', jsonBody({ package_id: packageId }))
+
+export const getSubAccounts = () => request<SubAccount[]>('/account/sub-accounts')
+
+export const createSubAccount = (input: SubAccountInput) =>
+  request<SubAccount>('/account/sub-accounts', jsonBody(input))
+
+export const updateSubAccount = (
+  subId: string,
+  patch: { display_name?: string; password?: string; active?: boolean },
+) =>
+  request<SubAccount>(`/account/sub-accounts/${encodeURIComponent(subId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  })
+
+export const deleteSubAccount = (subId: string) =>
+  request<{ deleted: boolean; id: string }>(`/account/sub-accounts/${encodeURIComponent(subId)}`, {
+    method: 'DELETE',
   })
 
 export function wechatFullPageLogin(health: { wechat_mock?: boolean } | null, next = '/') {

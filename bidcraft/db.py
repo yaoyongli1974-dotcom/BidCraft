@@ -69,7 +69,10 @@ def _migrate_columns(engine) -> None:
             ("wechat_unionid", "VARCHAR(128)"),
             ("wechat_nickname", "VARCHAR(120) DEFAULT ''"),
             ("avatar_url", "VARCHAR(500) DEFAULT ''"),
+            ("vip_expires_at", "DATETIME"),
+            ("parent_id", "VARCHAR(36)"),
         ],
+        "jobs": [("priority", "INTEGER DEFAULT 1")],
         "boq_snapshots": [("prices", "JSON"), ("package_id", "VARCHAR(36)")],
         "boq_quote_versions": [
             ("status", "VARCHAR(16) DEFAULT 'draft'"),

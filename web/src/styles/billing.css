@@ -1074,3 +1074,131 @@
     padding: 10px 14px;
   }
 }
+
+/* R24 VIP 会员与子账号 */
+.admin-vip-table {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.admin-vip-head,
+.admin-vip-row {
+  display: grid;
+  grid-template-columns: minmax(66px, 0.8fr) minmax(80px, 1.2fr) 66px 82px 28px;
+  gap: 6px;
+  align-items: center;
+}
+
+.admin-vip-head {
+  padding: 0 2px;
+  color: var(--faint);
+  font-size: 8.5px;
+}
+
+.admin-vip-row .input {
+  min-width: 0;
+}
+
+.admin-vip-row .icon-btn {
+  width: 26px;
+  height: 26px;
+}
+
+.admin-user-tags {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 3px;
+}
+
+.user-vip-crown {
+  color: var(--jade, #2f9e6e);
+  vertical-align: -1px;
+}
+
+.vip-preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.vip-preset {
+  border: 1px solid var(--line, rgba(0, 0, 0, 0.12));
+  background: var(--surface-raised, #fff);
+  border-radius: 999px;
+  padding: 3px 12px;
+  font-size: 11px;
+  cursor: pointer;
+  color: inherit;
+}
+
+.vip-preset:hover {
+  border-color: var(--jade, #2f9e6e);
+  color: var(--jade, #2f9e6e);
+}
+
+.billing-sub-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--surface-raised, #f6f7f9);
+  border: 1px solid var(--line, rgba(0, 0, 0, 0.08));
+  color: var(--muted, #5a6472);
+  font-size: 12px;
+}
+
+.billing-sub-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-end;
+  margin-bottom: 12px;
+}
+
+.billing-sub-form .form-field {
+  flex: 1 1 140px;
+  min-width: 120px;
+}
+
+.billing-sub-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.billing-sub-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line, rgba(0, 0, 0, 0.08));
+  background: var(--surface-raised, #fff);
+}
+
+.billing-sub-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.billing-sub-main strong {
+  font-size: 13px;
+}
+
+.billing-sub-main span {
+  font-size: 11px;
+  color: var(--muted, #5a6472);
+}
+
+.billing-sub-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
