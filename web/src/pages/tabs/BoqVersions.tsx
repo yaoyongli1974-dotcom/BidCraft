@@ -19,6 +19,7 @@ import {
 import type {
   ApprovalChainEntry,
   ApprovalStage,
+  BidPackage,
   BoqPayload,
   BoqQuoteVersion,
   BoqSummary,
@@ -58,6 +59,12 @@ const CHAIN_MAX = 5
 const APPROVERS_MAX = 5
 /** 金额门槛上限（元），与后端 PATCH 校验一致（0–1e12）。 */
 const MIN_AMOUNT_MAX = 1e12
+/** R25 每级适用包件 / 币种列表上限，与后端 PATCH 校验一致。 */
+const CONDITION_MAX = 20
+/** R25 单个包件 id / 币种字符串上限，与后端 PATCH 校验一致。 */
+const CONDITION_TEXT_MAX = 40
+/** 常见币种快捷选项；项目币种与自定义值会自动追加。 */
+const COMMON_CURRENCIES = ['CNY', 'USD', 'EUR', 'JPY', 'GBP'] as const
 
 /** 审批人名单展示：姓名快照优先，缺失时回退用户 id。 */
 function namesOf(entries: ApprovalChainEntry[]): string {
@@ -116,24 +123,35 @@ function VersionAudit({ version }: { version: BoqQuoteVersion }) {
 }
 
 /** 逐级审批时间线：通过为绿、驳回为红，展示各级审批人、决定、意见与时间。 */
-function ApprovalTimeline({ approvals }: { approvals: QuoteApprovalRecord[] }) {
+function ApprovalTimeline({
+  approvals,
+  activeIndices,
+}: {
+  approvals: QuoteApprovalRecord[]
+  /** 当前生效序列的原链索引；记录仍存原索引，展示时换算为第几级。 */
+  activeIndices?: number[]
+}) {
   if (approvals.length === 0) return null
   return (
     <ol className="boq-approval-timeline" aria-label="逐级审批记录">
-      {approvals.map((record, index) => (
-        <li
-          key={`${record.stage}:${record.user_id}:${index}`}
-          className={record.decision === 'approve' ? 'is-approve' : 'is-reject'}
-        >
-          <span className="boq-approval-step">第 {record.stage + 1} 级</span>
-          <span className="boq-approval-name">{record.name || record.user_id}</span>
-          <span className="boq-approval-decision">
-            {record.decision === 'approve' ? '通过' : '驳回'}
-          </span>
-          {record.at && <span>{formatDate(record.at)}</span>}
-          {record.note && <span className="boq-approval-note">意见：{record.note}</span>}
-        </li>
-      ))}
+      {approvals.map((record, index) => {
+        const position = activeIndices?.indexOf(record.stage) ?? -1
+        const step = position >= 0 ? position : record.stage
+        return (
+          <li
+            key={`${record.stage}:${record.user_id}:${index}`}
+            className={record.decision === 'approve' ? 'is-approve' : 'is-reject'}
+          >
+            <span className="boq-approval-step">第 {step + 1} 级</span>
+            <span className="boq-approval-name">{record.name || record.user_id}</span>
+            <span className="boq-approval-decision">
+              {record.decision === 'approve' ? '通过' : '驳回'}
+            </span>
+            {record.at && <span>{formatDate(record.at)}</span>}
+            {record.note && <span className="boq-approval-note">意见：{record.note}</span>}
+          </li>
+        )
+      })}
     </ol>
   )
 }
@@ -194,8 +212,48 @@ function StageApproverAdd({
   )
 }
 
-/** 弹窗草稿：在阶段之上附带门槛输入框的原始文本（空串 = 恒生效）。 */
-type ChainDraftStage = ApprovalStage & { thresholdText: string }
+/** 弹窗草稿：在阶段之上附带门槛与自定义币种输入框的原始文本。 */
+type ChainDraftStage = ApprovalStage & { thresholdText: string; currencyText: string }
+
+/** 条件多选胶囊：按下即切换该条件值。 */
+function ConditionChip({
+  label,
+  active,
+  disabled,
+  title,
+  onClick,
+}: {
+  label: string
+  active: boolean
+  disabled: boolean
+  title?: string
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      className={className('boq-chain-chip', active && 'is-active')}
+      aria-pressed={active}
+      disabled={disabled}
+      title={title}
+      onClick={onClick}
+    >
+      {label}
+    </button>
+  )
+}
+
+/** 包件 id 的展示名：优先「编号 名称」，找不到时回退 id（可能已删除）。 */
+function packageLabelOf(packages: BidPackage[], id: string): string {
+  const pkg = packages.find((item) => item.id === id)
+  if (!pkg) return `${id}（已删除包件）`
+  return pkg.number ? `${pkg.number} ${pkg.name}` : pkg.name
+}
+
+/** 条件标签展示：包件 / 币种列表。 */
+function conditionTagText(values: string[]): string {
+  return values.join('、')
+}
 
 /**
  * 审批链设置弹窗（仅负责人可见）：≤5 级、每级 1–5 名审批人（候选为负责人与可编辑成员），
@@ -206,11 +264,14 @@ type ChainDraftStage = ApprovalStage & { thresholdText: string }
 function ApprovalChainModal({
   projectRef,
   chain,
+  packages,
   onClose,
   onSaved,
 }: {
   projectRef: string
   chain: ApprovalStage[]
+  /** 项目包件列表，作为「适用包件」多选来源。 */
+  packages: BidPackage[]
   onClose: () => void
   onSaved: () => void
 }) {
@@ -223,6 +284,7 @@ function ApprovalChainModal({
         typeof stage.min_amount === 'number' && Number.isFinite(stage.min_amount)
           ? String(stage.min_amount)
           : '',
+      currencyText: '',
     })),
   )
   const [saving, setSaving] = useState(false)
@@ -239,7 +301,10 @@ function ApprovalChainModal({
 
   const addStage = () => {
     if (full) return
-    setDraft([...draft, { approvers: [], mode: 'all', thresholdText: '' }])
+    setDraft([
+      ...draft,
+      { approvers: [], mode: 'all', thresholdText: '', currencyText: '' },
+    ])
   }
 
   const moveStage = (index: number, delta: number) => {
@@ -264,6 +329,49 @@ function ApprovalChainModal({
     })
   }
 
+  /** 切换一级的「适用包件」或「适用币种」白名单值。 */
+  const toggleCondition = (
+    index: number,
+    key: 'packages' | 'currencies',
+    value: string,
+  ) => {
+    const stage = draft[index]
+    if (!stage) return
+    const current = stage[key] ?? []
+    const next = current.includes(value)
+      ? current.filter((item) => item !== value)
+      : current.length >= CONDITION_MAX
+        ? current
+        : [...current, value]
+    if (key === 'packages') {
+      updateStage(index, { packages: next })
+    } else {
+      updateStage(index, { currencies: next })
+    }
+  }
+
+  /** 添加自定义币种：去空格大写、非空且 ≤40 字、去重、最多 20 项。 */
+  const addCurrency = (index: number) => {
+    const stage = draft[index]
+    if (!stage) return
+    const text = stage.currencyText.trim().toUpperCase()
+    if (!text) return
+    if (text.length > CONDITION_TEXT_MAX) {
+      toast.warning('币种无效', `币种代码最多 ${CONDITION_TEXT_MAX} 个字符。`)
+      return
+    }
+    const current = stage.currencies ?? []
+    if (current.includes(text)) {
+      updateStage(index, { currencyText: '' })
+      return
+    }
+    if (current.length >= CONDITION_MAX) {
+      toast.warning('币种条件过多', `每级最多 ${CONDITION_MAX} 个适用币种。`)
+      return
+    }
+    updateStage(index, { currencies: [...current, text], currencyText: '' })
+  }
+
   const save = async () => {
     if (saving) return
     if (draft.some((stage) => stage.approvers.length === 0)) {
@@ -283,27 +391,50 @@ function ApprovalChainModal({
       )
       return
     }
+    const badCondition = draft.findIndex((stage) =>
+      [stage.packages ?? [], stage.currencies ?? []].some(
+        (list) =>
+          list.length > CONDITION_MAX ||
+          list.some((item) => !item.trim() || item.trim().length > CONDITION_TEXT_MAX),
+      ),
+    )
+    if (badCondition >= 0) {
+      toast.warning(
+        '适用条件无效',
+        `第 ${badCondition + 1} 级每个包件 / 币种需非空且不超过 ${CONDITION_TEXT_MAX} 字，每类最多 ${CONDITION_MAX} 项。`,
+      )
+      return
+    }
     setSaving(true)
     try {
       await updateProject(projectRef, {
         approval_chain: draft.map((stage) => {
           const text = stage.thresholdText.trim()
           const minAmount = text ? Number(text) : undefined
+          const packages = stage.packages ?? []
+          const currencies = stage.currencies ?? []
           return {
             approvers: stage.approvers.map((entry) => entry.id),
             mode: stage.mode,
             ...(minAmount === undefined ? {} : { min_amount: minAmount }),
+            ...(packages.length > 0 ? { packages } : {}),
+            ...(currencies.length > 0 ? { currencies } : {}),
           }
         }),
       })
       onSaved()
       const gated = draft.some((stage) => stage.thresholdText.trim())
+      const conditional = draft.some(
+        (stage) => (stage.packages?.length ?? 0) > 0 || (stage.currencies?.length ?? 0) > 0,
+      )
       toast.success(
         draft.length > 0 ? '审批链已保存' : '审批链已清空',
         draft.length > 0
-          ? gated
-            ? `报价提交后将按审批链逐级审批（最多 ${draft.length} 级，带金额门槛的级按报价合计生效），每级按会签/或签规则通过后才定稿。`
-            : `报价提交后将按 ${draft.length} 级逐级审批，每级按会签/或签规则通过后才定稿。`
+          ? conditional
+            ? `报价提交后将按审批链逐级审批（最多 ${draft.length} 级，带金额门槛 / 包件 / 币种条件的级按当前报价上下文生效），每级按会签/或签规则通过后才定稿。`
+            : gated
+              ? `报价提交后将按审批链逐级审批（最多 ${draft.length} 级，带金额门槛的级按报价合计生效），每级按会签/或签规则通过后才定稿。`
+              : `报价提交后将按 ${draft.length} 级逐级审批，每级按会签/或签规则通过后才定稿。`
           : '已恢复为负责人单级审批。',
       )
       onClose()
@@ -338,6 +469,8 @@ function ApprovalChainModal({
         </p>
         <p className="boq-chain-hint boq-chain-hint--quiet">
           每级可选「金额门槛」：报价合计达到该金额才需此级审批，留空恒生效；金额未知时带门槛级视为生效（宁多审不漏审）。
+          还可限定「适用包件」与「适用币种」：不选表示不限；多项条件需同时满足该级才生效，
+          若所有级都被条件过滤掉则自动回退为全部阶段生效。
         </p>
 
         {draft.length === 0 ? (
@@ -402,6 +535,87 @@ function ApprovalChainModal({
                   />
                   <small>达到该金额才需此级审批</small>
                 </label>
+                <div className="boq-chain-condition">
+                  <span className="boq-chain-condition-label">适用包件</span>
+                  <div className="boq-chain-chips">
+                    {packages.length === 0 && (stage.packages ?? []).length === 0 ? (
+                      <small className="boq-chain-condition-empty">
+                        项目未分包件：本条件不生效
+                      </small>
+                    ) : (
+                      Array.from(
+                        new Set([...packages.map((item) => item.id), ...(stage.packages ?? [])]),
+                      ).map((id) => {
+                        const active = (stage.packages ?? []).includes(id)
+                        return (
+                          <ConditionChip
+                            key={id}
+                            label={packageLabelOf(packages, id)}
+                            active={active}
+                            disabled={
+                              saving ||
+                              (!active && (stage.packages ?? []).length >= CONDITION_MAX)
+                            }
+                            title={id}
+                            onClick={() => toggleCondition(index, 'packages', id)}
+                          />
+                        )
+                      })
+                    )}
+                  </div>
+                </div>
+                <div className="boq-chain-condition">
+                  <span className="boq-chain-condition-label">适用币种</span>
+                  <div className="boq-chain-chips">
+                    {Array.from(
+                      new Set([...COMMON_CURRENCIES, ...(stage.currencies ?? [])]),
+                    ).map((code) => {
+                      const active = (stage.currencies ?? []).includes(code)
+                      return (
+                        <ConditionChip
+                          key={code}
+                          label={code}
+                          active={active}
+                          disabled={
+                            saving ||
+                            (!active && (stage.currencies ?? []).length >= CONDITION_MAX)
+                          }
+                          onClick={() => toggleCondition(index, 'currencies', code)}
+                        />
+                      )
+                    })}
+                    <span className="boq-chain-custom">
+                      <input
+                        className="input input--sm"
+                        value={stage.currencyText}
+                        maxLength={CONDITION_TEXT_MAX}
+                        placeholder="自定义币种"
+                        disabled={saving || (stage.currencies ?? []).length >= CONDITION_MAX}
+                        onChange={(event) =>
+                          updateStage(index, { currencyText: event.target.value })
+                        }
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            event.preventDefault()
+                            addCurrency(index)
+                          }
+                        }}
+                        aria-label={`第 ${index + 1} 级自定义适用币种`}
+                      />
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={saving || !stage.currencyText.trim()}
+                        onClick={() => addCurrency(index)}
+                      >
+                        添加
+                      </Button>
+                    </span>
+                  </div>
+                  <small className="boq-chain-condition-empty">
+                    不选 = 不限；同级多项命中任一即可
+                  </small>
+                </div>
                 {stage.approvers.length === 0 ? (
                   <p className="boq-chain-warn boq-chain-empty-stage">
                     尚未添加审批人：保存前每级至少 1 人。
@@ -633,6 +847,8 @@ export function QuoteVersionsPanel({
   canWrite,
   canReview,
   approvalChain,
+  packages = [],
+  currency = null,
   isOwner,
   currentUserId,
   isSuperAdmin,
@@ -646,6 +862,10 @@ export function QuoteVersionsPanel({
   canReview: boolean
   /** 项目审批链（v2 阶段列表，有序）；空数组 = 负责人单级审批。 */
   approvalChain: ApprovalStage[]
+  /** 项目包件列表：审批链的「适用包件」多选来源。 */
+  packages?: BidPackage[]
+  /** 项目报价币种（price_policy.currency）：审批链「适用币种」条件上下文。 */
+  currency?: string | null
   /** 仅负责人可设置审批链。 */
   isOwner: boolean
   currentUserId: string
@@ -663,14 +883,27 @@ export function QuoteVersionsPanel({
   const chainHasThresholds = approvalChain.some(
     (stage) => typeof stage.min_amount === 'number' && Number.isFinite(stage.min_amount),
   )
+  const chainHasConditions = approvalChain.some(
+    (stage) =>
+      (typeof stage.min_amount === 'number' && Number.isFinite(stage.min_amount)) ||
+      (stage.packages?.length ?? 0) > 0 ||
+      (stage.currencies?.length ?? 0) > 0,
+  )
 
   /** 版本报价合计（元）；非有限数视为金额未知（保守：带门槛级全部生效）。 */
   const amountOf = (version: BoqQuoteVersion): number | null =>
     Number.isFinite(version.summary.total_amount) ? version.summary.total_amount : null
 
-  /** 本地镜像后端 applicable_stages：当前金额下生效的级（原链索引 + 阶段）。 */
+  /**
+   * 本地镜像后端 applicable_stages：当前金额 + 包件 + 币种下生效的级
+   * （原链索引 + 阶段）。币种取项目 price_policy；未加载时按未知处理，
+   * 条件不匹配的级跳过，全部被过滤时 api 层回退全部阶段。
+   */
   const activeStagesOf = (version: BoqQuoteVersion) =>
-    applicableStages(approvalChain, amountOf(version))
+    applicableStages(approvalChain, amountOf(version), {
+      packageId: version.package_id,
+      currency,
+    })
 
   /** 当前待审级在生效序列中的位置（0 起）；链被缩短等异常情况下夹取到最后一级。 */
   const stagePosOf = (version: BoqQuoteVersion) => {
@@ -1185,10 +1418,30 @@ export function QuoteVersionsPanel({
                         ≥ ¥{formatMoney(stage.min_amount)}
                       </em>
                     )}
+                  {(stage.packages?.length ?? 0) > 0 && (
+                    <em
+                      className="boq-chain-condition-tag"
+                      title={`仅这些包件需此级审批：${conditionTagText(stage.packages ?? [])}`}
+                    >
+                      包件: {conditionTagText(stage.packages ?? [])}
+                    </em>
+                  )}
+                  {(stage.currencies?.length ?? 0) > 0 && (
+                    <em
+                      className="boq-chain-condition-tag"
+                      title={`仅这些币种需此级审批：${conditionTagText(stage.currencies ?? [])}`}
+                    >
+                      币种: {conditionTagText(stage.currencies ?? [])}
+                    </em>
+                  )}
                 </span>
               ))}
               （共 {chainLength} 级
-              {chainHasThresholds ? '，带门槛级按报价合计生效（金额未知时全部生效）' : ''}
+              {chainHasConditions
+                ? chainHasThresholds
+                  ? '，带条件的级按报价合计 / 包件 / 币种生效（金额未知时门槛级全部生效）'
+                  : '，带条件的级按包件 / 币种生效'
+                : ''}
               ，逐级通过后才定稿）
             </span>
           </p>
@@ -1255,7 +1508,10 @@ export function QuoteVersionsPanel({
                       <VersionAudit version={version} />
                     </span>
                     {version.note && <p className="boq-version-note">{version.note}</p>}
-                    <ApprovalTimeline approvals={version.approvals} />
+                    <ApprovalTimeline
+                      approvals={version.approvals}
+                      activeIndices={activeStagesOf(version).map((item) => item.index)}
+                    />
                   </div>
                   <div
                     className={className(
@@ -1442,6 +1698,7 @@ export function QuoteVersionsPanel({
         <ApprovalChainModal
           projectRef={projectRef}
           chain={approvalChain}
+          packages={packages}
           onClose={() => setChainOpen(false)}
           onSaved={handleChainSaved}
         />

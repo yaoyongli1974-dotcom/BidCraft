@@ -719,6 +719,51 @@ def _stage_min_amount(value: Any) -> int | float | None:
     return value
 
 
+STAGE_CONDITION_MAX_ITEMS = 20
+STAGE_CONDITION_ITEM_MAX = 40
+
+
+def _stage_str_list(value: Any) -> list[str] | None:
+    """Return a clean ``list[str]`` condition list, else None (R25).
+
+    A valid list holds non-empty strings of ≤40 chars; it is trimmed, deduped
+    and order-preserving. Non-lists, lists without a single valid item and
+    empty lists are invalid: the key is dropped so the stage stays
+    unrestricted (mirroring the ``min_amount`` handling).
+    """
+    if not isinstance(value, list):
+        return None
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if not text or len(text) > STAGE_CONDITION_ITEM_MAX or text in seen:
+            continue
+        seen.add(text)
+        ordered.append(text)
+    return ordered or None
+
+
+def _currency_code(value: Any) -> str:
+    """Normalize a currency code for white-list comparison (R25)."""
+    if not isinstance(value, str):
+        return ""
+    return value.strip().upper()
+
+
+def _attach_stage_conditions(stage: dict[str, Any], entry: dict[str, Any]) -> None:
+    """Copy the valid R21/R25 condition keys of ``entry`` onto ``stage``."""
+    threshold = _stage_min_amount(entry.get("min_amount"))
+    if threshold is not None:
+        stage["min_amount"] = threshold
+    for key in ("packages", "currencies"):
+        values = _stage_str_list(entry.get(key))
+        if values is not None:
+            stage[key] = values
+
+
 def normalize_chain(raw: Any) -> list[dict[str, Any]]:
     """Normalize a stored approval chain into the R19 v2 stage format.
 
@@ -726,8 +771,10 @@ def normalize_chain(raw: Any) -> list[dict[str, Any]]:
     v2 stages ``{approvers: [{id, name}], mode}`` are kept as-is with a
     missing/invalid ``mode`` falling back to ``all``. A valid optional
     ``min_amount`` (R21 amount threshold, finite number ≥0) is preserved;
-    invalid values drop the key. Malformed entries are ignored so legacy or
-    hand-edited meta never breaks review.
+    invalid values drop the key. R25 adds the same treatment for the
+    ``packages`` / ``currencies`` white-lists (non-empty ``list[str]``, items
+    deduped in order and ≤40 chars). Malformed entries are ignored so legacy
+    or hand-edited meta never breaks review.
     """
     stages: list[dict[str, Any]] = []
     for entry in list(raw or []):
@@ -748,9 +795,7 @@ def normalize_chain(raw: Any) -> list[dict[str, Any]]:
             if mode not in ("all", "any"):
                 mode = "all"
             stage: dict[str, Any] = {"approvers": approvers, "mode": mode}
-            threshold = _stage_min_amount(entry.get("min_amount"))
-            if threshold is not None:
-                stage["min_amount"] = threshold
+            _attach_stage_conditions(stage, entry)
             stages.append(stage)
         else:
             user_id = str(entry.get("id") or "").strip()
@@ -760,23 +805,60 @@ def normalize_chain(raw: Any) -> list[dict[str, Any]]:
                 "approvers": [{"id": user_id, "name": str(entry.get("name") or "")}],
                 "mode": "all",
             }
-            threshold = _stage_min_amount(entry.get("min_amount"))
-            if threshold is not None:
-                stage["min_amount"] = threshold
+            _attach_stage_conditions(stage, entry)
             stages.append(stage)
     return stages
 
 
+def _stage_applies(
+    stage: dict[str, Any],
+    total_amount: Any,
+    package_id: Any,
+    currency: Any,
+    *,
+    amount_known: bool,
+) -> bool:
+    """Whether one stage is applicable under all of its conditions (R21/R25).
+
+    An unknown amount (or a stage without a threshold) satisfies the amount
+    condition. A non-empty ``packages`` white-list needs a non-empty
+    ``package_id`` member; a non-empty ``currencies`` white-list needs a
+    non-empty currency whose normalized code is a member. Every condition must
+    hold for the stage to take effect.
+    """
+    threshold = _stage_min_amount(stage.get("min_amount"))
+    if amount_known and threshold is not None and total_amount < threshold:
+        return False
+    packages = _stage_str_list(stage.get("packages"))
+    if packages is not None:
+        package = str(package_id or "").strip()
+        if not package or package not in packages:
+            return False
+    currencies = _stage_str_list(stage.get("currencies"))
+    if currencies is not None:
+        code = _currency_code(currency)
+        if not code or code not in {_currency_code(item) for item in currencies}:
+            return False
+    return True
+
+
 def applicable_stages(
-    chain: list[dict[str, Any]], total_amount: Any
+    chain: list[dict[str, Any]],
+    total_amount: Any = None,
+    package_id: Any = None,
+    currency: Any = None,
 ) -> list[tuple[int, dict[str, Any]]]:
-    """Filter the chain to the stages taking effect for ``total_amount`` (R21).
+    """Filter the chain to the stages taking effect for a version (R21/R25).
 
     A stage carrying ``min_amount`` only applies once the version total reaches
     it (``total_amount >= min_amount``); stages without a threshold always
-    apply. An unknown total (None / missing / non-numeric) keeps every stage
-    applicable — conservative, better over-review than miss one. Returns
-    ``(original chain index, stage)`` pairs in chain order.
+    apply. An unknown total (None / missing / non-numeric) keeps the amount
+    condition satisfied — conservative, better over-review than miss one.
+    ``packages`` / ``currencies`` white-lists need ``package_id`` / the
+    normalized ``currency`` to be a member; an unknown context skips such a
+    stage. When the conditions filter out every stage the full chain is used
+    instead, so a conditional chain never ends up with zero approval levels.
+    Returns ``(original chain index, stage)`` pairs in chain order.
     """
     known = (
         isinstance(total_amount, (int, float))
@@ -785,28 +867,35 @@ def applicable_stages(
     )
     stages: list[tuple[int, dict[str, Any]]] = []
     for index, stage in enumerate(chain):
-        threshold = _stage_min_amount(stage.get("min_amount"))
-        if known and threshold is not None and total_amount < threshold:
-            continue
-        stages.append((index, stage))
+        if _stage_applies(
+            stage, total_amount, package_id, currency, amount_known=known
+        ):
+            stages.append((index, stage))
+    if chain and not stages:
+        return list(enumerate(chain))
     return stages
 
 
 def completed_stages(
-    chain: list[dict[str, Any]], approvals: list[dict], total_amount: Any = None
+    chain: list[dict[str, Any]],
+    approvals: list[dict],
+    total_amount: Any = None,
+    package_id: Any = None,
+    currency: Any = None,
 ) -> int:
-    """Count leading fully signed-off applicable stages (R19 all/any, R21 gates).
+    """Count leading fully signed-off applicable stages (R19 all/any, R21/R25).
 
-    Only stages applicable to ``total_amount`` are walked; inapplicable stages
-    are skipped without counting or stopping the scan. A stage is complete when
-    its approve-record count (records keep the original chain index) reaches
-    ``1`` (any) or ``len(approvers)`` (all); the scan stops at the first
-    incomplete applicable stage, so the result is also the ordinal of the
-    current pending applicable level. ``total_amount=None`` treats every stage
-    as applicable, preserving the pre-R21 two-argument behavior.
+    Only stages applicable to the version context (``total_amount``,
+    ``package_id``, ``currency``) are walked; inapplicable stages are skipped
+    without counting or stopping the scan. A stage is complete when its
+    approve-record count (records keep the original chain index) reaches ``1``
+    (any) or ``len(approvers)`` (all); the scan stops at the first incomplete
+    applicable stage, so the result is also the ordinal of the current pending
+    applicable level. Omitting the context treats every stage as applicable,
+    preserving the pre-R21 two-argument behavior.
     """
     completed = 0
-    for index, stage in applicable_stages(chain, total_amount):
+    for index, stage in applicable_stages(chain, total_amount, package_id, currency):
         approvers = stage.get("approvers") or []
         count = len(
             [
@@ -833,14 +922,18 @@ def version_payload(
 
     ``project`` (when given) supplies the approval chain so ``approval_stage``
     can report the pending applicable level of a submitted version and
-    ``approval_stage_count`` the number of stages applicable to the version's
-    ``summary.total_amount`` (R21 amount thresholds; unknown total → all).
+    ``approval_stage_count`` the number of stages applicable to the version
+    context (``summary.total_amount`` plus the version's package and the
+    project currency — R21 amount thresholds, R25 package/currency gates;
+    unknown total → all).
     """
     prices = dict(version.prices or {})
     approvals = list(version.approvals or [])
     summary = dict(version.summary or {})
     chain = normalize_chain((project.meta or {}).get("approval_chain")) if project else []
     total_amount = summary.get("total_amount")
+    package_id = version.package_id
+    currency = get_price_policy(project)["currency"] if project else None
     payload: dict[str, Any] = {
         "id": version.id,
         "name": version.name,
@@ -860,11 +953,13 @@ def version_payload(
         "reviewed_at": version.reviewed_at.isoformat() if version.reviewed_at else None,
         "approvals": approvals,
         "approval_stage": (
-            completed_stages(chain, approvals, total_amount)
+            completed_stages(chain, approvals, total_amount, package_id, currency)
             if (version.status or "draft") == "submitted" and chain
             else 0
         ),
-        "approval_stage_count": len(applicable_stages(chain, total_amount)),
+        "approval_stage_count": len(
+            applicable_stages(chain, total_amount, package_id, currency)
+        ),
     }
     if include_prices:
         payload["prices"] = prices
@@ -1025,7 +1120,8 @@ def review_version(
     「已完成阶段数」逐级流转——会签(all)级需全部审批人通过、或签(any)级任一
     通过即推进；当前级审批人（或全局超管）才可操作，会签级已批者再批被拒。
     空链沿用旧的单级负责人审批。R21 金额门槛：仅对版本金额生效的级参与流转
-    （金额未知时全部生效），记录 stage 仍存原链索引。
+    （金额未知时全部生效），R25 包件/币种条件同理由版本 ``package_id`` 与项目
+    ``price_policy.currency`` 判定，记录 stage 仍存原链索引。
     """
     if decision not in QUOTE_REVIEW_DECISIONS:
         raise ValueError("decision 只能是 approve 或 reject")
@@ -1035,8 +1131,10 @@ def review_version(
     chain = normalize_chain((project.meta or {}).get("approval_chain"))
     approvals = list(version.approvals or [])
     total_amount = (version.summary or {}).get("total_amount")
-    applicable = applicable_stages(chain, total_amount)
-    done = completed_stages(chain, approvals, total_amount)
+    package_id = version.package_id
+    currency = get_price_policy(project)["currency"]
+    applicable = applicable_stages(chain, total_amount, package_id, currency)
+    done = completed_stages(chain, approvals, total_amount, package_id, currency)
     # Authorization precedes the state check so an unauthorized caller gets 403
     # even on a draft (matching the old route-level owner gate), while an
     # authorized reviewer still sees the 409 state-machine conflict.
@@ -1078,7 +1176,8 @@ def review_version(
         version.approvals = approvals
         final_approve = (
             decision == "approve"
-            and completed_stages(chain, approvals, total_amount) >= len(applicable)
+            and completed_stages(chain, approvals, total_amount, package_id, currency)
+            >= len(applicable)
         )
     else:
         final_approve = decision == "approve"
@@ -1132,7 +1231,9 @@ def pending_for_user(db: Session, user: dict) -> list[dict[str, Any]]:
     only those who have not signed yet, any-mode everyone until one signs).
     R21 amount thresholds filter the chain first: ``stage`` is the applicable
     ordinal (completed applicable levels + 1) and ``stage_count`` the number
-    of applicable levels; an unknown version amount keeps every level.
+    of applicable levels; an unknown version amount keeps every level. R25
+    package/currency white-lists are evaluated against the version's
+    ``package_id`` and the project ``price_policy`` currency.
     Super admins may act on any submitted version, so it always lands in their
     inbox; global viewers never have approvals. Newest submissions first,
     capped at ``PENDING_APPROVALS_LIMIT``.
@@ -1162,6 +1263,7 @@ def pending_for_user(db: Session, user: dict) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for project in projects:
         chain = normalize_chain((project.meta or {}).get("approval_chain"))
+        currency = get_price_policy(project)["currency"]
         versions = db.scalars(
             select(BoqQuoteVersion).where(
                 BoqQuoteVersion.project_id == project.id,
@@ -1179,8 +1281,12 @@ def pending_for_user(db: Session, user: dict) -> list[dict[str, Any]]:
                 # the inbox level is the applicable ordinal, records keep the
                 # original chain index.
                 total_amount = (version.summary or {}).get("total_amount")
-                applicable = applicable_stages(chain, total_amount)
-                done = completed_stages(chain, approvals, total_amount)
+                applicable = applicable_stages(
+                    chain, total_amount, version.package_id, currency
+                )
+                done = completed_stages(
+                    chain, approvals, total_amount, version.package_id, currency
+                )
                 if done >= len(applicable):
                     continue  # defensive: a fully signed version is never submitted
                 stage, current = applicable[done]

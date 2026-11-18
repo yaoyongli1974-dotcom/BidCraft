@@ -238,7 +238,7 @@ export BIDCRAFT_WECHAT_PAY_MOCK=1         # 本地演示支付
 | 子账号 | ✅ | VIP 主账号自助创建子账号（上限可配），子账号共享主账号点数余额、不可单独充值/兑换/购买 VIP；删除子账号其项目自动移交主账号 |
 | 优先级任务队列 | ✅ | 后台任务（批量核对/导出、配图、生成）经优先级堆队列调度，VIP 用户任务优先出队；并发数 `BIDCRAFT_MAX_JOBS`（默认 2，1–8）；job payload 回显 priority/queue_position |
 | 报价版本与汇率 | ✅ | 报价快照版本保存/恢复/删除（每包件上限 20）、版本对比（新增/移除/改价 + 两侧合计）、税率与币种策略、汇率换算与人民币含税合计、导出「报价汇总」含税/汇率行 |
-| 报价审批流 | ✅ | 版本状态机（草稿→待审→已定稿/已驳回），成员提交审批、负责人定稿/驳回、可撤销定稿并重新提交；同包件至多一个定稿，定稿新版自动退回旧版；双版本（含当前清单）并排审阅视图；**项目审批链**（负责人配置 ≤5 级有序审批人，每级 1–5 人、会签 all/或签 any，逐级通过、末级定稿，越级 403，超管可代审；空链回退负责人单级）；审批级可设**金额门槛**（报价总额达到才需该级审批，低价自动跳过）；审计 `quote.submit/approve/reject/unapprove`；顶栏「待我审批」跨项目待办（数量徽标 + 只读面板，点击直达项目清单页签，60s 轮询） |
+| 报价审批流 | ✅ | 版本状态机（草稿→待审→已定稿/已驳回），成员提交审批、负责人定稿/驳回、可撤销定稿并重新提交；同包件至多一个定稿，定稿新版自动退回旧版；双版本（含当前清单）并排审阅视图；**项目审批链**（负责人配置 ≤5 级有序审批人，每级 1–5 人、会签 all/或签 any，逐级通过、末级定稿，越级 403，超管可代审；空链回退负责人单级）；审批级可设**金额门槛**（报价总额达到才需该级审批，低价自动跳过）；审计 `quote.submit/approve/reject/unapprove`；顶栏「待我审批」跨项目待办（数量徽标 + 只读面板，点击直达项目清单页签，60s 轮询）；审批级可按**包件 / 币种**白名单限定生效范围（与金额门槛组合，未命中自动跳过） |
 | 微信开放平台管理 | ✅ | 管理控制台配置 AppID/AppSecret（加密存库不回显）、回调地址、启用与模拟模式、连通性测试；保存即热生效，登录页自动出现扫码入口 |
 | 企业术语库 | ✅ | 管理端维护「禁用表述 / 建议替换」术语；项目核对自动产出 `TERM-###` 问题（禁用词 major、替换建议 minor，含原文证据与建议） |
 
@@ -347,7 +347,7 @@ DOCX 图注编号与版心宽度、批量生成默认风格尺寸；`tests/test_
 分别覆盖多包件隔离与收养、定额套用与调价、插件 CRUD/聚合/只读拒绝、校准报告与 CLI；
 `tests/test_quote_versions.py`、`tests/test_price_tax.py`、`tests/test_version_diff.py`
 覆盖报价版本、税率与汇率、版本对比；`tests/test_quote_approval.py` 覆盖审批状态机与自动退定稿；
-`tests/test_quote_approval_chain.py`、`tests/test_quote_approval_parallel.py`、`tests/test_quote_approval_condition.py`、`tests/test_approvals_pending.py` 覆盖多级审批链配置、逐级流转、会签/或签、金额门槛条件级与跨项目待我审批；
+`tests/test_quote_approval_chain.py`、`tests/test_quote_approval_parallel.py`、`tests/test_quote_approval_condition.py`、`tests/test_quote_approval_conditions.py`、`tests/test_approvals_pending.py` 覆盖多级审批链配置、逐级流转、会签/或签、金额门槛与包件/币种条件级及跨项目待我审批；
 `tests/test_plugin_guard.py`、`tests/test_plugin_sandbox.py`、`tests/test_plugin_pack.py`
 覆盖插件连续失败自动停用、资源限制沙箱、插件包导出/导入/升级/冲突与非法包校验；
 `tests/test_wechat_admin.py`、`tests/test_terms.py` 覆盖微信开放平台配置与术语库核对；
@@ -359,7 +359,7 @@ DOCX 图注编号与版心宽度、批量生成默认风格尺寸；`tests/test_
 覆盖项目复制的全量深拷贝、外键重映射、可选清单/配图、排除项与失败清理；`tests/test_project_templates.py`
 覆盖模板标记权限、模板列表与从模板创建（含非成员实例化与失败清理）；
 `tests/test_vip.py`、`tests/test_subaccounts.py`、`tests/test_jobqueue.py` 覆盖 VIP 授权/续期/折扣、
-子账号共享计费与权限隔离、优先级队列调度（当前全量 **514 passed**）。
+子账号共享计费与权限隔离、优先级队列调度、审批条件分支（当前全量 **529 passed**）。
 
 前端验证：`cd web && npm run build`（TypeScript 编译 + Vite 产物输出到
 `bidcraft/web_dist`），随后 `bidcraft serve --open` 做浏览器全流程验收。

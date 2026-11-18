@@ -973,6 +973,159 @@ describe('R21 conditional approval stages (min_amount)', () => {
   })
 })
 
+describe('R25 conditional approval stages (packages & currencies)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const jsonResponse = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+  const stage = (id: string, extra: Record<string, unknown> = {}) => ({
+    approvers: [{ id, name: id }],
+    mode: 'all',
+    ...extra,
+  })
+
+  it('keeps valid package and currency lists, dedupes in order and drops invalid entries', () => {
+    const chain = normalizeApprovalChain([
+      stage('u-1', {
+        packages: ['pkg-1', ' pkg-1 ', 'pkg-2', '', 'x'.repeat(41), 3, null],
+        currencies: ['USD', 'usd', 'USD', '', 'y'.repeat(41), false],
+      }),
+      stage('u-2', { packages: [], currencies: [] }),
+      stage('u-3'),
+    ])
+    expect(chain[0].packages).toEqual(['pkg-1', 'pkg-2'])
+    expect(chain[0].currencies).toEqual(['USD', 'usd'])
+    expect('packages' in chain[1]).toBe(false)
+    expect('currencies' in chain[1]).toBe(false)
+    expect('packages' in chain[2]).toBe(false)
+    expect('currencies' in chain[2]).toBe(false)
+  })
+
+  it('filters stages by package whitelist and falls back to all when none match', () => {
+    const chain = normalizeApprovalChain([
+      stage('u-1'),
+      stage('u-2', { packages: ['pkg-1', 'pkg-2'] }),
+    ])
+    expect(
+      applicableStages(chain, null, { packageId: 'pkg-1' }).map((item) => item.index),
+    ).toEqual([0, 1])
+    expect(
+      applicableStages(chain, null, { packageId: 'pkg-2' }).map((item) => item.index),
+    ).toEqual([0, 1])
+    expect(
+      applicableStages(chain, null, { packageId: 'pkg-3' }).map((item) => item.index),
+    ).toEqual([0])
+    expect(applicableStages(chain, null, { packageId: null }).map((item) => item.index)).toEqual([
+      0,
+    ])
+    // 旧调用只传金额：签名兼容；没有包件上下文时带包件条件的级按不匹配跳过。
+    expect(applicableStages(chain, null).map((item) => item.index)).toEqual([0])
+    // 没有任何条件的老链仍照常返回全部阶段。
+    const legacy = normalizeApprovalChain([stage('u-7'), stage('u-8')])
+    expect(applicableStages(legacy, null).map((item) => item.index)).toEqual([0, 1])
+    // 所有级都被包件条件过滤时回退全部阶段，审批链不会被架空。
+    const onlyPackage = normalizeApprovalChain([stage('u-9', { packages: ['pkg-1'] })])
+    expect(
+      applicableStages(onlyPackage, null, { packageId: 'pkg-3' }).map((item) => item.index),
+    ).toEqual([0])
+  })
+
+  it('filters stages by currency whitelist with normalized comparison and fallback', () => {
+    const chain = normalizeApprovalChain([
+      stage('u-1'),
+      stage('u-2', { currencies: ['USD', 'JPY'] }),
+    ])
+    expect(
+      applicableStages(chain, null, { currency: 'USD' }).map((item) => item.index),
+    ).toEqual([0, 1])
+    expect(
+      applicableStages(chain, null, { currency: 'usd' }).map((item) => item.index),
+    ).toEqual([0, 1])
+    expect(
+      applicableStages(chain, null, { currency: 'JPY' }).map((item) => item.index),
+    ).toEqual([0, 1])
+    expect(
+      applicableStages(chain, null, { currency: 'EUR' }).map((item) => item.index),
+    ).toEqual([0])
+    expect(applicableStages(chain, null, { currency: null }).map((item) => item.index)).toEqual([
+      0,
+    ])
+    const onlyCurrency = normalizeApprovalChain([stage('u-9', { currencies: ['USD'] })])
+    expect(
+      applicableStages(onlyCurrency, null, { currency: 'EUR' }).map((item) => item.index),
+    ).toEqual([0])
+  })
+
+  it('requires amount, package and currency conditions to pass together', () => {
+    const chain = normalizeApprovalChain([
+      stage('u-1', { min_amount: 100, packages: ['pkg-1'], currencies: ['USD'] }),
+      stage('u-2'),
+    ])
+    const context = { packageId: 'pkg-1', currency: 'USD' }
+    expect(applicableStages(chain, 100, context).map((item) => item.index)).toEqual([0, 1])
+    expect(applicableStages(chain, 99, context).map((item) => item.index)).toEqual([1])
+    expect(
+      applicableStages(chain, 100, { packageId: 'pkg-2', currency: 'USD' }).map(
+        (item) => item.index,
+      ),
+    ).toEqual([1])
+    expect(
+      applicableStages(chain, 100, { packageId: 'pkg-1', currency: 'CNY' }).map(
+        (item) => item.index,
+      ),
+    ).toEqual([1])
+  })
+
+  it('patches packages and currencies per stage and keeps them in the echo', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({
+        id: 'p-1',
+        name: '项目',
+        approval_chain: [
+          {
+            approvers: [{ id: 'u-1', name: '甲' }],
+            mode: 'all',
+            packages: ['pkg-1', 'pkg-2'],
+            currencies: ['USD'],
+          },
+          { approvers: [{ id: 'u-2', name: '乙' }], mode: 'any' },
+        ],
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const updated = await updateProject('p/1', {
+      approval_chain: [
+        { approvers: ['u-1'], mode: 'all', packages: ['pkg-1', 'pkg-2'], currencies: ['USD'] },
+        { approvers: ['u-2'], mode: 'any' },
+      ],
+    })
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(fetchMock.mock.calls[0][0]).toBe('/projects/p%2F1')
+    expect(init.method).toBe('PATCH')
+    const body = JSON.parse(String(init.body)) as {
+      approval_chain: Array<Record<string, unknown>>
+    }
+    expect(body.approval_chain[0]).toEqual({
+      approvers: ['u-1'],
+      mode: 'all',
+      packages: ['pkg-1', 'pkg-2'],
+      currencies: ['USD'],
+    })
+    expect(body.approval_chain[1]).toEqual({ approvers: ['u-2'], mode: 'any' })
+    expect('packages' in body.approval_chain[1]).toBe(false)
+    expect('currencies' in body.approval_chain[1]).toBe(false)
+    expect(updated.approval_chain?.[0].packages).toEqual(['pkg-1', 'pkg-2'])
+    expect(updated.approval_chain?.[0].currencies).toEqual(['USD'])
+    expect(updated.approval_chain && 'packages' in updated.approval_chain[1]).toBe(false)
+  })
+})
+
 describe('pending approvals', () => {
   afterEach(() => {
     vi.unstubAllGlobals()

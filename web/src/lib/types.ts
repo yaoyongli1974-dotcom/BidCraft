@@ -236,14 +236,22 @@ export interface ApprovalStage {
    * 缺省 / null = 恒生效。金额未知时带门槛级也视为生效（保守，宁多审不漏审）。
    */
   min_amount?: number | null
+  /** 适用包件 id 白名单；空 / 缺省 = 不限包件。 */
+  packages?: string[]
+  /** 适用币种白名单；空 / 缺省 = 不限币种。 */
+  currencies?: string[]
 }
 
-/** PATCH approval_chain 的 v2 入参：每级发用户 id 列表、模式与可选金额门槛。 */
+/** PATCH approval_chain 的 v2 入参：每级发用户 id 列表、模式与可选生效条件。 */
 export interface ApprovalStageInput {
   approvers: string[]
   mode?: ApprovalMode
   /** 金额门槛（元，≥0）；省略 = 该级恒生效。 */
   min_amount?: number
+  /** 适用包件 id 白名单；省略 / 空 = 不限包件。 */
+  packages?: string[]
+  /** 适用币种白名单；省略 / 空 = 不限币种。 */
+  currencies?: string[]
 }
 
 /** 报价版本逐级审批的一条记录。 */

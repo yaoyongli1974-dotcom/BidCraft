@@ -1582,6 +1582,79 @@
   font-size: 10px;
 }
 
+.boq-chain-condition {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.boq-chain-condition-label {
+  flex: 0 0 auto;
+  padding-top: 3px;
+  color: var(--ink-2);
+  font-size: 11px;
+}
+
+.boq-chain-chips {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.boq-chain-chip {
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: 10px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.boq-chain-chip:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.boq-chain-chip.is-active {
+  border-color: var(--accent);
+  background: var(--accent-soft, rgba(37, 99, 235, 0.12));
+  color: var(--accent);
+}
+
+.boq-chain-chip:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.boq-chain-condition-empty {
+  flex: 1 1 100%;
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.boq-chain-custom {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.boq-chain-custom .input {
+  flex: 0 0 110px;
+  min-width: 0;
+}
+
+.boq-chain-condition-tag {
+  margin-left: 2px;
+  color: var(--info, #1d4ed8);
+  font-style: normal;
+  overflow-wrap: anywhere;
+}
+
 .boq-version-stage-pending {
   color: var(--info, #1d4ed8);
   font-size: 10px;

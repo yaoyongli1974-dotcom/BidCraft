@@ -3547,12 +3547,14 @@ def create_app():
 
         ``approval_chain`` 双格式（R19，仅 owner/admin）：① R18 扁平用户 id
         列表 → 每 id 一个单审批人 all 阶段；② v2 阶段列表
-        [{approvers: [用户id], mode?: "all"|"any", min_amount?: 数值}]。校验：
-        阶段 ≤5、级内 1–5 人去重保序、users 存在性、mode ∈ all|any（默认
-        all）、可选 min_amount 为 0–1e12 的数值（R21 金额门槛，布尔/字符串
-        拒绝）。写入 meta 时统一存 v2 阶段快照（name=display_name||username，
-        合法 min_amount 原样保留），此后用户改名不追更；空列表清空审批链，
-        回到单级负责人审批。
+        [{approvers: [用户id], mode?: "all"|"any", min_amount?: 数值,
+        packages?: [包件id], currencies?: [币种]}]。校验：阶段 ≤5、级内 1–5 人
+        去重保序、users 存在性、mode ∈ all|any（默认 all）、可选 min_amount 为
+        0–1e12 的数值（R21 金额门槛，布尔/字符串拒绝）、可选 packages /
+        currencies 为 ≤20 项、每项非空且 ≤40 字符的字符串列表（R25 条件，
+        去重保序，非法→400「条件无效」）。写入 meta 时统一存 v2 阶段快照
+        （name=display_name||username，合法条件原样保留），此后用户改名不追更；
+        空列表清空审批链，回到单级负责人审批。
         """
 
         updates = payload.model_dump(exclude_unset=True)
@@ -3615,6 +3617,31 @@ def create_app():
                             or threshold > 1e12
                         ):
                             raise HTTPException(status_code=400, detail="金额门槛无效")
+                    conditions: dict[str, list[str]] = {}
+                    for condition_key in ("packages", "currencies"):
+                        if condition_key not in raw_stage:
+                            continue
+                        raw_values = raw_stage[condition_key]
+                        if (
+                            not isinstance(raw_values, list)
+                            or len(raw_values) > boq.STAGE_CONDITION_MAX_ITEMS
+                        ):
+                            raise HTTPException(status_code=400, detail="条件无效")
+                        seen_values: set[str] = set()
+                        ordered_values: list[str] = []
+                        for raw_value in raw_values:
+                            if not isinstance(raw_value, str):
+                                raise HTTPException(status_code=400, detail="条件无效")
+                            text = raw_value.strip()
+                            if (
+                                not text
+                                or len(text) > boq.STAGE_CONDITION_ITEM_MAX
+                            ):
+                                raise HTTPException(status_code=400, detail="条件无效")
+                            if text not in seen_values:
+                                seen_values.add(text)
+                                ordered_values.append(text)
+                        conditions[condition_key] = ordered_values
                     raw_approvers = raw_stage.get("approvers")
                     if not isinstance(raw_approvers, list):
                         raise HTTPException(
@@ -3645,6 +3672,8 @@ def create_app():
                     stage_snapshot: dict[str, Any] = {"approvers": approvers, "mode": mode}
                     if "min_amount" in raw_stage:
                         stage_snapshot["min_amount"] = raw_stage["min_amount"]
+                    for condition_key, condition_values in conditions.items():
+                        stage_snapshot[condition_key] = condition_values
                     chain.append(stage_snapshot)
                 meta["approval_chain"] = chain
                 project.meta = meta

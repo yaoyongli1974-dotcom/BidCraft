@@ -804,11 +804,12 @@ export const instantiateTemplate = (id: string, input: ProjectInstantiateInput =
  * Rename a project, change its 标段/包件 or set the quote approval chain.
  * Send only the fields that changed: the server rejects a payload where every
  * key is absent. `approval_chain` is the v2 stage list (≤5 stages, each with
- * 1–5 user ids, an all/any mode and an optional R21 `min_amount` threshold,
- * owner only); an empty array clears the chain back to single-stage owner
- * review. The echo is normalised to v2 even when an older server still replies
- * with the flat R18 format. R23 `is_template` toggles the project template flag
- * (owner/admin only); templates are visible to every member.
+ * 1–5 user ids, an all/any mode and optional R21 `min_amount` / R25
+ * `packages` & `currencies` conditions, owner only); an empty array clears the
+ * chain back to single-stage owner review. The echo is normalised to v2 even
+ * when an older server still replies with the flat R18 format. R23
+ * `is_template` toggles the project template flag (owner/admin only);
+ * templates are visible to every member.
  */
 export const updateProject = async (
   ref: string,
@@ -833,6 +834,8 @@ export const updateProject = async (
  * - 审批人只保留带 id 的条目（级内去重保序），姓名缺失留空串；
  * - 无有效审批人的阶段与非法项整体忽略；
  * - R21 金额门槛 min_amount 仅保留 ≥0 的有限数值，非法/负值丢弃该键（= 恒生效）。
+ * - R25 适用包件 packages / 适用币种 currencies 仅保留非空、≤40 字的字符串，
+ *   去重保序；非法 / 空列表丢弃该键（= 不限）。
  */
 export function normalizeApprovalChain(value: unknown): ApprovalStage[] {
   if (!Array.isArray(value)) return []
@@ -853,34 +856,88 @@ export function normalizeApprovalChain(value: unknown): ApprovalStage[] {
     const minAmount = record.min_amount
     const validMinAmount =
       typeof minAmount === 'number' && Number.isFinite(minAmount) && minAmount >= 0
+    const packages = normalizeApprovalConditionList(record.packages)
+    const currencies = normalizeApprovalConditionList(record.currencies)
     stages.push({
       approvers,
       mode: record.mode === 'any' ? 'any' : 'all',
       ...(validMinAmount ? { min_amount: minAmount } : {}),
+      ...(packages.length > 0 ? { packages } : {}),
+      ...(currencies.length > 0 ? { currencies } : {}),
     })
   }
   return stages
 }
 
 /**
- * 本地镜像后端 `applicable_stages`：按原链顺序过滤出当前金额下生效的级，
+ * R25 阶段生效条件列表归一化：只保留非空、≤40 字字符串，去重保序。
+ * 非数组 / 非法元素 / 空列表返回 []（= 该条件不限）。
+ */
+const APPROVAL_CONDITION_MAX = 40
+
+function normalizeApprovalConditionList(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const result: string[] = []
+  for (const item of value) {
+    if (typeof item !== 'string') continue
+    const text = item.trim()
+    if (!text || text.length > APPROVAL_CONDITION_MAX || result.includes(text)) continue
+    result.push(text)
+  }
+  return result
+}
+
+/** 币种比较按规范串（去空格 + 大写），与后端的规范化比较保持一致。 */
+function normalizeCurrencyToken(value: unknown): string {
+  return typeof value === 'string' ? value.trim().toUpperCase() : ''
+}
+
+/**
+ * 本地镜像后端 `applicable_stages`：按原链顺序过滤出当前上下文下生效的级，
  * 返回（原链索引, 阶段）列表。无门槛（缺省 / null）恒生效；金额未知
  * （null / undefined / 非有限数）时带门槛级也视为生效（保守，宁多审不漏审）；
  * 金额已知时仅 totalAmount ≥ min_amount 的门槛级生效。
+ * R25：packages 非空要求 context.packageId 命中，currencies 非空要求
+ * context.currency 命中（不区分大小写）；条件不匹配的级跳过。
+ * 过滤后无任何生效级时回退全部阶段，保证审批链不会被条件架空。
  */
+export interface ApprovalStageContext {
+  packageId?: string | null
+  currency?: string | null
+}
+
 export function applicableStages(
   chain: ApprovalStage[],
   totalAmount: number | null | undefined,
+  context?: ApprovalStageContext,
 ): Array<{ index: number; stage: ApprovalStage }> {
   const amountKnown = typeof totalAmount === 'number' && Number.isFinite(totalAmount)
+  const packageId = typeof context?.packageId === 'string' ? context.packageId.trim() : ''
+  const currency = normalizeCurrencyToken(context?.currency)
   const result: Array<{ index: number; stage: ApprovalStage }> = []
   chain.forEach((stage, index) => {
     const threshold = stage.min_amount
     const gated = typeof threshold === 'number' && Number.isFinite(threshold) && threshold >= 0
-    if (!gated || !amountKnown || (totalAmount as number) >= threshold) {
-      result.push({ index, stage })
+    if (gated && amountKnown && (totalAmount as number) < threshold) return
+    if (
+      stage.packages &&
+      stage.packages.length > 0 &&
+      !(packageId && stage.packages.includes(packageId))
+    ) {
+      return
     }
+    if (
+      stage.currencies &&
+      stage.currencies.length > 0 &&
+      !(currency && stage.currencies.some((item) => normalizeCurrencyToken(item) === currency))
+    ) {
+      return
+    }
+    result.push({ index, stage })
   })
+  if (result.length === 0 && chain.length > 0) {
+    return chain.map((stage, index) => ({ index, stage }))
+  }
   return result
 }
 

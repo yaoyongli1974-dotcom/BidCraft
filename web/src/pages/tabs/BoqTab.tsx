@@ -665,6 +665,8 @@ export function BoqTab() {
                 canWrite={canWrite}
                 canReview={canReview}
                 approvalChain={project.approval_chain ?? []}
+                packages={packages}
+                currency={policy?.currency ?? null}
                 isOwner={project.my_role === 'owner'}
                 currentUserId={user?.id ?? ''}
                 isSuperAdmin={isSuperAdmin}
