@@ -728,9 +728,10 @@ export const createProject = (name: string, pkg: string, bidSection = '') =>
  * Rename a project, change its 标段/包件 or set the quote approval chain.
  * Send only the fields that changed: the server rejects a payload where every
  * key is absent. `approval_chain` is the v2 stage list (≤5 stages, each with
- * 1–5 user ids and an all/any mode, owner only); an empty array clears the
- * chain back to single-stage owner review. The echo is normalised to v2 even
- * when an older server still replies with the flat R18 format.
+ * 1–5 user ids, an all/any mode and an optional R21 `min_amount` threshold,
+ * owner only); an empty array clears the chain back to single-stage owner
+ * review. The echo is normalised to v2 even when an older server still replies
+ * with the flat R18 format.
  */
 export const updateProject = async (
   ref: string,
@@ -748,7 +749,8 @@ export const updateProject = async (
  * - R18 扁平 `{id,name}` → 单审批人 all 阶段；
  * - v2 `{approvers:[{id,name}],mode}` 原样，mode 白名单外的值回退 all；
  * - 审批人只保留带 id 的条目（级内去重保序），姓名缺失留空串；
- * - 无有效审批人的阶段与非法项整体忽略。
+ * - 无有效审批人的阶段与非法项整体忽略；
+ * - R21 金额门槛 min_amount 仅保留 ≥0 的有限数值，非法/负值丢弃该键（= 恒生效）。
  */
 export function normalizeApprovalChain(value: unknown): ApprovalStage[] {
   if (!Array.isArray(value)) return []
@@ -766,9 +768,38 @@ export function normalizeApprovalChain(value: unknown): ApprovalStage[] {
       approvers.push({ id, name: asText(entryRecord.name) })
     }
     if (approvers.length === 0) continue
-    stages.push({ approvers, mode: record.mode === 'any' ? 'any' : 'all' })
+    const minAmount = record.min_amount
+    const validMinAmount =
+      typeof minAmount === 'number' && Number.isFinite(minAmount) && minAmount >= 0
+    stages.push({
+      approvers,
+      mode: record.mode === 'any' ? 'any' : 'all',
+      ...(validMinAmount ? { min_amount: minAmount } : {}),
+    })
   }
   return stages
+}
+
+/**
+ * 本地镜像后端 `applicable_stages`：按原链顺序过滤出当前金额下生效的级，
+ * 返回（原链索引, 阶段）列表。无门槛（缺省 / null）恒生效；金额未知
+ * （null / undefined / 非有限数）时带门槛级也视为生效（保守，宁多审不漏审）；
+ * 金额已知时仅 totalAmount ≥ min_amount 的门槛级生效。
+ */
+export function applicableStages(
+  chain: ApprovalStage[],
+  totalAmount: number | null | undefined,
+): Array<{ index: number; stage: ApprovalStage }> {
+  const amountKnown = typeof totalAmount === 'number' && Number.isFinite(totalAmount)
+  const result: Array<{ index: number; stage: ApprovalStage }> = []
+  chain.forEach((stage, index) => {
+    const threshold = stage.min_amount
+    const gated = typeof threshold === 'number' && Number.isFinite(threshold) && threshold >= 0
+    if (!gated || !amountKnown || (totalAmount as number) >= threshold) {
+      result.push({ index, stage })
+    }
+  })
+  return result
 }
 
 export async function getProject(ref: string): Promise<ProjectDetail> {
@@ -1784,6 +1815,8 @@ export function normalizeBoqQuoteVersion(value: unknown): BoqQuoteVersion | null
     reviewed_at: isoOrNull(source.reviewed_at),
     approvals: normalizeQuoteApprovals(source.approvals),
     approval_stage: Math.max(0, Math.round(asNumber(source.approval_stage, 0))),
+    // R21 生效级总数：旧后端不返回时缺省 1，界面用本地 applicableStages 回退。
+    approval_stage_count: Math.max(1, Math.round(asNumber(source.approval_stage_count, 1))),
     ...(prices ? { prices } : {}),
   }
 }
@@ -1892,6 +1925,7 @@ export async function createBoqVersion(
       reviewed_at: null,
       approvals: [],
       approval_stage: 0,
+      approval_stage_count: 1,
     }
   )
 }

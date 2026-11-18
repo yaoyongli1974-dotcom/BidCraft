@@ -29,6 +29,7 @@ import type {
 } from '../../lib/types'
 import {
   ApiError,
+  applicableStages,
   createBoqVersion,
   deleteBoqVersion,
   getBoqVersionDiff,
@@ -55,6 +56,8 @@ const NOTE_MAX = 200
 const CHAIN_MAX = 5
 /** 每级最多 5 名审批人，与后端 PATCH 校验一致。 */
 const APPROVERS_MAX = 5
+/** 金额门槛上限（元），与后端 PATCH 校验一致（0–1e12）。 */
+const MIN_AMOUNT_MAX = 1e12
 
 /** 审批人名单展示：姓名快照优先，缺失时回退用户 id。 */
 function namesOf(entries: ApprovalChainEntry[]): string {
@@ -191,9 +194,13 @@ function StageApproverAdd({
   )
 }
 
+/** 弹窗草稿：在阶段之上附带门槛输入框的原始文本（空串 = 恒生效）。 */
+type ChainDraftStage = ApprovalStage & { thresholdText: string }
+
 /**
  * 审批链设置弹窗（仅负责人可见）：≤5 级、每级 1–5 名审批人（候选为负责人与可编辑成员），
- * 每级可选会签（全部通过）/ 或签（任一通过）；阶段支持上移 / 下移 / 移除。
+ * 每级可选会签（全部通过）/ 或签（任一通过）与可选金额门槛（达到该金额才需此级审批，
+ * 留空恒生效）；阶段支持上移 / 下移 / 移除。
  * 保存走 PATCH approval_chain（v2 阶段格式），空链即回到负责人单级审批。
  */
 function ApprovalChainModal({
@@ -209,7 +216,15 @@ function ApprovalChainModal({
 }) {
   const toast = useToast()
   const membersQuery = useQuery(`members:${projectRef}`, () => getMembers(projectRef))
-  const [draft, setDraft] = useState<ApprovalStage[]>(chain)
+  const [draft, setDraft] = useState<ChainDraftStage[]>(() =>
+    chain.map((stage) => ({
+      ...stage,
+      thresholdText:
+        typeof stage.min_amount === 'number' && Number.isFinite(stage.min_amount)
+          ? String(stage.min_amount)
+          : '',
+    })),
+  )
   const [saving, setSaving] = useState(false)
 
   const candidates = (membersQuery.data ?? []).filter(
@@ -218,13 +233,13 @@ function ApprovalChainModal({
   const membersReady = !membersQuery.loading && !(membersQuery.error && !membersQuery.data)
   const full = draft.length >= CHAIN_MAX
 
-  const updateStage = (index: number, patch: Partial<ApprovalStage>) => {
+  const updateStage = (index: number, patch: Partial<ChainDraftStage>) => {
     setDraft(draft.map((stage, i) => (i === index ? { ...stage, ...patch } : stage)))
   }
 
   const addStage = () => {
     if (full) return
-    setDraft([...draft, { approvers: [], mode: 'all' }])
+    setDraft([...draft, { approvers: [], mode: 'all', thresholdText: '' }])
   }
 
   const moveStage = (index: number, delta: number) => {
@@ -255,19 +270,40 @@ function ApprovalChainModal({
       toast.warning('审批链未填写完整', '每级至少需要 1 名审批人；请添加审批人或移除空级。')
       return
     }
+    const badThreshold = draft.findIndex((stage) => {
+      const text = stage.thresholdText.trim()
+      if (!text) return false
+      const value = Number(text)
+      return !Number.isFinite(value) || value < 0 || value > MIN_AMOUNT_MAX
+    })
+    if (badThreshold >= 0) {
+      toast.warning(
+        '金额门槛无效',
+        `第 ${badThreshold + 1} 级金额门槛需为 0 到 1e12 之间的数字；留空表示该级恒生效。`,
+      )
+      return
+    }
     setSaving(true)
     try {
       await updateProject(projectRef, {
-        approval_chain: draft.map((stage) => ({
-          approvers: stage.approvers.map((entry) => entry.id),
-          mode: stage.mode,
-        })),
+        approval_chain: draft.map((stage) => {
+          const text = stage.thresholdText.trim()
+          const minAmount = text ? Number(text) : undefined
+          return {
+            approvers: stage.approvers.map((entry) => entry.id),
+            mode: stage.mode,
+            ...(minAmount === undefined ? {} : { min_amount: minAmount }),
+          }
+        }),
       })
       onSaved()
+      const gated = draft.some((stage) => stage.thresholdText.trim())
       toast.success(
         draft.length > 0 ? '审批链已保存' : '审批链已清空',
         draft.length > 0
-          ? `报价提交后将按 ${draft.length} 级逐级审批，每级按会签/或签规则通过后才定稿。`
+          ? gated
+            ? `报价提交后将按审批链逐级审批（最多 ${draft.length} 级，带金额门槛的级按报价合计生效），每级按会签/或签规则通过后才定稿。`
+            : `报价提交后将按 ${draft.length} 级逐级审批，每级按会签/或签规则通过后才定稿。`
           : '已恢复为负责人单级审批。',
       )
       onClose()
@@ -299,6 +335,9 @@ function ApprovalChainModal({
           提交报价后按下列顺序逐级审批：会签级需全部审批人通过，或签级任一通过即进入下一级；
           任一级驳回即退回修改，重新提交从第 1 级重走。最多 {CHAIN_MAX} 级、每级最多{' '}
           {APPROVERS_MAX} 人，候选为负责人与可编辑成员。未设置（保存空链）时为负责人单级审批。
+        </p>
+        <p className="boq-chain-hint boq-chain-hint--quiet">
+          每级可选「金额门槛」：报价合计达到该金额才需此级审批，留空恒生效；金额未知时带门槛级视为生效（宁多审不漏审）。
         </p>
 
         {draft.length === 0 ? (
@@ -346,6 +385,23 @@ function ApprovalChainModal({
                     </IconButton>
                   </span>
                 </div>
+                <label className="boq-chain-threshold">
+                  <span className="boq-chain-threshold-label">金额门槛</span>
+                  <input
+                    className="input input--sm"
+                    type="number"
+                    min={0}
+                    max={MIN_AMOUNT_MAX}
+                    step="any"
+                    inputMode="decimal"
+                    value={stage.thresholdText}
+                    placeholder="留空 = 恒生效"
+                    disabled={saving}
+                    onChange={(event) => updateStage(index, { thresholdText: event.target.value })}
+                    aria-label={`第 ${index + 1} 级金额门槛（元，可选）`}
+                  />
+                  <small>达到该金额才需此级审批</small>
+                </label>
                 {stage.approvers.length === 0 ? (
                   <p className="boq-chain-warn boq-chain-empty-stage">
                     尚未添加审批人：保存前每级至少 1 人。
@@ -604,10 +660,31 @@ export function QuoteVersionsPanel({
   const [chainOpen, setChainOpen] = useState(false)
   const chainLength = approvalChain.length
   const chainActive = chainLength > 0
+  const chainHasThresholds = approvalChain.some(
+    (stage) => typeof stage.min_amount === 'number' && Number.isFinite(stage.min_amount),
+  )
 
-  /** 待审级序号（0 起）；链被缩短等异常情况下夹取到最后一级，避免越界。 */
+  /** 版本报价合计（元）；非有限数视为金额未知（保守：带门槛级全部生效）。 */
+  const amountOf = (version: BoqQuoteVersion): number | null =>
+    Number.isFinite(version.summary.total_amount) ? version.summary.total_amount : null
+
+  /** 本地镜像后端 applicable_stages：当前金额下生效的级（原链索引 + 阶段）。 */
+  const activeStagesOf = (version: BoqQuoteVersion) =>
+    applicableStages(approvalChain, amountOf(version))
+
+  /** 当前待审级在生效序列中的位置（0 起）；链被缩短等异常情况下夹取到最后一级。 */
+  const stagePosOf = (version: BoqQuoteVersion) => {
+    const active = activeStagesOf(version)
+    return Math.min(Math.max(version.approval_stage, 0), Math.max(active.length - 1, 0))
+  }
+
+  /** 当前待审级的原链索引（审批记录 stage 存原索引，时间线按原级显示）。 */
   const stageOf = (version: BoqQuoteVersion) =>
-    Math.min(Math.max(version.approval_stage, 0), Math.max(chainLength - 1, 0))
+    activeStagesOf(version)[stagePosOf(version)]?.index ?? 0
+
+  /** 生效级总数：优先后端 approval_stage_count，本地镜像兜底（旧后端缺省 1 时回退链长）。 */
+  const stageCountOf = (version: BoqQuoteVersion) =>
+    Math.max(version.approval_stage_count, activeStagesOf(version).length, 1)
 
   /** 某级已通过的审批记录数（会签完成度）。 */
   const approvedCountAt = (version: BoqQuoteVersion, stageIndex: number) =>
@@ -629,14 +706,15 @@ export function QuoteVersionsPanel({
     return stage.approvers.filter((entry) => !approvedIds.has(entry.id))
   }
 
-  /** 本次通过后是否直接定稿：末级且（或签任一即可，或会签只差最后一条通过记录）。 */
+  /** 本次通过后是否直接定稿：当前为最后一个生效级且（或签任一即可，或会签只差最后一条通过记录）。 */
   const willFinalize = (version: BoqQuoteVersion) => {
     if (!chainActive) return true
-    const stageIndex = stageOf(version)
-    const stage = approvalChain[stageIndex]
-    if (!stage || stageIndex + 1 < chainLength) return false
-    if (stage.mode === 'any') return true
-    return stage.approvers.length - approvedCountAt(version, stageIndex) <= 1
+    const active = activeStagesOf(version)
+    const pos = stagePosOf(version)
+    const entry = active[pos]
+    if (!entry || pos + 1 < active.length) return false
+    if (entry.stage.mode === 'any') return true
+    return entry.stage.approvers.length - approvedCountAt(version, entry.index) <= 1
   }
 
   /**
@@ -853,9 +931,13 @@ export function QuoteVersionsPanel({
     setApprovalBusy(false)
   }
 
-  const approvalStage = approval ? stageOf(approval.version) : 0
-  const approvalIsFinalStage = approvalStage + 1 >= chainLength
-  const approvalStageInfo = approval ? approvalChain[approvalStage] : undefined
+  const approvalActive = approval ? activeStagesOf(approval.version) : []
+  const approvalPos = approval ? stagePosOf(approval.version) : 0
+  const approvalStage = approvalActive[approvalPos]?.index ?? 0
+  const approvalStageCount = approval ? stageCountOf(approval.version) : 0
+  const approvalIsFinalStage = approvalPos + 1 >= approvalActive.length
+  const approvalStageInfo = approvalActive[approvalPos]?.stage
+  const approvalNextStage = approvalActive[approvalPos + 1]?.stage
   const approvalWillFinalize = approval ? willFinalize(approval.version) : true
   /** 会签级除我之外还差几人通过（超管代批时即全部待批者）。 */
   const approvalRemaining =
@@ -870,7 +952,7 @@ export function QuoteVersionsPanel({
       ? {
           title: `提交「${approval.version.name}」审批？`,
           hint: chainActive
-            ? `提交后按审批链逐级审批（共 ${chainLength} 级），每级按会签/或签规则通过后才定稿。可附上报价口径说明。`
+            ? `提交后按审批链逐级审批（共 ${approvalStageCount} 级生效），每级按会签/或签规则通过后才定稿。可附上报价口径说明。`
             : '提交后版本进入待审状态，审批通过前不能再提交。可附上报价口径说明。',
           field: '提交说明',
           confirm: '提交审批',
@@ -878,7 +960,7 @@ export function QuoteVersionsPanel({
       : approval.kind === 'approve'
         ? {
             title: chainActive && !approvalWillFinalize
-              ? `通过「${approval.version.name}」的第 ${approvalStage + 1} 级审批？`
+              ? `通过「${approval.version.name}」的第 ${approvalPos + 1} 级审批？`
               : `定稿「${approval.version.name}」？`,
             hint: chainActive
               ? approvalWillFinalize
@@ -886,8 +968,8 @@ export function QuoteVersionsPanel({
                 : approvalIsFinalStage
                   ? `这是最后一级（会签）：你通过后还需「${approvalOtherNames || '其他审批人'}」通过，版本才定稿为本包件现行报价。`
                   : approvalStageInfo?.mode === 'all' && approvalRemaining > 1
-                    ? `本级为会签：你通过后还需「${approvalOtherNames || '其他审批人'}」通过，才进入第 ${approvalStage + 2}/${chainLength} 级。`
-                    : `通过后进入第 ${approvalStage + 2}/${chainLength} 级，由「${namesOf(approvalChain[approvalStage + 1]?.approvers ?? []) || '下一级审批人'}」继续审批；全部通过后才定稿。`
+                    ? `本级为会签：你通过后还需「${approvalOtherNames || '其他审批人'}」通过，才进入第 ${approvalPos + 2}/${approvalStageCount} 级。`
+                    : `通过后进入第 ${approvalPos + 2}/${approvalStageCount} 级，由「${namesOf(approvalNextStage?.approvers ?? []) || '下一级审批人'}」继续审批；全部通过后才定稿。`
               : '定稿后该版本成为本包件的现行报价；同一包件的旧定稿版本会自动退回草稿。',
             field: '审批意见',
             confirm: chainActive && !approvalWillFinalize ? '通过本级' : '定稿',
@@ -917,18 +999,24 @@ export function QuoteVersionsPanel({
             )
       syncAfterChange(updated)
       if (approval.kind === 'approve' && updated.status === 'submitted') {
-        // 通过但版本仍待审：会签级可能仍停在原地等其他审批人，否则进入下一级。
-        const nextStage = Math.min(updated.approval_stage, Math.max(chainLength - 1, 0))
+        // 通过但版本仍待审：会签级可能仍停在原地等其他审批人，否则进入下一个生效级。
+        const nextActive = activeStagesOf(updated)
+        const nextPos = Math.min(
+          Math.max(updated.approval_stage, 0),
+          Math.max(nextActive.length - 1, 0),
+        )
+        const nextStage = nextActive[nextPos]?.index ?? 0
+        const nextCount = stageCountOf(updated)
         const nextNames = namesOf(pendingApprovers(updated)) || '当前级审批人'
         if (nextStage === approvalStage && approvalChain[nextStage]?.mode === 'all') {
           toast.success(
             '本级审批已通过',
-            `「${approval.version.name}」第 ${nextStage + 1}/${chainLength} 级会签进行中，还需「${nextNames}」通过。`,
+            `「${approval.version.name}」第 ${nextPos + 1}/${nextCount} 级会签进行中，还需「${nextNames}」通过。`,
           )
         } else {
           toast.success(
             '本级审批已通过',
-            `「${approval.version.name}」进入第 ${nextStage + 1}/${chainLength} 级，等待「${nextNames}」审批。`,
+            `「${approval.version.name}」进入第 ${nextPos + 1}/${nextCount} 级，等待「${nextNames}」审批。`,
           )
         }
       } else {
@@ -941,7 +1029,7 @@ export function QuoteVersionsPanel({
           `「${approval.version.name}」${
             approval.kind === 'submit'
               ? chainActive
-                ? `已按审批链进入第 1/${chainLength} 级审批。`
+                ? `已按审批链进入第 1/${stageCountOf(updated)} 级审批。`
                 : '等待负责人审批。'
               : approval.kind === 'approve'
                 ? '已生效为本包件现行报价。'
@@ -1088,9 +1176,20 @@ export function QuoteVersionsPanel({
                   {index > 0 && ' → '}
                   {namesOf(stage.approvers)}
                   <em className="boq-chain-mode-tag">（{modeLabel(stage.mode)}）</em>
+                  {typeof stage.min_amount === 'number' &&
+                    Number.isFinite(stage.min_amount) && (
+                      <em
+                        className="boq-chain-threshold-tag"
+                        title={`报价合计达到 ¥${formatMoney(stage.min_amount)} 才需此级审批`}
+                      >
+                        ≥ ¥{formatMoney(stage.min_amount)}
+                      </em>
+                    )}
                 </span>
               ))}
-              （共 {chainLength} 级，逐级通过后才定稿）
+              （共 {chainLength} 级
+              {chainHasThresholds ? '，带门槛级按报价合计生效（金额未知时全部生效）' : ''}
+              ，逐级通过后才定稿）
             </span>
           </p>
         )}
@@ -1117,6 +1216,8 @@ export function QuoteVersionsPanel({
               const editable = version.status === 'draft' || version.status === 'rejected'
               const reviewable = canReviewVersion(version)
               const stage = stageOf(version)
+              const stagePos = stagePosOf(version)
+              const stageCount = stageCountOf(version)
               const stageInfo = approvalChain[stage]
               const stagePendingNames = submitted ? namesOf(pendingApprovers(version)) : ''
               const finalizes = willFinalize(version)
@@ -1133,9 +1234,9 @@ export function QuoteVersionsPanel({
                           <Badge
                             tone="info"
                             subtle
-                            title={`第 ${stage + 1}/${chainLength} 级（${modeLabel(stageInfo?.mode ?? 'all')}），待批：${stagePendingNames || '当前级审批人'}`}
+                            title={`第 ${stagePos + 1}/${stageCount} 级（${modeLabel(stageInfo?.mode ?? 'all')}），待批：${stagePendingNames || '当前级审批人'}`}
                           >
-                            第 {stage + 1}/{chainLength} 级待审
+                            第 {stagePos + 1}/{stageCount} 级待审
                           </Badge>
                           <span className="boq-version-stage-pending">
                             待批：{stagePendingNames || '当前级审批人'}
@@ -1183,7 +1284,7 @@ export function QuoteVersionsPanel({
                               ? '修改后重新提交，从第 1 级重走审批链'
                               : '修改后重新提交审批'
                             : chainActive
-                              ? `提交后按审批链逐级审批（共 ${chainLength} 级）`
+                              ? `提交后按审批链逐级审批（共 ${stageCount} 级生效）`
                               : '提交给项目负责人审批'
                         }
                         onClick={() => openApproval('submit', version)}
@@ -1200,7 +1301,7 @@ export function QuoteVersionsPanel({
                           disabled={busy}
                           title={
                             chainActive && !finalizes
-                              ? `通过第 ${stage + 1}/${chainLength} 级审批${stage + 1 < chainLength ? '，交由下一级继续审批' : '（会签还需其他审批人通过）'}`
+                              ? `通过第 ${stagePos + 1}/${stageCount} 级审批${stagePos + 1 < stageCount ? '，交由下一级继续审批' : '（会签还需其他审批人通过）'}`
                               : '定稿为本包件现行报价；同包件旧定稿版本自动退回草稿'
                           }
                           onClick={() => openApproval('approve', version)}
@@ -1224,7 +1325,7 @@ export function QuoteVersionsPanel({
                         className="boq-version-pending"
                         title={
                           chainActive
-                            ? `第 ${stage + 1}/${chainLength} 级（${modeLabel(stageInfo?.mode ?? 'all')}）等待「${stagePendingNames || '当前级审批人'}」审批`
+                            ? `第 ${stagePos + 1}/${stageCount} 级（${modeLabel(stageInfo?.mode ?? 'all')}）等待「${stagePendingNames || '当前级审批人'}」审批`
                             : '等待项目负责人或超级管理员审批'
                         }
                       >

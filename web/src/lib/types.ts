@@ -227,12 +227,19 @@ export type ApprovalMode = 'all' | 'any'
 export interface ApprovalStage {
   approvers: ApprovalChainEntry[]
   mode: ApprovalMode
+  /**
+   * 可选金额门槛（元，≥0）：仅当版本 summary.total_amount ≥ 门槛时该级生效；
+   * 缺省 / null = 恒生效。金额未知时带门槛级也视为生效（保守，宁多审不漏审）。
+   */
+  min_amount?: number | null
 }
 
-/** PATCH approval_chain 的 v2 入参：每级只发用户 id 列表与模式。 */
+/** PATCH approval_chain 的 v2 入参：每级发用户 id 列表、模式与可选金额门槛。 */
 export interface ApprovalStageInput {
   approvers: string[]
   mode?: ApprovalMode
+  /** 金额门槛（元，≥0）；省略 = 该级恒生效。 */
+  min_amount?: number
 }
 
 /** 报价版本逐级审批的一条记录。 */
@@ -912,8 +919,10 @@ export interface BoqQuoteVersion {
   reviewed_at: string | null
   /** 逐级审批记录（审批链非空时产生）；旧后端缺失时按空列表处理。 */
   approvals: QuoteApprovalRecord[]
-  /** 当前待审级序号（0 起，= 已通过级数）；非待审或空链时为 0。 */
+  /** 前导已完成的生效级数（0 起）；非待审或空链时为 0。不生效级被跳过、不计数。 */
   approval_stage: number
+  /** 生效级总数（按金额门槛过滤后）；旧后端缺失时归一为 1，界面回退本地计算。 */
+  approval_stage_count: number
   /** 仅详情接口返回：按清单行 key 保存的单价。 */
   prices?: Record<string, number> | null
 }

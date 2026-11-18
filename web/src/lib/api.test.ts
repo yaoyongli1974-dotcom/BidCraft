@@ -7,6 +7,7 @@ import {
   PLUGIN_MEM_LIMIT,
   UNAUTHORIZED_EVENT,
   apiFetch,
+  applicableStages,
   cnyTotalWithTax,
   createBoqVersion,
   createPlugin,
@@ -572,6 +573,129 @@ describe('boq quote versions', () => {
     expect(normalizeApprovalChain(undefined)).toEqual([])
     expect(normalizeApprovalChain('u-1')).toEqual([])
     expect(normalizeApprovalChain([])).toEqual([])
+  })
+})
+
+describe('R21 conditional approval stages (min_amount)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const jsonResponse = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+  const stage = (id: string, extra: Record<string, unknown> = {}) => ({
+    approvers: [{ id, name: id }],
+    mode: 'all',
+    ...extra,
+  })
+
+  it('keeps valid min_amount in the chain echo and drops invalid values', () => {
+    const stages = normalizeApprovalChain([
+      stage('u-1', { min_amount: 0 }),
+      stage('u-2', { min_amount: 50000.5 }),
+      stage('u-3', { min_amount: -1 }),
+      stage('u-4', { min_amount: '100' }),
+      stage('u-5', { min_amount: true }),
+      stage('u-6', { min_amount: Number.NaN }),
+      stage('u-7', { min_amount: null }),
+      stage('u-8'),
+    ])
+    expect(stages).toHaveLength(8)
+    expect(stages[0].min_amount).toBe(0)
+    expect(stages[1].min_amount).toBe(50000.5)
+    for (const index of [2, 3, 4, 5, 6, 7]) {
+      expect('min_amount' in stages[index]).toBe(false)
+    }
+  })
+
+  it('normalizes approval_stage_count with a safe default for older backends', () => {
+    expect(
+      normalizeBoqQuoteVersion({ id: 'v-1', approval_stage_count: 2 })?.approval_stage_count,
+    ).toBe(2)
+    expect(normalizeBoqQuoteVersion({ id: 'v-1' })?.approval_stage_count).toBe(1)
+    expect(
+      normalizeBoqQuoteVersion({ id: 'v-1', approval_stage_count: 0 })?.approval_stage_count,
+    ).toBe(1)
+    expect(
+      normalizeBoqQuoteVersion({ id: 'v-1', approval_stage_count: -3 })?.approval_stage_count,
+    ).toBe(1)
+    expect(
+      normalizeBoqQuoteVersion({ id: 'v-1', approval_stage_count: 'bogus' })?.approval_stage_count,
+    ).toBe(1)
+    expect(
+      normalizeBoqQuoteVersion({ id: 'v-1', approval_stage_count: 2.6 })?.approval_stage_count,
+    ).toBe(3)
+  })
+
+  it('patches the approval chain with per-stage min_amount and omits it when unset', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({
+        id: 'p-1',
+        name: '项目',
+        approval_chain: [
+          { approvers: [{ id: 'u-1', name: '甲' }], mode: 'all', min_amount: 100000 },
+          { approvers: [{ id: 'u-2', name: '乙' }], mode: 'any' },
+        ],
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const updated = await updateProject('p/1', {
+      approval_chain: [
+        { approvers: ['u-1'], mode: 'all', min_amount: 100000 },
+        { approvers: ['u-2'], mode: 'any' },
+      ],
+    })
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(fetchMock.mock.calls[0][0]).toBe('/projects/p%2F1')
+    expect(init.method).toBe('PATCH')
+    const body = JSON.parse(String(init.body)) as {
+      approval_chain: Array<Record<string, unknown>>
+    }
+    expect(body.approval_chain[0]).toEqual({
+      approvers: ['u-1'],
+      mode: 'all',
+      min_amount: 100000,
+    })
+    expect(body.approval_chain[1]).toEqual({ approvers: ['u-2'], mode: 'any' })
+    expect('min_amount' in body.approval_chain[1]).toBe(false)
+    expect(updated.approval_chain?.[0].min_amount).toBe(100000)
+    expect(updated.approval_chain && 'min_amount' in updated.approval_chain[1]).toBe(false)
+  })
+
+  it('mirrors applicable_stages: thresholds filter by amount, unknown amount keeps all', () => {
+    const chain = normalizeApprovalChain([
+      stage('u-1'),
+      stage('u-2', { min_amount: 100000 }),
+      stage('u-3', { min_amount: 0 }),
+    ])
+    // 低金额跳过门槛级，保留原链索引。
+    expect(applicableStages(chain, 99999.99).map((item) => item.index)).toEqual([0, 2])
+    // 恰好等于门槛视为生效。
+    expect(applicableStages(chain, 100000).map((item) => item.index)).toEqual([0, 1, 2])
+    expect(applicableStages(chain, 200000).map((item) => item.index)).toEqual([0, 1, 2])
+    // 金额未知 → 保守全部生效。
+    expect(applicableStages(chain, null).map((item) => item.index)).toEqual([0, 1, 2])
+    expect(applicableStages(chain, undefined).map((item) => item.index)).toEqual([0, 1, 2])
+    expect(applicableStages(chain, Number.NaN).map((item) => item.index)).toEqual([0, 1, 2])
+    // 0 元仍激活 min_amount=0 的级。
+    expect(applicableStages(chain, 0).map((item) => item.index)).toEqual([0, 2])
+    expect(applicableStages([], 100)).toEqual([])
+  })
+
+  it('returns original indices with their stage objects in the applicable list', () => {
+    const chain = normalizeApprovalChain([
+      stage('u-1', { min_amount: 500 }),
+      stage('u-2', { mode: 'any' }),
+    ])
+    expect(applicableStages(chain, 100)).toEqual([{ index: 1, stage: chain[1] }])
+    expect(applicableStages(chain, 500)).toEqual([
+      { index: 0, stage: chain[0] },
+      { index: 1, stage: chain[1] },
+    ])
   })
 })
 

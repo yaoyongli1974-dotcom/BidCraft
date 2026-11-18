@@ -706,13 +706,28 @@ QUOTE_REVIEW_DECISIONS = ("approve", "reject")
 PENDING_APPROVALS_LIMIT = 100
 
 
+def _stage_min_amount(value: Any) -> int | float | None:
+    """Return a valid stage amount threshold (finite number ≥0), else None.
+
+    Booleans, strings, negatives and non-finite numbers are invalid: the key
+    is dropped so the stage stays unconditionally applicable (R21).
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return value
+
+
 def normalize_chain(raw: Any) -> list[dict[str, Any]]:
     """Normalize a stored approval chain into the R19 v2 stage format.
 
     R18 flat entries ``{id, name}`` become single-approver ``all`` stages;
     v2 stages ``{approvers: [{id, name}], mode}`` are kept as-is with a
-    missing/invalid ``mode`` falling back to ``all``. Malformed entries are
-    ignored so legacy or hand-edited meta never breaks review.
+    missing/invalid ``mode`` falling back to ``all``. A valid optional
+    ``min_amount`` (R21 amount threshold, finite number ≥0) is preserved;
+    invalid values drop the key. Malformed entries are ignored so legacy or
+    hand-edited meta never breaks review.
     """
     stages: list[dict[str, Any]] = []
     for entry in list(raw or []):
@@ -732,29 +747,66 @@ def normalize_chain(raw: Any) -> list[dict[str, Any]]:
             mode = entry.get("mode")
             if mode not in ("all", "any"):
                 mode = "all"
-            stages.append({"approvers": approvers, "mode": mode})
+            stage: dict[str, Any] = {"approvers": approvers, "mode": mode}
+            threshold = _stage_min_amount(entry.get("min_amount"))
+            if threshold is not None:
+                stage["min_amount"] = threshold
+            stages.append(stage)
         else:
             user_id = str(entry.get("id") or "").strip()
             if not user_id:
                 continue
-            stages.append(
-                {
-                    "approvers": [{"id": user_id, "name": str(entry.get("name") or "")}],
-                    "mode": "all",
-                }
-            )
+            stage = {
+                "approvers": [{"id": user_id, "name": str(entry.get("name") or "")}],
+                "mode": "all",
+            }
+            threshold = _stage_min_amount(entry.get("min_amount"))
+            if threshold is not None:
+                stage["min_amount"] = threshold
+            stages.append(stage)
     return stages
 
 
-def completed_stages(chain: list[dict[str, Any]], approvals: list[dict]) -> int:
-    """Count leading fully signed-off stages (R19 all/any semantics).
+def applicable_stages(
+    chain: list[dict[str, Any]], total_amount: Any
+) -> list[tuple[int, dict[str, Any]]]:
+    """Filter the chain to the stages taking effect for ``total_amount`` (R21).
 
-    A stage is complete when its approve-record count reaches ``1`` (any) or
-    ``len(approvers)`` (all); the scan stops at the first incomplete stage, so
-    the result is also the index of the current pending level.
+    A stage carrying ``min_amount`` only applies once the version total reaches
+    it (``total_amount >= min_amount``); stages without a threshold always
+    apply. An unknown total (None / missing / non-numeric) keeps every stage
+    applicable — conservative, better over-review than miss one. Returns
+    ``(original chain index, stage)`` pairs in chain order.
+    """
+    known = (
+        isinstance(total_amount, (int, float))
+        and not isinstance(total_amount, bool)
+        and math.isfinite(total_amount)
+    )
+    stages: list[tuple[int, dict[str, Any]]] = []
+    for index, stage in enumerate(chain):
+        threshold = _stage_min_amount(stage.get("min_amount"))
+        if known and threshold is not None and total_amount < threshold:
+            continue
+        stages.append((index, stage))
+    return stages
+
+
+def completed_stages(
+    chain: list[dict[str, Any]], approvals: list[dict], total_amount: Any = None
+) -> int:
+    """Count leading fully signed-off applicable stages (R19 all/any, R21 gates).
+
+    Only stages applicable to ``total_amount`` are walked; inapplicable stages
+    are skipped without counting or stopping the scan. A stage is complete when
+    its approve-record count (records keep the original chain index) reaches
+    ``1`` (any) or ``len(approvers)`` (all); the scan stops at the first
+    incomplete applicable stage, so the result is also the ordinal of the
+    current pending applicable level. ``total_amount=None`` treats every stage
+    as applicable, preserving the pre-R21 two-argument behavior.
     """
     completed = 0
-    for index, stage in enumerate(chain):
+    for index, stage in applicable_stages(chain, total_amount):
         approvers = stage.get("approvers") or []
         count = len(
             [
@@ -780,17 +832,21 @@ def version_payload(
     """Serialize one quote version; the detail payload additionally carries prices.
 
     ``project`` (when given) supplies the approval chain so ``approval_stage``
-    can report the pending level of a submitted version.
+    can report the pending applicable level of a submitted version and
+    ``approval_stage_count`` the number of stages applicable to the version's
+    ``summary.total_amount`` (R21 amount thresholds; unknown total → all).
     """
     prices = dict(version.prices or {})
     approvals = list(version.approvals or [])
+    summary = dict(version.summary or {})
     chain = normalize_chain((project.meta or {}).get("approval_chain")) if project else []
+    total_amount = summary.get("total_amount")
     payload: dict[str, Any] = {
         "id": version.id,
         "name": version.name,
         "note": version.note or "",
         "package_id": version.package_id,
-        "summary": dict(version.summary or {}),
+        "summary": summary,
         "created_at": version.created_at.isoformat() if version.created_at else None,
         "price_count": len(prices),
         "status": version.status or "draft",
@@ -804,10 +860,11 @@ def version_payload(
         "reviewed_at": version.reviewed_at.isoformat() if version.reviewed_at else None,
         "approvals": approvals,
         "approval_stage": (
-            completed_stages(chain, approvals)
+            completed_stages(chain, approvals, total_amount)
             if (version.status or "draft") == "submitted" and chain
             else 0
         ),
+        "approval_stage_count": len(applicable_stages(chain, total_amount)),
     }
     if include_prices:
         payload["prices"] = prices
@@ -967,7 +1024,8 @@ def review_version(
     R19 并行会签：``project.meta["approval_chain"]`` 归一为 v2 阶段列表后按
     「已完成阶段数」逐级流转——会签(all)级需全部审批人通过、或签(any)级任一
     通过即推进；当前级审批人（或全局超管）才可操作，会签级已批者再批被拒。
-    空链沿用旧的单级负责人审批。
+    空链沿用旧的单级负责人审批。R21 金额门槛：仅对版本金额生效的级参与流转
+    （金额未知时全部生效），记录 stage 仍存原链索引。
     """
     if decision not in QUOTE_REVIEW_DECISIONS:
         raise ValueError("decision 只能是 approve 或 reject")
@@ -976,7 +1034,9 @@ def review_version(
         raise LookupError("版本不存在")
     chain = normalize_chain((project.meta or {}).get("approval_chain"))
     approvals = list(version.approvals or [])
-    stage = completed_stages(chain, approvals)
+    total_amount = (version.summary or {}).get("total_amount")
+    applicable = applicable_stages(chain, total_amount)
+    done = completed_stages(chain, approvals, total_amount)
     # Authorization precedes the state check so an unauthorized caller gets 403
     # even on a draft (matching the old route-level owner gate), while an
     # authorized reviewer still sees the 409 state-machine conflict.
@@ -984,18 +1044,23 @@ def review_version(
         if role != "owner" and not is_super:
             raise BoqForbiddenError("仅项目负责人可审批报价")
     else:
-        current = chain[stage] if stage < len(chain) else {"approvers": [], "mode": "all"}
+        # ``stage`` keeps the original chain index (audit/timeline); ``done``
+        # is the applicable-level ordinal used in user-facing level numbers.
+        if done < len(applicable):
+            stage, current = applicable[done]
+        else:
+            stage, current = len(chain), {"approvers": [], "mode": "all"}
         approver_ids = {str(p.get("id") or "") for p in current["approvers"]}
         if not is_super:
             if actor_id not in approver_ids:
-                raise BoqForbiddenError(f"当前需第 {stage + 1} 级审批人审批，您不是该级审批人")
+                raise BoqForbiddenError(f"当前需第 {done + 1} 级审批人审批，您不是该级审批人")
             if current["mode"] == "all" and any(
                 r.get("decision") == "approve"
                 and r.get("stage") == stage
                 and str(r.get("user_id") or "") == actor_id
                 for r in approvals
             ):
-                raise BoqForbiddenError(f"您已完成本级审批（第 {stage + 1} 级）")
+                raise BoqForbiddenError(f"您已完成本级审批（第 {done + 1} 级）")
     if (version.status or "draft") != "submitted":
         raise BoqConflictError("仅待审版本可审批")
     now = utcnow()
@@ -1012,7 +1077,8 @@ def review_version(
         )
         version.approvals = approvals
         final_approve = (
-            decision == "approve" and completed_stages(chain, approvals) >= len(chain)
+            decision == "approve"
+            and completed_stages(chain, approvals, total_amount) >= len(applicable)
         )
     else:
         final_approve = decision == "approve"
@@ -1064,6 +1130,9 @@ def pending_for_user(db: Session, user: dict) -> list[dict[str, Any]]:
     The pending level mirrors ``review_version``: an empty chain waits on the
     project owner, a chain waits on the current level's approvers (all-mode
     only those who have not signed yet, any-mode everyone until one signs).
+    R21 amount thresholds filter the chain first: ``stage`` is the applicable
+    ordinal (completed applicable levels + 1) and ``stage_count`` the number
+    of applicable levels; an unknown version amount keeps every level.
     Super admins may act on any submitted version, so it always lands in their
     inbox; global viewers never have approvals. Newest submissions first,
     capped at ``PENDING_APPROVALS_LIMIT``.
@@ -1104,13 +1173,18 @@ def pending_for_user(db: Session, user: dict) -> list[dict[str, Any]]:
             if not chain:
                 if not is_super and project.owner_id != user_id:
                     continue
-                stage, stage_count, mode = 0, 1, ""
+                pending_stage, stage_count, mode = 1, 1, ""
             else:
-                stage = completed_stages(chain, approvals)
-                if stage >= len(chain):
+                # R21: only stages applicable to the version amount take part;
+                # the inbox level is the applicable ordinal, records keep the
+                # original chain index.
+                total_amount = (version.summary or {}).get("total_amount")
+                applicable = applicable_stages(chain, total_amount)
+                done = completed_stages(chain, approvals, total_amount)
+                if done >= len(applicable):
                     continue  # defensive: a fully signed version is never submitted
-                current = chain[stage]
-                stage_count, mode = len(chain), current["mode"]
+                stage, current = applicable[done]
+                pending_stage, stage_count, mode = done + 1, len(applicable), current["mode"]
                 if not is_super:
                     approver_ids = {str(p.get("id") or "") for p in current["approvers"]}
                     if user_id not in approver_ids:
@@ -1129,7 +1203,7 @@ def pending_for_user(db: Session, user: dict) -> list[dict[str, Any]]:
                     "version_id": version.id,
                     "version_name": version.name,
                     "package_id": version.package_id,
-                    "stage": stage + 1,
+                    "stage": pending_stage,
                     "stage_count": stage_count,
                     "mode": mode,
                     "submitted_by": version.submitted_by or "",
