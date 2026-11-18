@@ -15,6 +15,7 @@ import {
   errorDetailText,
   exportPluginPackage,
   getBoqVersion,
+  getProject,
   getTerms,
   importPluginPackage,
   listBoqVersions,
@@ -32,6 +33,7 @@ import {
   submitBoqVersion,
   unapproveBoqVersion,
   updatePlugin,
+  updateProject,
   uploadForm,
 } from './api'
 
@@ -398,6 +400,91 @@ describe('boq quote versions', () => {
     })
     const init = fetchMock.mock.calls[0][1] as RequestInit
     expect(init.method).toBe('DELETE')
+  })
+
+  it('defaults approvals and approval_stage for older backends', () => {
+    const version = normalizeBoqQuoteVersion({ id: 'v-9', status: 'submitted' })
+    expect(version?.approvals).toEqual([])
+    expect(version?.approval_stage).toBe(0)
+    expect(normalizeBoqQuoteVersion({ id: 'v-9', approval_stage: -3 })?.approval_stage).toBe(0)
+  })
+
+  it('normalizes stage approval records and filters invalid decisions', () => {
+    const version = normalizeBoqQuoteVersion({
+      id: 'v-10',
+      status: 'submitted',
+      approval_stage: 1,
+      approvals: [
+        {
+          stage: 0,
+          user_id: 'u-1',
+          name: '甲',
+          decision: 'approve',
+          note: '同意',
+          at: '2026-11-18T09:00:00+08:00',
+        },
+        { stage: 1, user_id: 'u-2', name: '乙', decision: 'reject', note: '', at: null },
+        { stage: 2, user_id: 'u-3', decision: 'bogus' },
+        null,
+      ],
+    })
+    expect(version?.approval_stage).toBe(1)
+    expect(version?.approvals).toEqual([
+      {
+        stage: 0,
+        user_id: 'u-1',
+        name: '甲',
+        decision: 'approve',
+        note: '同意',
+        at: '2026-11-18T09:00:00+08:00',
+      },
+      { stage: 1, user_id: 'u-2', name: '乙', decision: 'reject', note: '', at: null },
+    ])
+  })
+
+  it('patches the approval chain as an ordered user-id list', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({
+        id: 'p-1',
+        name: '项目',
+        approval_chain: [
+          { id: 'u-1', name: '甲' },
+          { id: 'u-2', name: '乙' },
+        ],
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const updated = await updateProject('p/1', { approval_chain: ['u-1', 'u-2'] })
+    expect(fetchMock.mock.calls[0][0]).toBe('/projects/p%2F1')
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(String(init.body))).toEqual({ approval_chain: ['u-1', 'u-2'] })
+    expect(updated.approval_chain).toEqual([
+      { id: 'u-1', name: '甲' },
+      { id: 'u-2', name: '乙' },
+    ])
+
+    // 空列表 = 清空审批链，回到负责人单级审批；body 必须原样透传。
+    await updateProject('p/1', { approval_chain: [] })
+    const clearInit = fetchMock.mock.calls[1][1] as RequestInit
+    expect(JSON.parse(String(clearInit.body))).toEqual({ approval_chain: [] })
+  })
+
+  it('normalizes the project approval chain and drops invalid entries', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({
+        id: 'p-2',
+        name: '项目',
+        approval_chain: [{ id: 'u-1', name: '甲' }, { name: '无 id' }, null, { id: 'u-2' }],
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const project = await getProject('p-2')
+    expect(project.approval_chain).toEqual([
+      { id: 'u-1', name: '甲' },
+      { id: 'u-2', name: '' },
+    ])
   })
 })
 

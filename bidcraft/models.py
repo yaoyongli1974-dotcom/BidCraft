@@ -178,6 +178,9 @@ class BoqQuoteVersion(Base):
     review_note: Mapped[str] = mapped_column(String(200), default="", server_default="")
     reviewed_by: Mapped[str] = mapped_column(String(80), default="", server_default="")
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # R18 多级审批记录：[{stage, user_id, name, decision, note, at}]，逐级 append；
+    # 空链（单级负责人审批）时保持 []。重新提交会清空以重启审批链。
+    approvals: Mapped[list] = mapped_column(JSON, default=list)
 
 
 class QuotaItem(Base):

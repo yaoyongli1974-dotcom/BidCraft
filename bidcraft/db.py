@@ -76,6 +76,7 @@ def _migrate_columns(engine) -> None:
             ("review_note", "VARCHAR(200) DEFAULT ''"),
             ("reviewed_by", "VARCHAR(80) DEFAULT ''"),
             ("reviewed_at", "DATETIME"),
+            ("approvals", "TEXT NOT NULL DEFAULT '[]'"),
         ],
         "plugins": [
             ("fail_streak", "INTEGER DEFAULT 0"),

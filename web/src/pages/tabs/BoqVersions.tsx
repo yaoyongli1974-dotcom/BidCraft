@@ -1,9 +1,13 @@
 import { useEffect, useState } from 'react'
 import {
+  ArrowDown,
+  ArrowUp,
   Check,
   ChevronRight,
   GitCompare,
   History,
+  ListOrdered,
+  Plus,
   RotateCcw,
   Save,
   Send,
@@ -13,33 +17,40 @@ import {
   X,
 } from 'lucide-react'
 import type {
+  ApprovalChainEntry,
   BoqPayload,
   BoqQuoteVersion,
   BoqSummary,
   BoqVersionDiff,
+  QuoteApprovalRecord,
   QuoteVersionStatus,
 } from '../../lib/types'
 import {
+  ApiError,
   createBoqVersion,
   deleteBoqVersion,
   getBoqVersionDiff,
+  getMembers,
   listBoqVersions,
   messageOf,
   restoreBoqVersion,
   reviewBoqVersion,
   submitBoqVersion,
   unapproveBoqVersion,
+  updateProject,
 } from '../../lib/api'
-import { className, formatDate, formatMoney, type Tone } from '../../lib/format'
+import { className, formatDate, formatMoney, memberRoleMeta, type Tone } from '../../lib/format'
 import { useQuery } from '../../lib/hooks'
 import { Badge } from '../../components/Badge'
-import { Button } from '../../components/Button'
+import { Button, IconButton } from '../../components/Button'
 import { Modal } from '../../components/Modal'
 import { useConfirm } from '../../context/useConfirm'
 import { useToast } from '../../context/useToast'
 
 const NAME_MAX = 80
 const NOTE_MAX = 200
+/** 审批链最多 5 级，与后端 PATCH 校验一致。 */
+const CHAIN_MAX = 5
 
 const STATUS_META: Record<QuoteVersionStatus, { label: string; tone: Tone }> = {
   draft: { label: '草稿', tone: 'neutral' },
@@ -84,6 +95,218 @@ function VersionAudit({ version }: { version: BoqQuoteVersion }) {
         <span className="boq-version-audit-note">意见：{version.review_note}</span>
       )}
     </>
+  )
+}
+
+/** 逐级审批时间线：通过为绿、驳回为红，展示各级审批人、决定、意见与时间。 */
+function ApprovalTimeline({ approvals }: { approvals: QuoteApprovalRecord[] }) {
+  if (approvals.length === 0) return null
+  return (
+    <ol className="boq-approval-timeline" aria-label="逐级审批记录">
+      {approvals.map((record, index) => (
+        <li
+          key={`${record.stage}:${record.user_id}:${index}`}
+          className={record.decision === 'approve' ? 'is-approve' : 'is-reject'}
+        >
+          <span className="boq-approval-step">第 {record.stage + 1} 级</span>
+          <span className="boq-approval-name">{record.name || record.user_id}</span>
+          <span className="boq-approval-decision">
+            {record.decision === 'approve' ? '通过' : '驳回'}
+          </span>
+          {record.at && <span>{formatDate(record.at)}</span>}
+          {record.note && <span className="boq-approval-note">意见：{record.note}</span>}
+        </li>
+      ))}
+    </ol>
+  )
+}
+
+/**
+ * 审批链设置弹窗（仅负责人可见）：候选为负责人与可编辑成员，有序选择 ≤5 级，
+ * 支持上移 / 下移 / 移除；保存走 PATCH approval_chain，空链即回到负责人单级审批。
+ */
+function ApprovalChainModal({
+  projectRef,
+  chain,
+  onClose,
+  onSaved,
+}: {
+  projectRef: string
+  chain: ApprovalChainEntry[]
+  onClose: () => void
+  onSaved: () => void
+}) {
+  const toast = useToast()
+  const membersQuery = useQuery(`members:${projectRef}`, () => getMembers(projectRef))
+  const [draft, setDraft] = useState<ApprovalChainEntry[]>(chain)
+  const [candidateId, setCandidateId] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const candidates = (membersQuery.data ?? []).filter(
+    (member) => member.role === 'owner' || member.role === 'editor',
+  )
+  const remaining = candidates.filter(
+    (member) => !draft.some((entry) => entry.id === member.user_id),
+  )
+  const effectiveCandidate = remaining.some((member) => member.user_id === candidateId)
+    ? candidateId
+    : (remaining[0]?.user_id ?? '')
+  const full = draft.length >= CHAIN_MAX
+
+  const addCandidate = () => {
+    const member = remaining.find((item) => item.user_id === effectiveCandidate)
+    if (!member || full) return
+    setDraft([
+      ...draft,
+      { id: member.user_id, name: member.display_name || member.username },
+    ])
+    setCandidateId('')
+  }
+
+  const move = (index: number, delta: number) => {
+    const target = index + delta
+    if (target < 0 || target >= draft.length) return
+    const next = [...draft]
+    const [entry] = next.splice(index, 1)
+    next.splice(target, 0, entry)
+    setDraft(next)
+  }
+
+  const save = async () => {
+    if (saving) return
+    setSaving(true)
+    try {
+      await updateProject(projectRef, { approval_chain: draft.map((entry) => entry.id) })
+      onSaved()
+      toast.success(
+        draft.length > 0 ? '审批链已保存' : '审批链已清空',
+        draft.length > 0
+          ? `报价提交后将按 ${draft.length} 级逐级审批，全部通过才定稿。`
+          : '已恢复为负责人单级审批。',
+      )
+      onClose()
+    } catch (error) {
+      toast.error('保存审批链失败', messageOf(error))
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title="报价审批链设置"
+      size="md"
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={saving}>
+            取消
+          </Button>
+          <Button variant="primary" loading={saving} onClick={() => void save()}>
+            保存审批链
+          </Button>
+        </>
+      }
+    >
+      <div className="boq-chain-modal">
+        <p className="boq-chain-hint">
+          提交报价后按下列顺序逐级审批，全部通过才定稿；任一级驳回即退回修改，重新提交从第 1
+          级重走。最多 {CHAIN_MAX} 级，候选为负责人与可编辑成员。未设置（保存空链）时为负责人单级审批。
+        </p>
+
+        {draft.length === 0 ? (
+          <p className="boq-chain-empty">尚未设置审批链：当前为负责人单级审批。</p>
+        ) : (
+          <ol className="boq-chain-list" aria-label="审批链顺序">
+            {draft.map((entry, index) => {
+              const member = candidates.find((item) => item.user_id === entry.id)
+              return (
+                <li key={entry.id} className="boq-chain-item">
+                  <span className="boq-chain-stage">第 {index + 1} 级</span>
+                  <span className="boq-chain-name" title={entry.name || entry.id}>
+                    {entry.name || entry.id}
+                  </span>
+                  {member ? (
+                    <span className="boq-chain-role">{memberRoleMeta(member.role).label}</span>
+                  ) : (
+                    <span className="boq-chain-warn">已非可写成员</span>
+                  )}
+                  <span className="boq-chain-actions">
+                    <IconButton
+                      label={`上移「${entry.name || entry.id}」`}
+                      disabled={saving || index === 0}
+                      onClick={() => move(index, -1)}
+                    >
+                      <ArrowUp size={13} />
+                    </IconButton>
+                    <IconButton
+                      label={`下移「${entry.name || entry.id}」`}
+                      disabled={saving || index === draft.length - 1}
+                      onClick={() => move(index, 1)}
+                    >
+                      <ArrowDown size={13} />
+                    </IconButton>
+                    <IconButton
+                      label={`移除「${entry.name || entry.id}」`}
+                      tone="danger"
+                      disabled={saving}
+                      onClick={() => setDraft(draft.filter((item) => item.id !== entry.id))}
+                    >
+                      <X size={13} />
+                    </IconButton>
+                  </span>
+                </li>
+              )
+            })}
+          </ol>
+        )}
+
+        {membersQuery.loading ? (
+          <p className="price-policy-message">正在读取项目成员…</p>
+        ) : membersQuery.error && !membersQuery.data ? (
+          <div className="price-policy-message">
+            <span>暂时读不到项目成员，无法添加审批人。</span>
+            <button type="button" className="text-btn" onClick={membersQuery.refresh}>
+              重试
+            </button>
+          </div>
+        ) : (
+          <div className="boq-chain-add">
+            <select
+              value={effectiveCandidate}
+              disabled={saving || full || remaining.length === 0}
+              onChange={(event) => setCandidateId(event.target.value)}
+              aria-label="选择要加入审批链的成员"
+            >
+              {remaining.length === 0 ? (
+                <option value="">没有可添加的成员</option>
+              ) : (
+                remaining.map((member) => (
+                  <option key={member.user_id} value={member.user_id}>
+                    {member.display_name || member.username}（
+                    {memberRoleMeta(member.role).label}）
+                  </option>
+                ))
+              )}
+            </select>
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={<Plus size={13} />}
+              disabled={saving || full || remaining.length === 0}
+              title={full ? `审批链最多 ${CHAIN_MAX} 级` : '把所选成员追加为下一级审批人'}
+              onClick={addCandidate}
+            >
+              添加
+            </Button>
+          </div>
+        )}
+
+        <p className="boq-chain-hint boq-chain-hint--quiet">
+          审批人姓名在保存时快照，之后改名不会追更；移除成员不会自动改动已保存的审批链。
+        </p>
+      </div>
+    </Modal>
   )
 }
 
@@ -232,6 +455,11 @@ export function QuoteVersionsPanel({
   packageName,
   canWrite,
   canReview,
+  approvalChain,
+  isOwner,
+  currentUserId,
+  isSuperAdmin,
+  onChainSaved,
   onRestored,
 }: {
   projectRef: string
@@ -239,16 +467,45 @@ export function QuoteVersionsPanel({
   packageName?: string
   canWrite: boolean
   canReview: boolean
+  /** 项目审批链（有序）；空数组 = 负责人单级审批。 */
+  approvalChain: ApprovalChainEntry[]
+  /** 仅负责人可设置审批链。 */
+  isOwner: boolean
+  currentUserId: string
+  isSuperAdmin: boolean
+  onChainSaved: () => void
   onRestored: (payload: BoqPayload) => void
 }) {
   const toast = useToast()
   const confirm = useConfirm()
+
+  // ------------------------------------------------------------ 审批链与逐级审批
+  const [chainOpen, setChainOpen] = useState(false)
+  const chainLength = approvalChain.length
+  const chainActive = chainLength > 0
+
+  /** 待审级序号（0 起）；链被缩短等异常情况下夹取到最后一级，避免越界。 */
+  const stageOf = (version: BoqQuoteVersion) =>
+    Math.min(Math.max(version.approval_stage, 0), Math.max(chainLength - 1, 0))
+
+  /** 定稿/驳回可见性：链非空 → 当前级审批人或超管；链空 → 沿用 canReview。 */
+  const canReviewVersion = (version: BoqQuoteVersion) => {
+    if (!chainActive) return canReview
+    if (isSuperAdmin) return true
+    return Boolean(currentUserId) && approvalChain[stageOf(version)]?.id === currentUserId
+  }
 
   const versionsQuery = useQuery(
     `boq-versions:${projectRef}:${packageId ?? 'single'}`,
     () => listBoqVersions(projectRef, packageId),
   )
   const versions = versionsQuery.data ?? []
+
+  /** 审批链变更后同步项目数据与版本列表（stage 语义随链变化）。 */
+  const handleChainSaved = () => {
+    onChainSaved()
+    versionsQuery.refresh()
+  }
 
   const [name, setName] = useState('')
   const [nameTouched, setNameTouched] = useState(false)
@@ -430,24 +687,36 @@ export function QuoteVersionsPanel({
     setApprovalBusy(false)
   }
 
+  const approvalStage = approval ? stageOf(approval.version) : 0
+  const approvalIsFinalStage = approvalStage + 1 >= chainLength
   const approvalCopy = approval
     ? approval.kind === 'submit'
       ? {
           title: `提交「${approval.version.name}」审批？`,
-          hint: '提交后版本进入待审状态，审批通过前不能再提交。可附上报价口径说明。',
+          hint: chainActive
+            ? `提交后按审批链逐级审批（共 ${chainLength} 级），全部通过才定稿。可附上报价口径说明。`
+            : '提交后版本进入待审状态，审批通过前不能再提交。可附上报价口径说明。',
           field: '提交说明',
           confirm: '提交审批',
         }
       : approval.kind === 'approve'
         ? {
-            title: `定稿「${approval.version.name}」？`,
-            hint: '定稿后该版本成为本包件的现行报价；同一包件的旧定稿版本会自动退回草稿。',
+            title: chainActive && !approvalIsFinalStage
+              ? `通过「${approval.version.name}」的第 ${approvalStage + 1} 级审批？`
+              : `定稿「${approval.version.name}」？`,
+            hint: chainActive
+              ? approvalIsFinalStage
+                ? '这是最后一级审批：通过后该版本定稿为本包件的现行报价；同一包件的旧定稿版本会自动退回草稿。'
+                : `通过后进入第 ${approvalStage + 2}/${chainLength} 级，由「${approvalChain[approvalStage + 1]?.name || '下一级审批人'}」继续审批；全部通过后才定稿。`
+              : '定稿后该版本成为本包件的现行报价；同一包件的旧定稿版本会自动退回草稿。',
             field: '审批意见',
-            confirm: '定稿',
+            confirm: chainActive && !approvalIsFinalStage ? '通过本级' : '定稿',
           }
         : {
             title: `驳回「${approval.version.name}」？`,
-            hint: '驳回后版本退回可修改状态，报价人员可调整后再提交。',
+            hint: chainActive
+              ? '任一级驳回都会终止本次审批，版本退回可修改状态；重新提交后从第 1 级重走审批链。'
+              : '驳回后版本退回可修改状态，报价人员可调整后再提交。',
             field: '驳回原因',
             confirm: '驳回',
           }
@@ -467,21 +736,40 @@ export function QuoteVersionsPanel({
               approvalNote,
             )
       syncAfterChange(updated)
-      toast.success(
-        approval.kind === 'submit'
-          ? '已提交审批'
-          : approval.kind === 'approve'
-            ? '版本已定稿'
-            : '版本已驳回',
-        `「${approval.version.name}」${approval.kind === 'submit' ? '等待负责人审批。' : approval.kind === 'approve' ? '已生效为本包件现行报价。' : '已退回修改。'}`,
-      )
+      if (approval.kind === 'approve' && updated.status === 'submitted') {
+        // 链上中间级通过：版本仍待审，提示进入下一级。
+        const nextStage = Math.min(updated.approval_stage, Math.max(chainLength - 1, 0))
+        toast.success(
+          '本级审批已通过',
+          `「${approval.version.name}」进入第 ${nextStage + 1}/${chainLength} 级，等待「${approvalChain[nextStage]?.name || '下一级审批人'}」审批。`,
+        )
+      } else {
+        toast.success(
+          approval.kind === 'submit'
+            ? '已提交审批'
+            : approval.kind === 'approve'
+              ? '版本已定稿'
+              : '版本已驳回',
+          `「${approval.version.name}」${
+            approval.kind === 'submit'
+              ? chainActive
+                ? `已按审批链进入第 1/${chainLength} 级审批。`
+                : '等待负责人审批。'
+              : approval.kind === 'approve'
+                ? '已生效为本包件现行报价。'
+                : '已退回修改。'
+          }`,
+        )
+      }
       closeApproval()
     } catch (error) {
+      // 403 = 非当前级审批人（detail 含「第 N 级」）；级次可能已被他人推进，刷新列表。
+      if (error instanceof ApiError && error.status === 403) versionsQuery.refresh()
       toast.error(
         approval.kind === 'submit'
           ? '提交审批失败'
           : approval.kind === 'approve'
-            ? '定稿失败'
+            ? '审批失败'
             : '驳回失败',
         messageOf(error),
       )
@@ -589,7 +877,28 @@ export function QuoteVersionsPanel({
           >
             并排对比
           </Button>
+          {isOwner && (
+            <Button
+              size="sm"
+              variant="ghost"
+              icon={<ListOrdered size={13} />}
+              title="设置报价审批链：按顺序逐级审批，最多 5 级；未设置时为负责人单级审批"
+              onClick={() => setChainOpen(true)}
+            >
+              审批链{chainActive ? `（${chainLength} 级）` : ''}
+            </Button>
+          )}
         </div>
+
+        {chainActive && (
+          <p className="boq-chain-summary">
+            <ListOrdered size={12} aria-hidden />
+            <span>
+              审批链：{approvalChain.map((entry) => entry.name || entry.id).join(' → ')}
+              （共 {chainLength} 级，逐级通过后才定稿）
+            </span>
+          </p>
+        )}
 
         {versionsQuery.loading ? (
           <p className="price-policy-message">正在读取报价版本…</p>
@@ -611,6 +920,9 @@ export function QuoteVersionsPanel({
               const meta = statusMeta(version.status)
               const submitted = version.status === 'submitted'
               const editable = version.status === 'draft' || version.status === 'rejected'
+              const reviewable = canReviewVersion(version)
+              const stage = stageOf(version)
+              const stageApprover = approvalChain[stage]?.name || ''
               return (
                 <li key={version.id} className="boq-version-item">
                   <div className="boq-version-main">
@@ -619,6 +931,15 @@ export function QuoteVersionsPanel({
                       <Badge tone={meta.tone} dot={submitted}>
                         {meta.label}
                       </Badge>
+                      {submitted && chainActive && (
+                        <Badge
+                          tone="info"
+                          subtle
+                          title={`等待「${stageApprover || '当前级审批人'}」审批（第 ${stage + 1}/${chainLength} 级）`}
+                        >
+                          第 {stage + 1}/{chainLength} 级待审
+                        </Badge>
+                      )}
                     </div>
                     <span className="boq-version-meta">
                       <span>{formatDate(version.created_at)}</span>
@@ -631,6 +952,7 @@ export function QuoteVersionsPanel({
                       <VersionAudit version={version} />
                     </span>
                     {version.note && <p className="boq-version-note">{version.note}</p>}
+                    <ApprovalTimeline approvals={version.approvals} />
                   </div>
                   <div
                     className={className(
@@ -655,25 +977,33 @@ export function QuoteVersionsPanel({
                         disabled={busy}
                         title={
                           version.status === 'rejected'
-                            ? '修改后重新提交审批'
-                            : '提交给项目负责人审批'
+                            ? chainActive
+                              ? '修改后重新提交，从第 1 级重走审批链'
+                              : '修改后重新提交审批'
+                            : chainActive
+                              ? `提交后按审批链逐级审批（共 ${chainLength} 级）`
+                              : '提交给项目负责人审批'
                         }
                         onClick={() => openApproval('submit', version)}
                       >
                         {version.status === 'rejected' ? '重新提交' : '提交审批'}
                       </Button>
                     )}
-                    {submitted && canReview && (
+                    {submitted && reviewable && (
                       <>
                         <Button
                           size="sm"
                           variant="primary"
                           icon={<Check size={12} />}
                           disabled={busy}
-                          title="定稿为本包件现行报价；同包件旧定稿版本自动退回草稿"
+                          title={
+                            chainActive && stage + 1 < chainLength
+                              ? `通过第 ${stage + 1}/${chainLength} 级审批，交由下一级继续审批`
+                              : '定稿为本包件现行报价；同包件旧定稿版本自动退回草稿'
+                          }
                           onClick={() => openApproval('approve', version)}
                         >
-                          定稿
+                          {chainActive && stage + 1 < chainLength ? '通过本级' : '定稿'}
                         </Button>
                         <Button
                           size="sm"
@@ -687,10 +1017,17 @@ export function QuoteVersionsPanel({
                         </Button>
                       </>
                     )}
-                    {submitted && !canReview && (
-                      <span className="boq-version-pending" title="等待项目负责人或超级管理员审批">
+                    {submitted && !reviewable && (
+                      <span
+                        className="boq-version-pending"
+                        title={
+                          chainActive
+                            ? `等待「${stageApprover || '当前级审批人'}」进行第 ${stage + 1}/${chainLength} 级审批`
+                            : '等待项目负责人或超级管理员审批'
+                        }
+                      >
                         <ShieldCheck size={12} aria-hidden />
-                        待审批
+                        {chainActive ? `等待「${stageApprover || '审批人'}」` : '待审批'}
                       </span>
                     )}
                     {version.status === 'approved' && canWrite && (
@@ -739,7 +1076,9 @@ export function QuoteVersionsPanel({
         )}
 
         <p className="price-policy-note">
-          版本只记录当前包件的单价与汇总；恢复会覆盖当前单价，但不改动台账与清单对齐结果。草稿与已驳回的版本可提交审批，负责人定稿后等同现行报价。最多保留 20 个版本。
+          版本只记录当前包件的单价与汇总；恢复会覆盖当前单价，但不改动台账与清单对齐结果。草稿与已驳回的版本可提交审批，
+          {chainActive ? '按审批链逐级通过后定稿，等同现行报价' : '负责人定稿后等同现行报价'}
+          。最多保留 20 个版本。
         </p>
       </div>
 
@@ -766,6 +1105,9 @@ export function QuoteVersionsPanel({
         >
           <div className="boq-version-approval">
             <p className="boq-version-approval-hint">{approvalCopy.hint}</p>
+            {approval.kind !== 'submit' && (
+              <ApprovalTimeline approvals={approval.version.approvals} />
+            )}
             <label className="price-policy-field">
               <span>{approvalCopy.field}</span>
               <textarea
@@ -791,6 +1133,15 @@ export function QuoteVersionsPanel({
             </label>
           </div>
         </Modal>
+      )}
+
+      {chainOpen && isOwner && (
+        <ApprovalChainModal
+          projectRef={projectRef}
+          chain={approvalChain}
+          onClose={() => setChainOpen(false)}
+          onSaved={handleChainSaved}
+        />
       )}
 
       {compare && versionA && (

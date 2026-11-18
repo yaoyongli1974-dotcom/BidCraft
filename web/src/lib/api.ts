@@ -2,6 +2,7 @@ import type {
   AdminBillingData,
   AdminBillingSettings,
   AdminRulePackage,
+  ApprovalChainEntry,
   AuditEntry,
   AuditPage,
   BatchExportFailure,
@@ -59,6 +60,7 @@ import type {
   PluginTestResult,
   PricePolicy,
   PriceCurrency,
+  QuoteApprovalRecord,
   QuoteVersionStatus,
   Project,
   ProjectDetail,
@@ -720,17 +722,33 @@ export const createProject = (name: string, pkg: string, bidSection = '') =>
   )
 
 /**
- * Rename a project or change its 标段/包件. Send only the fields that changed:
- * the server rejects a payload where every key is absent.
+ * Rename a project, change its 标段/包件 or set the quote approval chain.
+ * Send only the fields that changed: the server rejects a payload where every
+ * key is absent. `approval_chain` is an ordered user-id list (≤5, owner only);
+ * an empty array clears the chain back to single-stage owner review.
  */
 export const updateProject = (
   ref: string,
-  patch: { name?: string; bid_section?: string },
+  patch: { name?: string; bid_section?: string; approval_chain?: string[] },
 ) =>
   request<Project>(`/projects/${encodeURIComponent(ref)}`, {
     method: 'PATCH',
     body: JSON.stringify(patch),
   })
+
+/** 审批链回显归一化：只保留带 id 的条目，姓名缺失时留空串。 */
+export function normalizeApprovalChain(value: unknown): ApprovalChainEntry[] {
+  if (!Array.isArray(value)) return []
+  const entries: ApprovalChainEntry[] = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue
+    const record = item as Record<string, unknown>
+    const id = asText(record.id).trim()
+    if (!id) continue
+    entries.push({ id, name: asText(record.name) })
+  }
+  return entries
+}
 
 export async function getProject(ref: string): Promise<ProjectDetail> {
   const data = await request<ProjectDetail>(`/projects/${encodeURIComponent(ref)}`)
@@ -738,6 +756,7 @@ export async function getProject(ref: string): Promise<ProjectDetail> {
     ...data,
     missing_required: Array.isArray(data.missing_required) ? data.missing_required : [],
     sources: Array.isArray(data.sources) ? data.sources : undefined,
+    approval_chain: normalizeApprovalChain(data.approval_chain),
   }
 }
 
@@ -1638,6 +1657,27 @@ function isoOrNull(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value : null
 }
 
+/** 逐级审批记录归一化：只保留决定为 approve/reject 的条目，旧后端缺省为空列表。 */
+function normalizeQuoteApprovals(value: unknown): QuoteApprovalRecord[] {
+  if (!Array.isArray(value)) return []
+  const records: QuoteApprovalRecord[] = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue
+    const record = item as Record<string, unknown>
+    const decision = asText(record.decision).trim()
+    if (decision !== 'approve' && decision !== 'reject') continue
+    records.push({
+      stage: Math.max(0, Math.round(asNumber(record.stage, 0))),
+      user_id: asText(record.user_id),
+      name: asText(record.name).slice(0, 80),
+      decision,
+      note: asText(record.note).slice(0, 200),
+      at: isoOrNull(record.at),
+    })
+  }
+  return records
+}
+
 export function normalizeBoqQuoteVersion(value: unknown): BoqQuoteVersion | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const source = value as Record<string, unknown>
@@ -1667,6 +1707,8 @@ export function normalizeBoqQuoteVersion(value: unknown): BoqQuoteVersion | null
     review_note: asText(source.review_note).slice(0, 200),
     reviewed_by: asText(source.reviewed_by).slice(0, 80),
     reviewed_at: isoOrNull(source.reviewed_at),
+    approvals: normalizeQuoteApprovals(source.approvals),
+    approval_stage: Math.max(0, Math.round(asNumber(source.approval_stage, 0))),
     ...(prices ? { prices } : {}),
   }
 }
@@ -1700,7 +1742,10 @@ export async function submitBoqVersion(
   return postQuoteVersionAction(ref, versionId, 'submit', trimmed ? { note: trimmed } : undefined)
 }
 
-/** 审批版本：定稿（approve）或驳回（reject），需要项目负责人或超级管理员。 */
+/**
+ * 审批版本：定稿（approve）或驳回（reject）。空审批链时由项目负责人或超级管理员
+ * 审批；链非空时仅当前级审批人或超级管理员可审，否则后端返回 403（detail 含「第 N 级」）。
+ */
 export async function reviewBoqVersion(
   ref: string,
   versionId: string,
@@ -1770,6 +1815,8 @@ export async function createBoqVersion(
       review_note: '',
       reviewed_by: '',
       reviewed_at: null,
+      approvals: [],
+      approval_stage: 0,
     }
   )
 }

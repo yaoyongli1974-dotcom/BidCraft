@@ -117,6 +117,8 @@ def test_version_save_list_detail_restore_delete(db, tmp_path):
         "review_note",
         "reviewed_by",
         "reviewed_at",
+        "approvals",
+        "approval_stage",
     }
     assert first["name"] == "初稿"
     assert first["note"] == "首轮报价"

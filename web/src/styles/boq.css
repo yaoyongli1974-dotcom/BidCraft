@@ -1413,6 +1413,155 @@
   white-space: nowrap;
 }
 
+/* ------------------------------------------------ 审批链与逐级审批时间线 */
+
+.boq-chain-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 10px;
+  color: var(--ink-2);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.boq-chain-summary svg {
+  flex: 0 0 auto;
+  color: var(--faint);
+}
+
+.boq-approval-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.boq-approval-timeline li {
+  display: flex;
+  align-items: baseline;
+  gap: 3px 8px;
+  flex-wrap: wrap;
+  color: var(--faint);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.boq-approval-step {
+  font-family: var(--font-mono);
+}
+
+.boq-approval-name {
+  color: var(--ink-2);
+  font-weight: 600;
+}
+
+.boq-approval-timeline li.is-approve .boq-approval-decision {
+  color: var(--jade);
+  font-weight: 600;
+}
+
+.boq-approval-timeline li.is-reject .boq-approval-decision {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.boq-approval-note {
+  max-width: 420px;
+  overflow-wrap: anywhere;
+}
+
+.boq-chain-modal {
+  display: grid;
+  gap: 12px;
+}
+
+.boq-chain-hint {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.boq-chain-hint--quiet {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.boq-chain-empty {
+  margin: 0;
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.boq-chain-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.boq-chain-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.boq-chain-stage {
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.boq-chain-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.boq-chain-role {
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.boq-chain-warn {
+  flex: 0 0 auto;
+  color: var(--warn);
+  font-size: 10px;
+}
+
+.boq-chain-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+}
+
+.boq-chain-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.boq-chain-add select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 /* ------------------------------------------------ 审批弹窗与并排审阅 */
 
 .boq-version-approval {

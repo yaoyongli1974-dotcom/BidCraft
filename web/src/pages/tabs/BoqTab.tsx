@@ -37,6 +37,7 @@ import { Badge } from '../../components/Badge'
 import { Button } from '../../components/Button'
 import { ErrorState, Skeleton } from '../../components/Feedback'
 import { TabHeading } from '../../components/Workbench'
+import { useAuth } from '../../context/useAuth'
 import { useConfirm } from '../../context/useConfirm'
 import { useToast } from '../../context/useToast'
 import {
@@ -119,7 +120,8 @@ function diffNotes(row: BoqRow): string[] {
 }
 
 export function BoqTab() {
-  const { ref, canWrite, project } = useWorkspace()
+  const { ref, canWrite, project, reloadProject } = useWorkspace()
+  const { user, isSuperAdmin } = useAuth()
   const canReview = !project.my_role || project.my_role === 'owner' || project.my_role === 'admin'
   const toast = useToast()
   const confirm = useConfirm()
@@ -662,6 +664,11 @@ export function BoqTab() {
                 packageName={currentPackage?.name}
                 canWrite={canWrite}
                 canReview={canReview}
+                approvalChain={project.approval_chain ?? []}
+                isOwner={project.my_role === 'owner'}
+                currentUserId={user?.id ?? ''}
+                isSuperAdmin={isSuperAdmin}
+                onChainSaved={() => void reloadProject().catch(() => undefined)}
                 onRestored={handleVersionRestored}
               />
 

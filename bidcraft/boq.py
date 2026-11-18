@@ -520,6 +520,14 @@ class BoqConflictError(ValueError):
     """A user-actionable conflict that should surface as HTTP 409."""
 
 
+class BoqForbiddenError(Exception):
+    """Caller is not the (current-stage) reviewer; surfaces as HTTP 403.
+
+    Deliberately not a ``ValueError`` so the generic 400 handlers never
+    swallow it.
+    """
+
+
 def get_snapshot(
     db: Session, project_id: str, package_id: str | None = None
 ) -> BoqSnapshot | None:
@@ -695,9 +703,21 @@ QUOTE_VERSION_STATUSES = ("draft", "submitted", "approved", "rejected")
 QUOTE_REVIEW_DECISIONS = ("approve", "reject")
 
 
-def version_payload(version: BoqQuoteVersion, *, include_prices: bool = False) -> dict[str, Any]:
-    """Serialize one quote version; the detail payload additionally carries prices."""
+def version_payload(
+    version: BoqQuoteVersion,
+    *,
+    include_prices: bool = False,
+    project: Project | None = None,
+) -> dict[str, Any]:
+    """Serialize one quote version; the detail payload additionally carries prices.
+
+    ``project`` (when given) supplies the approval chain so ``approval_stage``
+    can report the pending level of a submitted version.
+    """
     prices = dict(version.prices or {})
+    approvals = list(version.approvals or [])
+    chain = list(((project.meta or {}).get("approval_chain") or []) if project else [])
+    approved_count = len([r for r in approvals if r.get("decision") == "approve"])
     payload: dict[str, Any] = {
         "id": version.id,
         "name": version.name,
@@ -715,6 +735,12 @@ def version_payload(version: BoqQuoteVersion, *, include_prices: bool = False) -
         "review_note": version.review_note or "",
         "reviewed_by": version.reviewed_by or "",
         "reviewed_at": version.reviewed_at.isoformat() if version.reviewed_at else None,
+        "approvals": approvals,
+        "approval_stage": (
+            approved_count
+            if (version.status or "draft") == "submitted" and chain
+            else 0
+        ),
     }
     if include_prices:
         payload["prices"] = prices
@@ -752,7 +778,7 @@ def list_versions(
             BoqQuoteVersion.created_at.desc(), BoqQuoteVersion.id.desc()
         )
     )
-    return [version_payload(row) for row in rows]
+    return [version_payload(row, project=project) for row in rows]
 
 
 def get_version(
@@ -795,7 +821,7 @@ def save_version(
     )
     db.add(version)
     db.flush()
-    return version_payload(version)
+    return version_payload(version, project=project)
 
 
 def restore_version(
@@ -847,12 +873,14 @@ def submit_version(
     version.submit_note = _clean_note(note)
     version.submitted_by = _clean_actor(actor)
     version.submitted_at = utcnow()
-    # A resubmission starts a new review round; previous review feedback is void.
+    # A resubmission starts a new review round; previous review feedback is void
+    # and the multi-stage approval chain restarts from level 1 (R18).
     version.review_note = ""
     version.reviewed_by = ""
     version.reviewed_at = None
+    version.approvals = []
     db.flush()
-    return version_payload(version)
+    return version_payload(version, project=project)
 
 
 def review_version(
@@ -863,15 +891,54 @@ def review_version(
     actor: str = "",
     decision: str,
     note: str = "",
+    actor_id: str = "",
+    role: str = "",
+    is_super: bool = False,
 ) -> dict[str, Any]:
-    """Approve or reject a submitted version; approving withdraws the old one."""
+    """Approve or reject a submitted version; final approval withdraws the old one.
+
+    R18 多级流转：``project.meta["approval_chain"]`` 非空时按链逐级审批，
+    当前级审批人（或全局超管）才可操作；空链沿用旧的单级负责人审批。
+    """
     if decision not in QUOTE_REVIEW_DECISIONS:
         raise ValueError("decision 只能是 approve 或 reject")
     version = get_version(db, project.id, version_id)
     if version is None:
         raise LookupError("版本不存在")
+    chain = list((project.meta or {}).get("approval_chain") or [])
+    approvals = list(version.approvals or [])
+    stage = len([r for r in approvals if r.get("decision") == "approve"])
+    # Authorization precedes the state check so an unauthorized caller gets 403
+    # even on a draft (matching the old route-level owner gate), while an
+    # authorized reviewer still sees the 409 state-machine conflict.
+    if not chain:
+        if role != "owner" and not is_super:
+            raise BoqForbiddenError("仅项目负责人可审批报价")
+    else:
+        expected_id = str(chain[stage].get("id") or "") if stage < len(chain) else ""
+        if not is_super and (not expected_id or actor_id != expected_id):
+            raise BoqForbiddenError(f"当前需第 {stage + 1} 级审批人审批，您不是该级审批人")
     if (version.status or "draft") != "submitted":
         raise BoqConflictError("仅待审版本可审批")
+    now = utcnow()
+    final_approve = decision == "approve" and (not chain or stage + 1 >= len(chain))
+    if chain:
+        approvals.append(
+            {
+                "stage": stage,
+                "user_id": actor_id,
+                "name": _clean_actor(actor),
+                "decision": decision,
+                "note": _clean_note(note),
+                "at": now.isoformat(),
+            }
+        )
+        version.approvals = approvals
+    if decision == "approve" and not final_approve:
+        # Intermediate level: stays submitted, review_* untouched until the
+        # last level signs off.
+        db.flush()
+        return version_payload(version, project=project)
     if decision == "approve":
         # One approved version per package: retire the previous winner to draft
         # without touching its review trail (audit keeps the history).
@@ -888,9 +955,9 @@ def review_version(
         version.status = "rejected"
     version.review_note = _clean_note(note)
     version.reviewed_by = _clean_actor(actor)
-    version.reviewed_at = utcnow()
+    version.reviewed_at = now
     db.flush()
-    return version_payload(version)
+    return version_payload(version, project=project)
 
 
 def unapprove_version(
@@ -904,7 +971,7 @@ def unapprove_version(
         raise BoqConflictError("仅已定稿版本可撤销")
     version.status = "draft"
     db.flush()
-    return version_payload(version)
+    return version_payload(version, project=project)
 
 
 def diff_version(

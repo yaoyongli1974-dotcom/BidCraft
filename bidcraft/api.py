@@ -113,6 +113,8 @@ class ProjectCreate(BaseModel):
 class ProjectUpdate(BaseModel):
     name: str | None = None
     bid_section: str | None = None
+    # R18 审批链：有序用户 id 列表（≤5，仅 owner 可改）；空列表=单级负责人审批。
+    approval_chain: list[str] | None = None
 
 
 class BatchIdsRequest(BaseModel):
@@ -780,6 +782,7 @@ def _project_payload(
         "number": (project.meta or {}).get("number", ""),
         "tender_number": (project.meta or {}).get("tender_number", ""),
         "bid_section": (project.meta or {}).get("bid_section", "") or "",
+        "approval_chain": list((project.meta or {}).get("approval_chain") or []),
         "created_at": _iso(project.created_at),
         "updated_at": _iso(project.updated_at),
         "stats": stats or {},
@@ -3300,7 +3303,12 @@ def create_app():
 
     @app.patch("/projects/{ref}")
     def update_project(ref: str, payload: ProjectUpdate) -> dict[str, Any]:
-        """Rename a project or set its bid section (标段/包件)."""
+        """Rename a project, set its bid section (标段/包件) or approval chain.
+
+        ``approval_chain`` 为有序用户 id 列表（≤5，去重保序，仅 owner/admin）；
+        写入 meta 时解析为 [{id, name}] 快照（name=display_name||username），
+        此后用户改名不追更；空列表清空审批链，回到单级负责人审批。
+        """
 
         updates = payload.model_dump(exclude_unset=True)
         if not updates:
@@ -3323,6 +3331,33 @@ def create_app():
                 meta["bid_section"] = section
                 project.meta = meta
                 keys.append("bid_section")
+            if "approval_chain" in updates:
+                _require_owner(my_role)
+                seen: set[str] = set()
+                ordered: list[str] = []
+                for raw_id in updates["approval_chain"] or []:
+                    user_id = str(raw_id or "").strip()
+                    if user_id and user_id not in seen:
+                        seen.add(user_id)
+                        ordered.append(user_id)
+                if len(ordered) > 5:
+                    raise HTTPException(status_code=400, detail="审批链最多 5 级")
+                chain: list[dict[str, str]] = []
+                for user_id in ordered:
+                    approver = db.get(User, user_id)
+                    if approver is None:
+                        raise HTTPException(
+                            status_code=400, detail=f"审批人不存在: {user_id}"
+                        )
+                    chain.append(
+                        {
+                            "id": user_id,
+                            "name": approver.display_name or approver.username,
+                        }
+                    )
+                meta["approval_chain"] = chain
+                project.meta = meta
+                keys.append("approval_chain")
             audit(db, project.id, "project.update", {"keys": keys})
             return _project_payload(project, _project_stats(db, project.id), my_role)
 
@@ -4618,7 +4653,7 @@ def create_app():
             version = boq.get_version(db, project.id, version_id)
             if version is None:
                 raise LookupError("版本不存在")
-            return boq.version_payload(version, include_prices=True)
+            return boq.version_payload(version, include_prices=True, project=project)
 
     @app.get("/projects/{ref}/boq/versions/{version_id}/diff")
     def boq_version_diff(
@@ -4688,10 +4723,11 @@ def create_app():
     ) -> dict[str, Any]:
         with session_scope() as db:
             project, _role = _project(db, ref)
-            _require_owner(_role)
             user = current_user() or {}
             actor = user.get("display_name") or user.get("username") or ""
             try:
+                # R18：授权下沉到 boq.review_version——空链仅 owner/超管，
+                # 非空链按当前级审批人（或超管）逐级放行。
                 result = boq.review_version(
                     db,
                     project,
@@ -4699,7 +4735,12 @@ def create_app():
                     actor=actor,
                     decision=payload.decision,
                     note=payload.note,
+                    actor_id=str(user.get("id") or ""),
+                    role=_role,
+                    is_super=user.get("role") == auth.ROLE_SUPER_ADMIN,
                 )
+            except boq.BoqForbiddenError as exc:
+                raise HTTPException(status_code=403, detail=str(exc)) from exc
             except boq.BoqConflictError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             except ValueError as exc:
@@ -4707,12 +4748,14 @@ def create_app():
             audit(
                 db,
                 project.id,
-                "quote.approve" if result["status"] == "approved" else "quote.reject",
+                "quote.approve" if payload.decision == "approve" else "quote.reject",
                 {
                     "version_id": result["id"],
                     "name": result["name"],
                     "package_id": result["package_id"],
-                    "note": result["review_note"],
+                    "note": payload.note,
+                    "status": result["status"],
+                    "stage": len(result["approvals"]),
                 },
             )
             return result

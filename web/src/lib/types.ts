@@ -214,6 +214,23 @@ export interface ProjectStats {
 /** The caller's role inside one project. `admin` is a global super administrator. */
 export type ProjectRole = 'owner' | 'editor' | 'viewer' | 'admin'
 
+/** 报价审批链的一级：用户 id 与保存时的姓名快照（改名不追更）。 */
+export interface ApprovalChainEntry {
+  id: string
+  name: string
+}
+
+/** 报价版本逐级审批的一条记录。 */
+export interface QuoteApprovalRecord {
+  /** 0 起的审批级序号。 */
+  stage: number
+  user_id: string
+  name: string
+  decision: 'approve' | 'reject'
+  note: string
+  at: string | null
+}
+
 export interface Project {
   id: string
   name: string
@@ -229,6 +246,8 @@ export interface Project {
   stats?: Partial<ProjectStats>
   /** Present on `GET /projects` and `GET /projects/{ref}`; omitted by older servers. */
   my_role?: ProjectRole
+  /** 有序报价审批链（≤5 级）；空数组或缺省 = 负责人单级审批。旧后端可能省略。 */
+  approval_chain?: ApprovalChainEntry[]
 }
 
 export interface LedgerSummary {
@@ -853,6 +872,10 @@ export interface BoqQuoteVersion {
   review_note: string
   reviewed_by: string
   reviewed_at: string | null
+  /** 逐级审批记录（审批链非空时产生）；旧后端缺失时按空列表处理。 */
+  approvals: QuoteApprovalRecord[]
+  /** 当前待审级序号（0 起，= 已通过级数）；非待审或空链时为 0。 */
+  approval_stage: number
   /** 仅详情接口返回：按清单行 key 保存的单价。 */
   prices?: Record<string, number> | null
 }
