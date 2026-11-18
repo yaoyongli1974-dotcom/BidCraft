@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -257,6 +259,118 @@ def calibrate_dir(path: str | Path, recursive: bool = False) -> dict[str, Any]:
         "recursive": bool(recursive),
         "per_file": per_file,
         "aggregate": aggregate,
+    }
+
+
+BASELINE_SCHEMA = 1
+
+
+def save_baseline(report: dict[str, Any], path: str | Path) -> Path:
+    """保存回归基线：只存 aggregate（不含 root/per_file），保证跨机器可比。"""
+    target = Path(path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema": BASELINE_SCHEMA,
+        "saved_at": datetime.now(UTC).isoformat(),
+        "aggregate": report["aggregate"],
+    }
+    target.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return target
+
+
+def load_baseline(path: str | Path) -> dict[str, Any]:
+    """读取基线 JSON；文件缺失抛 FileNotFoundError，schema≠1 抛 ValueError。"""
+    data = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+    schema = data.get("schema")
+    if schema != BASELINE_SCHEMA:
+        raise ValueError(f"不支持的基线 schema：{schema!r}（期望 {BASELINE_SCHEMA}）")
+    return data
+
+
+def compare_baseline(
+    report: dict[str, Any], baseline_path: str | Path, *, tolerance: float = 0.02
+) -> dict[str, Any]:
+    """当前报告 vs 基线，只比 aggregate（忽略 root/recursive/saved_at/per_file）。
+
+    回归判定：字段不再命中/命中数下降；必填命中率下降超过 tolerance（严格 >）；
+    failed 增加 / ok 减少；avg_materials 相对下降超过 10%。
+    新增字段 key 与指标上升列入 improvements。ok = 无回归。
+    """
+    baseline = load_baseline(baseline_path)
+    base = baseline["aggregate"]
+    current = report["aggregate"]
+    regressions: list[dict[str, Any]] = []
+    improvements: list[dict[str, Any]] = []
+
+    def regression(metric: str, message: str, before: Any, after: Any) -> None:
+        regressions.append(
+            {"metric": metric, "message": message, "baseline": before, "current": after}
+        )
+
+    def improvement(metric: str, message: str, before: Any, after: Any) -> None:
+        improvements.append(
+            {"metric": metric, "message": message, "baseline": before, "current": after}
+        )
+
+    base_hits = base.get("field_hits", {})
+    cur_hits = current.get("field_hits", {})
+    for key, count in base_hits.items():
+        if key not in cur_hits:
+            regression(f"field_hits.{key}", f"字段不再命中：{key}", count, 0)
+        elif cur_hits[key] < count:
+            now = cur_hits[key]
+            regression(
+                f"field_hits.{key}", f"字段命中下降：{key} {count}→{now}", count, now
+            )
+    for key, count in cur_hits.items():
+        if key not in base_hits:
+            improvement(f"field_hits.{key}", f"新增字段命中：{key}", 0, count)
+
+    base_rate = float(base.get("required_hit_rate", 0.0))
+    cur_rate = float(current.get("required_hit_rate", 0.0))
+    # 先舍入再比较，避免浮点误差把恰好等于 tolerance 的下降误判为回归。
+    if round(base_rate - cur_rate, 6) > tolerance:
+        regression(
+            "required_hit_rate",
+            f"必填命中率下降：{base_rate}→{cur_rate}",
+            base_rate,
+            cur_rate,
+        )
+    elif cur_rate > base_rate:
+        improvement(
+            "required_hit_rate",
+            f"必填命中率上升：{base_rate}→{cur_rate}",
+            base_rate,
+            cur_rate,
+        )
+
+    base_failed = int(base.get("failed", 0))
+    cur_failed = int(current.get("failed", 0))
+    if cur_failed > base_failed:
+        regression("failed", f"失败文件增加：{base_failed}→{cur_failed}", base_failed, cur_failed)
+    base_ok = int(base.get("ok", 0))
+    cur_ok = int(current.get("ok", 0))
+    if cur_ok < base_ok:
+        regression("ok", f"成功文件减少：{base_ok}→{cur_ok}", base_ok, cur_ok)
+
+    base_avg = float(base.get("avg_materials", 0.0))
+    cur_avg = float(current.get("avg_materials", 0.0))
+    if base_avg > 0 and round((base_avg - cur_avg) / base_avg, 6) > 0.10:
+        regression(
+            "avg_materials", f"平均材料下降：{base_avg}→{cur_avg}", base_avg, cur_avg
+        )
+    if cur_avg > base_avg:
+        improvement(
+            "avg_materials", f"平均材料上升：{base_avg}→{cur_avg}", base_avg, cur_avg
+        )
+
+    return {
+        "ok": not regressions,
+        "regressions": regressions,
+        "improvements": improvements,
+        "baseline_saved_at": baseline.get("saved_at"),
     }
 
 

@@ -154,9 +154,17 @@ def calibrate(
     directory: Path = typer.Argument(..., help="招标文件目录"),
     output: Path | None = typer.Option(None, "--output", "-o", help="报告 JSON 输出路径"),
     recursive: bool = typer.Option(False, "--recursive", "-r", help="递归扫描子目录"),
+    save_baseline: Path | None = typer.Option(
+        None, "--save-baseline", help="保存回归基线 JSON（仅 aggregate，跨机器可比）"
+    ),
+    compare_baseline: Path | None = typer.Option(
+        None, "--compare-baseline", help="与回归基线比对（有回归 exit 1，基线缺失 exit 2）"
+    ),
 ) -> None:
     """对真实招标文件目录做解析/字段回归校准（只读，不写数据库）。"""
     from .calibrate import calibrate_dir, render_report
+    from .calibrate import compare_baseline as compare_baseline_report
+    from .calibrate import save_baseline as save_baseline_file
 
     if not directory.is_dir():
         console.print(f"[red]目录不存在：{directory}[/red]")
@@ -191,6 +199,55 @@ def calibrate(
             json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
         console.print(f"[green]报告已写入[/green] {output}")
+
+    exit_code = 0
+    if compare_baseline is not None:
+        try:
+            comparison = compare_baseline_report(report, compare_baseline)
+        except FileNotFoundError:
+            console.print(f"[red]基线文件不存在：{compare_baseline}[/red]")
+            raise typer.Exit(2) from None
+        except ValueError as exc:
+            console.print(f"[red]基线文件无效：{exc}[/red]")
+            raise typer.Exit(2) from None
+        if comparison["regressions"] or comparison["improvements"]:
+            table = Table(title="基线比对")
+            table.add_column("结果")
+            table.add_column("指标", overflow="fold")
+            table.add_column("说明", overflow="fold")
+            table.add_column("基线", justify="right")
+            table.add_column("当前", justify="right")
+            for item in comparison["regressions"]:
+                table.add_row(
+                    "[red]回归[/red]",
+                    item["metric"],
+                    item["message"],
+                    str(item["baseline"]),
+                    str(item["current"]),
+                )
+            for item in comparison["improvements"]:
+                table.add_row(
+                    "[green]改进[/green]",
+                    item["metric"],
+                    item["message"],
+                    str(item["baseline"]),
+                    str(item["current"]),
+                )
+            console.print(table)
+        if comparison["ok"]:
+            console.print("[green]基线比对通过：无回归[/green]")
+        else:
+            console.print(
+                f"[red]基线比对发现 {len(comparison['regressions'])} 项回归[/red]"
+            )
+            exit_code = 1
+
+    if save_baseline is not None:
+        saved = save_baseline_file(report, save_baseline)
+        console.print(f"[green]基线已保存[/green] {saved}")
+
+    if exit_code:
+        raise typer.Exit(exit_code)
 
 
 @app.command("packages")

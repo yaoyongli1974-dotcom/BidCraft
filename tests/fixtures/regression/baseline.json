@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "saved_at": "2026-11-18T02:28:09.061027+00:00",
+  "aggregate": {
+    "files": 6,
+    "ok": 6,
+    "failed": 0,
+    "field_hits": {
+      "project.acceptance": 6,
+      "project.agency": 6,
+      "project.bid_deadline": 6,
+      "project.bid_validity": 6,
+      "project.budget": 6,
+      "project.buyer": 6,
+      "project.content": 6,
+      "project.deposit": 6,
+      "project.duration": 6,
+      "project.location": 6,
+      "project.name": 6,
+      "project.number": 6,
+      "project.open_time": 6,
+      "project.payment": 6,
+      "project.warranty": 6,
+      "qualification.requirements": 6,
+      "scoring.method": 6,
+      "tender.number": 6,
+      "cabling.cable_grade": 1,
+      "cabling.fiber_grade": 1,
+      "cabling.point_count": 1,
+      "cabling.subsystems": 1,
+      "cabling.test_standard": 1,
+      "civil.building_area": 1,
+      "civil.concrete_grade": 1,
+      "civil.floors": 1,
+      "civil.foundation_type": 1,
+      "civil.quality_standard": 1,
+      "civil.structure_type": 1,
+      "civil.warranty_years": 1,
+      "decoration.area": 1,
+      "decoration.environment_standard": 1,
+      "decoration.fire_rating": 1,
+      "decoration.main_materials": 1,
+      "decoration.scope": 1,
+      "decoration.standard": 1,
+      "decoration.warranty_years": 1,
+      "fire.acceptance_standard": 1,
+      "fire.building_area": 1,
+      "fire.building_height": 1,
+      "fire.detector_count": 1,
+      "fire.fire_rating": 1,
+      "fire.sprinkler_count": 1,
+      "fire.system_scope": 1,
+      "fire.water_demand": 1,
+      "hvac.cooling_load": 1,
+      "hvac.duct_material": 1,
+      "hvac.equipment_count": 1,
+      "hvac.heating_load": 1,
+      "hvac.refrigerant": 1,
+      "hvac.system_scope": 1,
+      "hvac.test_standard": 1,
+      "hvac.warranty_years": 1,
+      "install.equipment_count": 1,
+      "install.mep_systems": 1,
+      "install.pipe_material": 1,
+      "install.scope": 1,
+      "install.test_standard": 1,
+      "install.warranty_years": 1
+    },
+    "by_type": {
+      "civil": {
+        "files": 1,
+        "ok": 1,
+        "required_hit_rate": 1.0
+      },
+      "decoration": {
+        "files": 1,
+        "ok": 1,
+        "required_hit_rate": 1.0
+      },
+      "fire-protection": {
+        "files": 1,
+        "ok": 1,
+        "required_hit_rate": 1.0
+      },
+      "hvac": {
+        "files": 1,
+        "ok": 1,
+        "required_hit_rate": 1.0
+      },
+      "installation": {
+        "files": 1,
+        "ok": 1,
+        "required_hit_rate": 1.0
+      },
+      "weakcurrent-cabling": {
+        "files": 1,
+        "ok": 1,
+        "required_hit_rate": 1.0
+      }
+    },
+    "required_hit_rate": 1.0,
+    "avg_materials": 0.0,
+    "ocr_files": 0
+  }
+}

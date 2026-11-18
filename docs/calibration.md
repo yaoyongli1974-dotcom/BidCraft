@@ -108,8 +108,33 @@ CLI 会额外打印汇总表、每文件一行和字段命中 Top 10；`--output
 真实招标文件涉及商业信息，需由用户自行放入独立目录运行校准，不要提交到仓库。
 
 `tests/test_calibrate.py` 断言六份 fixtures 全部 `ok`、`by_type` 覆盖 6 个行业包、
-每个包的 `required_hit_rate >= 0.8`；CI 的 python job 还以
+每个包的 `required_hit_rate >= 0.8`；`tests/test_calibrate_baseline.py` 另以提交的
+`baseline.json` 做门禁（夹具报告 vs 基线 `ok=True`）；CI 的 python job 还以
 `uv run --frozen bidcraft calibrate tests/fixtures/regression` 作为 exit 0 门禁。
+
+## 基线保存与比对
+
+把一次校准的目录级聚合存为基线，之后随时比对回归：
+
+```bash
+# 保存基线（只存 schema/saved_at/aggregate，不含逐文件明细）
+bidcraft calibrate <真实件目录> --save-baseline baselines/real-2026-11.json
+
+# 比对（可与保存同时使用：先比对定退出码，再覆盖保存）
+bidcraft calibrate <真实件目录> --compare-baseline baselines/real-2026-11.json
+```
+
+判定规则（相对基线）：
+
+- 字段命中 key 消失或 count 下降 → 回归；
+- `required_hit_rate` 降幅**严格大于**容差（默认 0.02，`compare_baseline(..., tolerance=)` 可调）→ 回归；
+- 解析失败文件增多或成功文件减少 → 回归；
+- `avg_materials` 相对降幅 >10% → 回归；
+- 新增命中 key、命中率上升、材料行均值上升 → 记为改进（不阻断）。
+
+退出码：**0** 无回归（或仅保存）；**1** 有回归（终端红色列出回归项，绿色列出改进项）；
+**2** 基线文件缺失或 schema 无效。基线只含聚合数字，不含文件内容，可安全提交；
+真实件本身仍不要入库。仿真夹具基线见 `tests/fixtures/regression/baseline.json`。
 
 运行内置回归：
 

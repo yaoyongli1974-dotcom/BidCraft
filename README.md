@@ -223,7 +223,7 @@ export BIDCRAFT_WECHAT_PAY_MOCK=1         # 本地演示支付
 | 多包件共享台账 | ✅ | 项目内多包件/标段独立清单快照与分包导出（`{项目名}-{包件名}-清单响应表.xlsx`），台账材料项目级共享不复制；首包自动收养既有清单；包件增删改与权限审计 |
 | 企业定额库与调价 | ✅ | 超管维护企业定额（名称/规格/单位/单价/分类），清单按相似度匹配定额并 dry-run 预览后套用单价；项目调价策略（系数 0.1–10、小数位 0–4）与按系数调价；报价汇总含调整后合计 |
 | 插件市场（MCP 客户端） | ✅ | 超管注册 stdio/http MCP 插件（预设 filesystem/fetch/memory/time），连通性测试与工具白名单；`bidcraft mcp` 聚合插件工具（`{插件}__{工具}` 前缀），只读模式拒绝插件写调用；stdio 子进程受资源限制（内存 64–4096 MB 默认 512、CPU 1–120 秒默认 10、umask 077、一次性临时工作目录）；`.bidplugin` 插件包导入/导出（同名默认覆盖升级）；见 `docs/plugins.md` |
-| 回归校准 | ✅ | `bidcraft calibrate <dir>` 只读扫描真实/仿真招标文件，统计字段命中、必填命中率、材料行数与 OCR 需求，输出 JSON 报告；不写库不建项目；见 `docs/calibration.md` |
+| 回归校准 | ✅ | `bidcraft calibrate <dir>` 只读扫描真实/仿真招标文件，统计字段命中、必填命中率、材料行数与 OCR 需求，输出 JSON 报告；`--save-baseline/--compare-baseline` 保存/比对基线（字段命中下降、命中率降幅>容差、解析失败增多即回归，exit 0/1/2）；不写库不建项目；见 `docs/calibration.md` |
 | 规则包管理 | ✅ | 超级管理员在 `/admin` 创建/修改/隐藏/恢复 YAML 规则包；新建时可填写规则包名称、唯一包名并选择工程类型，YAML 自动同步；内置包只读，用户覆盖写入 `BIDCRAFT_HOME/packages`；保存前校验继承、字段、大纲与核对表达式；新建项目按弱电/消防/安装/土建/暖通/装修分组 |
 | SSE 流式进度 | ✅ | 后台生成任务持久化章节/逐字事件，`Last-Event-ID` 断线续传；刷新后自动重新挂接，SSE 不可用时回退轮询 |
 | B/S 客户端 | ✅ | React + Vite 单页应用，项目/台账/大纲/正文/配图/核对/清单对齐/导出全流程；本地或局域网部署 |
@@ -254,7 +254,7 @@ bidcraft/
   mcp.py        MCP stdio 服务（JSON-RPC 2.0，6 个工具，可只读）
   plugins.py    MCP 客户端插件（stdio/http 握手与工具调用）与 mcp 聚合
   boq.py        工程量清单解析、材料匹配、差异回写、单价与报价汇总、包件隔离、定额套用、调价策略
-  calibrate.py  只读回归校准：扫描招标文件目录统计字段命中与 OCR 需求，不写库
+  calibrate.py  只读回归校准：扫描招标文件目录统计字段命中与 OCR 需求，基线保存/比对，不写库
   export/       DOCX / Markdown / PDF（LibreOffice + UNO）/ XLSX / 清单响应表
   resources/
     packages/   common-bid-facts + 弱电三包 + 消防/安装/土建/暖通/装修
@@ -340,16 +340,16 @@ DOCX 图注编号与版心宽度、批量生成默认风格尺寸；`tests/test_
 `tests/test_batch.py` 覆盖标段字段与 PATCH、批量核对/导出的权限过滤、zip 打包下载与部分失败；
 `tests/test_packages.py`、`tests/test_quota.py`、`tests/test_plugins.py`、`tests/test_calibrate.py`
 分别覆盖多包件隔离与收养、定额套用与调价、插件 CRUD/聚合/只读拒绝、校准报告与 CLI；
-`tests/test_quote_versions.py`、`tests/test_price_tax.py`、`tests/test_version_diff.py`、
-`tests/test_quote_approval.py` 覆盖报价版本、税率与汇率、版本对比、审批状态机与自动退定稿；
-`tests/test_plugin_guard.py`、`tests/test_wechat_admin.py`、`tests/test_terms.py` 覆盖插件连续失败自动停用、
-微信开放平台配置与术语库核对；
+`tests/test_quote_versions.py`、`tests/test_price_tax.py`、`tests/test_version_diff.py`
+覆盖报价版本、税率与汇率、版本对比；`tests/test_quote_approval.py` 覆盖审批状态机与自动退定稿；
+`tests/test_plugin_guard.py`、`tests/test_plugin_sandbox.py`、`tests/test_plugin_pack.py`
+覆盖插件连续失败自动停用、资源限制沙箱、插件包导出/导入/升级/冲突与非法包校验；
+`tests/test_wechat_admin.py`、`tests/test_terms.py` 覆盖微信开放平台配置与术语库核对；
 `tests/test_hardening.py`、`tests/test_backup.py`、`tests/test_kb_reindex_job.py`、
 `tests/test_security.py`、`tests/test_wechatpay.py`、`tests/test_jobs_unit.py`、
 `tests/test_store_unit.py` 覆盖上传限额/SSRF/分页等加固、在线备份、异步重建索引、
-加密与支付签名、任务工具与规则包存储；`tests/test_quote_approval.py`、`tests/test_plugin_sandbox.py`
-覆盖报价审批状态机与插件资源限制沙箱；`tests/test_plugin_pack.py` 覆盖插件包导出/导入/
-升级/冲突与非法包校验（当前全量 **388 passed**）。
+加密与支付签名、任务工具与规则包存储；`tests/test_calibrate_baseline.py` 覆盖基线
+保存/比对规则、容差边界与 CLI 退出码，并以提交基线做夹具门禁（当前全量 **412 passed**）。
 
 前端验证：`cd web && npm run build`（TypeScript 编译 + Vite 产物输出到
 `bidcraft/web_dist`），随后 `bidcraft serve --open` 做浏览器全流程验收。

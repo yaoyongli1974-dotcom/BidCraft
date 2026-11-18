@@ -130,7 +130,10 @@ PDF 读取优先用 pypdf 提取文本层，失败时回退 pdfplumber；仍无�
 
 `bidcraft calibrate <dir>` 是解析链路的旁路诊断：复用 `parsing` 与 `ledger` 的纯函数遍历目录，
 统计字段命中、必填命中率、材料行与 OCR 需求，**不写数据库、不创建项目、不调用模型**；
-单文件失败只记 `error` 后继续，报告可写 JSON。详见 `docs/calibration.md`。
+单文件失败只记 `error` 后继续，报告可写 JSON。`save_baseline`/`compare_baseline` 把目录级聚合
+存为基线文件（schema=1，仅 aggregate），比对字段命中下降、必填命中率降幅（容差 2%）、
+解析失败增多与材料行均值下降（相对降幅 >10%），CLI 以退出码 0/1/2 表达无回归/有回归/基线缺失或无效。
+详见 `docs/calibration.md`。
 
 后台生成任务用数据库 `jobs` 表保存状态，并用 `job_events` 追加事件流。生成线程按章提交事务，
 再更新任务进度，避免 SQLite 单写者锁竞争。事件包括 `queued`/`status`/`chapter_start`/`delta`/
