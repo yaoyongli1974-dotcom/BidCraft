@@ -6,10 +6,10 @@
 ## 1. 镜像
 
 ```bash
-docker build -t bidcraft:0.4.8 .          # 构建机
-docker save bidcraft:0.4.8 | gzip -1 > bidcraft-0.4.8.tar.gz
+docker build -t bidcraft:0.5.0 .          # 构建机
+docker save bidcraft:0.5.0 | gzip -1 > bidcraft-0.5.0.tar.gz
 # 传到服务器后：
-docker load -i bidcraft-0.4.8.tar.gz
+docker load -i bidcraft-0.5.0.tar.gz
 ```
 
 ## 2. 数据目录与配置
