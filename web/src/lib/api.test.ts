@@ -15,6 +15,7 @@ import {
   errorDetailText,
   exportPluginPackage,
   getBoqVersion,
+  getPendingApprovals,
   getProject,
   getTerms,
   importPluginPackage,
@@ -571,6 +572,117 @@ describe('boq quote versions', () => {
     expect(normalizeApprovalChain(undefined)).toEqual([])
     expect(normalizeApprovalChain('u-1')).toEqual([])
     expect(normalizeApprovalChain([])).toEqual([])
+  })
+})
+
+describe('pending approvals', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const jsonResponse = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+  it('normalizes the flat list with truncation, number fallback and null-safe time', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse([
+        {
+          project_id: 'p-1',
+          project_name: '项目甲',
+          version_id: 'v-1',
+          version_name: '版本 1',
+          package_id: 'pkg-1',
+          stage: 1,
+          stage_count: 2,
+          mode: 'all',
+          submitted_by: '张三',
+          submitted_at: '2026-11-18T09:00:00+08:00',
+          total_amount: 1234.5,
+        },
+        {
+          project_id: 'p-2',
+          project_name: '名'.repeat(130),
+          version_id: 'v-2',
+          version_name: '版'.repeat(130),
+          stage: '2',
+          mode: 'bogus',
+          submitted_by: '李'.repeat(100),
+          submitted_at: null,
+          total_amount: '88.5',
+        },
+        { project_id: 'p-3', version_id: 'v-3', stage: 0, stage_count: 9, mode: 'any', total_amount: null },
+        { version_id: 'v-x', project_name: '缺项目 id' },
+        { project_id: 'p-y', project_name: '缺版本 id' },
+        null,
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const items = await getPendingApprovals()
+    expect(fetchMock.mock.calls[0][0]).toBe('/approvals/pending')
+    expect(items).toHaveLength(3)
+    expect(items[0]).toEqual({
+      project_id: 'p-1',
+      project_name: '项目甲',
+      version_id: 'v-1',
+      version_name: '版本 1',
+      package_id: 'pkg-1',
+      stage: 1,
+      stage_count: 2,
+      mode: 'all',
+      submitted_by: '张三',
+      submitted_at: '2026-11-18T09:00:00+08:00',
+      total_amount: 1234.5,
+    })
+    expect(items[1].project_name).toHaveLength(120)
+    expect(items[1].version_name).toHaveLength(120)
+    expect(items[1].submitted_by).toHaveLength(80)
+    expect(items[1].stage).toBe(2)
+    expect(items[1].stage_count).toBe(2)
+    expect(items[1].mode).toBe('')
+    expect(items[1].submitted_at).toBeNull()
+    expect(items[1].total_amount).toBe(88.5)
+    expect(items[1].package_id).toBeNull()
+    expect(items[2].stage).toBe(1)
+    expect(items[2].mode).toBe('any')
+    expect(items[2].total_amount).toBeNull()
+    expect(items[2].project_name).toBe('未命名项目')
+    expect(items[2].version_name).toBe('未命名版本')
+  })
+
+  it('returns an empty list when the backend has no such endpoint (404)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ detail: 'Not Found' }, 404)),
+    )
+    await expect(getPendingApprovals()).resolves.toEqual([])
+  })
+
+  it('degrades to an empty list when the SPA fallback returns HTML', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response('<!doctype html><html></html>', {
+          status: 200,
+          headers: { 'Content-Type': 'text/html' },
+        }),
+      ),
+    )
+    await expect(getPendingApprovals()).resolves.toEqual([])
+  })
+
+  it('propagates non-404 failures', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ detail: '服务器错误' }, 500)),
+    )
+    await expect(getPendingApprovals()).rejects.toMatchObject({
+      status: 500,
+      message: '服务器错误',
+    })
   })
 })
 

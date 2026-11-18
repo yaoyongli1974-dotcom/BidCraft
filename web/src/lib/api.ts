@@ -54,6 +54,7 @@ import type {
   OutlineResponse,
   PackageInfo,
   ParseResult,
+  PendingApproval,
   Plugin,
   PluginCatalogEntry,
   WechatConfig,
@@ -925,6 +926,60 @@ export async function getAdminAudit(
   return normalizeAuditPage(data)
 }
 
+// ---------------------------------------------------------------- 待我审批（跨项目待办）
+
+/**
+ * 归一化一条待我审批。字符串按展示宽度截断、数字兜底、时间 null 安全；
+ * 缺少 project_id / version_id 的脏数据整体丢弃，避免渲染出无法跳转的条目。
+ */
+function normalizePendingApproval(value: unknown): PendingApproval | null {
+  if (!value || typeof value !== 'object') return null
+  const raw = value as Record<string, unknown>
+  const projectId = asText(raw.project_id).trim()
+  const versionId = asText(raw.version_id).trim()
+  if (!projectId || !versionId) return null
+  const modeRaw = asText(raw.mode).trim()
+  const mode: PendingApproval['mode'] =
+    modeRaw === 'any' ? 'any' : modeRaw === 'all' ? 'all' : ''
+  const stage = Math.max(1, Math.round(asNumber(raw.stage, 1)))
+  // 总级数至少不小于当前级，保证「第 X/N 级」永不出现 X>N。
+  const stageCount = Math.max(stage, Math.round(asNumber(raw.stage_count, stage)))
+  const packageId = asText(raw.package_id).trim()
+  const amount = asNumber(raw.total_amount, Number.NaN)
+  return {
+    project_id: projectId,
+    project_name: asText(raw.project_name).slice(0, 120) || '未命名项目',
+    version_id: versionId,
+    version_name: asText(raw.version_name).slice(0, 120) || '未命名版本',
+    package_id: packageId || null,
+    stage,
+    stage_count: stageCount,
+    mode,
+    submitted_by: asText(raw.submitted_by).slice(0, 80),
+    submitted_at: isoOrNull(raw.submitted_at),
+    total_amount: Number.isFinite(amount) ? amount : null,
+  }
+}
+
+/**
+ * 读取当前用户的跨项目审批待办（平铺数组）。旧后端没有该接口时返回 404，
+ * 或 SPA 兜底把未知路径回成 index.html（200 + HTML 导致 JSON 解析失败），
+ * 两种情况都按「无待办」降级为空列表，而不是把错误抛给顶栏。
+ */
+export async function getPendingApprovals(signal?: AbortSignal): Promise<PendingApproval[]> {
+  let data: unknown
+  try {
+    data = await request<unknown>('/approvals/pending', undefined, signal)
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return []
+    if (error instanceof SyntaxError) return []
+    throw error
+  }
+  const list = Array.isArray(data) ? data : asArray<unknown>(data, 'items')
+  return list
+    .map(normalizePendingApproval)
+    .filter((item): item is PendingApproval => item !== null)
+}
 
 // ---------------------------------------------------------------- sources
 

@@ -739,6 +739,243 @@
   font-size: 8.5px;
 }
 
+/* ------------------------------------------------------------------ pending approvals */
+
+.pending-menu {
+  position: relative;
+}
+
+.pending-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  transition: background 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+}
+
+.pending-trigger:hover,
+.pending-trigger.is-open {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.46);
+  border-color: var(--line);
+}
+
+.pending-count {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--vermilion);
+  color: #fff8ec;
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.pending-dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 160;
+  width: min(340px, calc(100vw - 24px));
+  padding: 6px;
+  background: var(--surface-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  box-shadow: var(--shadow-md);
+  animation: menuIn 0.16s var(--ease) both;
+}
+
+.pending-dropdown-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 9px 10px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 4px;
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.pending-dropdown-head svg {
+  color: var(--jade);
+}
+
+.pending-dropdown-count {
+  margin-left: auto;
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.pending-refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  color: var(--muted);
+  transition: background 0.14s ease, color 0.14s ease;
+}
+
+.pending-refresh:hover:not(:disabled) {
+  background: var(--jade-wash);
+  color: var(--jade);
+}
+
+.pending-refresh:disabled {
+  opacity: 0.6;
+}
+
+.pending-dropdown-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pending-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 340px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pending-item {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 8px 9px;
+  border-radius: 5px;
+  text-align: left;
+  transition: background 0.14s ease;
+}
+
+.pending-item:hover,
+.pending-item:focus-visible {
+  background: var(--jade-wash);
+}
+
+.pending-item-title {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  font-size: 11.5px;
+  color: var(--ink);
+}
+
+.pending-item-title strong {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pending-item-version {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pending-item-stage {
+  align-self: flex-start;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--jade-wash);
+  border: 1px solid rgba(26, 90, 73, 0.14);
+  color: var(--jade);
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.pending-item-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  font-size: 10px;
+  color: var(--faint);
+}
+
+.pending-item-submitter {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pending-item-amount {
+  flex: 0 0 auto;
+  color: var(--ink-2);
+  font-weight: 600;
+}
+
+.pending-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 20px 12px;
+  color: var(--faint);
+  font-size: 11.5px;
+  text-align: center;
+}
+
+.pending-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 9px;
+  margin: 2px;
+  border-radius: 5px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 10.5px;
+}
+
+.pending-error span {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.pending-error button {
+  flex: 0 0 auto;
+  color: var(--danger);
+  font-weight: 600;
+  text-decoration: underline;
+}
+
+.pending-dropdown-foot {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 9px 4px;
+  border-top: 1px solid var(--line);
+  margin-top: 4px;
+  color: var(--faint);
+  font-size: 8.5px;
+}
+
 /* ------------------------------------------------------------------ password modal */
 
 .password-modal {

@@ -4,6 +4,7 @@ import { useHealth } from '../context/useHealth'
 import { useHelp } from '../context/useHelp'
 import { useAuth } from '../context/useAuth'
 import { UserMenu } from './UserMenu'
+import { PendingApprovals } from './PendingApprovals'
 import { className } from '../lib/format'
 
 export function Masthead() {
@@ -66,6 +67,7 @@ export function Masthead() {
             <Icon size={14} className={loading ? 'spin' : undefined} aria-hidden />
             <span>{label}</span>
           </button>
+          <PendingApprovals />
           <button
             type="button"
             className="masthead-help"

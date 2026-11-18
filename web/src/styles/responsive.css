@@ -678,6 +678,18 @@
     justify-content: center;
   }
 
+  .pending-trigger-label {
+    display: none;
+  }
+
+  .pending-trigger {
+    padding: 0 7px;
+  }
+
+  .pending-dropdown {
+    width: min(320px, calc(100vw - 24px));
+  }
+
   .projects-hero {
     padding-top: 36px;
   }

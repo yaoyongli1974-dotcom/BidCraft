@@ -24,6 +24,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from . import auth
 from .config import settings
 from .models import (
     BidPackage,
@@ -31,6 +32,7 @@ from .models import (
     BoqSnapshot,
     Material,
     Project,
+    ProjectMember,
     QuotaItem,
     SourceFile,
     utcnow,
@@ -701,6 +703,7 @@ QUOTE_VERSION_NAME_MAX = 80
 QUOTE_VERSION_NOTE_MAX = 200
 QUOTE_VERSION_STATUSES = ("draft", "submitted", "approved", "rejected")
 QUOTE_REVIEW_DECISIONS = ("approve", "reject")
+PENDING_APPROVALS_LIMIT = 100
 
 
 def normalize_chain(raw: Any) -> list[dict[str, Any]]:
@@ -1051,6 +1054,93 @@ def unapprove_version(
     version.status = "draft"
     db.flush()
     return version_payload(version, project=project)
+
+
+def pending_for_user(db: Session, user: dict) -> list[dict[str, Any]]:
+    """Cross-project inbox of submitted quotes awaiting this user (R20).
+
+    Visible projects follow the project-list rule: super admins see every
+    project, everyone else sees owned projects plus ``ProjectMember`` grants.
+    The pending level mirrors ``review_version``: an empty chain waits on the
+    project owner, a chain waits on the current level's approvers (all-mode
+    only those who have not signed yet, any-mode everyone until one signs).
+    Super admins may act on any submitted version, so it always lands in their
+    inbox; global viewers never have approvals. Newest submissions first,
+    capped at ``PENDING_APPROVALS_LIMIT``.
+    """
+    role = user.get("role") or ""
+    if role == auth.ROLE_VIEWER:
+        return []
+    is_super = role == auth.ROLE_SUPER_ADMIN
+    user_id = str(user.get("id") or "")
+    if is_super:
+        projects = list(db.scalars(select(Project)))
+    else:
+        member_ids = [
+            row.project_id
+            for row in db.scalars(
+                select(ProjectMember).where(ProjectMember.user_id == user_id)
+            )
+        ]
+        visible: dict[str, Project] = {
+            item.id: item
+            for item in db.scalars(select(Project).where(Project.owner_id == user_id))
+        }
+        if member_ids:
+            for item in db.scalars(select(Project).where(Project.id.in_(member_ids))):
+                visible.setdefault(item.id, item)
+        projects = list(visible.values())
+    items: list[dict[str, Any]] = []
+    for project in projects:
+        chain = normalize_chain((project.meta or {}).get("approval_chain"))
+        versions = db.scalars(
+            select(BoqQuoteVersion).where(
+                BoqQuoteVersion.project_id == project.id,
+                BoqQuoteVersion.status == "submitted",
+            )
+        )
+        for version in versions:
+            approvals = list(version.approvals or [])
+            if not chain:
+                if not is_super and project.owner_id != user_id:
+                    continue
+                stage, stage_count, mode = 0, 1, ""
+            else:
+                stage = completed_stages(chain, approvals)
+                if stage >= len(chain):
+                    continue  # defensive: a fully signed version is never submitted
+                current = chain[stage]
+                stage_count, mode = len(chain), current["mode"]
+                if not is_super:
+                    approver_ids = {str(p.get("id") or "") for p in current["approvers"]}
+                    if user_id not in approver_ids:
+                        continue
+                    if mode == "all" and any(
+                        r.get("decision") == "approve"
+                        and r.get("stage") == stage
+                        and str(r.get("user_id") or "") == user_id
+                        for r in approvals
+                    ):
+                        continue
+            items.append(
+                {
+                    "project_id": project.id,
+                    "project_name": project.name,
+                    "version_id": version.id,
+                    "version_name": version.name,
+                    "package_id": version.package_id,
+                    "stage": stage + 1,
+                    "stage_count": stage_count,
+                    "mode": mode,
+                    "submitted_by": version.submitted_by or "",
+                    "submitted_at": (
+                        version.submitted_at.isoformat() if version.submitted_at else None
+                    ),
+                    "total_amount": (version.summary or {}).get("total_amount"),
+                }
+            )
+    items.sort(key=lambda item: item["submitted_at"] or "", reverse=True)
+    return items[:PENDING_APPROVALS_LIMIT]
 
 
 def diff_version(

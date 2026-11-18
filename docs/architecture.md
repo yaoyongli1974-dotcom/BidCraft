@@ -174,6 +174,7 @@ SSE 不可用时回退到约 1.6 秒一次的任务轮询。刷新页面后通�
 | 台账 | `GET /projects/{ref}/ledger`、`PATCH /projects/{ref}/facts/{key}` |
 | 清单 | `GET/POST/DELETE /projects/{ref}/boq`、`POST /projects/{ref}/boq/apply`、`POST /projects/{ref}/boq/price`、`POST /projects/{ref}/boq/export`（均接受 `package_id`） |
 | 包件与报价 | `GET/POST /projects/{ref}/packages`、`PATCH/DELETE /projects/{ref}/packages/{package_id}`、`GET/PUT /projects/{ref}/price-policy`、`POST /projects/{ref}/boq/quota-fill`（dry-run 可选）、`POST /projects/{ref}/boq/adjust` |
+| 报价版本与审批 | `GET/POST /projects/{ref}/boq/versions`、`GET /projects/{ref}/boq/versions/{id}`（含 prices）、`GET .../diff`（against=版本 id 或 current）、`POST .../restore`、`DELETE .../versions/{id}`、`POST .../submit`、`POST .../review`（approve/reject，按审批链逐级）、`POST .../unapprove`；`GET /approvals/pending` 跨项目待我审批（登录即可，平铺数组，submitted_at 降序上限 100） |
 | 大纲 | `GET/POST/PUT /projects/{ref}/outline` |
 | 章节 | `GET/PUT /projects/{ref}/chapters/{id}`、`POST .../generate` |
 | 生成 | `POST /projects/{ref}/write`（同步兼容）、`POST /projects/{ref}/generate`（后台）、`GET /projects/{ref}/jobs`、`GET /jobs/{id}`、`GET /jobs/{id}/events`（SSE） |

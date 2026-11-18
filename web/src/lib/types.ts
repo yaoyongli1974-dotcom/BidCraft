@@ -246,6 +246,29 @@ export interface QuoteApprovalRecord {
   at: string | null
 }
 
+/**
+ * 跨项目「待我审批」的一条待办（`GET /approvals/pending` 平铺数组的一项）。
+ * 只读视图：点击跳转到该项目的清单对齐（BOQ）页签，在版本面板里完成审批。
+ */
+export interface PendingApproval {
+  project_id: string
+  project_name: string
+  version_id: string
+  version_name: string
+  /** 归属包件；单包件项目可能为 null。 */
+  package_id: string | null
+  /** 当前待审级（1 起）。 */
+  stage: number
+  /** 审批链总级数；空链时为 1。 */
+  stage_count: number
+  /** 当前级通过模式：all=会签，any=或签，空串=空链（负责人单级审批）。 */
+  mode: 'all' | 'any' | ''
+  submitted_by: string
+  submitted_at: string | null
+  /** 报价合计（元）；后端未给出时为 null，界面不显示金额。 */
+  total_amount: number | null
+}
+
 export interface Project {
   id: string
   name: string

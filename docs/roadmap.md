@@ -20,13 +20,13 @@
 | 回归校准 | ✅ | `calibrate.py`、`bidcraft calibrate`、`tests/fixtures/regression/` | 只读扫描目录统计字段命中/必填命中率/材料行/OCR 需求；真实招标别名增量；仿真 fixtures 与报告 JSON；`--save-baseline/--compare-baseline` 基线保存/比对（回归 exit 1、基线缺失/无效 exit 2）；不写库不建项目 |
 | 插件市场（MCP 客户端） | ✅ | `plugins.py`、`plugin_pack.py`、`/admin/plugins`、`mcp.py`、`docs/plugins.md` | 超管注册 stdio/http MCP 插件、连通性测试与工具白名单；`bidcraft mcp` 聚合插件工具（`{插件}__{工具}` 前缀），单插件失败跳过，只读模式拒绝插件调用；`.bidplugin` 插件包导入/导出与同名覆盖升级 |
 | 报价版本与汇率 | ✅ | `models.py`、`boq.py`、`/projects/{ref}/boq/versions`、`web/` | 报价版本快照/恢复/删除（上限 20、包件隔离）；版本与当前清单或另一版本 diff（新增/移除/变动 + 两侧汇总）；税率与币种、汇率折算人民币含税合计；导出增税率/税额/汇率/人民币合计行 |
-| 报价审批流 | ✅ | `boq.py`、`/projects/{ref}/boq/versions/{id}/submit|review|unapprove`、`web/` | 版本状态机 draft→submitted→approved/rejected：可编辑成员提交（备注），负责人/超管定稿或驳回（意见），approved 可撤销回草稿；同包件至多一个定稿、定稿新版自动退旧版；rejected 重提清空上轮意见；审计 quote.submit/approve/reject/unapprove；前端状态徽标与双版本并排审阅；项目审批链（≤5 级、每级 1–5 人会签 all/或签 any、成员校验、名称快照）逐级审批，末级定稿、越级 403、超管代审，空链回退负责人单级 |
+| 报价审批流 | ✅ | `boq.py`、`/projects/{ref}/boq/versions/{id}/submit|review|unapprove`、`web/` | 版本状态机 draft→submitted→approved/rejected：可编辑成员提交（备注），负责人/超管定稿或驳回（意见），approved 可撤销回草稿；同包件至多一个定稿、定稿新版自动退旧版；rejected 重提清空上轮意见；审计 quote.submit/approve/reject/unapprove；前端状态徽标与双版本并排审阅；项目审批链（≤5 级、每级 1–5 人会签 all/或签 any、成员校验、名称快照）逐级审批，末级定稿、越级 403、超管代审，空链回退负责人单级；`GET /approvals/pending` 跨项目待我审批（顶栏徽标+只读面板，点击直达项目清单页签） |
 | 微信开放平台管理 | ✅ | `models.py`、`wechat.py`、`/admin/wechat`、`web/` | 管理端配置 AppID/AppSecret（加密存库不回显）、回调地址、启用与模拟模式；连通性测试；保存即热生效（`/health.wechat_login` 与登录页入口）；审计 `wechat.config` |
 | 企业术语库 | ✅ | `models.py`、`terms.py`、`/admin/terms`、`web/` | 禁用表述与建议替换术语 CRUD/搜索/启停；项目核对逐章扫描产出 `TERM-###`（major/minor，含证据片段与改写建议），跨章去重、上限 200 |
 | C7 可插拔 Agent / API | ✅ | `generation/agent.py`、`bidcraft/api.py`、`bidcraft/mcp.py` | OpenAI 兼容端点；FastAPI + 后台生成任务；MCP stdio 服务 |
 | C8 行业包 | ✅ 8 个行业包 + 通用基包 | `bidcraft/resources/packages/*.yaml` | 弱电（综合布线/安防/BA）+ 消防、安装、土建、暖通、装修；管理员可在 `/admin` 维护 YAML 覆盖包 |
 | 规则包管理 | ✅ | `rules/store.py`、`/admin/rule-packages`、`web/` | 超级管理员创建/修改/隐藏/恢复规则包；新建时可填写名称、唯一包名并选择工程类型；内置包只读，用户覆盖写入 `BIDCRAFT_HOME/packages`；保存前校验继承、字段、大纲与核对表达式 |
-| C9 回归/部署 | ✅ 基本 | `tests/`、`Dockerfile`、`web/` | 438 个测试；Docker 多阶段构建 Web（含 OCR 依赖）；本地/局域网两种部署 |
+| C9 回归/部署 | ✅ 基本 | `tests/`、`Dockerfile`、`web/` | 449 个测试；Docker 多阶段构建 Web（含 OCR 依赖）；本地/局域网两种部署 |
 | SSE 流式进度 | ✅ | `bidcraft/jobs.py`、`/jobs/{id}/events`、`web/` | 章节/逐字事件持久化；Last-Event-ID 断线续传；SSE 失败回退轮询；刷新后重新挂接任务 |
 | Excel 清单双向对齐 | ✅ | `boq.py`、`export/boq_xlsx.py`、`/projects/{ref}/boq`、`web/` | 清单导入与表头识别、材料模糊匹配、缺项/多项/数量·单位·规格差异、差异回写、响应表导出 |
 | 清单报价 | ✅ | `boq.py`、`/projects/{ref}/boq/price`、`export/boq_xlsx.py`、`web/` | 逐行单价录入/清除、按清单数量计算合价、已报价/未报价/缺数量统计、报价汇总与响应表价格列；不自动生成价格 |

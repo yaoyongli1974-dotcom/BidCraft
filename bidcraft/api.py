@@ -1607,6 +1607,7 @@ def create_app():
             "/batch-jobs/",
             "/packages",
             "/admin/",
+            "/approvals/",
             "/auth",
             "/billing/",
         )
@@ -4934,6 +4935,13 @@ def create_app():
                 section = re.sub(r'[\\/:*?"<>|]', "", package.name).strip() or "包件"
                 filename = f"{safe[:60]}-{section[:40]}-清单响应表.xlsx"
             return FileResponse(path, filename=filename)
+
+    # -------------------------------------------------------------- approvals
+    @app.get("/approvals/pending")
+    def approvals_pending() -> list[dict[str, Any]]:
+        """R20 待我审批：跨项目聚合当前用户待审的报价版本（平铺数组）。"""
+        with session_scope() as db:
+            return boq.pending_for_user(db, current_user() or {})
 
     # ------------------------------------------------------------------ web
     dist = Path(__file__).resolve().parent / "web_dist"
