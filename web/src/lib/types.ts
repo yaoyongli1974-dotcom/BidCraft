@@ -831,6 +831,9 @@ export interface BoqPayload {
 }
 
 /** 报价版本：某一时点该包件清单的单价与汇总快照。 */
+/** 报价版本的审批状态：草稿 → 待审 → 已定稿 / 已驳回，可退回草稿。 */
+export type QuoteVersionStatus = 'draft' | 'submitted' | 'approved' | 'rejected'
+
 export interface BoqQuoteVersion {
   id: string
   name: string
@@ -840,6 +843,16 @@ export interface BoqQuoteVersion {
   created_at: string | null
   /** 快照中已录入单价的条目数。 */
   price_count: number
+  /** 审批状态；旧后端缺失时按草稿处理。 */
+  status: QuoteVersionStatus
+  /** 提交审批时填写的说明。 */
+  submit_note: string
+  submitted_by: string
+  submitted_at: string | null
+  /** 审批意见（定稿或驳回时填写）。 */
+  review_note: string
+  reviewed_by: string
+  reviewed_at: string | null
   /** 仅详情接口返回：按清单行 key 保存的单价。 */
   prices?: Record<string, number> | null
 }

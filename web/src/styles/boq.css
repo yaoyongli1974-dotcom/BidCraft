@@ -1352,7 +1352,14 @@
   min-width: 0;
 }
 
-.boq-version-main > strong {
+.boq-version-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.boq-version-title > strong {
   font-size: 11px;
   font-weight: 600;
   color: var(--ink);
@@ -1392,6 +1399,207 @@
   opacity: 0.72;
 }
 
+.boq-version-audit-note {
+  max-width: 420px;
+  overflow-wrap: anywhere;
+}
+
+.boq-version-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--info, #1d4ed8);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------ 审批弹窗与并排审阅 */
+
+.boq-version-approval {
+  display: grid;
+  gap: 12px;
+}
+
+.boq-version-approval-hint {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.boq-version-approval textarea.input {
+  min-height: 76px;
+  resize: vertical;
+  font-family: inherit;
+}
+
+.boq-review {
+  display: grid;
+  gap: 12px;
+}
+
+.boq-review-controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.boq-review-controls .price-policy-field {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.boq-review-vs {
+  padding-bottom: 7px;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.boq-review-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.boq-review-side {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper-2, #faf7f0);
+  min-width: 0;
+}
+
+.boq-review-side-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.boq-review-side-head > strong {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.boq-review-fields {
+  display: grid;
+  gap: 3px;
+  margin: 8px 0 0;
+}
+
+.boq-review-field {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+}
+
+.boq-review-field dt {
+  color: var(--muted);
+}
+
+.boq-review-field dd {
+  margin: 0;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.boq-review-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.boq-review-table {
+  width: 100%;
+  min-width: 560px;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+
+.boq-review-table th,
+.boq-review-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.boq-review-table thead th {
+  color: var(--muted);
+  font-weight: 500;
+  background: var(--surface);
+}
+
+.boq-review-table thead th:first-child,
+.boq-review-table tbody th {
+  text-align: left;
+  white-space: normal;
+}
+
+.boq-review-table tbody th {
+  font-weight: 500;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.boq-review-table tbody tr:last-child th,
+.boq-review-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.boq-review-table tbody tr.is-added th {
+  box-shadow: inset 3px 0 0 var(--warn, #b45309);
+}
+
+.boq-review-table tbody tr.is-removed th {
+  box-shadow: inset 3px 0 0 var(--info, #1d4ed8);
+}
+
+.boq-review-table tbody tr.is-changed th {
+  box-shadow: inset 3px 0 0 var(--danger, #b91c1c);
+}
+
+.boq-review-table tbody tr.is-added {
+  background: rgba(180, 83, 9, 0.05);
+}
+
+.boq-review-table tbody tr.is-removed {
+  background: rgba(29, 78, 216, 0.05);
+}
+
+.boq-review-table tbody tr.is-changed {
+  background: rgba(185, 28, 28, 0.04);
+}
+
+.boq-review-delta {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.boq-review-table tr.is-added .boq-review-delta {
+  color: var(--warn, #b45309);
+}
+
+.boq-review-table tr.is-removed .boq-review-delta {
+  color: var(--info, #1d4ed8);
+}
+
+.boq-review-table tr.is-changed .boq-review-delta {
+  color: var(--danger, #b91c1c);
+}
+
+.boq-review-legend {
+  margin: 0;
+  color: var(--faint);
+  font-size: 10.5px;
+  line-height: 1.6;
+}
+
 @media (max-width: 760px) {
   .boq-version-save > button {
     width: 100%;
@@ -1406,6 +1614,14 @@
   .boq-version-actions {
     width: 100%;
     justify-content: flex-end;
+  }
+
+  .boq-review-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .boq-review-vs {
+    display: none;
   }
 }
 

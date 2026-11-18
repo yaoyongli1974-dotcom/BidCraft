@@ -110,6 +110,13 @@ def test_version_save_list_detail_restore_delete(db, tmp_path):
         "summary",
         "created_at",
         "price_count",
+        "status",
+        "submit_note",
+        "submitted_by",
+        "submitted_at",
+        "review_note",
+        "reviewed_by",
+        "reviewed_at",
     }
     assert first["name"] == "初稿"
     assert first["note"] == "首轮报价"

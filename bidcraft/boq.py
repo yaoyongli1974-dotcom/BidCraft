@@ -33,6 +33,7 @@ from .models import (
     Project,
     QuotaItem,
     SourceFile,
+    utcnow,
 )
 from .pipeline import add_source
 
@@ -690,6 +691,8 @@ def build_payload(
 MAX_QUOTE_VERSIONS = 20
 QUOTE_VERSION_NAME_MAX = 80
 QUOTE_VERSION_NOTE_MAX = 200
+QUOTE_VERSION_STATUSES = ("draft", "submitted", "approved", "rejected")
+QUOTE_REVIEW_DECISIONS = ("approve", "reject")
 
 
 def version_payload(version: BoqQuoteVersion, *, include_prices: bool = False) -> dict[str, Any]:
@@ -703,6 +706,15 @@ def version_payload(version: BoqQuoteVersion, *, include_prices: bool = False) -
         "summary": dict(version.summary or {}),
         "created_at": version.created_at.isoformat() if version.created_at else None,
         "price_count": len(prices),
+        "status": version.status or "draft",
+        "submit_note": version.submit_note or "",
+        "submitted_by": version.submitted_by or "",
+        "submitted_at": (
+            version.submitted_at.isoformat() if version.submitted_at else None
+        ),
+        "review_note": version.review_note or "",
+        "reviewed_by": version.reviewed_by or "",
+        "reviewed_at": version.reviewed_at.isoformat() if version.reviewed_at else None,
     }
     if include_prices:
         payload["prices"] = prices
@@ -807,6 +819,92 @@ def delete_version(db: Session, project: Project, version_id: str) -> None:
         raise LookupError("版本不存在")
     db.delete(version)
     db.flush()
+
+
+def _clean_actor(actor: str | None) -> str:
+    return (actor or "").strip()[:80]
+
+
+def _clean_note(note: str | None) -> str:
+    return (note or "").strip()[:QUOTE_VERSION_NOTE_MAX]
+
+
+def submit_version(
+    db: Session,
+    project: Project,
+    version_id: str,
+    *,
+    actor: str = "",
+    note: str = "",
+) -> dict[str, Any]:
+    """Send a draft (or rejected) version to the reviewer: draft|rejected → submitted."""
+    version = get_version(db, project.id, version_id)
+    if version is None:
+        raise LookupError("版本不存在")
+    if (version.status or "draft") not in {"draft", "rejected"}:
+        raise BoqConflictError("当前状态不可提交审批")
+    version.status = "submitted"
+    version.submit_note = _clean_note(note)
+    version.submitted_by = _clean_actor(actor)
+    version.submitted_at = utcnow()
+    # A resubmission starts a new review round; previous review feedback is void.
+    version.review_note = ""
+    version.reviewed_by = ""
+    version.reviewed_at = None
+    db.flush()
+    return version_payload(version)
+
+
+def review_version(
+    db: Session,
+    project: Project,
+    version_id: str,
+    *,
+    actor: str = "",
+    decision: str,
+    note: str = "",
+) -> dict[str, Any]:
+    """Approve or reject a submitted version; approving withdraws the old one."""
+    if decision not in QUOTE_REVIEW_DECISIONS:
+        raise ValueError("decision 只能是 approve 或 reject")
+    version = get_version(db, project.id, version_id)
+    if version is None:
+        raise LookupError("版本不存在")
+    if (version.status or "draft") != "submitted":
+        raise BoqConflictError("仅待审版本可审批")
+    if decision == "approve":
+        # One approved version per package: retire the previous winner to draft
+        # without touching its review trail (audit keeps the history).
+        others = db.scalars(
+            _version_statement(project.id, version.package_id).where(
+                BoqQuoteVersion.status == "approved",
+                BoqQuoteVersion.id != version.id,
+            )
+        )
+        for other in others:
+            other.status = "draft"
+        version.status = "approved"
+    else:
+        version.status = "rejected"
+    version.review_note = _clean_note(note)
+    version.reviewed_by = _clean_actor(actor)
+    version.reviewed_at = utcnow()
+    db.flush()
+    return version_payload(version)
+
+
+def unapprove_version(
+    db: Session, project: Project, version_id: str
+) -> dict[str, Any]:
+    """Withdraw an approval: approved → draft."""
+    version = get_version(db, project.id, version_id)
+    if version is None:
+        raise LookupError("版本不存在")
+    if (version.status or "draft") != "approved":
+        raise BoqConflictError("仅已定稿版本可撤销")
+    version.status = "draft"
+    db.flush()
+    return version_payload(version)
 
 
 def diff_version(

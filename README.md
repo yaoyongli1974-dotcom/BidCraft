@@ -233,6 +233,7 @@ export BIDCRAFT_WECHAT_PAY_MOCK=1         # 本地演示支付
 | 知识库 | ✅ | 本地目录索引或通用/Dify/RAGFlow API；可选 embedding 向量索引与混合重排（无模型自动回退关键词）；章节检索注入；台账事实优先 |
 | 注册与计费 | ✅ | 用户名/微信扫码注册、独立项目空间、按章扣点、兑换码、微信支付 Native（可 mock） |
 | 报价版本与汇率 | ✅ | 报价快照版本保存/恢复/删除（每包件上限 20）、版本对比（新增/移除/改价 + 两侧合计）、税率与币种策略、汇率换算与人民币含税合计、导出「报价汇总」含税/汇率行 |
+| 报价审批流 | ✅ | 版本状态机（草稿→待审→已定稿/已驳回），成员提交审批、负责人定稿/驳回、可撤销定稿并重新提交；同包件至多一个定稿，定稿新版自动退回旧版；双版本（含当前清单）并排审阅视图；审计 `quote.submit/approve/reject/unapprove` |
 | 微信开放平台管理 | ✅ | 管理控制台配置 AppID/AppSecret（加密存库不回显）、回调地址、启用与模拟模式、连通性测试；保存即热生效，登录页自动出现扫码入口 |
 | 企业术语库 | ✅ | 管理端维护「禁用表述 / 建议替换」术语；项目核对自动产出 `TERM-###` 问题（禁用词 major、替换建议 minor，含原文证据与建议） |
 
@@ -340,12 +341,13 @@ DOCX 图注编号与版心宽度、批量生成默认风格尺寸；`tests/test_
 `tests/test_packages.py`、`tests/test_quota.py`、`tests/test_plugins.py`、`tests/test_calibrate.py`
 分别覆盖多包件隔离与收养、定额套用与调价、插件 CRUD/聚合/只读拒绝、校准报告与 CLI；
 `tests/test_quote_versions.py`、`tests/test_price_tax.py`、`tests/test_version_diff.py`、
-`tests/test_plugin_guard.py`、`tests/test_wechat_admin.py`、`tests/test_terms.py` 覆盖报价版本、
-税率与汇率、版本对比、插件连续失败自动停用、微信开放平台配置与术语库核对；
+`tests/test_quote_approval.py` 覆盖报价版本、税率与汇率、版本对比、审批状态机与自动退定稿；
+`tests/test_plugin_guard.py`、`tests/test_wechat_admin.py`、`tests/test_terms.py` 覆盖插件连续失败自动停用、
+微信开放平台配置与术语库核对；
 `tests/test_hardening.py`、`tests/test_backup.py`、`tests/test_kb_reindex_job.py`、
 `tests/test_security.py`、`tests/test_wechatpay.py`、`tests/test_jobs_unit.py`、
 `tests/test_store_unit.py` 覆盖上传限额/SSRF/分页等加固、在线备份、异步重建索引、
-加密与支付签名、任务工具与规则包存储（当前全量 **337 passed**）。
+加密与支付签名、任务工具与规则包存储（当前全量 **344 passed**）。
 
 前端验证：`cd web && npm run build`（TypeScript 编译 + Vite 产物输出到
 `bidcraft/web_dist`），随后 `bidcraft serve --open` 做浏览器全流程验收。

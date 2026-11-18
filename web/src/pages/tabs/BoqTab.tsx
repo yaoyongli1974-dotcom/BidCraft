@@ -119,7 +119,8 @@ function diffNotes(row: BoqRow): string[] {
 }
 
 export function BoqTab() {
-  const { ref, canWrite } = useWorkspace()
+  const { ref, canWrite, project } = useWorkspace()
+  const canReview = !project.my_role || project.my_role === 'owner' || project.my_role === 'admin'
   const toast = useToast()
   const confirm = useConfirm()
 
@@ -660,6 +661,7 @@ export function BoqTab() {
                 packageId={packageId}
                 packageName={currentPackage?.name}
                 canWrite={canWrite}
+                canReview={canReview}
                 onRestored={handleVersionRestored}
               />
 

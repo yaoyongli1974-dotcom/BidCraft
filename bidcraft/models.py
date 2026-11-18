@@ -169,6 +169,15 @@ class BoqQuoteVersion(Base):
     prices: Mapped[dict] = mapped_column(JSON, default=dict)
     summary: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    status: Mapped[str] = mapped_column(
+        String(16), default="draft", server_default="draft"
+    )
+    submit_note: Mapped[str] = mapped_column(String(200), default="", server_default="")
+    submitted_by: Mapped[str] = mapped_column(String(80), default="", server_default="")
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    review_note: Mapped[str] = mapped_column(String(200), default="", server_default="")
+    reviewed_by: Mapped[str] = mapped_column(String(80), default="", server_default="")
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class QuotaItem(Base):

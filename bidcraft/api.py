@@ -207,6 +207,15 @@ class BoqVersionCreate(BaseModel):
     package_id: str | None = None
 
 
+class BoqVersionSubmit(BaseModel):
+    note: str = ""
+
+
+class BoqVersionReview(BaseModel):
+    decision: str
+    note: str = ""
+
+
 class BoqQuotaFillRequest(BaseModel):
     package_id: str | None = None
     only_missing: bool = True
@@ -4609,6 +4618,95 @@ def create_app():
                 project.id,
                 "boq.version_restore",
                 {"version_id": version_id, "package_id": snapshot.get("package_id")},
+            )
+            return result
+
+    @app.post("/projects/{ref}/boq/versions/{version_id}/submit")
+    def boq_version_submit(
+        ref: str, version_id: str, payload: BoqVersionSubmit | None = None
+    ) -> dict[str, Any]:
+        data = payload or BoqVersionSubmit()
+        with session_scope() as db:
+            project, _role = _project(db, ref)
+            _require_write(_role)
+            user = current_user() or {}
+            actor = user.get("display_name") or user.get("username") or ""
+            try:
+                result = boq.submit_version(
+                    db, project, version_id, actor=actor, note=data.note
+                )
+            except boq.BoqConflictError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            audit(
+                db,
+                project.id,
+                "quote.submit",
+                {
+                    "version_id": result["id"],
+                    "name": result["name"],
+                    "package_id": result["package_id"],
+                    "note": result["submit_note"],
+                },
+            )
+            return result
+
+    @app.post("/projects/{ref}/boq/versions/{version_id}/review")
+    def boq_version_review(
+        ref: str, version_id: str, payload: BoqVersionReview
+    ) -> dict[str, Any]:
+        with session_scope() as db:
+            project, _role = _project(db, ref)
+            _require_owner(_role)
+            user = current_user() or {}
+            actor = user.get("display_name") or user.get("username") or ""
+            try:
+                result = boq.review_version(
+                    db,
+                    project,
+                    version_id,
+                    actor=actor,
+                    decision=payload.decision,
+                    note=payload.note,
+                )
+            except boq.BoqConflictError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            audit(
+                db,
+                project.id,
+                "quote.approve" if result["status"] == "approved" else "quote.reject",
+                {
+                    "version_id": result["id"],
+                    "name": result["name"],
+                    "package_id": result["package_id"],
+                    "note": result["review_note"],
+                },
+            )
+            return result
+
+    @app.post("/projects/{ref}/boq/versions/{version_id}/unapprove")
+    def boq_version_unapprove(ref: str, version_id: str) -> dict[str, Any]:
+        with session_scope() as db:
+            project, _role = _project(db, ref)
+            _require_write(_role)
+            try:
+                result = boq.unapprove_version(db, project, version_id)
+            except boq.BoqConflictError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            audit(
+                db,
+                project.id,
+                "quote.unapprove",
+                {
+                    "version_id": result["id"],
+                    "name": result["name"],
+                    "package_id": result["package_id"],
+                },
             )
             return result
 

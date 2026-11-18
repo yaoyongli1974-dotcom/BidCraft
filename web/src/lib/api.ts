@@ -59,6 +59,7 @@ import type {
   PluginTestResult,
   PricePolicy,
   PriceCurrency,
+  QuoteVersionStatus,
   Project,
   ProjectDetail,
   QuotaFillResult,
@@ -1619,6 +1620,24 @@ export const deleteBoq = (ref: string, packageId?: string | null) =>
  * 归一化一个报价版本。列表接口不含 prices，详情接口才带回单价快照，
  * 因此 prices 缺失时保持 undefined 而不是空对象（便于区分「没有单价」与「未返回」）。
  */
+const QUOTE_VERSION_STATUSES: QuoteVersionStatus[] = [
+  'draft',
+  'submitted',
+  'approved',
+  'rejected',
+]
+
+function normalizeQuoteVersionStatus(value: unknown): QuoteVersionStatus {
+  const status = asText(value).trim()
+  return QUOTE_VERSION_STATUSES.includes(status as QuoteVersionStatus)
+    ? (status as QuoteVersionStatus)
+    : 'draft'
+}
+
+function isoOrNull(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value : null
+}
+
 export function normalizeBoqQuoteVersion(value: unknown): BoqQuoteVersion | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const source = value as Record<string, unknown>
@@ -1639,10 +1658,68 @@ export function normalizeBoqQuoteVersion(value: unknown): BoqQuoteVersion | null
     note: asText(source.note),
     package_id: packageId || null,
     summary: normalizeBoqSummary(source.summary),
-    created_at: typeof source.created_at === 'string' ? source.created_at : null,
+    created_at: isoOrNull(source.created_at),
     price_count: boqNumber(source.price_count),
+    status: normalizeQuoteVersionStatus(source.status),
+    submit_note: asText(source.submit_note).slice(0, 200),
+    submitted_by: asText(source.submitted_by).slice(0, 80),
+    submitted_at: isoOrNull(source.submitted_at),
+    review_note: asText(source.review_note).slice(0, 200),
+    reviewed_by: asText(source.reviewed_by).slice(0, 80),
+    reviewed_at: isoOrNull(source.reviewed_at),
     ...(prices ? { prices } : {}),
   }
+}
+
+/** 版本状态流转（提交/审批/撤销）统一返回最新版本 payload。 */
+async function postQuoteVersionAction(
+  ref: string,
+  versionId: string,
+  action: 'submit' | 'review' | 'unapprove',
+  body?: Record<string, unknown>,
+): Promise<BoqQuoteVersion> {
+  const data = await request<unknown>(
+    `/projects/${encodeURIComponent(ref)}/boq/versions/${encodeURIComponent(versionId)}/${action}`,
+    {
+      method: 'POST',
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    },
+  )
+  const version = normalizeBoqQuoteVersion(data)
+  if (!version) throw new ApiError(0, null, '报价版本返回了无法识别的数据。')
+  return version
+}
+
+/** 提交版本审批；只有草稿或已驳回的版本可以提交。 */
+export async function submitBoqVersion(
+  ref: string,
+  versionId: string,
+  note?: string,
+): Promise<BoqQuoteVersion> {
+  const trimmed = (note || '').trim().slice(0, 200)
+  return postQuoteVersionAction(ref, versionId, 'submit', trimmed ? { note: trimmed } : undefined)
+}
+
+/** 审批版本：定稿（approve）或驳回（reject），需要项目负责人或超级管理员。 */
+export async function reviewBoqVersion(
+  ref: string,
+  versionId: string,
+  decision: 'approve' | 'reject',
+  note?: string,
+): Promise<BoqQuoteVersion> {
+  const trimmed = (note || '').trim().slice(0, 200)
+  return postQuoteVersionAction(ref, versionId, 'review', {
+    decision,
+    ...(trimmed ? { note: trimmed } : {}),
+  })
+}
+
+/** 撤销定稿，把版本退回草稿。 */
+export async function unapproveBoqVersion(
+  ref: string,
+  versionId: string,
+): Promise<BoqQuoteVersion> {
+  return postQuoteVersionAction(ref, versionId, 'unapprove')
 }
 
 /** 列出项目（或指定包件）的报价版本，最新的在前。 */
@@ -1686,6 +1763,13 @@ export async function createBoqVersion(
       summary: normalizeBoqSummary(null),
       created_at: null,
       price_count: 0,
+      status: 'draft',
+      submit_note: '',
+      submitted_by: '',
+      submitted_at: null,
+      review_note: '',
+      reviewed_by: '',
+      reviewed_at: null,
     }
   )
 }

@@ -21,7 +21,10 @@ import {
   normalizeTerm,
   reindexKnowledgeBase,
   restoreBoqVersion,
+  reviewBoqVersion,
   roundTo,
+  submitBoqVersion,
+  unapproveBoqVersion,
   uploadForm,
 } from './api'
 
@@ -316,6 +319,65 @@ describe('boq quote versions', () => {
     expect(init.method).toBe('POST')
     expect(payload.rows[0].price?.unit_price).toBe(9)
     expect(payload.summary.total_with_tax).toBe(98.1)
+  })
+
+  it('defaults an unknown status to draft and clamps audit text', () => {
+    const version = normalizeBoqQuoteVersion({
+      id: 'v-6',
+      status: 'bogus',
+      submit_note: 'x'.repeat(240),
+      submitted_by: 'y'.repeat(100),
+      submitted_at: '2026-11-18T09:00:00+08:00',
+      review_note: 'z'.repeat(240),
+      reviewed_by: 'w'.repeat(100),
+      reviewed_at: 42,
+    })
+    expect(version?.status).toBe('draft')
+    expect(version?.submit_note).toHaveLength(200)
+    expect(version?.submitted_by).toHaveLength(80)
+    expect(version?.review_note).toHaveLength(200)
+    expect(version?.reviewed_by).toHaveLength(80)
+    expect(version?.submitted_at).toBe('2026-11-18T09:00:00+08:00')
+    expect(version?.reviewed_at).toBeNull()
+    expect(normalizeBoqQuoteVersion({ id: 'v-7', status: 'approved' })?.status).toBe(
+      'approved',
+    )
+  })
+
+  it('posts submit, review and unapprove actions with the documented bodies', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({ id: 'v-8', name: '版本 8', status: 'submitted' }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const submitted = await submitBoqVersion('proj-1', 'v/8', ' 请审批 ')
+    const submitInit = fetchMock.mock.calls[0][1] as RequestInit
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      '/projects/proj-1/boq/versions/v%2F8/submit',
+    )
+    expect(submitInit.method).toBe('POST')
+    expect(JSON.parse(String(submitInit.body))).toEqual({ note: '请审批' })
+    expect(submitted.status).toBe('submitted')
+
+    const reviewed = await reviewBoqVersion('proj-1', 'v/8', 'approve', ' 同意 ')
+    const reviewInit = fetchMock.mock.calls[1][1] as RequestInit
+    expect(fetchMock.mock.calls[1][0]).toBe(
+      '/projects/proj-1/boq/versions/v%2F8/review',
+    )
+    expect(reviewInit.method).toBe('POST')
+    expect(JSON.parse(String(reviewInit.body))).toEqual({
+      decision: 'approve',
+      note: '同意',
+    })
+    expect(reviewed.id).toBe('v-8')
+
+    await unapproveBoqVersion('proj-1', 'v/8')
+    const unapproveInit = fetchMock.mock.calls[2][1] as RequestInit
+    expect(fetchMock.mock.calls[2][0]).toBe(
+      '/projects/proj-1/boq/versions/v%2F8/unapprove',
+    )
+    expect(unapproveInit.method).toBe('POST')
+    expect(unapproveInit.body).toBeUndefined()
   })
 
   it('normalizes the delete response', async () => {
