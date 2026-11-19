@@ -274,6 +274,7 @@ export BIDCRAFT_WECHAT_PAY_MOCK=1         # 本地演示支付
 | 知识库 | ✅ | 本地目录索引或通用/Dify/RAGFlow API；可选 embedding 向量索引与混合重排（无模型自动回退关键词）；章节检索注入；台账事实优先 |
 | 注册与计费 | ✅ | 用户名/微信扫码注册、独立项目空间、按章扣点、兑换码、微信支付 Native（可 mock） |
 | 桌面客户端（C/S） | ✅ | `bidcraft desktop --server URL` 启动 **Qt 原生外壳**（PySide6 + QtWebEngine）：菜单栏/工具栏/状态栏、原生导航与快捷键、应用图标与窗口标题、系统托盘与最小化到托盘、单实例激活、窗口几何与服务器记忆、原生文件对话框上传与下载保存、托盘通知、在线状态轮询与检查更新；界面内请求经 **JS 桥直连服务端 REST API**（Cookie 由客户端持有），断网时回放**只读离线缓存**并显示离线横幅；Qt 不可用时逐级回退 pywebview 内嵌窗口 → 浏览器网关（仅绑定 127.0.0.1）；另有 PyInstaller 打包脚本与 GitHub Actions 三平台构建（Windows `.exe`、macOS `.app`、Linux `.deb`/`.rpm`）；`bidcraft client` 命令行完成登录/项目/上传/下载；见 `docs/desktop.md` |
+| 解析深度（MinerU） | ✅ 可选 | 复杂版面/图片型 PDF 可接 MinerU 解析服务：优先返回结构化 Markdown 与表格，自动映射页/表；服务不可达或超时自动回退内置 pypdf/pdfplumber+OCR，不阻塞上传；`bidcraft mineru-check --pdf 样本.pdf` 实测 |
 | 文本质量检查 | ✅ | 四级核对之外自动扫描：错别字/重复字/重复标点（`TXT-###`）、跨章节关键事实不一致（项目名称/工期/质保期/总价/投标人/项目负责人/质量标准，`CON-###`）、段落近似重复（`DUP-###`，相似度≥90%）；全部离线可解释，随核对写入问题台账 |
 | 素材可信度分级 | ✅ | 规则包新增 `material_policy`：按素材类型声明必填生命周期字段（资质：证书号/有效期；业绩：合同号/业主/金额/验收；人员：证书号/社保月份/锁定；标准：官方出处）；检索注入时缺字段或已过期的素材降级为「题录」只给标题/出处，不注入正文，防止模型复述过期证书与无据业绩 |
 | 人员与素材元数据 | ✅ | 人员台账（姓名/职务/注册专业/证书号/社保月数/在建锁定）；管理端知识库逐文档登记素材类型与生命周期字段，检索时缺字段/过期素材降级为题录 |
@@ -404,7 +405,7 @@ DOCX 图注编号与版心宽度、批量生成默认风格尺寸；`tests/test_
 覆盖项目复制的全量深拷贝、外键重映射、可选清单/配图、排除项与失败清理；`tests/test_project_templates.py`
 覆盖模板标记权限、模板列表与从模板创建（含非成员实例化与失败清理）；
 `tests/test_vip.py`、`tests/test_subaccounts.py`、`tests/test_jobqueue.py` 覆盖 VIP 授权/续期/折扣、
-子账号共享计费与权限隔离、优先级队列调度、审批条件分支；`tests/test_user_docs.py` 覆盖个人文档上传/索引、列表/下载/删除、跨用户隔离与检索防泄漏、审计；`tests/test_client.py`、`tests/test_desktop.py` 覆盖客户端登录/Cookie 复用、文档与原件上传、下载、网关反代与 Cookie 透传、静态/SPA 回退、令牌门禁与本地文件桥；`tests/test_offline_cache.py`、`tests/test_qtshell.py` 覆盖只读离线缓存回放与淘汰、Qt 外壳版本比较/桥接注入脚本/导航映射/设置键、Qt 缺失回退与原生页面辅助函数；`tests/test_qualifications.py` 覆盖资质台账 CRUD 与归属隔离、证据上传/下载/删除与越界防护、按开标日的自查判定与汇总、审计；`tests/test_personnel.py` 覆盖人员台账 CRUD 与归属隔离、字段校验、在建锁定、审计与知识库文档元数据接口；`tests/test_textqa.py` 覆盖错别字/重复标点规则、截止/截至语境、跨章节一致性、段落重复与核对集成（当前全量 **637 passed**）。
+子账号共享计费与权限隔离、优先级队列调度、审批条件分支；`tests/test_user_docs.py` 覆盖个人文档上传/索引、列表/下载/删除、跨用户隔离与检索防泄漏、审计；`tests/test_client.py`、`tests/test_desktop.py` 覆盖客户端登录/Cookie 复用、文档与原件上传、下载、网关反代与 Cookie 透传、静态/SPA 回退、令牌门禁与本地文件桥；`tests/test_offline_cache.py`、`tests/test_qtshell.py` 覆盖只读离线缓存回放与淘汰、Qt 外壳版本比较/桥接注入脚本/导航映射/设置键、Qt 缺失回退与原生页面辅助函数；`tests/test_qualifications.py` 覆盖资质台账 CRUD 与归属隔离、证据上传/下载/删除与越界防护、按开标日的自查判定与汇总、审计；`tests/test_personnel.py` 覆盖人员台账 CRUD 与归属隔离、字段校验、在建锁定、审计与知识库文档元数据接口；`tests/test_textqa.py` 覆盖错别字/重复标点规则、截止/截至语境、跨章节一致性、段落重复与核对集成；`tests/test_mineru.py` 覆盖 MinerU 响应映射、表格还原、异常回退与内置链优先级（当前全量 **645 passed**）。
 
 前端验证：`cd web && npm run build`（TypeScript 编译 + Vite 产物输出到
 `bidcraft/web_dist`），随后 `bidcraft serve --open` 做浏览器全流程验收。

@@ -121,3 +121,31 @@ docker exec bidcraft python -c "import bidcraft;print(bidcraft.__version__)"   #
 ```
 
 升级后 `/opt/bidcraft/data` 不变，数据库增量列由启动时迁移自动补齐；建议先备份该目录。
+
+
+## 9 可选：启用 MinerU 解析
+
+复杂版面或纯图片型招标文件，交给 MinerU 比页图 OCR 质量高一档；BidCraft 只做 HTTP 适配，不内置该模型。
+
+```bash
+# 任选一种方式部署 MinerU（示例，镜像与命令参数以其官方文档为准）
+docker run -d --name mineru -p 8001:8000 opendatalab/mineru:latest \
+  mineru-api --host 0.0.0.0 --port 8000
+```
+
+在 BidCraft 侧配置（compose 的 `environment` 或 shell）：
+
+```yaml
+BIDCRAFT_MINERU_URL: http://127.0.0.1:8001
+BIDCRAFT_MINERU_TIMEOUT: "180"   # 秒，图片型大文件适当加大
+BIDCRAFT_MINERU: "1"             # 置 0 可临时停用
+```
+
+验证：
+
+```bash
+bidcraft mineru-check
+bidcraft mineru-check --pdf /path/to/样本.pdf   # 实测解析页数/表格/耗时
+```
+
+行为约定：配置了 MinerU 就优先用它；连接失败、超时、HTTP 非 2xx、返回空 Markdown 都会自动回退到内置 `pypdf/pdfplumber + OCR`，并在文档 `meta.mineru_error` 留下原因；页号由 Markdown 估算，引用定位精度略低于原生分页。

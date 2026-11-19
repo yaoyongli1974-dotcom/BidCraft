@@ -1264,3 +1264,32 @@ def data_audit(
     if output is not None:
         write_json(result, output)
         console.print(f"[green]报告已写入 {output}[/green]")
+
+
+@app.command("mineru-check")
+def mineru_check(
+    url: str = typer.Option("", "--url", help="临时覆盖 BIDCRAFT_MINERU_URL"),
+    pdf: str = typer.Option("", "--pdf", help="可选：用一份 PDF 实跑一次解析"),
+) -> None:
+    """检查 MinerU 解析服务是否可用（配置缺失时提示回退内置解析链）。"""
+    from .parsing import mineru
+
+    if url.strip():
+        settings.mineru_url = url.strip()
+    if not mineru.available():
+        console.print("[yellow]未配置 MinerU，PDF 使用内置解析（pypdf/pdfplumber + OCR）。[/yellow]")
+        console.print("[dim]设置 BIDCRAFT_MINERU_URL=http://<host>:<port> 后重新运行。[/dim]")
+        raise typer.Exit(2)
+    console.print(f"MinerU 地址：{settings.mineru_url}")
+    if not pdf:
+        console.print("[green]已配置。[/green] 用 --pdf 指定一份 PDF 可实测解析质量。")
+        return
+    try:
+        document = mineru.parse_pdf(pdf)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]解析失败：{exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(
+        f"[green]解析成功[/green] 页数≈{document.page_count} 表格 {len(document.tables)} "
+        f"字符 {len(document.text)} 耗时 {document.meta.get('mineru_elapsed')}s"
+    )

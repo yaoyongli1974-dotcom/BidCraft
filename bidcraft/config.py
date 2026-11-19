@@ -83,6 +83,11 @@ class Settings:
         default_factory=lambda: int(os.getenv("BIDCRAFT_MAX_JOBS", "2"))
     )
     ocr_enabled: bool = field(default_factory=lambda: _bool("BIDCRAFT_OCR", True))
+    mineru_url: str = field(default_factory=lambda: os.getenv("BIDCRAFT_MINERU_URL", "").strip())
+    mineru_enabled: bool = field(default_factory=lambda: _bool("BIDCRAFT_MINERU", True))
+    mineru_timeout: float = field(
+        default_factory=lambda: float(os.getenv("BIDCRAFT_MINERU_TIMEOUT", "180"))
+    )
     ocr_languages: str = field(
         default_factory=lambda: os.getenv("BIDCRAFT_OCR_LANGS", "chi_sim+eng")
     )

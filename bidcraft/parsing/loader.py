@@ -75,9 +75,23 @@ def _read_text_file(path: Path) -> ParsedDocument:
 
 
 def _read_pdf(path: Path) -> ParsedDocument:
+    from . import mineru
+
+    if mineru.available():
+        try:
+            return mineru.parse_pdf(path)
+        except Exception as exc:  # noqa: BLE001 - MinerU must never block parsing
+            mineru_failure = f"{type(exc).__name__}: {exc}"
+        else:  # pragma: no cover - defensive
+            mineru_failure = ""
+    else:
+        mineru_failure = ""
+
     pages: list[str] = []
     tables: list[Table] = []
     meta: dict[str, Any] = {"source": path.name}
+    if mineru_failure:
+        meta["mineru_error"] = mineru_failure
     try:
         from pypdf import PdfReader
 
