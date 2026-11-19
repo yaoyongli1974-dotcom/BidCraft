@@ -336,6 +336,22 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
         def _after_login(self) -> None:
             self._show_native("projects")
 
+        def _guarded(self, action: Any) -> Any:
+            """未登录时拦截操作：提示并回到登录页。"""
+
+            def handler(*_args: Any) -> None:
+                try:
+                    self.bridge.client.me()
+                except ClientError:
+                    QMessageBox.information(
+                        self, "需要登录", "请先登录后再使用该功能。"
+                    )
+                    self._show_native("login")
+                    return
+                action()
+
+            return handler
+
         def _show_native(self, name: str) -> None:
             pages = {
                 "login": self.login_page,
@@ -407,9 +423,9 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
         def _build_actions(self) -> None:
             self.act_upload = QAction("上传文档到个人知识库", self)
             self.act_upload.setShortcut(QKeySequence("Ctrl+O"))
-            self.act_upload.triggered.connect(lambda: self.upload("doc"))
+            self.act_upload.triggered.connect(lambda: self._guarded(lambda: self.upload("doc")))
             self.act_source = QAction("上传招标原件到项目…", self)
-            self.act_source.triggered.connect(self.upload_source)
+            self.act_source.triggered.connect(self._guarded(self.upload_source))
             self.act_quit = QAction("退出", self)
             self.act_quit.setShortcut(QKeySequence("Ctrl+Q"))
             self.act_quit.triggered.connect(QApplication.instance().quit)
@@ -505,11 +521,11 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
                 if path in ("/", "/my-docs", "/billing"):
                     target = {"/": "projects", "/my-docs": "docs", "/billing": "billing"}[path]
                     act.triggered.connect(
-                        lambda _=False, name=target: self._show_native(name)
+                        self._guarded(lambda name=target: self._show_native(name))
                     )
                 else:
                     act.triggered.connect(
-                        lambda _=False, p=path: self._show_web(p)
+                        self._guarded(lambda p=path: self._show_web(p))
                     )
                 bar.addAction(act)
             bar.addSeparator()

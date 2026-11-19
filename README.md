@@ -362,7 +362,7 @@ DOCX 图注编号与版心宽度、批量生成默认风格尺寸；`tests/test_
 覆盖项目复制的全量深拷贝、外键重映射、可选清单/配图、排除项与失败清理；`tests/test_project_templates.py`
 覆盖模板标记权限、模板列表与从模板创建（含非成员实例化与失败清理）；
 `tests/test_vip.py`、`tests/test_subaccounts.py`、`tests/test_jobqueue.py` 覆盖 VIP 授权/续期/折扣、
-子账号共享计费与权限隔离、优先级队列调度、审批条件分支；`tests/test_user_docs.py` 覆盖个人文档上传/索引、列表/下载/删除、跨用户隔离与检索防泄漏、审计；`tests/test_client.py`、`tests/test_desktop.py` 覆盖客户端登录/Cookie 复用、文档与原件上传、下载、网关反代与 Cookie 透传、静态/SPA 回退、令牌门禁与本地文件桥；`tests/test_offline_cache.py`、`tests/test_qtshell.py` 覆盖只读离线缓存回放与淘汰、Qt 外壳版本比较/桥接注入脚本/导航映射/设置键、Qt 缺失回退与原生页面辅助函数（当前全量 **567 passed**）。
+子账号共享计费与权限隔离、优先级队列调度、审批条件分支；`tests/test_user_docs.py` 覆盖个人文档上传/索引、列表/下载/删除、跨用户隔离与检索防泄漏、审计；`tests/test_client.py`、`tests/test_desktop.py` 覆盖客户端登录/Cookie 复用、文档与原件上传、下载、网关反代与 Cookie 透传、静态/SPA 回退、令牌门禁与本地文件桥；`tests/test_offline_cache.py`、`tests/test_qtshell.py` 覆盖只读离线缓存回放与淘汰、Qt 外壳版本比较/桥接注入脚本/导航映射/设置键、Qt 缺失回退与原生页面辅助函数（当前全量 **568 passed**）。
 
 前端验证：`cd web && npm run build`（TypeScript 编译 + Vite 产物输出到
 `bidcraft/web_dist`），随后 `bidcraft serve --open` 做浏览器全流程验收。

@@ -13,6 +13,8 @@ try:  # pragma: no cover - 仅在装有 PySide6 的桌面环境执行
     from PySide6.QtCore import QObject, Qt, QThreadPool, Signal
     from PySide6.QtWidgets import (
         QAbstractItemView,
+        QDialog,
+        QDialogButtonBox,
         QFormLayout,
         QHBoxLayout,
         QHeaderView,
@@ -83,6 +85,70 @@ if QT_AVAILABLE:
             self.done.connect(on_done)
             self.pool.start(worker)
 
+    class RegisterDialog(QDialog):
+        """原生注册对话框：用户名 / 显示名 / 密码 / 确认密码。"""
+
+        def __init__(self, client: BidCraftClient, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self.client = client
+            self.async_ = Async(self)
+            self.setWindowTitle("注册 BidCraft 账号")
+            self.setMinimumWidth(380)
+
+            layout = QVBoxLayout(self)
+            form = QFormLayout()
+            self.username = QLineEdit()
+            self.username.setPlaceholderText("3–40 位字母、数字、下划线或短横线")
+            self.display_name = QLineEdit()
+            self.display_name.setPlaceholderText("可留空")
+            self.password = QLineEdit()
+            self.password.setEchoMode(QLineEdit.EchoMode.Password)
+            self.password.setPlaceholderText("至少 8 位")
+            self.confirm = QLineEdit()
+            self.confirm.setEchoMode(QLineEdit.EchoMode.Password)
+            form.addRow("用户名", self.username)
+            form.addRow("显示名", self.display_name)
+            form.addRow("密码", self.password)
+            form.addRow("确认密码", self.confirm)
+            layout.addLayout(form)
+            self.message = QLabel("")
+            self.message.setWordWrap(True)
+            layout.addWidget(self.message)
+            buttons = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+            )
+            buttons.button(QDialogButtonBox.StandardButton.Ok).setText("注册")
+            buttons.accepted.connect(self.submit)
+            buttons.rejected.connect(self.reject)
+            layout.addWidget(buttons)
+
+        def submit(self) -> None:
+            username = self.username.text().strip()
+            password = self.password.text()
+            if len(username) < 3:
+                self.message.setText("用户名至少 3 位。")
+                return
+            if len(password) < 8:
+                self.message.setText("密码至少 8 位。")
+                return
+            if password != self.confirm.text():
+                self.message.setText("两次输入的密码不一致。")
+                return
+            self.message.setText("正在注册…")
+
+            def done(_result: Any, error: Exception | None) -> None:
+                if error is not None:
+                    self.message.setText(str(error))
+                    return
+                self.accept()
+
+            self.async_.run(
+                lambda: self.client.register(
+                    username, password, self.display_name.text().strip()
+                ),
+                done,
+            )
+
     class LoginPage(QWidget):
         def __init__(self, client: BidCraftClient, on_success: Callable[[], None], parent: QWidget | None = None) -> None:
             super().__init__(parent)
@@ -111,16 +177,27 @@ if QT_AVAILABLE:
             form.addRow("密　码", self.password)
             layout.addLayout(form)
 
+            row = QHBoxLayout()
             self.button = QPushButton("登录")
             self.button.setDefault(True)
             self.button.clicked.connect(self.submit)
             self.password.returnPressed.connect(self.submit)
-            layout.addWidget(self.button)
+            row.addWidget(self.button, 1)
+            self.register_button = QPushButton("注册新账号")
+            self.register_button.clicked.connect(self.open_register)
+            row.addWidget(self.register_button)
+            layout.addLayout(row)
 
             self.message = QLabel("")
             self.message.setWordWrap(True)
             layout.addWidget(self.message)
             layout.addStretch(1)
+
+        def open_register(self) -> None:
+            dialog = RegisterDialog(self.client, self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                self.message.setText("注册成功，已自动登录。")
+                self.on_success()
 
         def submit(self) -> None:
             username = self.username.text().strip()

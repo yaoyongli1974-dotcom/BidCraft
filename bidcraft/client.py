@@ -239,6 +239,27 @@ class BidCraftClient:
         self._save_config()
         return user
 
+    def register(
+        self, username: str, password: str, display_name: str = ""
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"username": username, "password": password}
+        if display_name:
+            payload["display_name"] = display_name
+        response = self._http.post(  # 注册成功即建立会话
+            self._url("/auth/register"),
+            json=payload,
+        )
+        self._persist_cookies()
+        if response.status_code >= 400:
+            self._fail(response, "注册")
+        body = response.json() if response.content else {}
+        user = body.get("user") if isinstance(body, dict) else None
+        if not isinstance(user, dict):
+            user = {}
+        self._username = str(user.get("username") or username)
+        self._save_config()
+        return user
+
     def me(self) -> dict[str, Any]:
         response = self._request("GET", "/auth/me")
         if response.status_code == 401:

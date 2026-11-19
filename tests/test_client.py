@@ -180,3 +180,15 @@ def test_desktop_requires_server(tmp_path, monkeypatch):
     result = CliRunner().invoke(app, ["desktop", "--browser"])
     assert result.exit_code == 2
     assert "未指定服务器" in result.output
+
+
+def test_register_creates_session(live_server, tmp_path):
+    home = tmp_path / "client-home-reg"
+    client = _client(live_server, home)
+    try:
+        user = client.register("reg-user", "Passw0rd!123", "注册测试")
+        assert user["username"] == "reg-user"
+        assert client.me()["username"] == "reg-user"
+        assert client.projects() == []
+    finally:
+        client.close()
