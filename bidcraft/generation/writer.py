@@ -237,6 +237,34 @@ class GenerationReport:
     usage: dict[str, int] = field(default_factory=dict)
 
 
+def continuity_digest(chapters: list[tuple[str, str]], *, recent: int = 3, cap: int = 4000) -> str:
+    """Build a compact cross-chapter digest for long documents.
+
+    Long-range section keeps every heading with a one-line gist so the model
+    knows the whole structure; the recent tail keeps fuller excerpts so the next
+    chapter can pick up terminology, numbers and commitments without repeating
+    them. The result is capped so it cannot crowd out the outline.
+    """
+    if not chapters:
+        return ""
+    long_range = []
+    for heading, body in chapters:
+        gist = " ".join(str(body or "").split())[:60]
+        long_range.append(f"- {heading}：{gist}" if gist else f"- {heading}")
+    detail = []
+    for heading, body in chapters[-recent:]:
+        text = " ".join(str(body or "").split())[:300]
+        if text:
+            detail.append(f"【{heading}】{text}")
+    parts = []
+    if detail:
+        parts.append("近期章节（承接术语、数字与承诺，勿重复）：\n" + "\n".join(detail))
+    if long_range:
+        parts.append("全书已写章节索引：\n" + "\n".join(long_range))
+    text = "\n\n".join(parts)
+    return text[:cap]
+
+
 def write_chapter(
     client: ModelClient,
     ledger: FactLedger,
@@ -329,16 +357,16 @@ def generate_document(
             facts_text = f"{facts_text}\n{extra}" if facts_text else extra
     report = GenerationReport()
     previous_texts: list[str] = []
-    summaries: list[str] = []
+    chapters: list[tuple[str, str]] = []
     for index, node in enumerate(nodes, start=1):
         if only_node and node["id"] != only_node:
             if node.get("body"):
                 previous_texts.append(node["body"])
-                summaries.append(f"{node['heading']}：{node['body'][:120]}")
+                chapters.append((node["heading"], node["body"]))
             continue
         if node.get("body") and not only_node and not force:
             previous_texts.append(node["body"])
-            summaries.append(f"{node['heading']}：{node['body'][:120]}")
+            chapters.append((node["heading"], node["body"]))
             continue
         chapter_words = 0
         chapter_source = ""
@@ -367,7 +395,7 @@ def generate_document(
                 package,
                 node,
                 nodes,
-                "\n".join(summaries[-8:]),
+                continuity_digest(chapters),
                 stream=stream,
                 on_delta=on_delta,
                 knowledge_text=knowledge_text,
@@ -389,7 +417,7 @@ def generate_document(
                 outline_node.status = "fallback" if source == "fallback" else "drafted"
             db.flush()
             previous_texts.append(body)
-            summaries.append(f"{node['heading']}：{body[:120]}")
+            chapters.append((node["heading"], body))
             report.written.append(node["heading"])
             if source == "fallback":
                 report.fallback.append(node["heading"])

@@ -1319,3 +1319,20 @@ def mineru_check(
         f"[green]解析成功[/green] 页数≈{document.page_count} 表格 {len(document.tables)} "
         f"字符 {len(document.text)} 耗时 {document.meta.get('mineru_elapsed')}s"
     )
+
+
+@app.command("backup-verify")
+def backup_verify(
+    path: str = typer.Argument(..., help="备份文件（SQLite .db）"),
+) -> None:
+    """校验备份可恢复：复制到临时目录，跑 integrity_check 并统计表行数。"""
+    from .compliance import ComplianceError, verify_backup
+
+    try:
+        report = verify_backup(path)
+    except ComplianceError as exc:
+        typer.echo(f"[red]{exc}[/red]", err=True)
+        raise typer.Exit(2) from exc
+    typer.echo(
+        f"备份完整：{report['tables']} 张表，{report['rows']} 行数据（{path}）"
+    )

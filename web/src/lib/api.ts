@@ -3865,3 +3865,66 @@ export async function saveProjectScores(
   })
   return normalizeScoreAnalysis(data)
 }
+
+export interface LegalDoc {
+  name: string
+  text: string
+}
+
+export async function getLegalDoc(name: string): Promise<LegalDoc> {
+  const data = await request<{ name?: string; text?: string }>(
+    `/legal/${encodeURIComponent(name)}`,
+  )
+  return { name: name, text: String(data?.text ?? '') }
+}
+
+export interface BillingProfile {
+  title: string
+  tax_no: string
+  email: string
+}
+
+export async function getBillingProfile(): Promise<BillingProfile> {
+  const data = await request<Partial<BillingProfile>>('/account/billing-profile')
+  return {
+    title: String(data?.title ?? ''),
+    tax_no: String(data?.tax_no ?? ''),
+    email: String(data?.email ?? ''),
+  }
+}
+
+export async function saveBillingProfile(input: BillingProfile): Promise<BillingProfile> {
+  return request<BillingProfile>('/account/billing-profile', {
+    method: 'PUT',
+    body: JSON.stringify(input),
+  })
+}
+
+export async function downloadAccountExport(): Promise<void> {
+  const response = await fetch('/account/export', {
+    credentials: 'same-origin',
+    headers: { Accept: 'application/zip' },
+  })
+  if (!response.ok) throw await readError(response)
+  downloadBlob(await response.blob(), 'bidcraft-export.zip')
+}
+
+export async function downloadStatement(start = '', end = ''): Promise<void> {
+  const query = new URLSearchParams()
+  if (start) query.set('start', start)
+  if (end) query.set('end', end)
+  const suffix = query.toString() ? `?${query.toString()}` : ''
+  const response = await fetch(`/billing/statement${suffix}`, {
+    credentials: 'same-origin',
+    headers: { Accept: 'text/csv' },
+  })
+  if (!response.ok) throw await readError(response)
+  downloadBlob(await response.blob(), 'bidcraft-statement.csv')
+}
+
+export async function deleteAccount(password: string, confirm: string): Promise<void> {
+  await request('/account/delete', {
+    method: 'POST',
+    body: JSON.stringify({ password, confirm }),
+  })
+}

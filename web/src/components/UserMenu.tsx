@@ -119,6 +119,15 @@ export function UserMenu() {
               <span>我的文档</span>
             </Link>
             <Link
+              to="/account"
+              className="user-menu-item"
+              role="menuitem"
+              onClick={() => setOpen(false)}
+            >
+              <ShieldCheck size={15} />
+              <span>账号与数据</span>
+            </Link>
+            <Link
               to="/billing"
               className="user-menu-item"
               role="menuitem"

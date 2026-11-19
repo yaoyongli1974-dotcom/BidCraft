@@ -28,15 +28,23 @@ def _set_east_asian(style, font_name: str) -> None:
     fonts.set(qn("w:eastAsia"), font_name)
 
 
-def _setup_styles(document: Document) -> None:
+def _setup_styles(document: Document, template: dict | None = None) -> None:
+    from .templates import normalize
+
+    preset = normalize(template)
     normal = document.styles["Normal"]
-    _set_east_asian(normal, "宋体")
-    normal.font.size = Pt(12)
-    normal.paragraph_format.line_spacing = 1.5
+    _set_east_asian(normal, preset["body_font"])
+    normal.font.size = Pt(preset["body_size"])
+    normal.paragraph_format.line_spacing = preset["line_spacing"]
     normal.paragraph_format.space_after = Pt(6)
-    for name, size in (("Heading 1", 18), ("Heading 2", 15), ("Heading 3", 13)):
+    base = float(preset["body_size"])
+    for name, size in (
+        ("Heading 1", base + 6),
+        ("Heading 2", base + 3),
+        ("Heading 3", base + 1),
+    ):
         style = document.styles[name]
-        _set_east_asian(style, "黑体")
+        _set_east_asian(style, preset["heading_font"])
         style.font.size = Pt(size)
         style.font.bold = True
         style.font.color.rgb = RGBColor(0, 0, 0)
@@ -264,24 +272,30 @@ def export_docx(
     include_toc: bool = True,
     image_resolver: Callable[[str], Path | None] | None = None,
     image_policy: dict | None = None,
+    template: dict | None = None,
 ) -> Path:
+    from .templates import normalize
+
+    preset = normalize(template)
     document = Document()
     figure_state = _figure_state(image_policy)
     section = document.sections[0]
+    top, bottom, left, right = preset["margins"]
     section.page_height = Cm(29.7)
     section.page_width = Cm(21.0)
-    section.top_margin = Cm(2.54)
-    section.bottom_margin = Cm(2.54)
-    section.left_margin = Cm(2.8)
-    section.right_margin = Cm(2.6)
-    _setup_styles(document)
-    _add_page_number_footer(section)
+    section.top_margin = Cm(top)
+    section.bottom_margin = Cm(bottom)
+    section.left_margin = Cm(left)
+    section.right_margin = Cm(right)
+    _setup_styles(document, preset)
+    if preset["page_numbers"]:
+        _add_page_number_footer(section)
     _update_fields_on_open(document)
 
-    if include_cover:
+    if include_cover and preset["cover"]:
         _add_cover(document, ledger)
 
-    if include_toc:
+    if include_toc and preset["toc"]:
         heading = document.add_paragraph()
         heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
         run = heading.add_run("目  录")

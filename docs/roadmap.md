@@ -43,6 +43,9 @@
 | 解析深度（MinerU） | ✅ 可选 | `parsing/mineru.py`、`BIDCRAFT_MINERU_URL`、`bidcraft mineru-check` | 复杂版面/扫描件交给 MinerU，取 Markdown + 表格；失败/超时回退内置链路；页数为估算 |
 | 全局事实设定 | ✅ | `profile.py`、`/projects/{ref}/profile`、`generation/prompts.py`、`textqa.profile_conflicts` | 项目级事实注入生成；核对按锚点比对，不一致报 CON；存 `project.meta["writing_profile"]` |
 | 评分回填与失分复盘 | ✅ | `scoring.py`、`/projects/{ref}/scores`、`web/` | 评分项实际得分回填与得分率/分类聚合/失分 Top20；失分摘要注入生成提示 |
+| 长文一致性续写 | ✅ | `generation/writer.continuity_digest` | 全书章节索引 + 近期摘要注入，跨章承接与去重 |
+| 导出格式模板 | ✅ | `export/templates.py`、`/projects/{ref}/export-template` | 四套预设与项目级记忆；DOCX 字体/字号/行距/页边距/封面目录页码 |
+| 合规与账号 | ✅ | `compliance.py`、`/legal/*`、`/account/export|delete|billing-profile`、`/billing/statement`、`bidcraft backup-verify` | 条款页、数据导出、对账开票、注销、备份校验 |
 | 文本规则与查重 | ✅ | `textqa.py`、`dedup.py`、`/admin/textqa`、`bidcraft dedup` | 自定义错别字词库（存 `AppSetting["textqa"]`，上限 500）；跨文件段落查重报告，只读不联网 |
 | 文本质量检查 | ✅ | `textqa.py`、`pipeline.check_project`、问题台账 | 错别字/重复字/重复标点、跨章节事实一致性、段落近似重复；确定性规则，不依赖模型 |
 | 人员与素材元数据 | ✅ | `personnel.py`、`/my/personnel`、`/admin/kbs/{id}/docs`、`web/` | 人员台账（证书号/社保月数/在建锁定）；知识库逐文档元数据登记与可信度判定，缺字段降级题录 |

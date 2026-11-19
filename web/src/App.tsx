@@ -12,6 +12,8 @@ const ProjectsPage = lazy(() =>
 const LoginPage = lazy(() =>
   import('./pages/LoginPage').then((module) => ({ default: module.LoginPage })),
 )
+const AccountPage = lazy(() => import('./pages/AccountPage'))
+const LegalPage = lazy(() => import('./pages/LegalPage'))
 const RegisterPage = lazy(() =>
   import('./pages/RegisterPage').then((module) => ({ default: module.RegisterPage })),
 )
@@ -71,6 +73,11 @@ export const router = createBrowserRouter([
     errorElement: <RouteErrorPage />,
   },
   {
+    path: '/legal/:name',
+    element: page(<LegalPage />),
+    errorElement: <RouteErrorPage />,
+  },
+  {
     path: '/register',
     element: page(<RegisterPage />),
     errorElement: <RouteErrorPage />,
@@ -101,6 +108,7 @@ export const router = createBrowserRouter([
       { path: 'admin', element: page(<AdminConsole />, <ShellFallback />) },
       { path: 'billing', element: page(<BillingPage />, <ShellFallback />) },
       { path: 'my-docs', element: page(<MyDocsPage />, <ShellFallback />) },
+      { path: 'account', element: page(<AccountPage />, <ShellFallback />) },
       {
         path: 'qualifications',
         element: page(<QualificationsPage />, <ShellFallback />),

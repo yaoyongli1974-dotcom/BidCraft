@@ -31,6 +31,7 @@ from . import (
     auth,
     billing,
     boq,
+    compliance,
     images,
     jobqueue,
     jobs,
@@ -1594,12 +1595,15 @@ def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None
                         raise ValueError("还没有正文，请先生成或编写章节")
                     output_dir = settings.project_dir(project_id) / "output"
                     if fmt == "docx":
+                        from .export import templates as export_templates
+
                         path = export_docx(
                             output_dir / "bid.docx",
                             ledger,
                             nodes,
                             image_resolver=images.url_resolver(project_id),
                             image_policy=images.get_policy(project),
+                            template=export_templates.load(project),
                         )
                     elif fmt == "md":
                         path = export_markdown(output_dir / "bid.md", ledger, nodes)
@@ -5241,6 +5245,111 @@ def create_app():
             return [_issue_payload(row) for row in rows[start : start + capped]]
 
     # -------------------------------------------------------------- export
+    class AccountDelete(BaseModel):
+        password: str
+        confirm: str
+
+    class BillingProfilePayload(BaseModel):
+        title: str = ""
+        tax_no: str = ""
+        email: str = ""
+
+    class ExportTemplateUpdate(BaseModel):
+        id: str
+
+    @app.get("/legal/{name}")
+    def legal_document(name: str) -> dict[str, str]:
+        try:
+            text = compliance.legal_doc(name)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="文档不存在") from exc
+        return {"name": name, "text": text}
+
+    @app.post("/account/delete")
+    def account_delete(payload: AccountDelete) -> dict[str, Any]:
+        with session_scope() as db:
+            user = billing_user(db)
+            if payload.confirm.strip() != compliance.DELETE_CONFIRM:
+                raise HTTPException(status_code=400, detail="请输入「注销」以确认")
+            if not verify_password(payload.password, user.password_hash):
+                raise HTTPException(status_code=400, detail="密码不正确")
+            audit(db, None, "account.delete", {"user_id": user.id, "username": user.username})
+            try:
+                removed = compliance.delete_account(db, user)
+            except compliance.ComplianceError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            db.flush()
+            return {"deleted": True, **removed}
+
+    @app.get("/account/export")
+    def account_export() -> FileResponse:
+        with session_scope() as db:
+            user = billing_user(db)
+            try:
+                path = compliance.export_account(db, user, settings.home)
+            except Exception as exc:  # noqa: BLE001 - 导出失败需可读
+                raise HTTPException(status_code=500, detail=f"导出失败：{exc}") from exc
+            audit(db, None, "account.export", {"user_id": user.id})
+            db.flush()
+            return FileResponse(
+                path,
+                media_type="application/zip",
+                filename=Path(path).name,
+            )
+
+    @app.get("/account/billing-profile")
+    def billing_profile_get() -> dict[str, Any]:
+        with session_scope() as db:
+            user = billing_user(db)
+            return compliance.billing_profile(db, user.id)
+
+    @app.put("/account/billing-profile")
+    def billing_profile_put(payload: BillingProfilePayload) -> dict[str, Any]:
+        with session_scope() as db:
+            user = billing_user(db)
+            data = compliance.save_billing_profile(db, user.id, payload.model_dump())
+            audit(db, None, "account.billing_profile", {})
+            return data
+
+    @app.get("/billing/statement")
+    def billing_statement(start: str = "", end: str = "") -> Response:
+        with session_scope() as db:
+            user = billing_user(db)
+            body = compliance.statement_csv(db, user.id, start=start, end=end)
+        return Response(
+            content=body.encode("utf-8-sig"),
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": 'attachment; filename="bidcraft-statement.csv"'
+            },
+        )
+
+    @app.get("/projects/{ref}/export-templates")
+    def export_templates_list(ref: str) -> dict[str, Any]:
+        from .export import templates as export_templates
+
+        with session_scope() as db:
+            project, _role = _project(db, ref)
+            return {
+                "presets": export_templates.preset_list(),
+                "current": export_templates.load(project),
+            }
+
+    @app.put("/projects/{ref}/export-template")
+    def export_template_set(ref: str, payload: ExportTemplateUpdate) -> dict[str, Any]:
+        from .export import templates as export_templates
+
+        with session_scope() as db:
+            project, role = _project(db, ref)
+            _require_write(role)
+            try:
+                chosen = export_templates.save(project, payload.id)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            audit(db, project.id, "project.export_template", {"id": payload.id})
+            db.flush()
+            return {"current": chosen, "presets": export_templates.preset_list()}
+
     @app.post("/projects/{ref}/export")
     def export(ref: str, payload: ExportRequest) -> FileResponse:
         fmt = payload.format.lower()
@@ -5254,12 +5363,15 @@ def create_app():
             output_dir = settings.project_dir(project.id) / "output"
             audit(db, project.id, "export.run", {"format": fmt})
             if fmt == "docx":
+                from .export import templates as export_templates
+
                 path = export_docx(
                     output_dir / "bid.docx",
                     ledger,
                     nodes,
                     image_resolver=images.url_resolver(project.id),
                     image_policy=images.get_policy(project),
+                    template=export_templates.load(project),
                 )
             elif fmt in {"md", "markdown"}:
                 path = export_markdown(output_dir / "bid.md", ledger, nodes)
