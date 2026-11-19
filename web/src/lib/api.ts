@@ -56,6 +56,9 @@ import type {
   ParseResult,
   PendingApproval,
   Plugin,
+  PreflightItem,
+  PreflightReport,
+  PreflightStatus,
   PluginCatalogEntry,
   WechatConfig,
   WechatConfigInput,
@@ -70,6 +73,11 @@ import type {
   ProjectDuplicateInput,
   ProjectInstantiateInput,
   ProjectTemplate,
+  Qualification,
+  QualificationEvidence,
+  QualificationInput,
+  QualificationKind,
+  QualificationStatus,
   QuotaFillResult,
   QuotaInput,
   QuotaItem,
@@ -537,6 +545,261 @@ export async function deleteUserDoc(id: string): Promise<{ deleted: boolean; id:
 
 export const userDocFileUrl = (id: string) =>
   `/my/docs/${encodeURIComponent(id)}/file`
+
+// ---------------------------------------------------------------- qualifications & preflight
+
+const QUALIFICATION_KIND_OPTIONS: QualificationKind[] = [
+  'license',
+  'safety',
+  'person',
+  'performance',
+  'credit',
+  'other',
+]
+
+function isQualificationKind(value: unknown): value is QualificationKind {
+  return (
+    typeof value === 'string' &&
+    (QUALIFICATION_KIND_OPTIONS as string[]).includes(value)
+  )
+}
+
+function normalizeQualificationKind(value: unknown): QualificationKind {
+  const text = asText(value).trim().toLowerCase()
+  return isQualificationKind(text) ? text : 'other'
+}
+
+function normalizeQualificationStatus(value: unknown): QualificationStatus {
+  const text = asText(value).trim().toLowerCase()
+  return text === 'valid' || text === 'expiring' || text === 'expired' || text === 'none'
+    ? text
+    : 'none'
+}
+
+function normalizePreflightStatus(value: unknown): PreflightStatus {
+  const text = asText(value).trim().toLowerCase()
+  return text === 'ok' || text === 'expiring' || text === 'expired' || text === 'missing'
+    ? text
+    : 'missing'
+}
+
+function asNullableNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.round(value)
+  if (typeof value === 'string' && value.trim() && Number.isFinite(Number(value))) {
+    return Math.round(Number(value))
+  }
+  return null
+}
+
+function normalizeQualificationEvidence(value: unknown): QualificationEvidence | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  const filename = asText(raw.filename).trim()
+  if (!filename) return null
+  return {
+    filename,
+    size: Math.max(0, Math.round(asNumber(raw.size, 0))),
+    mime: asText(raw.mime),
+    uploaded_at: typeof raw.uploaded_at === 'string' ? raw.uploaded_at : null,
+  }
+}
+
+/**
+ * Normalise one qualification payload. Unknown kinds fall back to `other`,
+ * unknown statuses to `none`, and evidence entries without a filename are
+ * dropped so the evidence list never renders an empty download link.
+ */
+export function normalizeQualification(value: unknown): Qualification | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  const id = asText(raw.id).trim()
+  if (!id) return null
+  return {
+    id,
+    kind: normalizeQualificationKind(raw.kind),
+    name: asText(raw.name).trim() || '未命名资质',
+    holder: asText(raw.holder),
+    cert_no: asText(raw.cert_no),
+    issuer: asText(raw.issuer),
+    valid_from: asText(raw.valid_from) || null,
+    valid_to: asText(raw.valid_to) || null,
+    note: asText(raw.note),
+    evidence: asArray<unknown>(raw.evidence, 'evidence')
+      .map(normalizeQualificationEvidence)
+      .filter((item): item is QualificationEvidence => item !== null),
+    status: normalizeQualificationStatus(raw.status),
+    days_left: asNullableNumber(raw.days_left),
+    created_at: typeof raw.created_at === 'string' ? raw.created_at : null,
+    updated_at: typeof raw.updated_at === 'string' ? raw.updated_at : null,
+  }
+}
+
+/** 兼容 `{ qualification: {...} }` 包装；平铺 payload 原样返回。 */
+function unwrapQualification(value: unknown): unknown {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const raw = value as Record<string, unknown>
+    if (raw.qualification) return raw.qualification
+  }
+  return value
+}
+
+function requireQualification(value: unknown): Qualification {
+  const qualification = normalizeQualification(unwrapQualification(value))
+  if (!qualification) {
+    throw new ApiError(500, null, '服务端返回的资质信息无法识别，请刷新后重试。')
+  }
+  return qualification
+}
+
+const qualificationPath = (id: string) =>
+  `/my/qualifications/${encodeURIComponent(id)}`
+
+/** 当前用户的资质台账；kind / status 只在非空时拼接查询参数。 */
+export async function getQualifications(
+  params: { kind?: string; status?: string } = {},
+): Promise<Qualification[]> {
+  const search = new URLSearchParams()
+  const kind = (params.kind || '').trim()
+  const status = (params.status || '').trim()
+  if (kind) search.set('kind', kind)
+  if (status) search.set('status', status)
+  const query = search.toString()
+  const data = await request<unknown>(`/my/qualifications${query ? `?${query}` : ''}`)
+  const list = asArray<unknown>(data, 'qualifications')
+  const items = list.length ? list : asArray<unknown>(data, 'items')
+  return items
+    .map(normalizeQualification)
+    .filter((item): item is Qualification => item !== null)
+}
+
+export async function createQualification(
+  input: QualificationInput,
+): Promise<Qualification> {
+  const data = await request<unknown>('/my/qualifications', jsonBody(input))
+  return requireQualification(data)
+}
+
+export async function updateQualification(
+  id: string,
+  input: Partial<QualificationInput>,
+): Promise<Qualification> {
+  const data = await request<unknown>(qualificationPath(id), {
+    method: 'PATCH',
+    body: JSON.stringify(input),
+  })
+  return requireQualification(data)
+}
+
+export async function deleteQualification(
+  id: string,
+): Promise<{ deleted: boolean; id: string }> {
+  const data = await request<unknown>(qualificationPath(id), { method: 'DELETE' })
+  const raw = data && typeof data === 'object' ? (data as Record<string, unknown>) : {}
+  return { deleted: asBool(raw.deleted), id: asText(raw.id) || id }
+}
+
+/** multipart 上传存证文件；返回更新后的资质 payload。 */
+export async function uploadQualificationEvidence(
+  id: string,
+  file: File,
+  onProgress?: (percent: number) => void,
+): Promise<Qualification> {
+  const form = new FormData()
+  form.append('file', file)
+  const payload = await uploadForm<unknown>(`${qualificationPath(id)}/evidence`, form, {
+    onProgress,
+    networkMessage: '上传证据失败：无法连接本地服务，请确认后端已启动。',
+  })
+  return requireQualification(payload)
+}
+
+/**
+ * 删除一条存证。后端契约若未实现该路由，调用会抛 404/405，界面会提示
+ * “后端暂不支持删除证据”，不影响其他操作。
+ */
+export async function deleteQualificationEvidence(
+  id: string,
+  filename: string,
+): Promise<{ deleted: boolean; id: string; filename: string }> {
+  const data = await request<unknown>(qualificationEvidenceUrl(id, filename), {
+    method: 'DELETE',
+  })
+  if (!data) return { deleted: true, id, filename }
+  const raw = data && typeof data === 'object' ? (data as Record<string, unknown>) : {}
+  return {
+    deleted: asBool(raw.deleted),
+    id: asText(raw.id) || id,
+    filename: asText(raw.filename) || filename,
+  }
+}
+
+export const qualificationEvidenceUrl = (id: string, filename: string) =>
+  `${qualificationPath(id)}/evidence/${encodeURIComponent(filename)}`
+
+function normalizePreflightItem(value: unknown): PreflightItem | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  const key = asText(raw.key).trim()
+  if (!key) return null
+  const kinds = (Array.isArray(raw.kinds) ? raw.kinds : [])
+    .map((kind) => asText(kind).trim().toLowerCase())
+    .filter(isQualificationKind)
+  return {
+    key,
+    label: asText(raw.label).trim() || key,
+    kinds: Array.from(new Set(kinds)),
+    hint: asText(raw.hint),
+    status: normalizePreflightStatus(raw.status),
+    qualification_id: asText(raw.qualification_id) || null,
+    name: asText(raw.name),
+    valid_to: asText(raw.valid_to) || null,
+    evidence_count: Math.max(0, Math.round(asNumber(raw.evidence_count, 0))),
+  }
+}
+
+/** 归一化自查报告；缺少 summary 时按条目状态回算，保证汇总条始终可用。 */
+export function normalizePreflight(
+  value: unknown,
+  fallbackDeadline = '',
+): PreflightReport {
+  const raw = value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+  const items = asArray<unknown>(raw.items, 'items')
+    .map(normalizePreflightItem)
+    .filter((item): item is PreflightItem => item !== null)
+  const summaryRaw =
+    raw.summary && typeof raw.summary === 'object'
+      ? (raw.summary as Record<string, unknown>)
+      : {}
+  const computed = {
+    ok: items.filter((item) => item.status === 'ok').length,
+    warn: items.filter((item) => item.status === 'expiring').length,
+    missing: items.filter(
+      (item) => item.status === 'missing' || item.status === 'expired',
+    ).length,
+  }
+  const ok = Math.max(0, Math.round(asNumber(summaryRaw.ok, computed.ok)))
+  const warn = Math.max(0, Math.round(asNumber(summaryRaw.warn, computed.warn)))
+  const missing = Math.max(0, Math.round(asNumber(summaryRaw.missing, computed.missing)))
+  return {
+    deadline: asText(raw.deadline) || fallbackDeadline,
+    items,
+    summary: {
+      ok,
+      warn,
+      missing,
+      total: Math.max(0, Math.round(asNumber(summaryRaw.total, items.length))),
+    },
+  }
+}
+
+/** 按开标日生成自查清单；deadline 缺省时后端使用今天。 */
+export async function getPreflight(deadline?: string | null): Promise<PreflightReport> {
+  const value = (deadline || '').trim()
+  const data = await request<unknown>(
+    `/my/preflight${value ? `?deadline=${encodeURIComponent(value)}` : ''}`,
+  )
+  return normalizePreflight(data, value)
+}
 
 // ---------------------------------------------------------------- health & packages
 

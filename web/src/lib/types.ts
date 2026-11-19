@@ -1151,6 +1151,87 @@ export interface PricePolicy {
   exchange_rate: number
 }
 
+// ---------------------------------------------------------------- 资质与自查
+
+/** 资质台账的固定类型；未知值在归一化时回退为 `other`。 */
+export type QualificationKind =
+  | 'license'
+  | 'safety'
+  | 'person'
+  | 'performance'
+  | 'credit'
+  | 'other'
+
+export type QualificationStatus = 'valid' | 'expiring' | 'expired' | 'none'
+
+/** 存在资质目录里的官方查询截图或证照扫描件。 */
+export interface QualificationEvidence {
+  filename: string
+  size: number
+  mime: string
+  uploaded_at: string | null
+}
+
+/** 当前用户的一条资质记录（`GET /my/qualifications` 平铺数组的一项）。 */
+export interface Qualification {
+  id: string
+  kind: QualificationKind
+  name: string
+  holder: string
+  cert_no: string
+  issuer: string
+  valid_from: string | null
+  valid_to: string | null
+  note: string
+  evidence: QualificationEvidence[]
+  status: QualificationStatus
+  /** 距到期日的天数；无到期日时为 null。 */
+  days_left: number | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+/** 新建 / 编辑资质时提交的字段；日期使用 YYYY-MM-DD，留空表示不填。 */
+export interface QualificationInput {
+  kind: QualificationKind | string
+  name: string
+  holder?: string
+  cert_no?: string
+  issuer?: string
+  valid_from?: string | null
+  valid_to?: string | null
+  note?: string
+}
+
+export type PreflightStatus = 'ok' | 'expiring' | 'expired' | 'missing'
+
+/** 按开标日生成的一条自查项；`kinds` 为可满足该项的资质类型。 */
+export interface PreflightItem {
+  key: string
+  label: string
+  kinds: QualificationKind[]
+  hint: string
+  status: PreflightStatus
+  qualification_id: string | null
+  name: string
+  valid_to: string | null
+  evidence_count: number
+}
+
+/** 自查清单的汇总；`warn` 统计临期项。 */
+export interface PreflightSummary {
+  ok: number
+  warn: number
+  missing: number
+  total: number
+}
+
+export interface PreflightReport {
+  deadline: string
+  items: PreflightItem[]
+  summary: PreflightSummary
+}
+
 // ---------------------------------------------------------------- 协作与审计
 
 /** `owner` is synthesised by the server from `project.owner_id` and always listed first. */

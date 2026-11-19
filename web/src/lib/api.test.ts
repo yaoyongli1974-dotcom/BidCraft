@@ -12,11 +12,13 @@ import {
   createBillingOrder,
   createBoqVersion,
   createPlugin,
+  createQualification,
   createSubAccount,
   createTerm,
   createUserDoc,
   createVipOrder,
   deleteBoqVersion,
+  deleteQualification,
   deleteSubAccount,
   deleteUserDoc,
   duplicateProject,
@@ -24,8 +26,10 @@ import {
   exportPluginPackage,
   getBoqVersion,
   getPendingApprovals,
+  getPreflight,
   getProject,
   getProjectTemplates,
+  getQualifications,
   getSubAccounts,
   getTerms,
   getUserDocs,
@@ -39,7 +43,9 @@ import {
   normalizeBoqSummary,
   normalizeImagePolicy,
   normalizePlugin,
+  normalizePreflight,
   normalizePricePolicy,
+  normalizeQualification,
   normalizeTerm,
   reindexKnowledgeBase,
   restoreBoqVersion,
@@ -49,8 +55,10 @@ import {
   unapproveBoqVersion,
   updatePlugin,
   updateProject,
+  updateQualification,
   updateSubAccount,
   uploadForm,
+  uploadQualificationEvidence,
   userDocFileUrl,
 } from './api'
 
@@ -1910,6 +1918,257 @@ describe('my docs', () => {
 
   it('builds the download URL for a doc', () => {
     expect(userDocFileUrl('d/1')).toBe('/my/docs/d%2F1/file')
+  })
+})
+
+describe('qualifications & preflight (R32)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const jsonResponse = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+  it('归一化资质：kind/status 白名单、日期 null 与证据过滤', () => {
+    const parsed = normalizeQualification({
+      id: 'q-1',
+      kind: 'unknown-kind',
+      name: '   ',
+      holder: '某公司',
+      cert_no: 'D123',
+      issuer: '省住建厅',
+      valid_from: null,
+      valid_to: '2027-01-05',
+      note: '备注',
+      status: 'weird',
+      days_left: '12',
+      evidence: [
+        {
+          filename: '信用中国.png',
+          size: '2048',
+          mime: 'image/png',
+          uploaded_at: '2026-11-01T08:00:00',
+        },
+        { size: 12, mime: 'image/png' },
+      ],
+      created_at: '2026-11-01T08:00:00',
+      updated_at: null,
+    })
+
+    expect(parsed).toMatchObject({
+      id: 'q-1',
+      kind: 'other',
+      name: '未命名资质',
+      holder: '某公司',
+      cert_no: 'D123',
+      issuer: '省住建厅',
+      valid_from: null,
+      valid_to: '2027-01-05',
+      status: 'none',
+      days_left: 12,
+      updated_at: null,
+    })
+    expect(parsed?.evidence).toEqual([
+      {
+        filename: '信用中国.png',
+        size: 2048,
+        mime: 'image/png',
+        uploaded_at: '2026-11-01T08:00:00',
+      },
+    ])
+    expect(normalizeQualification({ id: '', name: '无 id' })).toBeNull()
+    expect(
+      normalizeQualification({
+        id: 'q-2',
+        kind: 'safety',
+        name: '安全生产许可证',
+        status: 'expiring',
+        days_left: -3,
+      }),
+    ).toMatchObject({ kind: 'safety', status: 'expiring', days_left: -3 })
+  })
+
+  it('getQualifications 拼接 kind/status 查询并归一化平铺数组', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse([
+        {
+          id: 'q-1',
+          kind: 'license',
+          name: '营业执照',
+          status: 'valid',
+          days_left: 200,
+          evidence: [],
+        },
+        { id: '', name: '应被忽略' },
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const list = await getQualifications({ kind: 'license', status: ' valid ' })
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      '/my/qualifications?kind=license&status=valid',
+    )
+    expect(
+      (fetchMock.mock.calls[0][1] as RequestInit | undefined)?.method,
+    ).toBeUndefined()
+    expect(list).toHaveLength(1)
+    expect(list[0]).toMatchObject({
+      id: 'q-1',
+      kind: 'license',
+      name: '营业执照',
+      status: 'valid',
+      days_left: 200,
+    })
+
+    await getQualifications()
+    expect(fetchMock.mock.calls[1][0]).toBe('/my/qualifications')
+  })
+
+  it('create/update/delete 使用正确的方法、路径与 body', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, init?: RequestInit) =>
+      jsonResponse(
+        { id: 'q/1', kind: 'license', name: '营业执照', status: 'valid', evidence: [] },
+        init?.method === 'POST' ? 201 : 200,
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await createQualification({
+      kind: 'license',
+      name: '营业执照',
+      valid_from: '2024-01-01',
+      valid_to: '2028-01-01',
+    })
+    expect(fetchMock.mock.calls[0][0]).toBe('/my/qualifications')
+    const createInit = fetchMock.mock.calls[0][1] as RequestInit
+    expect(createInit.method).toBe('POST')
+    expect(JSON.parse(String(createInit.body))).toMatchObject({
+      kind: 'license',
+      name: '营业执照',
+      valid_from: '2024-01-01',
+      valid_to: '2028-01-01',
+    })
+
+    await updateQualification('q/1', { name: '更新后的名称', valid_to: null })
+    expect(fetchMock.mock.calls[1][0]).toBe('/my/qualifications/q%2F1')
+    const updateInit = fetchMock.mock.calls[1][1] as RequestInit
+    expect(updateInit.method).toBe('PATCH')
+    expect(JSON.parse(String(updateInit.body))).toEqual({
+      name: '更新后的名称',
+      valid_to: null,
+    })
+
+    await deleteQualification('q/1')
+    expect(fetchMock.mock.calls[2][0]).toBe('/my/qualifications/q%2F1')
+    expect((fetchMock.mock.calls[2][1] as RequestInit).method).toBe('DELETE')
+  })
+
+  it('上传证据走 multipart 的 file 字段并读回归一化资质', async () => {
+    FakeXhr.instances = []
+    vi.stubGlobal('XMLHttpRequest', FakeXhr)
+    const file = new File(['png-bytes'], '信用中国截图.png', { type: 'image/png' })
+
+    const pending = uploadQualificationEvidence('q/1', file)
+    const xhr = FakeXhr.instances[0]
+    expect(xhr.method).toBe('POST')
+    expect(xhr.url).toBe('/my/qualifications/q%2F1/evidence')
+    const form = xhr.body as FormData
+    expect(form).toBeInstanceOf(FormData)
+    const sent = form.get('file') as File
+    expect(sent.name).toBe('信用中国截图.png')
+    expect(await sent.text()).toBe('png-bytes')
+
+    xhr.respond(
+      201,
+      JSON.stringify({
+        id: 'q/1',
+        kind: 'credit',
+        name: '信用记录',
+        status: 'valid',
+        evidence: [
+          {
+            filename: '信用中国截图.png',
+            size: 9,
+            mime: 'image/png',
+            uploaded_at: '2026-11-19T09:00:00',
+          },
+        ],
+      }),
+    )
+    await expect(pending).resolves.toMatchObject({
+      id: 'q/1',
+      kind: 'credit',
+      name: '信用记录',
+      evidence: [{ filename: '信用中国截图.png', size: 9 }],
+    })
+  })
+
+  it('preflight 透传 deadline，并回算缺失的 summary', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({
+        deadline: '2026-12-01',
+        items: [
+          {
+            key: 'business_license',
+            label: '营业执照',
+            kinds: ['license', 'not-a-kind'],
+            hint: '需在有效期内',
+            status: 'ok',
+            qualification_id: 'q-1',
+            name: '营业执照',
+            valid_to: '2028-01-01',
+            evidence_count: '2',
+          },
+          {
+            key: 'credit',
+            label: '信用记录',
+            kinds: ['credit'],
+            hint: '开标当日查询',
+            status: 'not-a-status',
+            qualification_id: null,
+            name: '',
+            valid_to: null,
+            evidence_count: 0,
+          },
+        ],
+        summary: { ok: 1, warn: '0', missing: 1, total: 2 },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const report = await getPreflight('2026-12-01')
+    expect(fetchMock.mock.calls[0][0]).toBe('/my/preflight?deadline=2026-12-01')
+    expect(report.items[0]).toMatchObject({
+      key: 'business_license',
+      kinds: ['license'],
+      evidence_count: 2,
+    })
+    expect(report.items[1]).toMatchObject({
+      key: 'credit',
+      status: 'missing',
+      qualification_id: null,
+      valid_to: null,
+    })
+    expect(report.summary).toEqual({ ok: 1, warn: 0, missing: 1, total: 2 })
+
+    await getPreflight()
+    expect(fetchMock.mock.calls[1][0]).toBe('/my/preflight')
+
+    const fallback = normalizePreflight(
+      {
+        items: [
+          { key: 'a', status: 'ok' },
+          { key: 'b', status: 'expiring' },
+          { key: 'c', status: 'expired' },
+        ],
+      },
+      '2026-12-02',
+    )
+    expect(fallback.deadline).toBe('2026-12-02')
+    expect(fallback.summary).toEqual({ ok: 1, warn: 1, missing: 1, total: 3 })
   })
 })
 

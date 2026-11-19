@@ -274,6 +274,7 @@ export BIDCRAFT_WECHAT_PAY_MOCK=1         # 本地演示支付
 | 知识库 | ✅ | 本地目录索引或通用/Dify/RAGFlow API；可选 embedding 向量索引与混合重排（无模型自动回退关键词）；章节检索注入；台账事实优先 |
 | 注册与计费 | ✅ | 用户名/微信扫码注册、独立项目空间、按章扣点、兑换码、微信支付 Native（可 mock） |
 | 桌面客户端（C/S） | ✅ | `bidcraft desktop --server URL` 启动 **Qt 原生外壳**（PySide6 + QtWebEngine）：菜单栏/工具栏/状态栏、原生导航与快捷键、应用图标与窗口标题、系统托盘与最小化到托盘、单实例激活、窗口几何与服务器记忆、原生文件对话框上传与下载保存、托盘通知、在线状态轮询与检查更新；界面内请求经 **JS 桥直连服务端 REST API**（Cookie 由客户端持有），断网时回放**只读离线缓存**并显示离线横幅；Qt 不可用时逐级回退 pywebview 内嵌窗口 → 浏览器网关（仅绑定 127.0.0.1）；另有 PyInstaller 打包脚本与 GitHub Actions 三平台构建（Windows `.exe`、macOS `.app`、Linux `.deb`/`.rpm`）；`bidcraft client` 命令行完成登录/项目/上传/下载；见 `docs/desktop.md` |
+| 资质与投标前自查 | ✅ | 资质/业绩台账（类型、证书号、发证机关、有效期、证据文件）；按开标日生成六项自查清单（营业执照/资质证书/安许/项目负责人/类似业绩/信用记录）并判定 有效/临期/过期/缺失；官方查询截图上传存证与到期预警；审计 `qualification.*` |
 | 我的文档（个人知识库） | ✅ | 普通用户自助上传文件（拖拽选择、≤50MB、格式校验、进度）到服务器个人目录并自动建索引；「我的文档」页管理（列表/状态/下载/删除）；上传即建个人知识库，生成检索只注入本人文档且默认搜索排除个人库防跨用户泄漏；审计 `user_doc.upload/delete` |
 | VIP 会员 | ✅ | 超管授予/续期/清除 VIP（天数），或自助购买 VIP 套餐（月/季/年卡，mock 支付续期不加点）；VIP 按章扣点享折扣（可配 0.1–1）；VIP 后台任务排队优先（priority=0） |
 | 子账号 | ✅ | VIP 主账号自助创建子账号（上限可配），子账号共享主账号点数余额、不可单独充值/兑换/购买 VIP；删除子账号其项目自动移交主账号 |
@@ -400,7 +401,7 @@ DOCX 图注编号与版心宽度、批量生成默认风格尺寸；`tests/test_
 覆盖项目复制的全量深拷贝、外键重映射、可选清单/配图、排除项与失败清理；`tests/test_project_templates.py`
 覆盖模板标记权限、模板列表与从模板创建（含非成员实例化与失败清理）；
 `tests/test_vip.py`、`tests/test_subaccounts.py`、`tests/test_jobqueue.py` 覆盖 VIP 授权/续期/折扣、
-子账号共享计费与权限隔离、优先级队列调度、审批条件分支；`tests/test_user_docs.py` 覆盖个人文档上传/索引、列表/下载/删除、跨用户隔离与检索防泄漏、审计；`tests/test_client.py`、`tests/test_desktop.py` 覆盖客户端登录/Cookie 复用、文档与原件上传、下载、网关反代与 Cookie 透传、静态/SPA 回退、令牌门禁与本地文件桥；`tests/test_offline_cache.py`、`tests/test_qtshell.py` 覆盖只读离线缓存回放与淘汰、Qt 外壳版本比较/桥接注入脚本/导航映射/设置键、Qt 缺失回退与原生页面辅助函数（当前全量 **570 passed**）。
+子账号共享计费与权限隔离、优先级队列调度、审批条件分支；`tests/test_user_docs.py` 覆盖个人文档上传/索引、列表/下载/删除、跨用户隔离与检索防泄漏、审计；`tests/test_client.py`、`tests/test_desktop.py` 覆盖客户端登录/Cookie 复用、文档与原件上传、下载、网关反代与 Cookie 透传、静态/SPA 回退、令牌门禁与本地文件桥；`tests/test_offline_cache.py`、`tests/test_qtshell.py` 覆盖只读离线缓存回放与淘汰、Qt 外壳版本比较/桥接注入脚本/导航映射/设置键、Qt 缺失回退与原生页面辅助函数；`tests/test_qualifications.py` 覆盖资质台账 CRUD 与归属隔离、证据上传/下载/删除与越界防护、按开标日的自查判定与汇总、审计（当前全量 **614 passed**）。
 
 前端验证：`cd web && npm run build`（TypeScript 编译 + Vite 产物输出到
 `bidcraft/web_dist`），随后 `bidcraft serve --open` 做浏览器全流程验收。

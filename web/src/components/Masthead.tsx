@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom'
-import { Cpu, FileText, Loader2, Settings2, ShieldCheck, WifiOff } from 'lucide-react'
+import { BadgeCheck, Cpu, FileText, Loader2, Settings2, ShieldCheck, WifiOff } from 'lucide-react'
 import { useHealth } from '../context/useHealth'
 import { useHelp } from '../context/useHelp'
 import { useAuth } from '../context/useAuth'
@@ -16,6 +16,7 @@ export function Masthead() {
   const onProjects = location.pathname === '/'
   const onAdmin = location.pathname === '/admin'
   const onMyDocs = location.pathname === '/my-docs'
+  const onQualifications = location.pathname === '/qualifications'
 
   const { label, tone, Icon } = (() => {
     if (loading) return { label: '检查本地服务', tone: 'neutral', Icon: Loader2 }
@@ -49,6 +50,16 @@ export function Masthead() {
           >
             <FileText size={13} />
             我的文档
+          </Link>
+          <Link
+            to="/qualifications"
+            className={className(
+              'masthead-link',
+              onQualifications && 'is-active',
+            )}
+          >
+            <BadgeCheck size={13} />
+            资质与自查
           </Link>
           {isSuperAdmin && (onProjects || onAdmin) && (
             <Link

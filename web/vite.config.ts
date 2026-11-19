@@ -9,6 +9,7 @@ const proxy = Object.fromEntries(
   [
     '/health',
     '/packages',
+    '/my',
     '/projects',
     '/jobs',
     '/api',

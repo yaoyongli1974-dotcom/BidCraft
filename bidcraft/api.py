@@ -9,13 +9,14 @@ controls when serving a team.
 import io
 import logging
 import math
+import mimetypes
 import re
 import shutil
 import tempfile
 import threading
 import time
 import zipfile
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote
@@ -37,6 +38,7 @@ from . import (
     model_config,
     plugin_pack,
     plugins,
+    qualifications,
     terms,
     user_docs,
     wechat,
@@ -302,6 +304,28 @@ class TermUpdate(BaseModel):
     target: str | None = None
     note: str | None = None
     enabled: bool | None = None
+
+
+class QualificationCreate(BaseModel):
+    kind: str = "other"
+    name: str = ""
+    holder: str = ""
+    cert_no: str = ""
+    issuer: str = ""
+    valid_from: str | None = None
+    valid_to: str | None = None
+    note: str = ""
+
+
+class QualificationUpdate(BaseModel):
+    kind: str | None = None
+    name: str | None = None
+    holder: str | None = None
+    cert_no: str | None = None
+    issuer: str | None = None
+    valid_from: str | None = None
+    valid_to: str | None = None
+    note: str | None = None
 
 
 class PackageCreate(BaseModel):
@@ -4309,6 +4333,136 @@ def create_app():
             if root not in path.parents or not path.is_file():
                 raise LookupError(f"文件不存在：{row.filename}")
             return FileResponse(path, media_type=row.mime or None, filename=row.filename)
+
+    # ------------------------------------------------------- qualifications
+    @app.get("/my/qualifications")
+    def my_qualifications(kind: str = "", status: str = "") -> list[dict[str, Any]]:
+        with session_scope() as db:
+            user = billing_user(db)
+            try:
+                rows = qualifications.list_qualifications(
+                    db, user, kind=kind, status=status
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return [qualifications.qualification_payload(row) for row in rows]
+
+    @app.get("/my/preflight")
+    def my_preflight(deadline: str = "") -> dict[str, Any]:
+        raw = (deadline or "").strip()
+        due: date | None = None
+        if raw:
+            try:
+                due = date.fromisoformat(raw[:10])
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400, detail="日期格式无效，应为 YYYY-MM-DD"
+                ) from exc
+        with session_scope() as db:
+            user = billing_user(db)
+            return qualifications.preflight(db, user, deadline=due)
+
+    @app.post("/my/qualifications", status_code=201)
+    def create_my_qualification(payload: QualificationCreate) -> dict[str, Any]:
+        with session_scope() as db:
+            user = billing_user(db)
+            try:
+                row = qualifications.create_qualification(
+                    db, user, payload.model_dump()
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            audit(
+                db,
+                None,
+                "qualification.create",
+                {"id": row.id, "kind": row.kind, "name": row.name},
+            )
+            return qualifications.qualification_payload(row)
+
+    @app.patch("/my/qualifications/{qualification_id}")
+    def update_my_qualification(
+        qualification_id: str, payload: QualificationUpdate
+    ) -> dict[str, Any]:
+        with session_scope() as db:
+            user = billing_user(db)
+            try:
+                row = qualifications.update_qualification(
+                    db,
+                    user,
+                    qualification_id,
+                    payload.model_dump(exclude_unset=True),
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            audit(
+                db,
+                None,
+                "qualification.update",
+                {"id": row.id, "keys": sorted(payload.model_fields_set)},
+            )
+            return qualifications.qualification_payload(row)
+
+    @app.delete("/my/qualifications/{qualification_id}")
+    def delete_my_qualification(qualification_id: str) -> dict[str, Any]:
+        with session_scope() as db:
+            user = billing_user(db)
+            row = qualifications.delete_qualification(db, user, qualification_id)
+            audit(
+                db,
+                None,
+                "qualification.delete",
+                {"id": row.id, "name": row.name},
+            )
+            return {"deleted": True, "id": row.id}
+
+    @app.post("/my/qualifications/{qualification_id}/evidence", status_code=201)
+    async def upload_my_qualification_evidence(
+        qualification_id: str, file: UploadFile = File(...)
+    ) -> dict[str, Any]:
+        raw_name = (file.filename or "").strip()
+        content = await file.read(qualifications.MAX_EVIDENCE_BYTES + 1)
+        with session_scope() as db:
+            user = billing_user(db)
+            row = qualifications.get_qualification(db, user, qualification_id)
+            try:
+                entry = qualifications.add_evidence(db, row, raw_name, content)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            audit(
+                db,
+                None,
+                "qualification.evidence",
+                {"id": row.id, "filename": entry["filename"]},
+            )
+            return qualifications.qualification_payload(row)
+
+    @app.get("/my/qualifications/{qualification_id}/evidence/{filename}")
+    def my_qualification_evidence(
+        qualification_id: str, filename: str
+    ) -> FileResponse:
+        with session_scope() as db:
+            user = billing_user(db)
+            row = qualifications.get_qualification(db, user, qualification_id)
+            path = qualifications.evidence_path(db, row, filename)
+            media = mimetypes.guess_type(path.name)[0]
+            return FileResponse(path, media_type=media, filename=path.name)
+
+    @app.delete("/my/qualifications/{qualification_id}/evidence/{filename}")
+    def delete_my_qualification_evidence(
+        qualification_id: str, filename: str
+    ) -> dict[str, Any]:
+        with session_scope() as db:
+            user = billing_user(db)
+            row = qualifications.get_qualification(db, user, qualification_id)
+            name = qualifications.delete_evidence(db, row, filename)
+            audit(
+                db,
+                None,
+                "qualification.evidence",
+                {"id": row.id, "filename": name, "action": "delete"},
+            )
+            return {"deleted": True, "filename": name}
 
     # ------------------------------------------------------------- sources
     @app.get("/projects/{ref}/sources")

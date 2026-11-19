@@ -185,6 +185,33 @@ class BoqQuoteVersion(Base):
     approvals: Mapped[list] = mapped_column(JSON, default=list)
 
 
+class Qualification(Base):
+    """投标资质/业绩台账（owner 私有）。
+
+    证书本身不联网核验；用户在此登记结构化信息，并把官方查询截图/证书扫描件
+    作为证据附件留档。``evidence`` 元素形如
+    ``{filename, path, size, mime, uploaded_at}``，文件落在
+    ``<home>/qualifications/<user_id>/``。
+    """
+
+    __tablename__ = "qualifications"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    # license | safety | person | performance | credit | other
+    kind: Mapped[str] = mapped_column(String(20), default="other")
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    holder: Mapped[str] = mapped_column(String(120), default="")
+    cert_no: Mapped[str] = mapped_column(String(80), default="")
+    issuer: Mapped[str] = mapped_column(String(120), default="")
+    valid_from: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    valid_to: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    note: Mapped[str] = mapped_column(String(500), default="")
+    evidence: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class QuotaItem(Base):
     """Enterprise quota entry (企业定额) maintained by a super administrator.
 
