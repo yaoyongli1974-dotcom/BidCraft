@@ -1,0 +1,71 @@
+# 桌面客户端（C/S 模式）
+
+BidCraft 默认是 B/S 部署：服务器跑 `bidcraft serve`，用户用浏览器访问。
+**桌面客户端**在 B/S 之上增加一个本机进程，用同一套服务端接口提供「客户端」体验：
+
+```
+[桌面客户端 127.0.0.1:8765]  ──反向代理 + Cookie 透传──▶  [BidCraft 服务器 :8000]
+        │
+        └── 本机文件读取（本地文件桥）
+```
+
+它解决的核心问题是：**用户的文件在自己电脑上**。桌面模式可以直接读取本机文件并上传到
+「我的文档」或项目原件，无需先把文件 scp 到服务器目录。
+
+## 启动
+
+```bash
+# 在本机（不是服务器）安装客户端
+uv sync
+
+# 连接远端服务器，启动本地网关并打开窗口
+bidcraft desktop --server https://bid.example.com
+
+# 指定端口 / 不自动打开浏览器（便于脚本或二次封装）
+bidcraft desktop --server http://127.0.0.1:8000 --port 8765 --no-browser
+```
+
+启动后终端会打印本地地址与**客户端令牌**；窗口内即是完整的 BidCraft 界面，登录状态、
+Cookie、SSE 进度全部由网关透明转发。
+
+## 本地文件桥
+
+「我的文档」页在桌面模式下会多出「从本机选择文件」：
+
+1. 点击后弹出本机文件选择窗（网关在客户端机器上渲染目录列表）；
+2. 选中文件后由客户端进程读取并通过网关上传到服务器；
+3. 上传成功通过 `postMessage` 通知主窗口刷新列表，索引在后台完成。
+
+安全边界：
+
+- 网关只监听 `127.0.0.1`，不对外网暴露；
+- `/__client/*` 接口（info / upload / picker-upload）均校验客户端令牌，令牌每次启动随机生成；
+- 文件读取仅发生在客户端进程，服务器只收到上传后的文件内容，不会访问你的本地路径；
+- 单文件上限 50MB，格式与服务器端白名单一致。
+
+## 命令行客户端
+
+同一套客户端库也可脚本化使用（适合运维、批量上传、定时下载）：
+
+```bash
+bidcraft client login --server https://bid.example.com -u admin
+bidcraft client status                     # 健康检查 + 当前用户
+bidcraft client projects                   # 项目列表
+bidcraft client upload ./手册.pdf           # 默认上传到「我的文档」
+bidcraft client upload ./招标文件.pdf --project PRJ-001
+bidcraft client download DOC_ID --out ./downloads/
+```
+
+会话 Cookie 保存在 `~/.config/bidcraft-client/cookies.json`（权限 0600），
+可用 `BIDCRAFT_CLIENT_HOME` 指定其他目录。
+
+## 与 B/S 的关系
+
+| 能力 | 浏览器（B/S） | 桌面客户端（C/S） |
+| --- | --- | --- |
+| 全部业务功能 | ✅ | ✅（同一套 SPA 与 API） |
+| 登录与权限 | Cookie | Cookie（网关透传，同源） |
+| 本机文件直传 | 需先传到服务器目录 | ✅ 本地文件桥 |
+| 离线可用 | ❌ | ❌（仍需连接服务器） |
+
+桌面模式不改变服务端行为，也不引入独立数据库；它是服务端 API 之上的一个轻客户端。

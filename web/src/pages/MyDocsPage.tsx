@@ -1,7 +1,8 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Download,
   FileText,
+  FolderOpen,
   Info,
   RefreshCw,
   ShieldCheck,
@@ -89,6 +90,34 @@ export function MyDocsPage() {
   const openPicker = () => {
     if (uploading) return
     inputRef.current?.click()
+  }
+
+  const desktopToken =
+    typeof window !== 'undefined' ? window.__BIDCRAFT_CLIENT_TOKEN : undefined
+  const refreshDocs = query.refresh
+
+  useEffect(() => {
+    if (!desktopToken) return
+    const onMessage = (event: MessageEvent) => {
+      const data = event.data as { type?: string; ok?: boolean } | null
+      if (!data || data.type !== 'bidcraft-desktop-upload') return
+      if (data.ok) {
+        toast.success('本机文件已上传', '索引将在后台完成，完成后即可参与生成。')
+        refreshDocs()
+      }
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [desktopToken, refreshDocs, toast])
+
+  const openDesktopPicker = () => {
+    if (!desktopToken) return
+    const params = new URLSearchParams({ t: desktopToken, kind: 'doc' })
+    window.open(
+      `/__client/picker?${params.toString()}`,
+      'bidcraft-picker',
+      'width=760,height=620',
+    )
   }
 
   const handleFiles = async (files: File[]) => {
@@ -270,6 +299,21 @@ export function MyDocsPage() {
               </>
             )}
           </div>
+
+          {desktopToken && (
+            <div className="mydocs-desktop">
+              <Button
+                variant="secondary"
+                icon={<FolderOpen size={15} />}
+                onClick={openDesktopPicker}
+              >
+                从本机选择文件
+              </Button>
+              <p className="subtle">
+                桌面客户端模式：直接读取本机文件上传，无需先复制到服务器目录。
+              </p>
+            </div>
+          )}
 
           <div className="side-note">
             <div className="side-note-head">

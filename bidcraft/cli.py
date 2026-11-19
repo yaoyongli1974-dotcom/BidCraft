@@ -994,5 +994,185 @@ def backup(
     )
 
 
+# ------------------------------------------------------------------ client CLI
+client_app = typer.Typer(add_completion=False, help="命令行客户端：登录、上传与下载。")
+app.add_typer(client_app, name="client")
+
+
+def _client_or_exit(server: str | None = None):
+    from .client import BidCraftClient, ClientError
+
+    try:
+        return BidCraftClient(server=server)
+    except ClientError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+
+@client_app.command("login")
+def client_login(
+    server: str = typer.Option(..., "--server", help="服务器地址，如 https://bid.example.com"),
+    username: str = typer.Option("", "--username", "-u", help="用户名（省略则使用配置或交互输入）"),
+    password: str = typer.Option("", "--password", help="密码（省略则交互式输入）"),
+) -> None:
+    """登录并保存会话 Cookie。"""
+    import getpass
+
+    from .client import CLIENT_HOME, BidCraftClient, ClientError
+
+    if not username:
+        existing = BidCraftClient(server=server).config.username
+        username = existing or typer.prompt("用户名")
+    if not password:
+        password = getpass.getpass("密码：")
+    try:
+        with BidCraftClient(server=server) as client:
+            user = client.login(username, password)
+    except ClientError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    name = user.get("display_name") or user.get("username") or username
+    console.print(f"[green]登录成功[/green] {name}")
+    console.print(f"[dim]配置目录：{CLIENT_HOME}[/dim]")
+
+
+@client_app.command("status")
+def client_status(
+    server: str = typer.Option("", "--server", help="临时覆盖服务器地址"),
+) -> None:
+    """查看服务器状态与当前登录用户。"""
+    from .client import ClientError
+
+    client = _client_or_exit(server or None)
+    try:
+        health = client.health()
+        user = client.me()
+    except ClientError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    finally:
+        client.close()
+    console.print(f"服务器：{client.server}")
+    console.print(f"版本：{health.get('version', '未知')}")
+    console.print(
+        f"当前用户：{user.get('display_name') or user.get('username', '')} "
+        f"（{user.get('role_label') or user.get('role', '')}）"
+    )
+    if "credits" in user:
+        console.print(f"算力余额：{user.get('credits')}")
+
+
+@client_app.command("projects")
+def client_projects(
+    server: str = typer.Option("", "--server", help="临时覆盖服务器地址"),
+) -> None:
+    """列出当前用户可见的项目。"""
+    from .client import ClientError
+
+    client = _client_or_exit(server or None)
+    try:
+        rows = client.projects()
+    except ClientError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    finally:
+        client.close()
+    if not rows:
+        console.print("[dim]暂无项目[/dim]")
+        return
+    table = Table(title="项目列表")
+    table.add_column("ID", style="cyan")
+    table.add_column("名称")
+    table.add_column("包件")
+    table.add_column("创建时间", style="dim")
+    for row in rows:
+        table.add_row(
+            str(row.get("id", "")),
+            str(row.get("name", "")),
+            str(row.get("package", "")),
+            str(row.get("created_at", "")),
+        )
+    console.print(table)
+
+
+@client_app.command("upload")
+def client_upload(
+    paths: list[Path] = typer.Argument(..., help="本地文件路径（可多个）"),
+    project: str = typer.Option("", "--project", help="上传为项目原件（项目 ID/编号）"),
+    doc: bool = typer.Option(False, "--doc", help="上传到个人知识库（默认）"),
+) -> None:
+    """上传文档到个人知识库或项目原件。"""
+    from .client import ClientError
+
+    if project and doc:
+        console.print("[red]--project 与 --doc 不能同时使用[/red]")
+        raise typer.Exit(1)
+    client = _client_or_exit()
+    try:
+        for path in paths:
+            if project:
+                result = client.upload_source(project, path)
+                summary = result.get("project") or {}
+                title = summary.get("name") if isinstance(summary, dict) else ""
+                console.print(
+                    f"[green]已上传项目原件[/green] {path.name}"
+                    + (f" → {title}" if title else "")
+                )
+            else:
+                created = client.upload_doc(path)
+                console.print(
+                    f"[green]已上传文档[/green] {created.get('filename') or path.name}"
+                    + (f"（{created.get('id')}）" if created.get("id") else "")
+                )
+    except ClientError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    finally:
+        client.close()
+
+
+@client_app.command("download")
+def client_download(
+    target: str = typer.Argument(..., help="下载 URL、相对路径或文档 ID"),
+    out: Path = typer.Option(..., "--out", "-o", help="保存路径（文件或目录）"),
+) -> None:
+    """下载文档或项目文件。"""
+    from .client import ClientError
+
+    if target.startswith(("http://", "https://")):
+        url = target
+    elif "/" in target:
+        url = "/" + target.lstrip("/")
+    else:
+        url = f"/my/docs/{target}/file"
+    client = _client_or_exit()
+    try:
+        saved = client.download(url, out)
+    except ClientError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    finally:
+        client.close()
+    console.print(f"[green]已保存[/green] {saved}")
+
+
+@app.command()
+def desktop(
+    server: str = typer.Option(..., "--server", help="远端服务器地址"),
+    port: int = typer.Option(0, "--port", help="本地端口（默认随机）"),
+    no_browser: bool = typer.Option(False, "--no-browser", help="不自动打开浏览器"),
+) -> None:
+    """启动桌面网关：本地反代 + 本地文件桥（需安装 api 扩展的前端产物）。"""
+    from .desktop import run_desktop
+
+    try:
+        run_desktop(server, port=port, open_browser=not no_browser)
+    except KeyboardInterrupt:  # pragma: no cover - 交互式退出
+        pass
+    except (ValueError, OSError) as exc:
+        console.print(f"[red]桌面网关启动失败：{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+
 if __name__ == "__main__":
     app()

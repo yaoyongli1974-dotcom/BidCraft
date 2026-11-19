@@ -1280,3 +1280,11 @@ export interface ChapterConflict {
   current_words: number
   message?: string
 }
+
+declare global {
+  interface Window {
+    /** Set by the desktop client gateway (`/__client/token.js`). */
+    __BIDCRAFT_CLIENT_TOKEN?: string
+    __BIDCRAFT_SERVER?: string
+  }
+}

@@ -201,6 +201,7 @@ export BIDCRAFT_WECHAT_PAY_MOCK=1         # 本地演示支付
 - [`docs/billing.md`](docs/billing.md)：注册、按章扣点、兑换码与微信支付。
 - [`docs/roadmap.md`](docs/roadmap.md)：已落地能力与后续版本计划。
 - [`docs/mcp.md`](docs/mcp.md)：MCP（JSON-RPC 2.0）服务与 6 个工具接入。
+- [`docs/desktop.md`](docs/desktop.md)：桌面客户端（C/S 模式）、本地文件桥与命令行客户端。
 - [`docs/plugins.md`](docs/plugins.md)：MCP 客户端插件市场、聚合与安全边界。
 - [`docs/calibration.md`](docs/calibration.md)：真实招标文件回归校准命令与报告字段。
 - [`docs/C1-spec.md`](docs/C1-spec.md)：领域规格（事实台账 Schema 与规则口径）。
@@ -234,6 +235,7 @@ export BIDCRAFT_WECHAT_PAY_MOCK=1         # 本地演示支付
 | 模型配置 | ✅ | 管理控制台维护对话/图片/向量模型；默认对话与图片模型接入生成；连通性测试；密钥加密 |
 | 知识库 | ✅ | 本地目录索引或通用/Dify/RAGFlow API；可选 embedding 向量索引与混合重排（无模型自动回退关键词）；章节检索注入；台账事实优先 |
 | 注册与计费 | ✅ | 用户名/微信扫码注册、独立项目空间、按章扣点、兑换码、微信支付 Native（可 mock） |
+| 桌面客户端（C/S） | ✅ | `bidcraft desktop --server URL` 在本机启动网关（仅绑定 127.0.0.1）：反向代理远端服务并透传 Cookie/SSE，内置同一套 SPA；**本地文件桥**可直接选本机文件上传到「我的文档」或项目原件（无需 scp），令牌校验 + 50MB 限额；另有 `bidcraft client` 命令行完成登录/项目/上传/下载，会话 Cookie 持久化；见 `docs/desktop.md` |
 | 我的文档（个人知识库） | ✅ | 普通用户自助上传文件（拖拽选择、≤50MB、格式校验、进度）到服务器个人目录并自动建索引；「我的文档」页管理（列表/状态/下载/删除）；上传即建个人知识库，生成检索只注入本人文档且默认搜索排除个人库防跨用户泄漏；审计 `user_doc.upload/delete` |
 | VIP 会员 | ✅ | 超管授予/续期/清除 VIP（天数），或自助购买 VIP 套餐（月/季/年卡，mock 支付续期不加点）；VIP 按章扣点享折扣（可配 0.1–1）；VIP 后台任务排队优先（priority=0） |
 | 子账号 | ✅ | VIP 主账号自助创建子账号（上限可配），子账号共享主账号点数余额、不可单独充值/兑换/购买 VIP；删除子账号其项目自动移交主账号 |
@@ -360,7 +362,7 @@ DOCX 图注编号与版心宽度、批量生成默认风格尺寸；`tests/test_
 覆盖项目复制的全量深拷贝、外键重映射、可选清单/配图、排除项与失败清理；`tests/test_project_templates.py`
 覆盖模板标记权限、模板列表与从模板创建（含非成员实例化与失败清理）；
 `tests/test_vip.py`、`tests/test_subaccounts.py`、`tests/test_jobqueue.py` 覆盖 VIP 授权/续期/折扣、
-子账号共享计费与权限隔离、优先级队列调度、审批条件分支；`tests/test_user_docs.py` 覆盖个人文档上传/索引、列表/下载/删除、跨用户隔离与检索防泄漏、审计（当前全量 **533 passed**）。
+子账号共享计费与权限隔离、优先级队列调度、审批条件分支；`tests/test_user_docs.py` 覆盖个人文档上传/索引、列表/下载/删除、跨用户隔离与检索防泄漏、审计；`tests/test_client.py`、`tests/test_desktop.py` 覆盖客户端登录/Cookie 复用、文档与原件上传、下载、网关反代与 Cookie 透传、静态/SPA 回退、令牌门禁与本地文件桥（当前全量 **550 passed**）。
 
 前端验证：`cd web && npm run build`（TypeScript 编译 + Vite 产物输出到
 `bidcraft/web_dist`），随后 `bidcraft serve --open` 做浏览器全流程验收。

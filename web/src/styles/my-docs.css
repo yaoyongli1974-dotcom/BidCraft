@@ -168,3 +168,20 @@
     display: none;
   }
 }
+
+.mydocs-desktop {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px dashed var(--line, #e2dbcd);
+  border-radius: 12px;
+  background: var(--surface-raised, #fffdf8);
+}
+
+.mydocs-desktop .subtle {
+  margin: 0;
+  font-size: 12px;
+}
