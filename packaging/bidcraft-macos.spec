@@ -20,6 +20,7 @@ a = Analysis(
         "webview.platforms.winforms",
         "webview.platforms.cocoa",
         "webview.platforms.qt",
+        "qtpy",
     ],
     hookspath=[],
     runtime_hooks=[],

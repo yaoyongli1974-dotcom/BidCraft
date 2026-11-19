@@ -10,6 +10,7 @@ import {
   UploadCloud,
 } from 'lucide-react'
 import {
+  awaitDesktopBridge,
   createUserDoc,
   deleteUserDoc,
   desktopBridge,
@@ -17,6 +18,7 @@ import {
   messageOf,
   userDocFileUrl,
 } from '../lib/api'
+import type { DesktopBridge } from '../lib/api'
 import type { UserDoc } from '../lib/types'
 import {
   className,
@@ -111,7 +113,17 @@ export function MyDocsPage() {
     return () => window.removeEventListener('message', onMessage)
   }, [desktopToken, refreshDocs, toast])
 
-  const bridge = desktopBridge()
+  const [bridge, setBridge] = useState<DesktopBridge | null>(() => desktopBridge())
+
+  useEffect(() => {
+    let alive = true
+    void awaitDesktopBridge().then((found) => {
+      if (alive) setBridge(found)
+    })
+    return () => {
+      alive = false
+    }
+  }, [])
 
   const nativeUpload = async () => {
     if (!bridge || uploading) return

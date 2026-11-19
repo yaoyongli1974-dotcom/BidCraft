@@ -35,7 +35,7 @@ GET 请求成功时按「服务器 + 路径」缓存到 `~/.config/bidcraft-clie
 
 - **Windows**：WebView2（Win10+ 通常自带）
 - **macOS**：系统 WKWebView
-- **Linux**：需要 `PySide6`（推荐）或 `python3-gi` + WebKitGTK；缺失时自动回退浏览器模式
+- **Linux**：需要 `PySide6` + `qtpy`（推荐，`uv pip install PySide6 qtpy`）或 `python3-gi` + WebKitGTK；缺失时自动回退浏览器模式。Wayland 桌面建议 `QT_QPA_PLATFORM=wayland`，容器/root 环境加 `QTWEBENGINE_DISABLE_SANDBOX=1`
 
 ## 启动
 

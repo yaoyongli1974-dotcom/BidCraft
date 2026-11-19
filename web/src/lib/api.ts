@@ -256,7 +256,38 @@ export interface DesktopBridge {
 export function desktopBridge(): DesktopBridge | null {
   if (typeof window === 'undefined') return null
   const host = window as unknown as { pywebview?: { api?: DesktopBridge } }
-  return host.pywebview?.api ?? null
+  const api = host.pywebview?.api
+  return api && typeof api.api_request === 'function' ? api : null
+}
+
+let bridgeReady: Promise<DesktopBridge | null> | null = null
+
+/** pywebview 在 `pywebviewready` 后才注入 api，启动早期的桩对象不可用。 */
+export function awaitDesktopBridge(timeoutMs = 5000): Promise<DesktopBridge | null> {
+  const ready = desktopBridge()
+  if (ready) return Promise.resolve(ready)
+  if (typeof window === 'undefined') return Promise.resolve(null)
+  const host = window as unknown as { pywebview?: unknown }
+  if (!host.pywebview) return Promise.resolve(null)
+  if (!bridgeReady) {
+    bridgeReady = new Promise((resolve) => {
+      const finish = (value: DesktopBridge | null) => {
+        clearInterval(poll)
+        clearTimeout(deadline)
+        window.removeEventListener('pywebviewready', onReady)
+        bridgeReady = null
+        resolve(value)
+      }
+      const onReady = () => {
+        const found = desktopBridge()
+        if (found) finish(found)
+      }
+      const poll = setInterval(onReady, 50)
+      const deadline = setTimeout(() => finish(desktopBridge()), timeoutMs)
+      window.addEventListener('pywebviewready', onReady)
+    })
+  }
+  return bridgeReady
 }
 
 export function announceOffline(offline: boolean, cachedAt?: number): void {
@@ -287,7 +318,13 @@ export async function apiFetch<T>(
   signal?: AbortSignal,
 ): Promise<T> {
   const requestSignal = signal ?? init?.signal ?? undefined
-  const bridge = desktopBridge()
+  if (requestSignal?.aborted) {
+    throw Object.assign(new Error('aborted'), { name: 'AbortError' })
+  }
+  const bridge = await awaitDesktopBridge()
+  if (requestSignal?.aborted) {
+    throw Object.assign(new Error('aborted'), { name: 'AbortError' })
+  }
   if (bridge) {
     const bodyText = typeof init?.body === 'string' ? init.body : undefined
     const contentType = String(

@@ -1912,3 +1912,31 @@ describe('my docs', () => {
     expect(userDocFileUrl('d/1')).toBe('/my/docs/d%2F1/file')
   })
 })
+
+describe('desktop bridge readiness (R29)', () => {
+  afterEach(() => {
+    delete (window as unknown as { pywebview?: unknown }).pywebview
+    vi.resetModules()
+  })
+
+  it('浏览器环境没有桥时立即返回 null', async () => {
+    const mod = await import('./api')
+    expect(mod.desktopBridge()).toBeNull()
+    await expect(mod.awaitDesktopBridge(50)).resolves.toBeNull()
+  })
+
+  it('pywebview 注入完成前的桩对象不算就绪，ready 后可用', async () => {
+    const mod = await import('./api')
+    const stub: Record<string, unknown> = {}
+    ;(window as unknown as { pywebview: { api: unknown } }).pywebview = { api: stub }
+    expect(mod.desktopBridge()).toBeNull()
+    const pending = mod.awaitDesktopBridge(2000)
+    setTimeout(() => {
+      stub.api_request = () => Promise.resolve({ status: 200, body: '', offline: false })
+      window.dispatchEvent(new Event('pywebviewready'))
+    }, 30)
+    const bridge = await pending
+    expect(bridge).not.toBeNull()
+    expect(typeof bridge?.api_request).toBe('function')
+  })
+})
