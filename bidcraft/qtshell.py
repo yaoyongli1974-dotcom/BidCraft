@@ -441,7 +441,7 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
         def _build_actions(self) -> None:
             self.act_upload = QAction("上传文档到个人知识库", self)
             self.act_upload.setShortcut(QKeySequence("Ctrl+O"))
-            self.act_upload.triggered.connect(lambda: self._guarded(lambda: self.upload("doc")))
+            self.act_upload.triggered.connect(self._guarded(lambda: self.upload("doc")))
             self.act_source = QAction("上传招标原件到项目…", self)
             self.act_source.triggered.connect(self._guarded(self.upload_source))
             self.act_quit = QAction("退出", self)
