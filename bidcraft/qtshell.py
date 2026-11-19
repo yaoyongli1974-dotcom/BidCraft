@@ -361,6 +361,7 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
             }
             page = pages[name]
             self.stack.setCurrentWidget(page)
+            self._set_web_actions(False)
             if name == "projects":
                 self.projects_page.reload()
             elif name == "docs":
@@ -371,7 +372,18 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
         def _show_web(self, path: str) -> None:
             self._sync_cookies()
             self.stack.setCurrentWidget(self.view)
+            self._set_web_actions(True)
             self.view.load(QUrl(self.base + path))
+
+        def _set_web_actions(self, enabled: bool) -> None:
+            """后退/前进/刷新只对网页工作区有意义。"""
+            for action in (
+                getattr(self, "act_back", None),
+                getattr(self, "act_forward", None),
+                getattr(self, "act_reload", None),
+            ):
+                if action is not None:
+                    action.setEnabled(enabled)
 
         def _open_project(self, item: dict[str, Any]) -> None:
             ref = str(item.get("id") or "")
@@ -503,10 +515,6 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
             bar.setObjectName("mainToolbar")
             bar.setMovable(False)
             self.addToolBar(bar)
-            bar.addAction(self.act_back)
-            bar.addAction(self.act_forward)
-            bar.addAction(self.act_reload)
-            bar.addSeparator()
             items = list(NAV_ITEMS)
             try:
                 me = self.bridge.client.me()
@@ -528,8 +536,6 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
                         self._guarded(lambda p=path: self._show_web(p))
                     )
                 bar.addAction(act)
-            bar.addSeparator()
-            bar.addAction(self.act_upload)
             spacer = QWidget(self)
             spacer.setSizePolicy(spacer.sizePolicy().horizontalPolicy().Expanding,
                                  spacer.sizePolicy().verticalPolicy().Preferred)
