@@ -9,7 +9,7 @@ fi
 VERSION="${VERSION:-$(.venv/bin/python -c 'from bidcraft import __version__; print(__version__)')}"
 rm -rf build/pyinstaller dist/BidCraft.app dist/BidCraft
 .venv/bin/python -m PyInstaller --noconfirm --clean \
-  --distpath dist --workpath build/pyinstaller --windowed packaging/bidcraft.spec
+  --distpath dist --workpath build/pyinstaller packaging/bidcraft-macos.spec
 cd dist
 ditto -c -k --sequesterRsrc --keepParent BidCraft.app "bidcraft-desktop-${VERSION}-macos.zip"
 echo "产物：dist/bidcraft-desktop-${VERSION}-macos.zip"
