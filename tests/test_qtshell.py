@@ -70,3 +70,16 @@ def test_latest_version_reads_tag(monkeypatch):
 
     monkeypatch.setattr(httpx, "get", lambda *a, **k: Response())
     assert qtshell.latest_version() == "v9.9.9"
+
+
+def test_native_page_helpers():
+    from bidcraft import qtnative
+
+    assert qtnative.human_size(0) == "0 B"
+    assert qtnative.human_size(1536) == "1.5 KB"
+    assert qtnative.human_size(5 * 1024 * 1024) == "5.0 MB"
+    assert qtnative.doc_status_label("ready") == "可检索"
+    assert qtnative.doc_status_label("failed") == "索引失败"
+    assert qtnative.doc_status_label("other") == "other"
+    assert "名称" in qtnative.project_columns()
+    assert "文件名" in qtnative.doc_columns()

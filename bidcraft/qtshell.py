@@ -153,7 +153,7 @@ try:  # pragma: no cover - 依赖系统 Qt
     from PySide6.QtWebEngineCore import QWebEngineScript
     from PySide6.QtWebEngineWidgets import QWebEngineView
     from PySide6.QtWidgets import (
- QApplication,
+        QApplication,
         QDialog,
         QDialogButtonBox,
         QFileDialog,
@@ -163,6 +163,7 @@ try:  # pragma: no cover - 依赖系统 Qt
         QMainWindow,
         QMenu,
         QMessageBox,
+        QStackedWidget,
         QSystemTrayIcon,
         QToolBar,
         QVBoxLayout,
@@ -277,12 +278,15 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
                 self.setWindowIcon(QIcon(str(icon)))
 
             self.view = QWebEngineView(self)
-            self.setCentralWidget(self.view)
+            self.stack = QStackedWidget(self)
+            self.setCentralWidget(self.stack)
             self._install_scripts()
             self.channel = QWebChannel(self.view.page())
             self.channel.registerObject("bridge", self.bridge)
             self.view.page().setWebChannel(self.channel)
             self.view.page().profile().downloadRequested.connect(self._on_download)
+            self.stack.addWidget(self.view)
+            self._build_native_pages()
 
             self._build_actions()
             self._build_menu()
@@ -290,7 +294,7 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
             self._build_status()
             self._build_tray()
             self._restore_geometry()
-            self.view.load(QUrl(base + "/"))
+            self._initial_page()
             self.timer = QTimer(self)
             self.timer.timeout.connect(self.refresh_status)
             self.timer.start(30_000)
@@ -300,8 +304,85 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
             """登录页/菜单切换服务器后刷新页面并更新标题。"""
             self.server = server
             self.setWindowTitle(f"BidCraft 投标工作台 — {server}")
-            self.view.load(QUrl(self.base + "/login"))
+            self._initial_page()
             self.refresh_status()
+
+        # ------------------------------------------------------ 原生页面（混合）
+        def _build_native_pages(self) -> None:
+            from .qtnative import BillingPage, LoginPage, MyDocsPage, ProjectsPage
+
+            self.login_page = LoginPage(self.bridge.client, self._after_login)
+            self.projects_page = ProjectsPage(self.bridge.client, self._open_project)
+            self.docs_page = MyDocsPage(self.bridge.client, lambda: self.upload("doc"))
+            self.billing_page = BillingPage(
+                self.bridge.client, lambda: self._show_web("/billing")
+            )
+            for page in (
+                self.login_page,
+                self.projects_page,
+                self.docs_page,
+                self.billing_page,
+            ):
+                self.stack.addWidget(page)
+
+        def _initial_page(self) -> None:
+            try:
+                self.bridge.client.me()
+            except ClientError:
+                self._show_native("login")
+                return
+            self._show_native("projects")
+
+        def _after_login(self) -> None:
+            self._show_native("projects")
+
+        def _show_native(self, name: str) -> None:
+            pages = {
+                "login": self.login_page,
+                "projects": self.projects_page,
+                "docs": self.docs_page,
+                "billing": self.billing_page,
+            }
+            page = pages[name]
+            self.stack.setCurrentWidget(page)
+            if name == "projects":
+                self.projects_page.reload()
+            elif name == "docs":
+                self.docs_page.reload()
+            elif name == "billing":
+                self.billing_page.reload()
+
+        def _show_web(self, path: str) -> None:
+            self._sync_cookies()
+            self.stack.setCurrentWidget(self.view)
+            self.view.load(QUrl(self.base + path))
+
+        def _open_project(self, item: dict[str, Any]) -> None:
+            ref = str(item.get("id") or "")
+            if ref:
+                self._show_web(f"/app/projects/{ref}")
+
+        def _sync_cookies(self) -> None:
+            """把客户端会话 Cookie 注入 WebEngine，工作区网页才能复用登录态。"""
+            try:
+                cookies = self.bridge.client._current_cookies()
+            except Exception:  # noqa: BLE001 - 同步失败不阻断页面
+                return
+            from PySide6.QtNetwork import QNetworkCookie
+
+            store = self.view.page().profile().cookieStore()
+            url = QUrl(self.base)
+            for item in cookies:
+                name = str(item.get("name") or "")
+                value = str(item.get("value") or "")
+                if not name:
+                    continue
+                cookie = QNetworkCookie(name.encode(), value.encode())
+                domain = str(item.get("domain") or "")
+                if domain:
+                    cookie.setDomain(domain)
+                cookie.setPath(str(item.get("path") or "/"))
+                store.setCookie(cookie, url)
 
         # ---------------------------------------------------------- 初始化
         def _install_scripts(self) -> None:
@@ -421,7 +502,15 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
                 items.append(ADMIN_NAV)
             for label, path in items:
                 act = QAction(label, self)
-                act.triggered.connect(lambda _=False, p=path: self.view.load(QUrl(self.base + p)))
+                if path in ("/", "/my-docs", "/billing"):
+                    target = {"/": "projects", "/my-docs": "docs", "/billing": "billing"}[path]
+                    act.triggered.connect(
+                        lambda _=False, name=target: self._show_native(name)
+                    )
+                else:
+                    act.triggered.connect(
+                        lambda _=False, p=path: self._show_web(p)
+                    )
                 bar.addAction(act)
             bar.addSeparator()
             bar.addAction(self.act_upload)

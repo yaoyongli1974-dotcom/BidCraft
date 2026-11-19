@@ -300,6 +300,43 @@ class BidCraftClient:
             return body["doc"]
         return body if isinstance(body, dict) else {}
 
+    def list_docs(self) -> list[dict[str, Any]]:
+        response = self._request("GET", "/my/docs")
+        if response.status_code == 401:
+            raise ClientError("未登录或登录已过期，请先登录")
+        if response.status_code >= 400:
+            self._fail(response, "读取文档列表")
+        body = response.json()
+        if isinstance(body, list):
+            return [item for item in body if isinstance(item, dict)]
+        if isinstance(body, dict):
+            for key in ("docs", "items"):
+                value = body.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+        return []
+
+    def delete_project(self, project_id: str) -> dict[str, Any]:
+        response = self._request("DELETE", f"/projects/{project_id}")
+        if response.status_code >= 400:
+            self._fail(response, "删除项目")
+        body = response.json()
+        return body if isinstance(body, dict) else {}
+
+    def billing(self) -> dict[str, Any]:
+        response = self._request("GET", "/billing/summary")
+        if response.status_code >= 400:
+            self._fail(response, "读取账单")
+        body = response.json()
+        return body if isinstance(body, dict) else {}
+
+    def redeem(self, code: str) -> dict[str, Any]:
+        response = self._request("POST", "/billing/redeem", json={"code": code})
+        if response.status_code >= 400:
+            self._fail(response, "兑换")
+        body = response.json()
+        return body if isinstance(body, dict) else {}
+
     def delete_doc(self, doc_id: str) -> dict[str, Any]:
         response = self._request("DELETE", f"/my/docs/{doc_id}")
         if response.status_code >= 400:
