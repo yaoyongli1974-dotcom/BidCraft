@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  Settings2,
   Download,
   Eye,
   FileStack,
@@ -53,6 +54,7 @@ import { EmptyState, ErrorState, ProgressBar, Skeleton } from '../components/Fee
 import { NewProjectModal } from '../components/NewProjectModal'
 import { EditProjectModal } from '../components/EditProjectModal'
 import { DuplicateProjectModal } from '../components/DuplicateProjectModal'
+import { ProjectProfileModal } from '../components/ProjectProfileModal'
 import { InstantiateTemplateModal } from '../components/InstantiateTemplateModal'
 import { useToast } from '../context/useToast'
 import { useConfirm } from '../context/useConfirm'
@@ -123,6 +125,7 @@ export function ProjectsPage() {
   const [reportOpen, setReportOpen] = useState(false)
   const [editing, setEditing] = useState<Project | null>(null)
   const [duplicating, setDuplicating] = useState<Project | null>(null)
+  const [profileTarget, setProfileTarget] = useState<Project | null>(null)
   const [instantiateOpen, setInstantiateOpen] = useState(false)
   const selectAllRef = useRef<HTMLInputElement>(null)
 
@@ -1025,6 +1028,7 @@ export function ProjectsPage() {
                 onDelete={() => handleDelete(project)}
                 onEdit={() => setEditing(project)}
                 onDuplicate={() => setDuplicating(project)}
+                onProfile={() => setProfileTarget(project)}
               />
             ))}
             <div className="project-table-foot">
@@ -1069,6 +1073,10 @@ export function ProjectsPage() {
         }}
       />
 
+      <ProjectProfileModal
+        project={profileTarget}
+        onClose={() => setProfileTarget(null)}
+      />
       <DuplicateProjectModal
         project={duplicating}
         onClose={() => setDuplicating(null)}
@@ -1121,6 +1129,7 @@ function ProjectRow({
   onDelete,
   onEdit,
   onDuplicate,
+  onProfile,
 }: {
   project: Project
   packageTitle?: string
@@ -1132,6 +1141,7 @@ function ProjectRow({
   onDelete: () => void
   onEdit: () => void
   onDuplicate: () => void
+  onProfile: () => void
 }) {
   const stats = normaliseListStats(project)
   const status = projectStatus(project.status)
@@ -1250,6 +1260,17 @@ function ProjectRow({
             <span className="action-divider" aria-hidden />
             <IconButton label={`编辑项目 ${project.name}`} onClick={onEdit}>
               <Pencil size={14} />
+            </IconButton>
+          </>
+        )}
+        {canEdit && (
+          <>
+            <span className="action-divider" aria-hidden />
+            <IconButton
+              label={`全局设定 ${project.name}`}
+              onClick={onProfile}
+            >
+              <Settings2 size={14} />
             </IconButton>
           </>
         )}

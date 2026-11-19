@@ -172,6 +172,31 @@ def _term_results(db: Session, sections: list[dict]) -> list[CheckResult]:
     ]
 
 
+def _profile_results(db: Session, project: Project, sections: list[dict]) -> list[CheckResult]:
+    """Flag chapter values that contradict the project's global facts."""
+
+    from . import profile as profile_module
+
+    anchors = profile_module.anchors(profile_module.load(project))
+    if not anchors:
+        return []
+    findings = textqa.profile_conflicts(sections, anchors)
+    return [
+        CheckResult(
+            code=finding["id"],
+            level=finding["level"],
+            category=finding["category"],
+            message=finding["message"],
+            location=finding["location"],
+            finding=finding["message"],
+            recommendation=finding["recommendation"],
+            evidence=finding["evidence"],
+            passed=False,
+        )
+        for finding in findings
+    ]
+
+
 def _textqa_results(db: Session, sections: list[dict]) -> list[CheckResult]:
     """Turn typo / consistency / duplication findings into check results."""
 
@@ -203,6 +228,7 @@ def check_project(db: Session, project_id: str) -> tuple[list, dict]:
     all_results = run_checks(package, ledger, nodes, include_passed=True)
     all_results.extend(_term_results(db, nodes))
     all_results.extend(_textqa_results(db, nodes))
+    all_results.extend(_profile_results(db, project, nodes))
     results = [result for result in all_results if not result.passed]
     db.query(Issue).filter(Issue.project_id == project_id).delete()
     for result in results:

@@ -2743,3 +2743,52 @@ select:focus-visible {
   font-size: 17px;
   margin-top: 2px;
 }
+
+/* R38 全局设定 */
+.profile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+.profile-phrase-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.profile-phrase-row .input {
+  flex: 1;
+}
+.profile-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.profile-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--surface-raised, #f2f1ed);
+  font-size: 12px;
+}
+.profile-tag button {
+  border: 0;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--muted, #6b6b6b);
+  display: inline-flex;
+}
+.profile-fact-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) minmax(180px, 2fr) auto;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+@media (max-width: 720px) {
+  .profile-fact-row {
+    grid-template-columns: 1fr;
+  }
+}

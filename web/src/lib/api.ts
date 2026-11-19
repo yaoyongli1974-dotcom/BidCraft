@@ -77,6 +77,8 @@ import type {
   QuoteApprovalRecord,
   QuoteVersionStatus,
   Project,
+  ProjectProfileResponse,
+  WritingProfile,
   ProjectDetail,
   ProjectDuplicateInput,
   ProjectInstantiateInput,
@@ -3691,4 +3693,89 @@ export async function testWechatConfig(): Promise<{ ok: boolean; message: string
   const raw = await request<unknown>('/admin/wechat/test', { method: 'POST' })
   const data = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
   return { ok: asBool(data.ok), message: asText(data.message) }
+}
+
+export const PROFILE_TONES = ['稳健', '简洁', '技术', '亲和'] as const
+
+const PROFILE_TEXT_FIELDS = [
+  ['company_name', 80],
+  ['legal_rep', 40],
+  ['project_name', 120],
+  ['owner_name', 120],
+  ['bid_amount', 40],
+  ['duration_days', 20],
+  ['warranty_years', 20],
+  ['quality_standard', 80],
+] as const
+
+export function normalizeWritingProfile(value: unknown): WritingProfile {
+  const source = (value ?? {}) as Record<string, unknown>
+  const profile: WritingProfile = {
+    company_name: '',
+    legal_rep: '',
+    project_name: '',
+    owner_name: '',
+    bid_amount: '',
+    duration_days: '',
+    warranty_years: '',
+    quality_standard: '',
+    tone: '稳健',
+    forbidden_phrases: [],
+    extra_facts: [],
+  }
+  for (const [field, limit] of PROFILE_TEXT_FIELDS) {
+    profile[field] = String(source[field] ?? '').trim().slice(0, limit)
+  }
+  const tone = String(source.tone ?? '稳健')
+  profile.tone = (PROFILE_TONES as readonly string[]).includes(tone)
+    ? (tone as WritingProfile['tone'])
+    : '稳健'
+
+  const phrases = Array.isArray(source.forbidden_phrases) ? source.forbidden_phrases : []
+  const seen = new Set<string>()
+  for (const item of phrases) {
+    const text = String(item ?? '').trim().slice(0, 40)
+    if (text && !seen.has(text)) {
+      seen.add(text)
+      profile.forbidden_phrases.push(text)
+    }
+  }
+
+  const extras = Array.isArray(source.extra_facts) ? source.extra_facts : []
+  const keys = new Set<string>()
+  for (const item of extras) {
+    const row = (item ?? {}) as Record<string, unknown>
+    const key = String(row.key ?? '').trim().slice(0, 40)
+    const val = String(row.value ?? '').trim().slice(0, 200)
+    if (key && val && !keys.has(key)) {
+      keys.add(key)
+      profile.extra_facts.push({ key, value: val })
+    }
+  }
+  return profile
+}
+
+export function normalizeProjectProfile(value: unknown): ProjectProfileResponse {
+  const source = (value ?? {}) as Record<string, unknown>
+  return {
+    profile: normalizeWritingProfile(source.profile),
+    anchors: (source.anchors ?? {}) as Record<string, string>,
+    facts_block: String(source.facts_block ?? ''),
+  }
+}
+
+export async function getProjectProfile(ref: string): Promise<ProjectProfileResponse> {
+  const data = await request<unknown>(`/projects/${encodeURIComponent(ref)}/profile`)
+  return normalizeProjectProfile(data)
+}
+
+export async function saveProjectProfile(
+  ref: string,
+  profile: WritingProfile,
+): Promise<ProjectProfileResponse> {
+  const data = await request<unknown>(`/projects/${encodeURIComponent(ref)}/profile`, {
+    method: 'PUT',
+    body: JSON.stringify({ profile: normalizeWritingProfile(profile) }),
+  })
+  return normalizeProjectProfile(data)
 }

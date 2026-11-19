@@ -1458,3 +1458,28 @@ declare global {
     __BIDCRAFT_SERVER?: string
   }
 }
+
+export interface ProfileExtraFact {
+  key: string
+  value: string
+}
+
+export interface WritingProfile {
+  company_name: string
+  legal_rep: string
+  project_name: string
+  owner_name: string
+  bid_amount: string
+  duration_days: string
+  warranty_years: string
+  quality_standard: string
+  tone: '稳健' | '简洁' | '技术' | '亲和'
+  forbidden_phrases: string[]
+  extra_facts: ProfileExtraFact[]
+}
+
+export interface ProjectProfileResponse {
+  profile: WritingProfile
+  anchors: Record<string, string>
+  facts_block: string
+}

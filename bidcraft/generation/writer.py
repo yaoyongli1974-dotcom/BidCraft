@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import OutlineNode, Section
+from ..models import OutlineNode, Project, Section
 from ..rules.loader import Package
 from ..schemas import FactLedger
 from .agent import ModelClient, ModelUnavailable
@@ -248,6 +248,7 @@ def write_chapter(
     stream: bool = False,
     on_delta: Callable[[str], None] | None = None,
     knowledge_text: str = "",
+    facts_text: str = "",
 ) -> tuple[str, str]:
     heading = str(node["heading"])
     intent = str(node.get("intent") or "")
@@ -267,6 +268,7 @@ def write_chapter(
         previous_summary=previous_summary,
         package_title=package.title,
         knowledge_text=knowledge_text,
+        facts_text=facts_text,
     )
     body = client.complete(
         messages,
@@ -313,6 +315,13 @@ def generate_document(
     from .outline import load_outline
 
     nodes = load_outline(db, project_id)
+    project = db.get(Project, project_id)
+    facts_text = ""
+    if project is not None:
+        from ..profile import facts_block
+        from ..profile import load as load_profile
+
+        facts_text = facts_block(load_profile(project))
     report = GenerationReport()
     previous_texts: list[str] = []
     summaries: list[str] = []
@@ -357,6 +366,7 @@ def generate_document(
                 stream=stream,
                 on_delta=on_delta,
                 knowledge_text=knowledge_text,
+                facts_text=facts_text,
             )
             body = dedupe_body(body, previous_texts)
             if not body.strip():

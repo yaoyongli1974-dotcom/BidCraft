@@ -40,6 +40,7 @@ from . import (
     personnel,
     plugin_pack,
     plugins,
+    profile,
     qualifications,
     terms,
     textqa,
@@ -3928,6 +3929,37 @@ def create_app():
             audit(db, project.id, "project.update", {"keys": keys})
             return _project_payload(project, _project_stats(db, project.id), my_role)
 
+    @app.get("/projects/{ref}/profile")
+    def get_project_profile(ref: str) -> dict[str, Any]:
+        """Return the project's global facts and their canonical anchors."""
+
+        with session_scope() as db:
+            project, _role = _project(db, ref)
+            stored = profile.load(project)
+            return {
+                "profile": stored,
+                "anchors": profile.anchors(stored),
+                "facts_block": profile.facts_block(stored),
+            }
+
+    @app.put("/projects/{ref}/profile")
+    def save_project_profile(ref: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Replace the project's global facts (used by generation and checks)."""
+
+        with session_scope() as db:
+            project, my_role = _project(db, ref)
+            _require_write(my_role)
+            try:
+                stored = profile.save(project, payload.get("profile", payload))
+            except profile.ProfileError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            audit(db, project.id, "project.profile", {"keys": _profile_keys(stored)})
+            return {
+                "profile": stored,
+                "anchors": profile.anchors(stored),
+                "facts_block": profile.facts_block(stored),
+            }
+
     @app.delete("/projects/{ref}")
     def delete_project(ref: str) -> dict[str, Any]:
         with session_scope() as db:
@@ -5805,3 +5837,9 @@ try:  # keep importing bidcraft.api cheap when the optional extra is absent
     app = create_app()
 except RuntimeError:  # pragma: no cover
     app = None
+
+
+def _profile_keys(profile_values: dict[str, Any]) -> list[str]:
+    """List the non-empty profile fields for the audit detail."""
+
+    return [key for key, value in profile_values.items() if value not in ("", [], None)]

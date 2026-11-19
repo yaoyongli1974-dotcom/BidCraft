@@ -2540,3 +2540,67 @@ describe('desktop bridge readiness (R29)', () => {
     expect(typeof bridge?.api_request).toBe('function')
   })
 })
+
+describe('writing profile (R38)', () => {
+  afterEach(() => vi.unstubAllGlobals())
+  const jsonResponse = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+  it('normalizes profile fields, tone fallback and dedupe', async () => {
+    const { normalizeWritingProfile } = await import('./api')
+    const profile = normalizeWritingProfile({
+      company_name: '  某某科技  ',
+      tone: '激昂',
+      forbidden_phrases: ['绝对第一', '绝对第一', ' '],
+      extra_facts: [
+        { key: '项目经理', value: '张三' },
+        { key: '项目经理', value: '李四' },
+        { key: '', value: '忽略' },
+      ],
+    })
+    expect(profile.company_name).toBe('某某科技')
+    expect(profile.tone).toBe('稳健')
+    expect(profile.forbidden_phrases).toEqual(['绝对第一'])
+    expect(profile.extra_facts).toEqual([{ key: '项目经理', value: '张三' }])
+  })
+
+  it('loads profile by encoded project id', async () => {
+    const { getProjectProfile } = await import('./api')
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
+      jsonResponse({ profile: { tone: '技术' }, anchors: {} }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const result = await getProjectProfile('p/1')
+    expect(fetchMock.mock.calls[0][0]).toBe('/projects/p%2F1/profile')
+    expect(result.profile.tone).toBe('技术')
+  })
+
+  it('saves profile with PUT and normalized body', async () => {
+    const { saveProjectProfile } = await import('./api')
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
+      jsonResponse({ profile: { company_name: '某公司' }, anchors: {} }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    await saveProjectProfile('p1', {
+      company_name: ' 某公司 ',
+      legal_rep: '',
+      project_name: '',
+      owner_name: '',
+      bid_amount: '',
+      duration_days: '',
+      warranty_years: '',
+      quality_standard: '',
+      tone: '稳健',
+      forbidden_phrases: ['绝对第一', '绝对第一'],
+      extra_facts: [],
+    })
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.method).toBe('PUT')
+    const body = JSON.parse(String(init.body))
+    expect(body.profile.company_name).toBe('某公司')
+    expect(body.profile.forbidden_phrases).toEqual(['绝对第一'])
+  })
+})

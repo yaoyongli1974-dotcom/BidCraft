@@ -393,3 +393,59 @@ def scan_sections(
     if len(findings) < limit:
         findings.extend(check_duplication(section_list, start=len(findings) + 1))
     return findings[:limit]
+
+def profile_conflicts(
+    sections: list[dict[str, Any]],
+    anchors: dict[str, str],
+    *,
+    start: int = 1,
+) -> list[dict[str, Any]]:
+    """Compare documented values against the project's global facts.
+
+    ``anchors`` maps consistency keys (项目名称/投标人名称/总价/工期/质保期) to the
+    canonical values the user configured. A documented value that differs — and
+    is not merely a substring of the canonical value — is reported as major.
+    """
+
+    if not anchors:
+        return []
+    patterns = {key: (pattern, message) for key, pattern, message in _KEY_PATTERNS}
+    findings: list[dict[str, Any]] = []
+    for section in sections:
+        body = str(section.get("body") or "")
+        if not body.strip():
+            continue
+        heading = str(section.get("heading") or "")
+        for key, expected in anchors.items():
+            entry = patterns.get(key)
+            if entry is None:
+                continue
+            pattern, _message = entry
+            values: list[str] = []
+            for match in pattern.finditer(body):
+                raw = match.group(1) if match.groups() else match.group(0)
+                value = _norm_value(key, raw)
+                if value and value not in values:
+                    values.append(value)
+            if not values:
+                continue
+            if all(_value_matches(value, expected) for value in values):
+                continue
+            findings.append(
+                {
+                    "id": f"CON-{start + len(findings):03d}",
+                    "level": "major",
+                    "category": CATEGORY_CONSISTENCY,
+                    "message": f"{key}与全局设定不一致：正文「{'、'.join(values)}」，设定「{expected}」",
+                    "location": heading,
+                    "recommendation": f"统一为全局设定中的{key}「{expected}」，或修改项目全局设定",
+                    "evidence": {"key": key, "expected": expected, "values": values},
+                }
+            )
+    return findings
+
+
+def _value_matches(value: str, expected: str) -> bool:
+    left = _norm_value("", value)
+    right = _norm_value("", expected)
+    return left == right or left in right or right in left

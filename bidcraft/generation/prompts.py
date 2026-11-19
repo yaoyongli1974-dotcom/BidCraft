@@ -26,8 +26,16 @@ def chapter_messages(
     previous_summary: str,
     package_title: str,
     knowledge_text: str = "",
+    facts_text: str = "",
 ) -> list[dict[str, str]]:
     knowledge = f"\n{knowledge_text}\n" if knowledge_text else ""
+    facts = (
+        "【全局事实（必须严格遵守，前后一致）】\n"
+        f"{facts_text}\n"
+        "以上事实与台账冲突时，以台账为准；未列出的事实不得编造。\n\n"
+        if facts_text
+        else ""
+    )
     user = f"""项目：{project_name}
 行业包：{package_title}
 当前章节：{heading}
@@ -36,7 +44,7 @@ def chapter_messages(
 
 {ledger_text}
 
-【全书大纲】
+{facts}【全书大纲】
 {outline_text}
 
 【已写章节摘要（避免重复）】
