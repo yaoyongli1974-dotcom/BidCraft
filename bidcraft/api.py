@@ -42,6 +42,7 @@ from . import (
     plugins,
     qualifications,
     terms,
+    textqa,
     user_docs,
     wechat,
     wechatpay,
@@ -3342,6 +3343,35 @@ def create_app():
             )
             terms.delete_term(db, row)
             return {"deleted": True, "id": term_id}
+
+    # ------------------------------------------------------ textqa config
+    class TextQaUpdate(BaseModel):
+        typos: Any = None
+
+    def textqa_payload(db) -> dict[str, Any]:
+        typos = textqa.load_custom(db)
+        return {
+            "typos": typos,
+            "count": len(typos),
+            "builtin_count": len(textqa.TYPO_RULES),
+        }
+
+    @app.get("/admin/textqa")
+    def get_textqa(request: Request) -> dict[str, Any]:
+        require_super(request)
+        with session_scope() as db:
+            return textqa_payload(db)
+
+    @app.put("/admin/textqa")
+    def put_textqa(payload: TextQaUpdate, request: Request) -> dict[str, Any]:
+        require_super(request)
+        with session_scope() as db:
+            try:
+                saved = textqa.save_custom(db, payload.typos)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            audit(db, None, "textqa.config", {"count": len(saved)})
+            return textqa_payload(db)
 
     # ------------------------------------------------------ wechat config
     class WechatConfigUpdate(BaseModel):

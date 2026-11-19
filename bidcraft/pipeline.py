@@ -172,7 +172,7 @@ def _term_results(db: Session, sections: list[dict]) -> list[CheckResult]:
     ]
 
 
-def _textqa_results(sections: list[dict]) -> list[CheckResult]:
+def _textqa_results(db: Session, sections: list[dict]) -> list[CheckResult]:
     """Turn typo / consistency / duplication findings into check results."""
 
     return [
@@ -187,7 +187,7 @@ def _textqa_results(sections: list[dict]) -> list[CheckResult]:
             evidence=finding["evidence"],
             passed=False,
         )
-        for finding in textqa.scan_sections(sections)
+        for finding in textqa.scan_sections(db, sections)
     ]
 
 
@@ -202,7 +202,7 @@ def check_project(db: Session, project_id: str) -> tuple[list, dict]:
     nodes = load_outline(db, project_id)
     all_results = run_checks(package, ledger, nodes, include_passed=True)
     all_results.extend(_term_results(db, nodes))
-    all_results.extend(_textqa_results(nodes))
+    all_results.extend(_textqa_results(db, nodes))
     results = [result for result in all_results if not result.passed]
     db.query(Issue).filter(Issue.project_id == project_id).delete()
     for result in results:

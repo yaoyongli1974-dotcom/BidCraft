@@ -3572,6 +3572,64 @@
   font-weight: 400;
 }
 
+/* 文本规则（错别字词库） */
+
+.textqa-table {
+  min-width: 720px;
+}
+
+.textqa-table td {
+  vertical-align: middle;
+}
+
+.textqa-table .input {
+  min-width: 0;
+}
+
+.textqa-col-wrong,
+.textqa-col-right {
+  width: 26%;
+}
+
+.textqa-col-action {
+  width: 64px;
+  text-align: right;
+}
+
+.textqa-row-error {
+  display: block;
+  margin-top: 4px;
+}
+
+.textqa-cleared {
+  color: var(--faint);
+  font-size: 10.5px;
+  text-align: center;
+}
+
+.textqa-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.textqa-foot-left,
+.textqa-foot-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.textqa-count {
+  color: var(--faint);
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+}
+
 /* 匹配测试 */
 
 .quota-match {

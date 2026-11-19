@@ -25,6 +25,7 @@ const proxy = Object.fromEntries(
     '/admin/redeem-codes',
     '/admin/rule-packages',
     '/admin/quotas',
+    '/admin/textqa',
     '/admin/plugins',
     '/admin/audit',
   ].map((path) => [path, { target: apiTarget, changeOrigin: true }]),

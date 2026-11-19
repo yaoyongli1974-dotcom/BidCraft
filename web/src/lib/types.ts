@@ -1134,6 +1134,27 @@ export interface TermInput {
   enabled?: boolean
 }
 
+// ---------------------------------------------------------------- 文本规则（错别字词库）
+
+/**
+ * 一条企业自定义错别字规则。`wrong` 是正文里要揪出来的错词，`right` 留空表示
+ * 只提示、不给替换建议；`note` 用于说明适用范围或依据。
+ */
+export interface TypoRule {
+  wrong: string
+  right: string
+  note: string
+}
+
+/** `GET/PUT /admin/textqa` 的载荷：自定义规则列表 + 内置词库规模。 */
+export interface TextQaSettings {
+  typos: TypoRule[]
+  /** 自定义规则条数（后端按 wrong 去重后的数量）。 */
+  count: number
+  /** 内置错别字词库条数；只读，不可在控制台删除。 */
+  builtin_count: number
+}
+
 // ---------------------------------------------------------------- 调价策略
 
 /** 报价币种，与后端的枚举保持一致。 */

@@ -11,6 +11,7 @@ import {
   Plug,
   ScrollText,
   ShieldAlert,
+  SpellCheck,
   Users,
   Wallet,
   type LucideIcon,
@@ -24,6 +25,7 @@ import {
   getQuotas,
   getRulePackages,
   getTerms,
+  getTextQa,
   getUsers,
 } from '../../lib/api'
 import { formatNumber, roleMeta } from '../../lib/format'
@@ -32,6 +34,7 @@ import { AdminModelsTab } from './AdminModelsTab'
 import { AdminKnowledgeTab } from './AdminKnowledgeTab'
 import { AdminQuotaTab } from './AdminQuotaTab'
 import { AdminTermsTab } from './AdminTermsTab'
+import { AdminTextQaTab } from './AdminTextQaTab'
 import { AdminRulePackagesTab } from './AdminRulePackagesTab'
 import { AdminUsersTab } from './AdminUsersTab'
 import { AdminBillingTab } from './AdminBillingTab'
@@ -45,6 +48,7 @@ type AdminTab =
   | 'packages'
   | 'quotas'
   | 'terms'
+  | 'textqa'
   | 'users'
   | 'audit'
   | 'billing'
@@ -88,6 +92,12 @@ const ADMIN_TABS: AdminTabDef[] = [
     label: '术语库',
     icon: BookMarked,
     description: '企业用词规范：禁用表述与建议替换',
+  },
+  {
+    id: 'textqa',
+    label: '文本规则',
+    icon: SpellCheck,
+    description: '错别字词库：内置规则不可删，企业自定义优先',
   },
   {
     id: 'users',
@@ -141,6 +151,7 @@ function AdminWorkspace() {
   const rulePackagesQuery = useQuery('admin:rule-packages', () => getRulePackages(true))
   const quotasQuery = useQuery('admin:quotas', () => getQuotas('', 100))
   const termsQuery = useQuery('admin:terms', () => getTerms({ limit: 200 }))
+  const textQaQuery = useQuery('admin:textqa', getTextQa)
   const usersQuery = useQuery('admin:users', getUsers)
 
   const models = modelsQuery.data || []
@@ -159,6 +170,7 @@ function AdminWorkspace() {
     packages: rulePackagesQuery.loading ? undefined : visiblePackages.length,
     quotas: quotasQuery.loading ? undefined : quotas.length,
     terms: termsQuery.loading ? undefined : terms.length,
+    textqa: textQaQuery.loading ? undefined : textQaQuery.data?.count ?? 0,
     users: usersQuery.loading ? undefined : users.length,
     audit: undefined,
     billing: undefined,
@@ -341,6 +353,16 @@ function AdminWorkspace() {
             refreshing={termsQuery.refreshing}
             error={termsQuery.error}
             refresh={termsQuery.refresh}
+          />
+        )}
+        {tab === 'textqa' && (
+          <AdminTextQaTab
+            settings={textQaQuery.data}
+            loading={textQaQuery.loading}
+            refreshing={textQaQuery.refreshing}
+            error={textQaQuery.error}
+            refresh={textQaQuery.refresh}
+            onSaved={textQaQuery.setData}
           />
         )}
         {tab === 'users' && (

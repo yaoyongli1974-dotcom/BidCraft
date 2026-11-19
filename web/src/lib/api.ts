@@ -101,6 +101,8 @@ import type {
   TermInput,
   TermItem,
   TestResult,
+  TextQaSettings,
+  TypoRule,
   UploadResult,
   User,
   UserDoc,
@@ -3308,6 +3310,66 @@ export const deleteTerm = (id: string) =>
     `/admin/terms/${encodeURIComponent(id)}`,
     { method: 'DELETE' },
   )
+
+// ---------------------------------------------------------------- admin: 文本规则（错别字词库）
+
+/** 与后端 `textqa.save_custom` 的列宽 / 条数上限保持一致。 */
+export const TYPO_RULE_MAX = { wrong: 20, right: 20, note: 60 } as const
+export const TYPO_RULE_LIMIT = 500
+
+/**
+ * 归一化自定义错别字规则：去掉空错词、按 wrong 去重（保留首次出现的顺序与内容）、
+ * 按后端列宽截断 wrong/right/note，并收敛到 500 条上限。既用于解析服务端返回，
+ * 也用于提交前的清洗，保证前后端校验口径一致。
+ */
+export function normalizeTypoRules(value: unknown): TypoRule[] {
+  const items = asArray<unknown>(value, 'typos')
+  const seen = new Set<string>()
+  const rules: TypoRule[] = []
+  for (const item of items) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const raw = item as Record<string, unknown>
+    const wrong = asText(raw.wrong).trim().slice(0, TYPO_RULE_MAX.wrong)
+    if (!wrong || seen.has(wrong)) continue
+    seen.add(wrong)
+    rules.push({
+      wrong,
+      right: asText(raw.right).trim().slice(0, TYPO_RULE_MAX.right),
+      note: asText(raw.note).trim().slice(0, TYPO_RULE_MAX.note),
+    })
+    if (rules.length >= TYPO_RULE_LIMIT) break
+  }
+  return rules
+}
+
+/** 兼容平铺数组与 `{ typos, count, builtin_count }` 两种返回形状。 */
+function normalizeTextQa(value: unknown): TextQaSettings {
+  const raw =
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {}
+  const typos = normalizeTypoRules(raw.typos ?? value)
+  return {
+    typos,
+    count: Math.max(0, Math.round(asNumber(raw.count, typos.length))),
+    builtin_count: Math.max(0, Math.round(asNumber(raw.builtin_count, 0))),
+  }
+}
+
+/** 读取企业自定义错别字词库（仅超管）；内置词库只回条数，不回明细。 */
+export async function getTextQa(): Promise<TextQaSettings> {
+  const data = await request<unknown>('/admin/textqa')
+  return normalizeTextQa(data)
+}
+
+/** 整体覆盖保存自定义规则；非法载荷后端回 400（中文 detail），经 ApiError 透出。 */
+export async function saveTextQa(typos: TypoRule[]): Promise<TextQaSettings> {
+  const data = await request<unknown>('/admin/textqa', {
+    method: 'PUT',
+    body: JSON.stringify({ typos: normalizeTypoRules(typos) }),
+  })
+  return normalizeTextQa(data)
+}
 
 // ---------------------------------------------------------------- admin: 插件市场（MCP 客户端）
 

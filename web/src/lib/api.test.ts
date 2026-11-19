@@ -37,6 +37,7 @@ import {
   getQualifications,
   getSubAccounts,
   getTerms,
+  getTextQa,
   getUserDocs,
   grantUserVip,
   importPluginPackage,
@@ -54,10 +55,12 @@ import {
   normalizePricePolicy,
   normalizeQualification,
   normalizeTerm,
+  normalizeTypoRules,
   reindexKnowledgeBase,
   restoreBoqVersion,
   reviewBoqVersion,
   roundTo,
+  saveTextQa,
   submitBoqVersion,
   unapproveBoqVersion,
   updatePlugin,
@@ -1383,6 +1386,94 @@ describe('enterprise terms', () => {
     })
     expect(created.id).toBe('t-3')
     expect(created.enabled).toBe(false)
+  })
+})
+
+describe('text qa typo rules (R37)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const jsonResponse = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+  it('drops empty wrong words, dedupes by wrong and truncates to the column widths', () => {
+    const rules = normalizeTypoRules([
+      { wrong: ' 帐号 ', right: ' 账号 ', note: ' 通用 ' },
+      { wrong: '帐号', right: '帐户', note: '重复行应被丢弃' },
+      { wrong: '   ', right: 'x' },
+      { wrong: '' },
+      null,
+      'not-an-object',
+      { wrong: '错'.repeat(25), right: '对'.repeat(25), note: '备'.repeat(70) },
+    ])
+    expect(rules).toHaveLength(2)
+    expect(rules[0]).toEqual({ wrong: '帐号', right: '账号', note: '通用' })
+    expect(rules[1].wrong).toHaveLength(20)
+    expect(rules[1].right).toHaveLength(20)
+    expect(rules[1].note).toHaveLength(60)
+
+    // 上限 500 条；也接受 { typos: [...] } 包装。
+    const many = Array.from({ length: 520 }, (_, index) => ({
+      wrong: `错词${index}`,
+      right: '',
+      note: '',
+    }))
+    expect(normalizeTypoRules(many)).toHaveLength(500)
+    expect(normalizeTypoRules({ typos: many })).toHaveLength(500)
+    expect(normalizeTypoRules(undefined)).toEqual([])
+  })
+
+  it('reads the settings from GET /admin/textqa', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({
+        typos: [
+          { wrong: '帐号', right: '账号', note: '' },
+          { wrong: '帐号', right: '重复项' },
+        ],
+        count: 1,
+        builtin_count: 128,
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const settings = await getTextQa()
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/admin/textqa')
+    expect(settings).toEqual({
+      typos: [{ wrong: '帐号', right: '账号', note: '' }],
+      count: 1,
+      builtin_count: 128,
+    })
+  })
+
+  it('saves the whole list with PUT and a normalized body', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({
+        typos: [{ wrong: '帐号', right: '账号', note: '' }],
+        count: 1,
+        builtin_count: 128,
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const saved = await saveTextQa([
+      { wrong: ' 帐号 ', right: ' 账号 ', note: '' },
+      { wrong: '帐号', right: '重复项', note: '' },
+      { wrong: '', right: '空错词应被丢弃', note: '' },
+    ])
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(fetchMock.mock.calls[0][0]).toBe('/admin/textqa')
+    expect(init.method).toBe('PUT')
+    expect(JSON.parse(String(init.body))).toEqual({
+      typos: [{ wrong: '帐号', right: '账号', note: '' }],
+    })
+    expect(saved.count).toBe(1)
+    expect(saved.builtin_count).toBe(128)
   })
 })
 

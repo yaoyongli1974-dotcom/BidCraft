@@ -1237,6 +1237,32 @@ def knowledge_audit(
         console.print(f"[green]报告已写入 {output}[/green]")
 
 
+@app.command()
+def dedup(
+    directory: Path = typer.Argument(..., help="待查重目录（txt/md/markdown，docx 可选）"),
+    threshold: float = typer.Option(0.85, "--threshold", help="相似度阈值 0–1"),
+    min_chars: int = typer.Option(80, "--min-chars", help="参与比对的最少段落字数"),
+    as_json: bool = typer.Option(False, "--json", help="直接输出 JSON"),
+    output: Path | None = typer.Option(None, "--output", "-o", help="报告 JSON 输出路径"),
+) -> None:
+    """跨文件段落查重（只读，不联网）。"""
+    from .dedup import compare, render, to_json, write_json
+
+    if not directory.is_dir():
+        console.print(f"[red]目录不存在：{directory}[/red]")
+        raise typer.Exit(1)
+
+    report = compare(directory, threshold=threshold, min_chars=min_chars)
+    if as_json:
+        console.print_json(to_json(report))
+    else:
+        console.print(render(report), markup=False, highlight=False)
+
+    if output is not None:
+        write_json(report, output)
+        console.print(f"[green]报告已写入 {output}[/green]")
+
+
 @app.command("data-audit")
 def data_audit(
     path: Path = typer.Argument(..., help="开放数据文件（csv/txt/xlsx）"),
