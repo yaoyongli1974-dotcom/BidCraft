@@ -38,6 +38,7 @@ from . import (
     plugin_pack,
     plugins,
     terms,
+    user_docs,
     wechat,
     wechatpay,
 )
@@ -883,9 +884,26 @@ def _generation_client(db) -> ModelClient:
     return ModelClient(endpoint if endpoint is not None else settings)
 
 
-def _knowledge_provider(db):
+def _knowledge_provider(db, user_id: str | None = None):
+    """Build the generation retrieval callback for one user.
+
+    Global knowledge bases stay available to everyone; the caller's personal
+    knowledge base is added explicitly (and therefore included even though
+    :func:`knowledge.search` otherwise skips personal bases).
+    """
+
+    kb_ids: list[str] = []
+    if user_id:
+        kb_ids.append(user_docs.personal_kb(db, str(user_id)).id)
+
     def provide(query: str) -> str:
-        passages = knowledge.search(db, query, limit=4)
+        passages = knowledge.search(
+            db,
+            query,
+            kb_ids=kb_ids or None,
+            limit=4,
+            include_personal=bool(kb_ids),
+        )
         return knowledge.context_block(passages)
 
     return provide
@@ -944,6 +962,7 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
             project = db.get(Project, project_id)
             if project is None:
                 raise ValueError("项目不存在")
+            owner_id = str((job.payload or {}).get("user_id") or project.owner_id or "")
             ledger = load_ledger(db, project_id)
             problems = ledger_gate(ledger)
             if problems:
@@ -1057,7 +1076,7 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
                 on_progress=on_progress,
                 on_chapter_start=on_chapter_start,
                 force=force,
-                knowledge_provider=_knowledge_provider(work_db),
+                knowledge_provider=_knowledge_provider(work_db, owner_id),
             )
             flush_delta()
             project.status = "drafting"
@@ -1653,6 +1672,7 @@ def create_app():
             "/auth",
             "/billing/",
             "/account/",
+            "/my/",
         )
         if not path.startswith(api_prefixes):
             return await call_next(request)
@@ -4170,6 +4190,78 @@ def create_app():
             audit(db, project.id, "image.delete", {"id": image_id})
             return {"deleted": True, "id": image_id}
 
+    # ------------------------------------------------------------ user docs
+    @app.get("/my/docs")
+    def my_docs() -> list[dict[str, Any]]:
+        with session_scope() as db:
+            user = billing_user(db)
+            return [user_docs.doc_payload(row) for row in user_docs.list_docs(db, user.id)]
+
+    @app.post("/my/docs", status_code=202)
+    async def upload_my_doc(file: UploadFile = File(...)) -> dict[str, Any]:
+        raw_name = (file.filename or "").strip()
+        content = await file.read(user_docs.MAX_USER_DOC_BYTES + 1)
+        worker: threading.Thread | None = None
+        with session_scope() as db:
+            user = billing_user(db)
+            try:
+                doc = user_docs.save_upload(db, user, raw_name, content)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            kb_id = doc.kb_id
+            job = _active_kb_reindex(db, kb_id)
+            if job is None:
+                job = Job(
+                    project_id=None,
+                    kind="kb_reindex",
+                    status="queued",
+                    message="知识库重建索引排队中…",
+                    payload={
+                        "owner_id": user.id,
+                        "kb_id": kb_id,
+                        "name": "个人知识库",
+                    },
+                )
+                db.add(job)
+                db.flush()
+                jobs.publish_event(job.id, "queued", jobs.job_payload(job), db=db)
+                worker = threading.Thread(
+                    target=_run_kb_reindex_job,
+                    args=(job.id, kb_id),
+                    daemon=True,
+                    name=f"bidcraft-kb-reindex-{job.id[:8]}",
+                )
+            job_id = job.id
+            payload = user_docs.doc_payload(doc)
+            audit(
+                db,
+                None,
+                "user_doc.upload",
+                {"id": doc.id, "filename": doc.filename, "kb_id": kb_id, "job_id": job_id},
+            )
+        if worker is not None:
+            worker.start()
+        return {"doc": payload, "job_id": job_id}
+
+    @app.delete("/my/docs/{doc_id}")
+    def delete_my_doc(doc_id: str) -> dict[str, Any]:
+        with session_scope() as db:
+            user = billing_user(db)
+            row = user_docs.delete_doc(db, user, doc_id)
+            audit(db, None, "user_doc.delete", {"id": row.id, "filename": row.filename})
+            return {"deleted": True, "id": row.id}
+
+    @app.get("/my/docs/{doc_id}/file")
+    def my_doc_file(doc_id: str) -> FileResponse:
+        with session_scope() as db:
+            user = billing_user(db)
+            row = user_docs.get_doc(db, user.id, doc_id)
+            root = user_docs.user_dir(user.id).resolve()
+            path = Path(row.stored_path).resolve()
+            if root not in path.parents or not path.is_file():
+                raise LookupError(f"文件不存在：{row.filename}")
+            return FileResponse(path, media_type=row.mime or None, filename=row.filename)
+
     # ------------------------------------------------------------- sources
     @app.get("/projects/{ref}/sources")
     def sources(
@@ -4434,7 +4526,7 @@ def create_app():
                 ledger,
                 package,
                 only_node=node.id,
-                knowledge_provider=_knowledge_provider(db),
+                knowledge_provider=_knowledge_provider(db, user.id),
             )
             if charged and not report.written:
                 billing.refund_chapters(db, user, charged, project_id=project.id)
@@ -4478,7 +4570,7 @@ def create_app():
                 client,
                 ledger,
                 package,
-                knowledge_provider=_knowledge_provider(db),
+                knowledge_provider=_knowledge_provider(db, user.id),
             )
             if charged and count > len(report.written):
                 unit = charged // count if count else 0

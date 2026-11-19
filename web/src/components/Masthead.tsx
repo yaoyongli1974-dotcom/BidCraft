@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom'
-import { Cpu, Loader2, Settings2, ShieldCheck, WifiOff } from 'lucide-react'
+import { Cpu, FileText, Loader2, Settings2, ShieldCheck, WifiOff } from 'lucide-react'
 import { useHealth } from '../context/useHealth'
 import { useHelp } from '../context/useHelp'
 import { useAuth } from '../context/useAuth'
@@ -14,6 +14,7 @@ export function Masthead() {
   const location = useLocation()
   const onProjects = location.pathname === '/'
   const onAdmin = location.pathname === '/admin'
+  const onMyDocs = location.pathname === '/my-docs'
 
   const { label, tone, Icon } = (() => {
     if (loading) return { label: '检查本地服务', tone: 'neutral', Icon: Loader2 }
@@ -39,6 +40,13 @@ export function Masthead() {
         <div className="masthead-nav">
           <Link to="/" className={className('masthead-link', onProjects && 'is-active')}>
             项目
+          </Link>
+          <Link
+            to="/my-docs"
+            className={className('masthead-link', onMyDocs && 'is-active')}
+          >
+            <FileText size={13} />
+            我的文档
           </Link>
           {isSuperAdmin && (onProjects || onAdmin) && (
             <Link

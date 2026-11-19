@@ -478,6 +478,27 @@ class KnowledgeBase(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class UserDoc(Base):
+    """A file uploaded by a regular user into their personal knowledge base."""
+
+    __tablename__ = "user_docs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
+    kb_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_bases.id"), nullable=True
+    )
+    filename: Mapped[str] = mapped_column(String(255), default="")
+    stored_path: Mapped[str] = mapped_column(String(1000), default="")
+    size: Mapped[int] = mapped_column(Integer, default=0)
+    mime: Mapped[str] = mapped_column(String(120), default="")
+    #: ready | indexing | failed
+    status: Mapped[str] = mapped_column(String(16), default="ready")
+    error: Mapped[str] = mapped_column(String(500), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class KbChunk(Base):
     __tablename__ = "kb_chunks"
 

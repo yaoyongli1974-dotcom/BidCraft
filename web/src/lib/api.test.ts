@@ -14,9 +14,11 @@ import {
   createPlugin,
   createSubAccount,
   createTerm,
+  createUserDoc,
   createVipOrder,
   deleteBoqVersion,
   deleteSubAccount,
+  deleteUserDoc,
   duplicateProject,
   errorDetailText,
   exportPluginPackage,
@@ -26,6 +28,7 @@ import {
   getProjectTemplates,
   getSubAccounts,
   getTerms,
+  getUserDocs,
   grantUserVip,
   importPluginPackage,
   instantiateTemplate,
@@ -48,6 +51,7 @@ import {
   updateProject,
   updateSubAccount,
   uploadForm,
+  userDocFileUrl,
 } from './api'
 
 class FakeXhr {
@@ -74,7 +78,11 @@ class FakeXhr {
     this.url = url
   }
 
-  send() {}
+  body: unknown = null
+
+  send(body?: unknown) {
+    this.body = body
+  }
 
   abort() {
     this.aborted = true
@@ -1775,5 +1783,132 @@ describe('R24 VIP & sub-accounts', () => {
   it('surfaces a 403 when a sub-account tries to recharge', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ detail: '子账号费用由主账号承担，无需单独充值' }, 403)))
     await expect(createBillingOrder('starter')).rejects.toBeInstanceOf(ApiError)
+  })
+})
+
+describe('my docs', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const jsonResponse = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+  it('lists the current user docs and normalizes defaults', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse([
+        {
+          id: 'd-1',
+          filename: '资质证书.pdf',
+          size: '2048',
+          mime: 'application/pdf',
+          status: 'Indexing',
+          kb_id: 'kb-1',
+          created_at: '2026-11-01T08:00:00',
+        },
+        { id: '', filename: 'ignored.txt' },
+        { id: 'd-2', filename: '产品参数.xlsx', size: 12 },
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const docs = await getUserDocs()
+    expect(fetchMock.mock.calls[0][0]).toBe('/my/docs')
+    expect((fetchMock.mock.calls[0][1] as RequestInit | undefined)?.method).toBeUndefined()
+    expect(docs).toHaveLength(2)
+    expect(docs[0]).toMatchObject({
+      id: 'd-1',
+      filename: '资质证书.pdf',
+      size: 2048,
+      status: 'indexing',
+      error: '',
+      kb_id: 'kb-1',
+    })
+    expect(docs[1]).toMatchObject({
+      id: 'd-2',
+      filename: '产品参数.xlsx',
+      size: 12,
+      mime: '',
+      status: 'ready',
+      created_at: null,
+      updated_at: null,
+    })
+  })
+
+  it('unwraps a docs/items envelope when an older server nests the list', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({ items: [{ id: 'd-3', filename: '说明.md', size: 10 }] }),
+      ),
+    )
+    const docs = await getUserDocs()
+    expect(docs.map((doc) => doc.id)).toEqual(['d-3'])
+  })
+
+  it('uploads a multipart file to /my/docs and returns the 202 job', async () => {
+    FakeXhr.instances = []
+    vi.stubGlobal('XMLHttpRequest', FakeXhr)
+    const file = new File(['hello'], '产品彩页.pdf', { type: 'application/pdf' })
+
+    const pending = createUserDoc(file)
+    const xhr = FakeXhr.instances[0]
+    expect(xhr.method).toBe('POST')
+    expect(xhr.url).toBe('/my/docs')
+    const form = xhr.body as FormData
+    expect(form).toBeInstanceOf(FormData)
+    const sent = form.get('file') as File
+    expect(sent.name).toBe('产品彩页.pdf')
+    expect(await sent.text()).toBe('hello')
+
+    xhr.respond(
+      202,
+      JSON.stringify({
+        doc: {
+          id: 'd-4',
+          filename: '产品彩页.pdf',
+          size: 5,
+          mime: 'application/pdf',
+          status: 'ready',
+          kb_id: 'kb-9',
+          created_at: '2026-11-19T09:00:00',
+        },
+        job_id: 'job-7',
+      }),
+    )
+    await expect(pending).resolves.toMatchObject({
+      job_id: 'job-7',
+      doc: { id: 'd-4', filename: '产品彩页.pdf', kb_id: 'kb-9' },
+    })
+  })
+
+  it('rejects an unrecognizable upload payload', async () => {
+    FakeXhr.instances = []
+    vi.stubGlobal('XMLHttpRequest', FakeXhr)
+    const pending = createUserDoc(new File(['x'], 'a.txt'))
+    FakeXhr.instances[0].respond(202, '{"job_id":"job-1"}')
+    await expect(pending).rejects.toMatchObject({
+      name: 'ApiError',
+      message: '服务端返回的文档信息无法识别，请刷新后重试。',
+    })
+  })
+
+  it('deletes by encoded id and keeps the server echo', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({ deleted: true, id: 'd/1' }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await deleteUserDoc('d/1')
+    expect(fetchMock.mock.calls[0][0]).toBe('/my/docs/d%2F1')
+    expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe('DELETE')
+    expect(result).toEqual({ deleted: true, id: 'd/1' })
+  })
+
+  it('builds the download URL for a doc', () => {
+    expect(userDocFileUrl('d/1')).toBe('/my/docs/d%2F1/file')
   })
 })

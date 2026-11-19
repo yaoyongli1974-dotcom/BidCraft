@@ -4,6 +4,7 @@ import {
   ChevronDown,
   Coins,
   Crown,
+  FileText,
   KeyRound,
   LayoutDashboard,
   LogOut,
@@ -108,6 +109,15 @@ export function UserMenu() {
               </div>
             </div>
 
+            <Link
+              to="/my-docs"
+              className="user-menu-item"
+              role="menuitem"
+              onClick={() => setOpen(false)}
+            >
+              <FileText size={15} />
+              <span>我的文档</span>
+            </Link>
             <Link
               to="/billing"
               className="user-menu-item"

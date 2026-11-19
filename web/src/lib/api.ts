@@ -87,6 +87,8 @@ import type {
   TestResult,
   UploadResult,
   User,
+  UserDoc,
+  UserDocUploadResult,
   UserInput,
 } from './types'
 import { normalizeProjectType, projectTypeLabel } from './format'
@@ -349,6 +351,68 @@ export function uploadForm<T>(
     xhr.send(form)
   })
 }
+
+// ---------------------------------------------------------------- my docs
+
+function normalizeUserDoc(value: unknown): UserDoc | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  const id = asText(raw.id)
+  if (!id) return null
+  return {
+    id,
+    filename: asText(raw.filename) || '未命名文档',
+    size: Math.max(0, Math.round(asNumber(raw.size))),
+    mime: asText(raw.mime),
+    status: (asText(raw.status, 'ready') || 'ready').toLowerCase(),
+    error: asText(raw.error),
+    kb_id: asText(raw.kb_id),
+    created_at: typeof raw.created_at === 'string' ? raw.created_at : null,
+    updated_at: typeof raw.updated_at === 'string' ? raw.updated_at : null,
+  }
+}
+
+/** 当前登录用户上传的个人文档列表（平铺数组，后端只返回本人数据）。 */
+export async function getUserDocs(): Promise<UserDoc[]> {
+  const data = await request<unknown>('/my/docs')
+  const list = asArray<unknown>(data, 'docs')
+  const items = list.length ? list : asArray<unknown>(data, 'items')
+  return items
+    .map(normalizeUserDoc)
+    .filter((item): item is UserDoc => item !== null)
+}
+
+/** multipart 上传一份个人文档；202 返回 `{ doc, job_id }`。 */
+export async function createUserDoc(
+  file: File,
+  onProgress?: (percent: number) => void,
+): Promise<UserDocUploadResult> {
+  const form = new FormData()
+  form.append('file', file)
+  const payload = await uploadForm<unknown>('/my/docs', form, {
+    onProgress,
+    networkMessage: '上传失败：无法连接本地服务，请确认后端已启动。',
+  })
+  const raw =
+    payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : {}
+  const doc = normalizeUserDoc(raw.doc ?? payload)
+  if (!doc) throw new ApiError(500, null, '服务端返回的文档信息无法识别，请刷新后重试。')
+  return { doc, job_id: asText(raw.job_id) }
+}
+
+/** 删除本人上传的文档；后端会同时移除落盘文件与索引记录。 */
+export async function deleteUserDoc(id: string): Promise<{ deleted: boolean; id: string }> {
+  const data = await request<unknown>(`/my/docs/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  })
+  const raw = data && typeof data === 'object' ? (data as Record<string, unknown>) : {}
+  return { deleted: asBool(raw.deleted), id: asText(raw.id) || id }
+}
+
+export const userDocFileUrl = (id: string) =>
+  `/my/docs/${encodeURIComponent(id)}/file`
 
 // ---------------------------------------------------------------- health & packages
 

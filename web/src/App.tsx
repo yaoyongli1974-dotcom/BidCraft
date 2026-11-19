@@ -18,6 +18,9 @@ const RegisterPage = lazy(() =>
 const BillingPage = lazy(() =>
   import('./pages/BillingPage').then((module) => ({ default: module.BillingPage })),
 )
+const MyDocsPage = lazy(() =>
+  import('./pages/MyDocsPage').then((module) => ({ default: module.MyDocsPage })),
+)
 const AdminConsole = lazy(() =>
   import('./pages/admin/AdminConsole').then((module) => ({ default: module.AdminConsole })),
 )
@@ -92,6 +95,7 @@ export const router = createBrowserRouter([
       },
       { path: 'admin', element: page(<AdminConsole />, <ShellFallback />) },
       { path: 'billing', element: page(<BillingPage />, <ShellFallback />) },
+      { path: 'my-docs', element: page(<MyDocsPage />, <ShellFallback />) },
       { path: '*', element: <NotFoundContent /> },
     ],
   },

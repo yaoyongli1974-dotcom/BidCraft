@@ -553,13 +553,23 @@ def search(
     *,
     limit: int = 4,
     kb_ids: list[str] | None = None,
+    include_personal: bool = False,
 ) -> list[Passage]:
+    """Retrieve passages from enabled knowledge bases.
+
+    Personal knowledge bases (``options.personal``) are opt-in: they are only
+    searched when ``include_personal=True`` so one user's uploads never leak
+    into another user's generation context.
+    """
+
     if not (query or "").strip():
         return []
     statement = select(KnowledgeBase).where(KnowledgeBase.enabled.is_(True))
     if kb_ids:
         statement = statement.where(KnowledgeBase.id.in_(kb_ids))
     bases = list(db.scalars(statement.order_by(KnowledgeBase.is_default.desc())))
+    if not include_personal:
+        bases = [kb for kb in bases if not (kb.options or {}).get("personal")]
     passages: list[Passage] = []
     for kb in bases:
         try:

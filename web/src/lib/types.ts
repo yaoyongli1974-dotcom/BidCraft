@@ -41,6 +41,30 @@ export interface User {
   created_at?: string | null
 }
 
+/**
+ * 普通用户上传的个人文档（R27）。文件落在服务端的个人目录，并自动建立
+ * 个人知识库索引；只有上传者本人可以在生成时检索到。
+ */
+export interface UserDoc {
+  id: string
+  filename: string
+  size: number
+  mime: string
+  /** ready（可检索）/ indexing（索引中）/ failed（索引失败）等后端状态。 */
+  status: string
+  error: string
+  /** 关联的个人知识库 id。 */
+  kb_id: string
+  created_at: string | null
+  updated_at: string | null
+}
+
+/** `POST /my/docs` 的 202 响应：文档元数据与后台索引任务 id。 */
+export interface UserDocUploadResult {
+  doc: UserDoc
+  job_id: string
+}
+
 export type ModelKind = 'chat' | 'image' | 'embedding'
 export type ModelProvider = 'openai' | 'ollama' | 'custom'
 

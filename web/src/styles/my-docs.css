@@ -1,0 +1,170 @@
+/* ------------------------------------------------------------------ my docs (personal library) */
+
+.mydocs-page {
+  padding: 26px 0 16px;
+}
+
+.mydocs-layout {
+  display: grid;
+  grid-template-columns: 372px minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.mydocs-upload-column {
+  min-width: 0;
+}
+
+.mydocs-dropzone {
+  min-height: 264px;
+}
+
+.mydocs-list {
+  overflow: hidden;
+  min-width: 0;
+}
+
+.mydocs-rows {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--line);
+}
+
+.mydocs-row {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  padding: 15px 20px;
+  border-bottom: 1px solid var(--line);
+  transition: background 0.16s ease;
+}
+
+.mydocs-row:last-child {
+  border-bottom: 0;
+}
+
+.mydocs-row:hover {
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.mydocs-row.is-failed {
+  background: linear-gradient(90deg, rgba(159, 53, 40, 0.035), transparent 45%);
+}
+
+.mydocs-file-icon {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  background: var(--paper);
+  color: var(--jade);
+  border: 1px solid var(--line);
+}
+
+.mydocs-row.is-failed .mydocs-file-icon {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: rgba(159, 53, 40, 0.16);
+}
+
+.mydocs-main {
+  min-width: 0;
+}
+
+.mydocs-name-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.mydocs-name {
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.mydocs-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px 10px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+  color: var(--faint);
+  font-size: 9.5px;
+}
+
+.mydocs-meta .mono {
+  max-width: 220px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mydocs-error {
+  margin-top: 5px;
+  color: var(--danger);
+  font-size: 10.5px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.mydocs-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mydocs-download {
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.mydocs-row--skeleton {
+  align-items: center;
+}
+
+.mydocs-row--skeleton .mydocs-main {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+@media (max-width: 1000px) {
+  .mydocs-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .mydocs-dropzone {
+    min-height: 220px;
+  }
+}
+
+@media (max-width: 720px) {
+  .mydocs-page {
+    padding-top: 18px;
+  }
+
+  .mydocs-row {
+    grid-template-columns: 34px minmax(0, 1fr);
+    padding: 13px 15px;
+  }
+
+  .mydocs-file-icon {
+    width: 32px;
+    height: 32px;
+  }
+
+  .mydocs-actions {
+    grid-column: 2;
+    justify-content: flex-start;
+  }
+
+  .mydocs-meta .mono {
+    display: none;
+  }
+}
