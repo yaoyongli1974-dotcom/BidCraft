@@ -69,3 +69,28 @@ bidcraft client download DOC_ID --out ./downloads/
 | 离线可用 | ❌ | ❌（仍需连接服务器） |
 
 桌面模式不改变服务端行为，也不引入独立数据库；它是服务端 API 之上的一个轻客户端。
+
+## 打包与安装包
+
+仓库提供三种平台的打包脚本，PyInstaller 负责生成独立可执行文件（无需用户安装 Python），
+再由平台工具封装成安装包：
+
+| 平台 | 命令 | 产物 |
+| --- | --- | --- |
+| Linux（含 deb/rpm） | `bash packaging/build_deb.sh` / `bash packaging/build_rpm.sh` | `dist/bidcraft-desktop_<版本>_<arch>.deb`、`dist/*.rpm` |
+| Windows | `packaging/build_windows.ps1` | `dist/bidcraft-desktop-<版本>-windows.zip`（内含 `BidCraft.exe`） |
+| macOS | `bash packaging/build_macos_app.sh` | `dist/bidcraft-desktop-<版本>-macos.zip`（内含 `BidCraft.app`） |
+
+前置：`npm run build`（web）→ `uv pip install pyinstaller` → `bash packaging/build_pyinstaller.sh`。
+deb 使用 `dpkg-deb` 直接构建（无 debhelper 依赖），rpm 使用 `nfpm`。
+
+安装后：
+
+- Linux：`/usr/bin/bidcraft-desktop`，菜单项「BidCraft 投标工作台」；
+- Windows / macOS：双击 `BidCraft.exe` / `BidCraft.app`。
+
+启动时可用 `--server URL` 指定服务器，或设置环境变量 `BIDCRAFT_SERVER`，
+或先执行一次 `bidcraft client login --server URL` 保存地址，之后双击即自动连接。
+
+跨平台构建由 `.github/workflows/desktop-release.yml` 负责：推送 `v*` 标签时在
+Windows / macOS / Ubuntu 三个原生 runner 上构建并把 `.zip`、`.deb`、`.rpm` 附加到 Release。

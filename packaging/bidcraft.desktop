@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=BidCraft
+Name[zh_CN]=BidCraft 投标工作台
+Comment=Connect to a BidCraft server
+Comment[zh_CN]=连接 BidCraft 服务器
+Exec=/usr/bin/bidcraft-desktop %U
+Icon=bidcraft
+Terminal=true
+Categories=Office;

@@ -151,3 +151,32 @@ def test_missing_local_file_is_rejected(live_server, tmp_path):
             client.upload_doc(tmp_path / "nope.txt")
     finally:
         client.close()
+
+
+def test_load_config_prefers_file_then_env(tmp_path, monkeypatch):
+    from bidcraft import client as client_module
+
+    monkeypatch.setenv("BIDCRAFT_SERVER", "http://env.example/")
+    config = client_module.load_config(tmp_path)
+    assert config.server == "http://env.example"
+
+    (tmp_path / "config.json").write_text(
+        json.dumps({"server": "https://saved.example/", "username": "alice"}),
+        encoding="utf-8",
+    )
+    config = client_module.load_config(tmp_path)
+    assert config.server == "https://saved.example"
+    assert config.username == "alice"
+
+
+def test_desktop_requires_server(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from bidcraft import client as client_module
+    from bidcraft.cli import app
+
+    monkeypatch.setattr(client_module, "CLIENT_HOME", tmp_path)
+    monkeypatch.delenv("BIDCRAFT_SERVER", raising=False)
+    result = CliRunner().invoke(app, ["desktop"])
+    assert result.exit_code == 2
+    assert "未指定服务器" in result.output

@@ -582,9 +582,9 @@ def run_desktop(server: str, *, port: int = 0, open_browser: bool = True) -> Non
         target=httpd.serve_forever, name="bidcraft-desktop-gateway", daemon=True
     )
     thread.start()
-    print(f"BidCraft 桌面网关已启动：{url}（本地文件桥已启用）")
-    print(f"上游服务器：{server}")
-    print(f"客户端令牌：{token}")
+    print(f"BidCraft 桌面网关已启动：{url}（本地文件桥已启用）", flush=True)
+    print(f"上游服务器：{server}", flush=True)
+    print(f"客户端令牌：{token}", flush=True)
     if open_browser:
         webbrowser.open(url)
     try:

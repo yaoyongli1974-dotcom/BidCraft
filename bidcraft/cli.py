@@ -1158,15 +1158,27 @@ def client_download(
 
 @app.command()
 def desktop(
-    server: str = typer.Option(..., "--server", help="远端服务器地址"),
+    server: str = typer.Option(
+        "",
+        "--server",
+        help="远端服务器地址（省略时读环境变量 BIDCRAFT_SERVER 或上次 client login 保存的地址）",
+    ),
     port: int = typer.Option(0, "--port", help="本地端口（默认随机）"),
     no_browser: bool = typer.Option(False, "--no-browser", help="不自动打开浏览器"),
 ) -> None:
     """启动桌面网关：本地反代 + 本地文件桥（需安装 api 扩展的前端产物）。"""
+    from .client import load_config
     from .desktop import run_desktop
 
+    target = server.strip() or load_config().server
+    if not target:
+        console.print(
+            "[red]未指定服务器[/red]：请使用 --server，或先执行 "
+            "[bold]bidcraft client login --server URL[/bold] 保存地址。"
+        )
+        raise typer.Exit(2)
     try:
-        run_desktop(server, port=port, open_browser=not no_browser)
+        run_desktop(target, port=port, open_browser=not no_browser)
     except KeyboardInterrupt:  # pragma: no cover - 交互式退出
         pass
     except (ValueError, OSError) as exc:

@@ -37,6 +37,25 @@ class ClientConfig:
     home: Path = field(default_factory=_default_home)
 
 
+def load_config(home: str | Path | None = None) -> ClientConfig:
+    """读取已保存的客户端配置；server 缺省时回退到 ``BIDCRAFT_SERVER``。"""
+    base = Path(home).expanduser().resolve() if home else CLIENT_HOME
+    config = ClientConfig(home=base)
+    path = base / "config.json"
+    if path.is_file():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raw = {}
+        if isinstance(raw, dict):
+            config.server = str(raw.get("server") or "")
+            config.username = str(raw.get("username") or "")
+    if not config.server:
+        config.server = os.getenv("BIDCRAFT_SERVER", "").strip()
+    config.server = config.server.rstrip("/")
+    return config
+
+
 def _write_private(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
