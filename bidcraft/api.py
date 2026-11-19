@@ -35,6 +35,7 @@ from . import (
     jobqueue,
     jobs,
     knowledge,
+    material_policy,
     model_config,
     plugin_pack,
     plugins,
@@ -441,6 +442,23 @@ class ModelUpdate(BaseModel):
     options: dict[str, Any] | None = None
     enabled: bool | None = None
     is_default: bool | None = None
+
+
+class KbDocMeta(BaseModel):
+    source: str = Field(min_length=1, max_length=1000)
+    kind: str = "other"
+    title: str = Field(default="", max_length=200)
+    cert_no: str = Field(default="", max_length=120)
+    contract_no: str = Field(default="", max_length=120)
+    owner: str = Field(default="", max_length=120)
+    amount: str = Field(default="", max_length=60)
+    acceptance: str = Field(default="", max_length=200)
+    social_months: str = Field(default="", max_length=60)
+    locked: str = Field(default="", max_length=60)
+    valid_to: str = Field(default="", max_length=10)
+    source_url: str = Field(default="", max_length=500)
+    verifiable_at: str = Field(default="", max_length=200)
+    note: str = Field(default="", max_length=200)
 
 
 class KbCreate(BaseModel):
@@ -928,7 +946,8 @@ def _knowledge_provider(db, user_id: str | None = None):
             limit=4,
             include_personal=bool(kb_ids),
         )
-        return knowledge.context_block(passages)
+        block, _ = material_policy.context_block(db, passages)
+        return block
 
     return provide
 
@@ -2410,6 +2429,63 @@ def create_app():
                 )
             result = knowledge.build_vectors(db, row)
             return {**result, "kb": knowledge.kb_payload(row, db)}
+
+    @app.get("/admin/kbs/{kb_id}/docs")
+    def kb_docs(kb_id: str, request: Request) -> dict[str, Any]:
+        require_super(request)
+        with session_scope() as db:
+            row = db.get(KnowledgeBase, kb_id)
+            if row is None:
+                raise HTTPException(status_code=404, detail="知识库不存在")
+            docs = material_policy.doc_map(row)
+            items = []
+            for source, meta in sorted(docs.items()):
+                verdict = material_policy.assess(meta)
+                items.append(
+                    {
+                        "source": source,
+                        **meta,
+                        "ok": verdict.ok,
+                        "reason": verdict.reason,
+                    }
+                )
+            return {
+                "items": items,
+                "policy": material_policy.load_policy(),
+                "kinds": material_policy.kinds(),
+            }
+
+    @app.put("/admin/kbs/{kb_id}/docs")
+    def kb_docs_upsert(kb_id: str, request: Request, payload: KbDocMeta) -> dict[str, Any]:
+        require_super(request)
+        with session_scope() as db:
+            row = db.get(KnowledgeBase, kb_id)
+            if row is None:
+                raise HTTPException(status_code=404, detail="知识库不存在")
+            try:
+                record = material_policy.set_meta(db, row, payload.source, payload.model_dump())
+            except knowledge.KnowledgeError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            audit(db, None, "kb.doc_meta", {"kb_id": kb_id, "source": payload.source})
+            verdict = material_policy.assess(record)
+            return {"source": payload.source, **record, "ok": verdict.ok, "reason": verdict.reason}
+
+    @app.delete("/admin/kbs/{kb_id}/docs")
+    def kb_docs_delete(kb_id: str, request: Request, source: str) -> dict[str, Any]:
+        require_super(request)
+        with session_scope() as db:
+            row = db.get(KnowledgeBase, kb_id)
+            if row is None:
+                raise HTTPException(status_code=404, detail="知识库不存在")
+            options = dict(row.options or {})
+            docs = dict(material_policy.doc_map(row))
+            if source not in docs:
+                raise HTTPException(status_code=404, detail="素材未登记")
+            docs.pop(source)
+            options["docs"] = docs
+            row.options = options
+            audit(db, None, "kb.doc_meta", {"kb_id": kb_id, "source": source, "deleted": True})
+            return {"deleted": True, "source": source}
 
     # --------------------------------------------------------------- plugins
     def plugin_name(value: str | None) -> str:

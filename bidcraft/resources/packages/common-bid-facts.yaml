@@ -258,3 +258,26 @@ checks:
     assert: "not contains(doc, '{{待填')"
     message: 成稿仍存在未填写占位符
     recommendation: 用事实台账或人工确认值替换 {{待填:...}} 后再定稿
+
+# 素材「可引用性」策略：缺失必填生命周期字段或已过期的素材，
+# 检索注入时降级为「题录」（只给标题/出处/日期），不注入正文。
+material_policy:
+  qualification:
+    label: 资质证书
+    required: [cert_no, valid_to]
+    hint: 证书编号与有效期
+  performance:
+    label: 业绩合同
+    required: [contract_no, owner, amount, acceptance]
+    hint: 合同编号、业主、金额、验收结论
+  personnel:
+    label: 人员证书
+    required: [cert_no, social_months, locked]
+    hint: 证书号、社保月份、是否在建锁定
+  standard:
+    label: 标准规范
+    required: [source_url]
+    hint: 官方出处
+  other:
+    label: 其他素材
+    required: []

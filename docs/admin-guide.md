@@ -328,3 +328,22 @@ run_check、export_document、search_knowledge），供 Claude Desktop / Cursor 
 - 上传/删除记审计 `user_doc.upload` / `user_doc.delete`；删除文档不立即重建 KB，其残留片段在下一次重建索引时清除。
 
 注：系统级知识库（`/admin` → 知识库）仍为超级管理员维护；「本地目录」类型填写的是**服务器上的文件系统绝对路径**（如 `/srv/bidcraft/knowledge/tender-archive`），不是用户本机路径或 http 地址；要接第三方检索请选「API/第三方接口」类型。
+
+## 素材可信度分级（material_policy）
+
+知识库只判断「命中」不够，还要判断「可信」。规则包（`common-bid-facts.yaml`）里的
+`material_policy` 为每类素材声明必填的生命周期字段：
+
+| 素材类型 | 必填字段 |
+|---|---|
+| 资质证书 `qualification` | 证书编号、有效期至 |
+| 业绩合同 `performance` | 合同编号、业主、金额、验收结论 |
+| 人员证书 `personnel` | 证书号、社保缴纳月份、在建锁定 |
+| 标准规范 `standard` | 官方出处 |
+
+行为：
+
+- 管理端为知识库中的每个来源登记元数据：`PUT /admin/kbs/{id}/docs`（`source`、`kind`、`title`、`valid_to`、`source_url` 等）
+- 检索注入时：字段齐全且在有效期内 → 注入正文；缺字段或已过期 → **降级为题录**（只给标题、有效期、出处），模型不得据其复述细节
+- 判定结果可在 `GET /admin/kbs/{id}/docs` 查看（`ok`/`reason`）
+- 未登记元数据的来源一律按题录处理——宁可少注入，不让过期证书进入正文
