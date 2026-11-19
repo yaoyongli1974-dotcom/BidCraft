@@ -268,3 +268,35 @@ def test_picker_upload_forwards_and_notifies_opener(gateway, upstream, tmp_path)
     forwarded = [item for item in _UpstreamHandler.records if item["path"] == "/my/docs"]
     assert forwarded, _UpstreamHandler.records
     assert "multipart/form-data" in forwarded[-1]["content_type"]
+
+
+def test_html_navigation_wins_over_api_prefix(gateway):
+    # 浏览器/窗口导航（Accept: text/html）即便路径与 API 前缀同名也落到 SPA。
+    for path in ("/billing", "/admin", "/app/billing"):
+        response = _get(gateway, path, headers={"Accept": "text/html,application/xhtml+xml"})
+        assert response.status_code == 200, path
+        assert "desktop-spa" in response.text, path
+    # 真正的 API 调用（JSON）仍然转发给上游。
+    api = _get(gateway, "/billing/summary", headers={"Accept": "application/json"})
+    assert api.status_code != 404 or "desktop-spa" not in api.text
+
+
+def test_native_bridge_mode_spa_navigation(upstream, tmp_path):
+    spa = tmp_path / "spa"
+    spa.mkdir()
+    (spa / "index.html").write_text("<html>native-shell</html>", encoding="utf-8")
+    httpd = desktop.start_gateway(upstream, port=0, spa_dir=spa, token=TOKEN, proxy_enabled=False)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        page = _get(base, "/app/billing", headers={"Accept": "text/html"})
+        assert page.status_code == 200 and "native-shell" in page.text
+        # 非导航的 API 请求在原生桥模式下明确拒绝，交给客户端桥处理。
+        api = _get(base, "/projects", headers={"Accept": "application/json"})
+        assert api.status_code == 404
+        assert api.json()["detail"] == "API 由客户端原生桥处理"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(5)

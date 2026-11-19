@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   ArrowRight,
@@ -12,12 +12,42 @@ import {
 } from 'lucide-react'
 import { useAuth } from '../context/useAuth'
 import { useHealth } from '../context/useHealth'
-import { messageOf, wechatLoginUrl } from '../lib/api'
+import { awaitDesktopBridge, messageOf, wechatLoginUrl } from '../lib/api'
 import { useDocumentTitle } from '../lib/hooks'
 import { AuthSplash } from '../components/AuthGate'
 
 export function LoginPage() {
   useDocumentTitle('登录')
+  const [bridge, setBridge] = useState<Awaited<ReturnType<typeof awaitDesktopBridge>>>(null)
+  const [server, setServer] = useState('')
+  useEffect(() => {
+    let alive = true
+    void awaitDesktopBridge(1500).then(async (api) => {
+      if (!alive || !api) return
+      setBridge(api)
+      try {
+        const info = await api.info()
+        if (alive) setServer(info.server)
+      } catch {
+        /* 服务未响应时保持占位 */
+      }
+    })
+    return () => {
+      alive = false
+    }
+  }, [])
+  async function changeServer() {
+    if (!bridge?.choose_server) return
+    try {
+      const result = await bridge.choose_server()
+      if (result?.changed) {
+        setServer(result.server)
+        window.location.reload()
+      }
+    } catch {
+      /* 取消或失败时保持原状 */
+    }
+  }
   const { user, loading, login } = useAuth()
   const { health } = useHealth()
   const navigate = useNavigate()
@@ -133,6 +163,21 @@ export function LoginPage() {
             <div className="login-notice" role="status">
               <ShieldCheck size={16} />
               <span>{notice}</span>
+            </div>
+          )}
+
+          {bridge && (
+            <div className="login-server">
+              <span className="login-server-label">服务器</span>
+              <code className="login-server-value">{server || '连接中…'}</code>
+              <button
+                type="button"
+                className="text-btn"
+                onClick={() => void changeServer()}
+                disabled={!bridge.choose_server}
+              >
+                更改
+              </button>
             </div>
           )}
 

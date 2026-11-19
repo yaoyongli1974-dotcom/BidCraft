@@ -32,7 +32,7 @@ def test_css_script_hides_web_masthead():
 
 def test_nav_items_cover_core_pages():
     paths = [path for _, path in qtshell.NAV_ITEMS]
-    assert "/app/projects" in paths
+    assert "/" in paths
     assert "/my-docs" in paths
     assert "/billing" in paths
     assert qtshell.ADMIN_NAV[1] == "/admin"

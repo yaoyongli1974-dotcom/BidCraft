@@ -251,6 +251,7 @@ export interface DesktopBridge {
     path?: string
   }>
   info(): Promise<{ server: string; version: string }>
+  choose_server?(): Promise<{ changed: boolean; server: string }>
 }
 
 export function desktopBridge(): DesktopBridge | null {

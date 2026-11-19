@@ -26,7 +26,7 @@ KEY_DOWNLOAD_DIR = "client/download_dir"
 KEY_TRAY_HINT = "window/tray_hint_shown"
 
 NAV_ITEMS: tuple[tuple[str, str], ...] = (
-    ("项目", "/app/projects"),
+    ("项目", "/"),
     ("我的文档", "/my-docs"),
     ("账单", "/billing"),
 )
@@ -109,7 +109,8 @@ def bridge_script(channel_js: str) -> str:
         api: {
           info: wrap(bridge, 'info'),
           api_request: wrap(bridge, 'api_request'),
-          pick_and_upload: wrap(bridge, 'pick_and_upload')
+          pick_and_upload: wrap(bridge, 'pick_and_upload'),
+          choose_server: wrap(bridge, 'choose_server')
         }
       };
       window.dispatchEvent(new Event('pywebviewready'));
@@ -181,6 +182,7 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
         def __init__(self, server: str, parent: QWidget | None = None) -> None:
             super().__init__(parent)
             self.client = BidCraftClient(server)
+            self.on_server_changed = None
 
         @Slot(result=str)
         def info(self) -> str:
@@ -197,6 +199,22 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
                     method, path, body_b64=body_b64, content_type=content_type
                 )
             )
+
+        @Slot(result=str)
+        def choose_server(self) -> str:
+            """在窗口内切换服务器（登录页亦可调用）。"""
+            dialog = _ServerDialog(self.client.server)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return json.dumps({"changed": False, "server": self.client.server})
+            server = dialog.value()
+            changed = server.rstrip("/") != self.client.server.rstrip("/")
+            if changed:
+                self.client = BidCraftClient(server)
+                settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
+                settings.setValue(KEY_SERVER, self.client.server)
+                if self.on_server_changed is not None:
+                    self.on_server_changed(self.client.server)
+            return json.dumps({"changed": changed, "server": self.client.server})
 
         @Slot(str, str, result=str)
         def pick_and_upload(self, kind: str = "doc", project: str = "") -> str:
@@ -250,6 +268,7 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
             self.base = base
             self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
             self.bridge = _Bridge(server, self)
+            self.bridge.on_server_changed = self._on_server_changed
             self.setWindowTitle("BidCraft 投标工作台")
             self.resize(width, height)
             self.setMinimumSize(960, 640)
@@ -275,6 +294,13 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
             self.timer = QTimer(self)
             self.timer.timeout.connect(self.refresh_status)
             self.timer.start(30_000)
+            self.refresh_status()
+
+        def _on_server_changed(self, server: str) -> None:
+            """登录页/菜单切换服务器后刷新页面并更新标题。"""
+            self.server = server
+            self.setWindowTitle(f"BidCraft 投标工作台 — {server}")
+            self.view.load(QUrl(self.base + "/login"))
             self.refresh_status()
 
         # ---------------------------------------------------------- 初始化
@@ -377,6 +403,7 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
 
         def _build_toolbar(self) -> None:
             bar = QToolBar("主导航", self)
+            bar.setObjectName("mainToolbar")
             bar.setMovable(False)
             self.addToolBar(bar)
             bar.addAction(self.act_back)

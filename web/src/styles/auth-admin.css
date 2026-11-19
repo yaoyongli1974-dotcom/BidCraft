@@ -4365,3 +4365,29 @@
   background: #fdf3e2;
   border-bottom: 1px solid #f0dcbd;
 }
+
+/* 桌面客户端的服务器切换（登录页） */
+.login-server {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 14px;
+  padding: 8px 12px;
+  border: 1px solid var(--line-strong, #d8d2c4);
+  border-radius: 10px;
+  background: var(--surface-raised, #fbf8f1);
+  font-size: 12.5px;
+}
+.login-server-label {
+  color: var(--muted, #7a7365);
+  letter-spacing: 0.04em;
+}
+.login-server-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--ink, #2a2620);
+}

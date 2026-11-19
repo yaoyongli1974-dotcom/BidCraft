@@ -150,6 +150,11 @@ class _GatewayHandler(BaseHTTPRequestHandler):
             return True
         return any(path == prefix or path.startswith(prefix + "/") for prefix in PROXY_PREFIXES)
 
+    def _wants_html(self) -> bool:
+        """浏览器/窗口导航（Accept: text/html）应始终落到 SPA，即便路径与 API 前缀同名。"""
+        accept = self.headers.get("Accept", "")
+        return "text/html" in accept.lower()
+
     # ------------------------------------------------------------------ entry
     def do_GET(self) -> None:  # noqa: N802 - stdlib 命名
         self._dispatch()
@@ -194,17 +199,15 @@ class _GatewayHandler(BaseHTTPRequestHandler):
             self._send_json(404, {"detail": "未知的客户端接口"})
             return
         if not self.server.proxy_enabled:
-            if (
-                method in {"GET", "HEAD"}
-                and not self._is_api(path)
-                and self._serve_static(path, head_only=method == "HEAD")
-            ):
+            if method in {"GET", "HEAD"} and (
+                not self._is_api(path) or self._wants_html()
+            ) and self._serve_static(path, head_only=method == "HEAD"):
                 return
             self._send_json(404, {"detail": "API 由客户端原生桥处理"})
             return
         if (
             method in {"GET", "HEAD"}
-            and not self._is_api(path)
+            and (not self._is_api(path) or self._wants_html())
             and self._serve_static(path, head_only=method == "HEAD")
         ):
             return
