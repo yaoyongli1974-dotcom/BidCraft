@@ -83,3 +83,10 @@ def test_native_page_helpers():
     assert qtnative.doc_status_label("other") == "other"
     assert "名称" in qtnative.project_columns()
     assert "文件名" in qtnative.doc_columns()
+
+
+def test_account_label_variants():
+    assert qtshell.account_label({"display_name": "张三", "role_label": "超级管理员"}) == "张三（超级管理员）"
+    assert qtshell.account_label({"username": "wx_abc", "role": "manager"}) == "wx_abc（manager）"
+    assert qtshell.account_label({"username": "only"}) == "only"
+    assert qtshell.account_label({}) == ""

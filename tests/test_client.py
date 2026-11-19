@@ -192,3 +192,15 @@ def test_register_creates_session(live_server, tmp_path):
         assert client.projects() == []
     finally:
         client.close()
+
+
+def test_logout_clears_session(live_server):
+    from bidcraft.client import BidCraftClient, ClientError
+
+    client = BidCraftClient(live_server)
+    client.login("admin", "test-admin")
+    assert client.me()["username"] == "admin"
+    client.logout()
+    assert not client.cookies_path.is_file()
+    with pytest.raises(ClientError):
+        client.me()

@@ -78,6 +78,15 @@ def icon_path() -> Path | None:
     return None
 
 
+def account_label(user: dict[str, Any]) -> str:
+    """工具栏账号显示：显示名（角色），缺项自动省略。"""
+    name = str(user.get("display_name") or user.get("username") or "").strip()
+    role = str(user.get("role_label") or user.get("role") or "").strip()
+    if name and role:
+        return f"{name}（{role}）"
+    return name
+
+
 def bridge_script(channel_js: str) -> str:
     """把 QWebChannel 桥包装成 window.pywebview.api（Promise 版）。"""
     return (
@@ -340,7 +349,38 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
             self._show_native("projects")
 
         def _after_login(self) -> None:
+            self.refresh_user_label()
             self._show_native("projects")
+
+        def refresh_user_label(self) -> None:
+            try:
+                user = self.bridge.client.me()
+            except ClientError:
+                self.user_label.setText("")
+                return
+            self.user_label.setText(account_label(user))
+
+        def logout(self, switch: bool = False) -> None:
+            """退出登录（switch=True 时停留在登录页供更换账号）。"""
+            if not switch and QMessageBox.question(
+                self,
+                "退出登录",
+                "确定要退出当前账号吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            ) != QMessageBox.StandardButton.Yes:
+                return
+            self.bridge.client.logout()
+            self.view.page().profile().cookieStore().deleteAllCookies()
+            self.login_page.reset()
+            self._show_native("login")
+            self.user_label.setText("")
+            self.status_hint.setText("已退出登录" if not switch else "请使用其他账号登录")
+            self.tray.showMessage(
+                "BidCraft",
+                "已退出登录" if not switch else "已退出，请登录新账号",
+                QSystemTrayIcon.MessageIcon.Information,
+            )
 
         def _guarded(self, action: Any) -> Any:
             """未登录时拦截操作：提示并回到登录页。"""
@@ -501,6 +541,10 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
             )
             self.act_download_dir = QAction("下载目录设置…", self)
             self.act_download_dir.triggered.connect(self._choose_download_dir)
+            self.act_logout = QAction("退出登录", self)
+            self.act_logout.triggered.connect(self.logout)
+            self.act_switch = QAction("切换账号…", self)
+            self.act_switch.triggered.connect(lambda: self.logout(switch=True))
 
         def _build_menu(self) -> None:
             bar = self.menuBar()
@@ -514,6 +558,9 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
             file_menu.addAction(self.act_source)
             file_menu.addSeparator()
             file_menu.addAction(self.act_download_dir)
+            file_menu.addSeparator()
+            file_menu.addAction(self.act_switch)
+            file_menu.addAction(self.act_logout)
             file_menu.addAction(self.act_quit)
             edit_menu = bar.addMenu("编辑")
             page = self.view.page()
@@ -582,8 +629,11 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
             spacer.setSizePolicy(spacer.sizePolicy().horizontalPolicy().Expanding,
                                  spacer.sizePolicy().verticalPolicy().Preferred)
             bar.addWidget(spacer)
+            self.user_label = QLabel("", self)
+            bar.addWidget(self.user_label)
             self.server_label = QLabel(self.server)
             bar.addWidget(self.server_label)
+            self.refresh_user_label()
 
         def _build_status(self) -> None:
             self.status_state = QLabel("连接中…")

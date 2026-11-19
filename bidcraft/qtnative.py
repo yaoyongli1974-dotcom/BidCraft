@@ -193,6 +193,12 @@ if QT_AVAILABLE:
             layout.addWidget(self.message)
             layout.addStretch(1)
 
+        def reset(self) -> None:
+            """退出登录后清空输入，便于直接登录其他账号。"""
+            self.username.clear()
+            self.password.clear()
+            self.message.setText("")
+
         def open_register(self) -> None:
             dialog = RegisterDialog(self.client, self)
             if dialog.exec() == QDialog.DialogCode.Accepted:

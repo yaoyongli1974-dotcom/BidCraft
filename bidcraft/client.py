@@ -260,6 +260,15 @@ class BidCraftClient:
         self._save_config()
         return user
 
+    def logout(self) -> None:
+        """注销服务端会话并清除本地 Cookie。"""
+        try:
+            self._request("POST", "/auth/logout")
+        except ClientError:
+            pass
+        self._http.cookies.clear()
+        self._persist_cookies()
+
     def me(self) -> dict[str, Any]:
         response = self._request("GET", "/auth/me")
         if response.status_code == 401:
