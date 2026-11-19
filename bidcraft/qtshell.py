@@ -563,6 +563,7 @@ def run_qt(
     app = QApplication.instance() or QApplication([])
     app.setApplicationName(SETTINGS_APP)
     app.setOrganizationName(SETTINGS_ORG)
+    app.setDesktopFileName("bidcraft")
     app.setApplicationDisplayName("BidCraft 投标工作台")
     icon = icon_path()
     if icon:
