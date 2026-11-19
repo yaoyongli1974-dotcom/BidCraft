@@ -473,13 +473,41 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
             self.act_update.triggered.connect(self.check_update)
             self.act_about = QAction("关于 BidCraft", self)
             self.act_about.triggered.connect(self._about)
+            # 文件菜单：直达原生页面与常用动作
+            self.act_new_project = QAction("新建项目…", self)
+            self.act_new_project.setShortcut(QKeySequence("Ctrl+N"))
+            self.act_new_project.triggered.connect(
+                self._guarded(
+                    lambda: (self._show_native("projects"), self.projects_page.create())
+                )
+            )
+            self.act_projects = QAction("项目列表", self)
+            self.act_projects.triggered.connect(
+                self._guarded(lambda: self._show_native("projects"))
+            )
+            self.act_docs_page = QAction("我的文档", self)
+            self.act_docs_page.triggered.connect(
+                self._guarded(lambda: self._show_native("docs"))
+            )
+            self.act_billing_page = QAction("账单与充值…", self)
+            self.act_billing_page.triggered.connect(
+                self._guarded(lambda: self._show_native("billing"))
+            )
+            self.act_download_dir = QAction("下载目录设置…", self)
+            self.act_download_dir.triggered.connect(self._choose_download_dir)
 
         def _build_menu(self) -> None:
             bar = self.menuBar()
             file_menu = bar.addMenu("文件")
+            file_menu.addAction(self.act_new_project)
+            file_menu.addAction(self.act_projects)
+            file_menu.addAction(self.act_docs_page)
+            file_menu.addAction(self.act_billing_page)
+            file_menu.addSeparator()
             file_menu.addAction(self.act_upload)
             file_menu.addAction(self.act_source)
             file_menu.addSeparator()
+            file_menu.addAction(self.act_download_dir)
             file_menu.addAction(self.act_quit)
             edit_menu = bar.addMenu("编辑")
             page = self.view.page()
@@ -495,10 +523,18 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
                 item.triggered.connect(lambda _=False, a=action: page.triggerAction(a))
                 edit_menu.addAction(item)
             view_menu = bar.addMenu("视图")
+            view_menu.addAction(self.act_projects)
+            view_menu.addAction(self.act_docs_page)
+            view_menu.addAction(self.act_billing_page)
+            view_menu.addSeparator()
             for act in (
                 self.act_back,
                 self.act_forward,
                 self.act_reload,
+            ):
+                view_menu.addAction(act)
+            view_menu.addSeparator()
+            for act in (
                 self.act_zoom_in,
                 self.act_zoom_out,
                 self.act_zoom_reset,
@@ -612,11 +648,30 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
             raw = self.bridge.pick_and_upload(kind, project)
             data = json.loads(raw)
             if data.get("ok"):
-                self.status_hint.setText("上传成功，索引将在后台完成")
-                self.tray.showMessage("BidCraft", "文件已上传", QSystemTrayIcon.MessageIcon.Information)
-                self.view.reload()
+                doc = data.get("doc") or {}
+                name = str(doc.get("filename") or "文件")
+                self.status_hint.setText(f"已上传：{name}")
+                self.tray.showMessage(
+                    "BidCraft", f"已上传 {name}，索引将在后台完成",
+                    QSystemTrayIcon.MessageIcon.Information,
+                )
+                if kind == "doc":
+                    self._show_native("docs")
+                else:
+                    QMessageBox.information(
+                        self, "上传成功", f"{name} 已上传，解析与索引将在后台完成。"
+                    )
             else:
-                self.status_hint.setText(f"上传失败：{data.get('error', '未知错误')}")
+                message = str(data.get("error") or "未知错误")
+                self.status_hint.setText(f"上传失败：{message}")
+                QMessageBox.warning(self, "上传失败", message)
+
+        def _choose_download_dir(self) -> None:
+            current = self.settings.value(KEY_DOWNLOAD_DIR) or str(Path.home())
+            directory = QFileDialog.getExistingDirectory(self, "选择下载目录", str(current))
+            if directory:
+                self.settings.setValue(KEY_DOWNLOAD_DIR, directory)
+                self.status_hint.setText(f"下载目录：{directory}")
 
         def upload_source(self) -> None:
             try:
