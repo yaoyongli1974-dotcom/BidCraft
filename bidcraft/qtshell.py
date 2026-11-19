@@ -251,8 +251,8 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
             return json.dumps({"ok": True, "result": data})
 
     class _ServerDialog(QDialog):
-        def __init__(self, current: str) -> None:
-            super().__init__()
+        def __init__(self, current: str, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
             self.setWindowTitle("连接到 BidCraft 服务器")
             self.setMinimumWidth(420)
             layout = QVBoxLayout(self)
