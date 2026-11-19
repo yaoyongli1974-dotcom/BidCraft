@@ -1166,13 +1166,14 @@ def desktop(
     port: int = typer.Option(0, "--port", help="本地端口（默认随机）"),
     browser: bool = typer.Option(False, "--browser", help="使用系统浏览器（默认原生窗口）"),
     no_browser: bool = typer.Option(False, "--no-browser", help="不自动打开浏览器（仅 --browser）"),
+    webview_mode: bool = typer.Option(False, "--webview", help="使用 pywebview 内嵌窗口（旧模式）"),
 ) -> None:
-    """启动桌面客户端：原生窗口 + API 直连 + 本地文件桥。"""
+    """启动桌面客户端：Qt 原生外壳 + API 直连 + 本地文件桥。"""
     from .client import load_config
     from .desktop import run_desktop, run_window
 
     target = server.strip() or load_config().server
-    if not target:
+    if not target and (browser or webview_mode):
         console.print(
             "[red]未指定服务器[/red]：请使用 --server，或先执行 "
             "[bold]bidcraft client login --server URL[/bold] 保存地址。"
@@ -1181,8 +1182,17 @@ def desktop(
     try:
         if browser:
             run_desktop(target, port=port, open_browser=not no_browser)
-        else:
+        elif webview_mode:
             run_window(target, port=port)
+        else:
+            from .qtshell import run_qt
+
+            if not run_qt(target, port=port):
+                console.print("[yellow]Qt 外壳不可用，回退到内嵌窗口模式…[/yellow]")
+                if not target:
+                    console.print("[red]回退模式需要 --server 指定服务器地址[/red]")
+                    raise typer.Exit(2)
+                run_window(target, port=port)
     except KeyboardInterrupt:  # pragma: no cover - 交互式退出
         pass
     except (ValueError, OSError) as exc:

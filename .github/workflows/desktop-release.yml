@@ -69,7 +69,7 @@ jobs:
       - name: Install Python deps
         run: |
           uv sync --frozen
-          uv pip install pyinstaller pywebview
+          uv pip install pyinstaller pywebview qtpy PySide6
       - name: Build exe bundle
         shell: pwsh
         run: ./packaging/build_windows.ps1
@@ -99,7 +99,7 @@ jobs:
       - name: Install Python deps
         run: |
           uv sync --frozen
-          uv pip install pyinstaller pywebview
+          uv pip install pyinstaller pywebview qtpy PySide6
       - name: Build .app
         run: bash packaging/build_macos_app.sh
       - uses: actions/upload-artifact@v4

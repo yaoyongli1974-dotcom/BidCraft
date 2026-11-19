@@ -11,7 +11,10 @@ a = Analysis(
     [str(ROOT / "packaging" / "entry.py")],
     pathex=[str(ROOT)],
     binaries=[],
-    datas=[(str(ROOT / "bidcraft" / "web_dist"), "bidcraft/web_dist")],
+    datas=[
+        (str(ROOT / "bidcraft" / "web_dist"), "bidcraft/web_dist"),
+        (str(ROOT / "packaging" / "bidcraft.svg"), "packaging"),
+    ],
     hiddenimports=[
         "bidcraft.client",
         "bidcraft.desktop",
@@ -21,6 +24,10 @@ a = Analysis(
         "webview.platforms.cocoa",
         "webview.platforms.qt",
         "qtpy",
+        "bidcraft.qtshell",
+        "PySide6.QtWebChannel",
+        "PySide6.QtWebEngineWidgets",
+        "PySide6.QtNetwork",
     ],
     hookspath=[],
     runtime_hooks=[],

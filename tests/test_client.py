@@ -177,6 +177,6 @@ def test_desktop_requires_server(tmp_path, monkeypatch):
 
     monkeypatch.setattr(client_module, "CLIENT_HOME", tmp_path)
     monkeypatch.delenv("BIDCRAFT_SERVER", raising=False)
-    result = CliRunner().invoke(app, ["desktop"])
+    result = CliRunner().invoke(app, ["desktop", "--browser"])
     assert result.exit_code == 2
     assert "未指定服务器" in result.output

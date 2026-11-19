@@ -10,6 +10,7 @@ import argparse
 
 from bidcraft.client import load_config
 from bidcraft.desktop import run_desktop, run_window
+from bidcraft.qtshell import run_qt
 
 
 def main() -> None:
@@ -18,6 +19,7 @@ def main() -> None:
     parser.add_argument("--server", dest="server_flag", default="", help="BidCraft 服务器地址")
     parser.add_argument("--port", type=int, default=0, help="本地端口（默认随机）")
     parser.add_argument("--browser", action="store_true", help="改用系统浏览器")
+    parser.add_argument("--webview", action="store_true", help="改用 pywebview 内嵌窗口")
     parser.add_argument("--no-browser", action="store_true", help="不自动打开浏览器（仅 --browser）")
     args = parser.parse_args()
 
@@ -32,7 +34,9 @@ def main() -> None:
         raise SystemExit(2)
     if args.browser:
         run_desktop(server, port=args.port, open_browser=not args.no_browser)
-    else:
+    elif args.webview:
+        run_window(server, port=args.port)
+    elif not run_qt(server, port=args.port):
         run_window(server, port=args.port)
 
 
