@@ -27,6 +27,7 @@ import type {
   BoqVersionDiff,
   BoqVersionDiffChanged,
   BoqVersionDiffEntry,
+  ScoreAnalysis,
   ChapterConflict,
   CreditAdjustResult,
   KnowledgeBase,
@@ -3778,4 +3779,89 @@ export async function saveProjectProfile(
     body: JSON.stringify({ profile: normalizeWritingProfile(profile) }),
   })
   return normalizeProjectProfile(data)
+}
+
+export function normalizeScoreAnalysis(value: unknown): ScoreAnalysis {
+  const raw = (value ?? {}) as Record<string, unknown>
+  const list = (input: unknown): ScoreAnalysis['items'] =>
+    Array.isArray(input)
+      ? input
+          .map((entry) => {
+            const row = (entry ?? {}) as Record<string, unknown>
+            if (!row.id) return null
+            const num = (v: unknown) => {
+              const parsed = typeof v === 'number' ? v : Number(v)
+              return Number.isFinite(parsed) ? parsed : null
+            }
+            return {
+              id: String(row.id),
+              name: String(row.name ?? '').slice(0, 255),
+              score: num(row.score),
+              category: String(row.category ?? '').slice(0, 80),
+              criteria: String(row.criteria ?? ''),
+              section_hint: String(row.section_hint ?? '').slice(0, 255),
+              actual_score: num(row.actual_score),
+              actual_bidder: String(row.actual_bidder ?? '').slice(0, 80),
+              score_note: String(row.score_note ?? '').slice(0, 200),
+              rate: num(row.rate),
+              loss: num(row.loss),
+            }
+          })
+          .filter((row): row is ScoreAnalysis['items'][number] => row !== null)
+      : []
+  const items = list(raw.items)
+  const losses = Array.isArray(raw.losses) ? list(raw.losses) : items.filter((row) => (row.loss ?? 0) > 0)
+  const number = (v: unknown) => {
+    const parsed = typeof v === 'number' ? v : Number(v)
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+  const optional = (v: unknown) => {
+    const parsed = typeof v === 'number' ? v : Number(v)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return {
+    project_id: String(raw.project_id ?? ''),
+    total_items: number(raw.total_items) || items.length,
+    filled: number(raw.filled),
+    total_max: number(raw.total_max),
+    total_actual: number(raw.total_actual),
+    rate: optional(raw.rate),
+    dimensions: Array.isArray(raw.dimensions)
+      ? raw.dimensions.map((entry) => {
+          const row = (entry ?? {}) as Record<string, unknown>
+          return {
+            category: String(row.category ?? '未分类'),
+            count: number(row.count),
+            max: number(row.max),
+            actual: number(row.actual),
+            rate: optional(row.rate),
+          }
+        })
+      : [],
+    losses,
+    items,
+  }
+}
+
+export async function getProjectScores(projectId: string): Promise<ScoreAnalysis> {
+  const data = await request<unknown>(`/projects/${encodeURIComponent(projectId)}/scores`)
+  return normalizeScoreAnalysis(data)
+}
+
+export interface ScorePatch {
+  id: string
+  actual_score: number | null
+  actual_bidder?: string
+  score_note?: string
+}
+
+export async function saveProjectScores(
+  projectId: string,
+  rows: ScorePatch[],
+): Promise<ScoreAnalysis> {
+  const data = await request<unknown>(`/projects/${encodeURIComponent(projectId)}/scores`, {
+    method: 'PUT',
+    body: JSON.stringify({ rows }),
+  })
+  return normalizeScoreAnalysis(data)
 }

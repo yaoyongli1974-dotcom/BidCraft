@@ -41,6 +41,7 @@ import {
 } from '../../lib/format'
 import { useQuery, useUnsavedGuard } from '../../lib/hooks'
 import { Badge } from '../../components/Badge'
+import { ScoreBackfill } from '../../components/ScoreBackfill'
 import { Button } from '../../components/Button'
 import { ErrorState, Skeleton } from '../../components/Feedback'
 import {
@@ -627,6 +628,16 @@ export function LedgerTab() {
               })}
             </div>
           )
+        ) : activeTab === 'scoring' ? (
+          <div className="tab-stack">
+            <ScoreBackfill projectId={project?.id || ref || ''} canWrite={canWrite} />
+            <ReadonlyLedger
+              tab={activeTab}
+              ledger={ledger}
+              search={search}
+              projectFormatSections={ledger?.template_sections || []}
+            />
+          </div>
         ) : (
           <ReadonlyLedger
             tab={activeTab}

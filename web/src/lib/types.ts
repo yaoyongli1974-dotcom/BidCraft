@@ -1483,3 +1483,37 @@ export interface ProjectProfileResponse {
   anchors: Record<string, string>
   facts_block: string
 }
+
+export interface ScoreEntry {
+  id: string
+  name: string
+  score: number | null
+  category: string
+  criteria: string
+  section_hint: string
+  actual_score: number | null
+  actual_bidder: string
+  score_note: string
+  rate: number | null
+  loss: number | null
+}
+
+export interface ScoreDimension {
+  category: string
+  count: number
+  max: number
+  actual: number
+  rate: number | null
+}
+
+export interface ScoreAnalysis {
+  project_id: string
+  total_items: number
+  filled: number
+  total_max: number
+  total_actual: number
+  rate: number | null
+  dimensions: ScoreDimension[]
+  losses: ScoreEntry[]
+  items: ScoreEntry[]
+}

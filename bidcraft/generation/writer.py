@@ -322,6 +322,11 @@ def generate_document(
         from ..profile import load as load_profile
 
         facts_text = facts_block(load_profile(project))
+        from ..scoring import hints as score_hints
+
+        extra = score_hints(db, project)
+        if extra:
+            facts_text = f"{facts_text}\n{extra}" if facts_text else extra
     report = GenerationReport()
     previous_texts: list[str] = []
     summaries: list[str] = []

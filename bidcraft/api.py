@@ -42,6 +42,7 @@ from . import (
     plugins,
     profile,
     qualifications,
+    scoring,
     terms,
     textqa,
     user_docs,
@@ -118,6 +119,17 @@ class ProjectCreate(BaseModel):
     package: str = "weakcurrent-cabling"
     # 标段/包件：仅作项目元信息，不参与多包件共享台账（后续迭代）。
     bid_section: str = ""
+
+
+class ScoreRow(BaseModel):
+    id: str
+    actual_score: float | None = None
+    actual_bidder: str | None = None
+    score_note: str | None = None
+
+
+class ScoresUpdate(BaseModel):
+    rows: list[ScoreRow] = []
 
 
 class ProjectUpdate(BaseModel):
@@ -3941,6 +3953,27 @@ def create_app():
                 "anchors": profile.anchors(stored),
                 "facts_block": profile.facts_block(stored),
             }
+
+    @app.get("/projects/{ref}/scores")
+    def project_scores(ref: str) -> dict[str, Any]:
+        with session_scope() as db:
+            project, _role = _project(db, ref)
+            return scoring.analysis(db, project)
+
+    @app.put("/projects/{ref}/scores")
+    def project_scores_update(ref: str, payload: ScoresUpdate) -> dict[str, Any]:
+        with session_scope() as db:
+            project, role = _project(db, ref)
+            _require_write(role)
+            try:
+                updated = scoring.record_scores(
+                    db, project, [row.model_dump() for row in payload.rows]
+                )
+            except scoring.ScoreError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            db.flush()
+            audit(db, project.id, "project.scores", {"rows": updated})
+            return scoring.analysis(db, project)
 
     @app.put("/projects/{ref}/profile")
     def save_project_profile(ref: str, payload: dict[str, Any]) -> dict[str, Any]:

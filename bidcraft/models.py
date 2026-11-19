@@ -302,6 +302,10 @@ class ScoringItem(Base):
     category: Mapped[str] = mapped_column(String(80), default="")
     section_hint: Mapped[str] = mapped_column(String(255), default="")
     source_quote: Mapped[str] = mapped_column(Text, default="")
+    # R39 得分回填：本项目（或对标中标人）在该评分项的实际得分与备注。
+    actual_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    actual_bidder: Mapped[str] = mapped_column(String(80), default="")
+    score_note: Mapped[str] = mapped_column(String(200), default="")
 
 
 class Requirement(Base):

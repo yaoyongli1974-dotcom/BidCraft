@@ -90,6 +90,11 @@ def _migrate_columns(engine) -> None:
             ("mem_limit_mb", "INTEGER DEFAULT 512"),
             ("cpu_seconds", "INTEGER DEFAULT 10"),
         ],
+        "scoring_items": [
+            ("actual_score", "FLOAT"),
+            ("actual_bidder", "VARCHAR(80) DEFAULT ''"),
+            ("score_note", "VARCHAR(200) DEFAULT ''"),
+        ],
         "image_assets": [("options", "JSON")],
         "sections": [("revision", "INTEGER DEFAULT 0")],
         "kb_chunks": [

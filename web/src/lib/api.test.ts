@@ -33,6 +33,7 @@ import {
   getPersonnel,
   getPreflight,
   getProject,
+  getProjectScores,
   getProjectTemplates,
   getQualifications,
   getSubAccounts,
@@ -58,6 +59,7 @@ import {
   normalizeTypoRules,
   reindexKnowledgeBase,
   restoreBoqVersion,
+  saveProjectScores,
   reviewBoqVersion,
   roundTo,
   saveTextQa,
@@ -2602,5 +2604,44 @@ describe('writing profile (R38)', () => {
     const body = JSON.parse(String(init.body))
     expect(body.profile.company_name).toBe('某公司')
     expect(body.profile.forbidden_phrases).toEqual(['绝对第一'])
+  })
+})
+
+describe('score backfill (R39)', () => {
+  afterEach(() => vi.unstubAllGlobals())
+  const jsonResponse = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
+
+  it('normalizes analysis items, losses and dimensions', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
+      project_id: 'p1', total_items: 2, filled: 1, total_max: 30, total_actual: 20,
+      rate: 0.6667,
+      dimensions: [{ category: '技术', count: 1, max: 20, actual: 12, rate: 0.6 }],
+      losses: [{ id: 'a', name: '技术方案', score: 20, actual_score: 12, loss: 8, rate: 0.6 }],
+      items: [
+        { id: 'a', name: '技术方案', score: 20, actual_score: 12, loss: 8, rate: 0.6, category: '技术' },
+        { id: 'b', name: '报价', score: 10, actual_score: String(8) },
+      ],
+    })))
+    const data = await getProjectScores('p/1')
+    expect(data.total_items).toBe(2)
+    expect(data.items[1].actual_score).toBe(8)
+    expect(data.items[1].actual_bidder).toBe('')
+    expect(data.losses[0].loss).toBe(8)
+    expect(data.dimensions[0].rate).toBeCloseTo(0.6)
+  })
+
+  it('encodes the project id and sends PUT rows', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({ items: [], losses: [] }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    await saveProjectScores('p/1', [{ id: 'a', actual_score: 12, score_note: '扣分' }])
+    expect(fetchMock.mock.calls[0][0]).toBe('/projects/p%2F1/scores')
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.method).toBe('PUT')
+    expect(JSON.parse(String(init.body))).toEqual({
+      rows: [{ id: 'a', actual_score: 12, score_note: '扣分' }],
+    })
   })
 })

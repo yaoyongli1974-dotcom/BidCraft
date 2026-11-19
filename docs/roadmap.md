@@ -42,6 +42,7 @@
 | 素材可信度分级 | ✅ | `material_policy.py`、`resources/packages/*.yaml`、`/admin/kbs/{id}/docs` | 规则包 `material_policy` 声明每类素材必填生命周期字段；检索注入按可信度分级，缺失/过期降级为题录；文档元数据存 `knowledge_bases.options.docs` |
 | 解析深度（MinerU） | ✅ 可选 | `parsing/mineru.py`、`BIDCRAFT_MINERU_URL`、`bidcraft mineru-check` | 复杂版面/扫描件交给 MinerU，取 Markdown + 表格；失败/超时回退内置链路；页数为估算 |
 | 全局事实设定 | ✅ | `profile.py`、`/projects/{ref}/profile`、`generation/prompts.py`、`textqa.profile_conflicts` | 项目级事实注入生成；核对按锚点比对，不一致报 CON；存 `project.meta["writing_profile"]` |
+| 评分回填与失分复盘 | ✅ | `scoring.py`、`/projects/{ref}/scores`、`web/` | 评分项实际得分回填与得分率/分类聚合/失分 Top20；失分摘要注入生成提示 |
 | 文本规则与查重 | ✅ | `textqa.py`、`dedup.py`、`/admin/textqa`、`bidcraft dedup` | 自定义错别字词库（存 `AppSetting["textqa"]`，上限 500）；跨文件段落查重报告，只读不联网 |
 | 文本质量检查 | ✅ | `textqa.py`、`pipeline.check_project`、问题台账 | 错别字/重复字/重复标点、跨章节事实一致性、段落近似重复；确定性规则，不依赖模型 |
 | 人员与素材元数据 | ✅ | `personnel.py`、`/my/personnel`、`/admin/kbs/{id}/docs`、`web/` | 人员台账（证书号/社保月数/在建锁定）；知识库逐文档元数据登记与可信度判定，缺字段降级题录 |
