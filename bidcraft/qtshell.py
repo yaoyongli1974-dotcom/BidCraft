@@ -194,6 +194,10 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
             self.client = BidCraftClient(server)
             self.on_server_changed = None
 
+        def set_server(self, server: str) -> None:
+            """切换服务器：新客户端（旧 Cookie 不跨服务器复用）。"""
+            self.client = BidCraftClient(server)
+
         @Slot(result=str)
         def info(self) -> str:
             return json.dumps(
@@ -315,6 +319,34 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
             self.timer.start(30_000)
             self.refresh_status()
 
+        def choose_server(self) -> None:
+            """切换登录服务器：更新客户端、记住地址、回到登录页。"""
+            dialog = _ServerDialog(self.server, self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            target = dialog.value()
+            if not target:
+                return
+            if not target.startswith(("http://", "https://")):
+                target = "https://" + target
+            self.settings.setValue(KEY_SERVER, target)
+            self.bridge.set_server(target)
+            for page in (
+                self.login_page,
+                self.projects_page,
+                self.docs_page,
+                self.billing_page,
+            ):
+                page.client = self.bridge.client
+            self.server = target
+            self.setWindowTitle(f"BidCraft 投标工作台 — {target}")
+            if hasattr(self, "server_action"):
+                self.server_action.setText(f"服务器：{target}")
+            self.login_page.reset()
+            self._show_native("login")
+            self.status_hint.setText(f"已切换到 {target}")
+            self.refresh_status()
+
         def _on_server_changed(self, server: str) -> None:
             """登录页/菜单切换服务器后刷新页面并更新标题。"""
             self.server = server
@@ -326,7 +358,9 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
         def _build_native_pages(self) -> None:
             from .qtnative import BillingPage, LoginPage, MyDocsPage, ProjectsPage
 
-            self.login_page = LoginPage(self.bridge.client, self._after_login)
+            self.login_page = LoginPage(
+                self.bridge.client, self._after_login, self.choose_server
+            )
             self.projects_page = ProjectsPage(self.bridge.client, self._open_project)
             self.docs_page = MyDocsPage(self.bridge.client, lambda: self.upload("doc"))
             self.billing_page = BillingPage(
@@ -543,6 +577,8 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
             self.act_download_dir.triggered.connect(self._choose_download_dir)
             self.act_logout = QAction("退出登录", self)
             self.act_logout.triggered.connect(self.logout)
+            self.act_server = QAction("更改服务器…", self)
+            self.act_server.triggered.connect(self.choose_server)
             self.act_switch = QAction("切换账号…", self)
             self.act_switch.triggered.connect(lambda: self.logout(switch=True))
 
@@ -559,6 +595,7 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
             file_menu.addSeparator()
             file_menu.addAction(self.act_download_dir)
             file_menu.addSeparator()
+            file_menu.addAction(self.act_server)
             file_menu.addAction(self.act_switch)
             file_menu.addAction(self.act_logout)
             file_menu.addAction(self.act_quit)
@@ -631,8 +668,9 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
             bar.addWidget(spacer)
             self.user_label = QLabel("", self)
             bar.addWidget(self.user_label)
-            self.server_label = QLabel(self.server)
-            bar.addWidget(self.server_label)
+            self.server_action = QAction(f"服务器：{self.server}", self)
+            self.server_action.triggered.connect(self.choose_server)
+            bar.addAction(self.server_action)
             self.refresh_user_label()
 
         def _build_status(self) -> None:

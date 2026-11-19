@@ -150,10 +150,17 @@ if QT_AVAILABLE:
             )
 
     class LoginPage(QWidget):
-        def __init__(self, client: BidCraftClient, on_success: Callable[[], None], parent: QWidget | None = None) -> None:
+        def __init__(
+            self,
+            client: BidCraftClient,
+            on_success: Callable[[], None],
+            on_change_server: Callable[[], None] | None = None,
+            parent: QWidget | None = None,
+        ) -> None:
             super().__init__(parent)
             self.client = client
             self.on_success = on_success
+            self.on_change_server = on_change_server
             self.async_ = Async(self)
 
             layout = QVBoxLayout(self)
@@ -162,9 +169,19 @@ if QT_AVAILABLE:
             title = QLabel("BidCraft 投标工作台")
             title.setStyleSheet("font-size: 22px; font-weight: 600;")
             layout.addWidget(title)
-            subtitle = QLabel("使用账号登录，或在工作区右上角切换服务器。")
+            subtitle = QLabel("使用账号登录；服务器地址可在下方更改。")
             subtitle.setStyleSheet("color: palette(mid);")
             layout.addWidget(subtitle)
+
+            server_row = QHBoxLayout()
+            server_row.setSpacing(8)
+            self.server_label = QLabel(f"服务器：{client.server or '未设置'}")
+            self.server_label.setStyleSheet("color: palette(mid);")
+            server_row.addWidget(self.server_label, 1)
+            self.server_button = QPushButton("更改服务器…")
+            self.server_button.clicked.connect(self._change_server)
+            server_row.addWidget(self.server_button)
+            layout.addLayout(server_row)
 
             form = QFormLayout()
             form.setSpacing(10)
@@ -192,6 +209,11 @@ if QT_AVAILABLE:
             self.message.setWordWrap(True)
             layout.addWidget(self.message)
             layout.addStretch(1)
+
+        def _change_server(self) -> None:
+            if self.on_change_server is not None:
+                self.on_change_server()
+            self.server_label.setText(f"服务器：{self.client.server or '未设置'}")
 
         def reset(self) -> None:
             """退出登录后清空输入，便于直接登录其他账号。"""
