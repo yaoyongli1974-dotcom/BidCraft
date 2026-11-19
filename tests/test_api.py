@@ -33,7 +33,7 @@ def test_api_project_lifecycle(db, tender_path):
 
 
     client = _client()
-    assert client.get("/health").json()["version"]
+    assert client.get("/health").json()["status"] == "ok"
 
     created = client.post(
         "/projects", json={"name": "API 测试项目", "package": "weakcurrent-cabling"}

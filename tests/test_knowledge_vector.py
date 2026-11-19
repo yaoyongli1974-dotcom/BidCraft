@@ -7,6 +7,8 @@ from datetime import datetime
 import httpx
 import pytest
 
+from bidcraft.config import settings
+
 pytest.importorskip("fastapi")
 
 DEFAULT_VECTOR = [1.0, 0.0, 0.0]
@@ -497,6 +499,7 @@ def test_reindex_returns_vector_and_payload_fields(db, tmp_path, monkeypatch):
     assert stale["vector_ready"] is False
     assert stale["vector_stale"] is True
 
+    monkeypatch.setattr(settings, "health_public", False)
     health = client.get("/health").json()
     assert health["embedding_configured"] is True
     assert health["embedding_model"] == "emb-main"
@@ -538,6 +541,7 @@ def test_embed_route_validation_errors(db, tmp_path, monkeypatch):
     assert missing.status_code == 400
     assert "未配置可用的向量模型" in missing.json()["detail"]
 
+    monkeypatch.setattr(settings, "health_public", False)
     health = client.get("/health").json()
     assert health["embedding_configured"] is False
     assert health["embedding_model"] == ""

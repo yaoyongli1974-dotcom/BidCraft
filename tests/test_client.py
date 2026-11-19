@@ -96,7 +96,7 @@ def test_projects_listing_and_creation(live_server, tmp_path):
         assert created["name"] == "客户端项目"
         rows = client.projects()
         assert [row["id"] for row in rows] == [created["id"]]
-        assert client.health()["version"]
+        assert client.health()["status"] == "ok"
     finally:
         client.close()
 
