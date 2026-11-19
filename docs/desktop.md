@@ -9,8 +9,33 @@ BidCraft 默认是 B/S 部署：服务器跑 `bidcraft serve`，用户用浏览�
         └── 本机文件读取（本地文件桥）
 ```
 
-它解决的核心问题是：**用户的文件在自己电脑上**。桌面模式可以直接读取本机文件并上传到
-「我的文档」或项目原件，无需先把文件 scp 到服务器目录。
+它解决的核心问题是：**用户的文件在自己电脑上**。桌面模式用原生文件对话框直接读取本机文件并上传，
+无需先把文件 scp 到服务器目录。
+
+### 通信方式：API 直连
+
+窗口模式下**不做反向代理**：本机只托管前端静态资源，所有业务请求由 Python 客户端
+（`BidCraftClient`）直接调用服务端 REST API，再把结果回传给窗口内的 JS：
+
+```
+[原生窗口 SPA] --pywebview JS 桥--> [Python 客户端] --HTTPS/JSON--> [BidCraft 服务器]
+```
+
+- 会话 Cookie 由客户端保存，不依赖浏览器同源策略；
+- 请求体/响应体以 base64 在桥上传输，前端 `apiFetch` 自动改走桥；
+- 文件上传走原生对话框（`pick_and_upload`），不经过网页文件选择器。
+
+### 离线只读缓存
+
+GET 请求成功时按「服务器 + 路径」缓存到 `~/.config/bidcraft-client/cache/`；
+服务器不可达时回放缓存并标记 `offline`，界面顶部显示「离线只读」横幅，
+写操作会明确失败提示，不会静默丢数据。缓存范围仅限项目/我的文档/待我审批等只读接口。
+
+### 平台依赖
+
+- **Windows**：WebView2（Win10+ 通常自带）
+- **macOS**：系统 WKWebView
+- **Linux**：需要 `PySide6`（推荐）或 `python3-gi` + WebKitGTK；缺失时自动回退浏览器模式
 
 ## 启动
 
@@ -19,7 +44,8 @@ BidCraft 默认是 B/S 部署：服务器跑 `bidcraft serve`，用户用浏览�
 uv sync
 
 # 连接远端服务器，启动本地网关并打开窗口
-bidcraft desktop --server https://bid.example.com
+bidcraft desktop --server https://bid.example.com          # 原生窗口
+bidcraft desktop --server https://bid.example.com --browser  # 浏览器模式（调试）
 
 # 指定端口 / 不自动打开浏览器（便于脚本或二次封装）
 bidcraft desktop --server http://127.0.0.1:8000 --port 8765 --no-browser

@@ -1164,11 +1164,12 @@ def desktop(
         help="远端服务器地址（省略时读环境变量 BIDCRAFT_SERVER 或上次 client login 保存的地址）",
     ),
     port: int = typer.Option(0, "--port", help="本地端口（默认随机）"),
-    no_browser: bool = typer.Option(False, "--no-browser", help="不自动打开浏览器"),
+    browser: bool = typer.Option(False, "--browser", help="使用系统浏览器（默认原生窗口）"),
+    no_browser: bool = typer.Option(False, "--no-browser", help="不自动打开浏览器（仅 --browser）"),
 ) -> None:
-    """启动桌面网关：本地反代 + 本地文件桥（需安装 api 扩展的前端产物）。"""
+    """启动桌面客户端：原生窗口 + API 直连 + 本地文件桥。"""
     from .client import load_config
-    from .desktop import run_desktop
+    from .desktop import run_desktop, run_window
 
     target = server.strip() or load_config().server
     if not target:
@@ -1178,7 +1179,10 @@ def desktop(
         )
         raise typer.Exit(2)
     try:
-        run_desktop(target, port=port, open_browser=not no_browser)
+        if browser:
+            run_desktop(target, port=port, open_browser=not no_browser)
+        else:
+            run_window(target, port=port)
     except KeyboardInterrupt:  # pragma: no cover - 交互式退出
         pass
     except (ValueError, OSError) as exc:

@@ -12,6 +12,7 @@ import {
 import {
   createUserDoc,
   deleteUserDoc,
+  desktopBridge,
   getUserDocs,
   messageOf,
   userDocFileUrl,
@@ -110,14 +111,18 @@ export function MyDocsPage() {
     return () => window.removeEventListener('message', onMessage)
   }, [desktopToken, refreshDocs, toast])
 
-  const openDesktopPicker = () => {
-    if (!desktopToken) return
-    const params = new URLSearchParams({ t: desktopToken, kind: 'doc' })
-    window.open(
-      `/__client/picker?${params.toString()}`,
-      'bidcraft-picker',
-      'width=760,height=620',
-    )
+  const bridge = desktopBridge()
+
+  const nativeUpload = async () => {
+    if (!bridge || uploading) return
+    const result = await bridge.pick_and_upload('doc')
+    if (result.cancelled) return
+    if (!result.ok) {
+      toast.error('上传失败', result.error || '请稍后重试')
+      return
+    }
+    toast.success('本机文件已上传', '索引将在后台完成，完成后即可参与生成。')
+    query.refresh()
   }
 
   const handleFiles = async (files: File[]) => {
@@ -300,17 +305,18 @@ export function MyDocsPage() {
             )}
           </div>
 
-          {desktopToken && (
+          {bridge && (
             <div className="mydocs-desktop">
               <Button
                 variant="secondary"
                 icon={<FolderOpen size={15} />}
-                onClick={openDesktopPicker}
+                onClick={() => void nativeUpload()}
+                loading={Boolean(uploading)}
               >
                 从本机选择文件
               </Button>
               <p className="subtle">
-                桌面客户端模式：直接读取本机文件上传，无需先复制到服务器目录。
+                原生文件对话框：直接读取本机文件上传，无需先复制到服务器目录。
               </p>
             </div>
           )}

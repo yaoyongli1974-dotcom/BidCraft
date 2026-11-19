@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 
 from bidcraft.client import load_config
-from bidcraft.desktop import run_desktop
+from bidcraft.desktop import run_desktop, run_window
 
 
 def main() -> None:
@@ -17,7 +17,8 @@ def main() -> None:
     parser.add_argument("server", nargs="?", default="", help="BidCraft 服务器地址")
     parser.add_argument("--server", dest="server_flag", default="", help="BidCraft 服务器地址")
     parser.add_argument("--port", type=int, default=0, help="本地端口（默认随机）")
-    parser.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
+    parser.add_argument("--browser", action="store_true", help="改用系统浏览器")
+    parser.add_argument("--no-browser", action="store_true", help="不自动打开浏览器（仅 --browser）")
     args = parser.parse_args()
 
     server = (args.server_flag or args.server).strip() or load_config().server
@@ -29,7 +30,10 @@ def main() -> None:
     if not server:
         print("未提供服务器地址，已退出。")
         raise SystemExit(2)
-    run_desktop(server, port=args.port, open_browser=not args.no_browser)
+    if args.browser:
+        run_desktop(server, port=args.port, open_browser=not args.no_browser)
+    else:
+        run_window(server, port=args.port)
 
 
 if __name__ == "__main__":

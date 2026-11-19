@@ -219,12 +219,98 @@ export function isAbortError(error: unknown): boolean {
   return (error as { name?: unknown }).name === 'AbortError'
 }
 
+function parseJsonOrNull(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
+export interface DesktopBridge {
+  api_request(
+    method: string,
+    path: string,
+    bodyB64?: string,
+    contentType?: string,
+  ): Promise<{
+    status: number
+    content_type: string
+    body: string
+    offline: boolean
+    cached_at?: number
+  }>
+  pick_and_upload(
+    kind?: string,
+    project?: string,
+  ): Promise<{
+    ok: boolean
+    cancelled?: boolean
+    error?: string
+    payload?: unknown
+    path?: string
+  }>
+  info(): Promise<{ server: string; version: string }>
+}
+
+export function desktopBridge(): DesktopBridge | null {
+  if (typeof window === 'undefined') return null
+  const host = window as unknown as { pywebview?: { api?: DesktopBridge } }
+  return host.pywebview?.api ?? null
+}
+
+export function announceOffline(offline: boolean, cachedAt?: number): void {
+  if (typeof window === 'undefined') return
+  window.dispatchEvent(
+    new CustomEvent(offline ? 'bidcraft-offline' : 'bidcraft-online', { detail: { cachedAt } }),
+  )
+}
+
+function base64Utf8(text: string): string {
+  const bytes = new TextEncoder().encode(text)
+  let binary = ''
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte)
+  })
+  return btoa(binary)
+}
+
+function decodeBase64(body: string): string {
+  const binary = atob(body)
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0))
+  return new TextDecoder().decode(bytes)
+}
+
 export async function apiFetch<T>(
   path: string,
   init?: RequestInit,
   signal?: AbortSignal,
 ): Promise<T> {
   const requestSignal = signal ?? init?.signal ?? undefined
+  const bridge = desktopBridge()
+  if (bridge) {
+    const bodyText = typeof init?.body === 'string' ? init.body : undefined
+    const contentType = String(
+      (init?.headers as Record<string, string> | undefined)?.['Content-Type'] ?? '',
+    )
+    const result = await bridge.api_request(
+      init?.method ?? 'GET',
+      path,
+      bodyText ? base64Utf8(bodyText) : '',
+      contentType,
+    )
+    announceOffline(result.offline, result.cached_at)
+    if (result.status === 401 && !AUTH_SKIP_401.some((item) => path.startsWith(item))) {
+      notifyUnauthorized(path)
+    }
+    const text = decodeBase64(result.body)
+    if (result.status >= 400) {
+      const detail = parseJsonOrNull(text)
+      throw new ApiError(result.status, detail, messageOf({ status: result.status, detail } as never))
+    }
+    if (result.status === 204 || !text) return undefined as T
+    return JSON.parse(text) as T
+  }
   let response: Response
   try {
     response = await fetch(path, {

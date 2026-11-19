@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 from dataclasses import dataclass, field
@@ -16,6 +17,8 @@ import httpx
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 DEFAULT_TIMEOUT = 30.0
+
+from .offline_cache import OfflineCache
 
 
 def _default_home() -> Path:
@@ -316,6 +319,51 @@ class BidCraftClient:
             self._fail(response, "上传项目原件")
         body = response.json()
         return body if isinstance(body, dict) else {}
+
+    def bridge_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        body_b64: str = "",
+        content_type: str = "",
+    ) -> dict[str, Any]:
+        """桌面窗口 JS 桥：直连 API；GET 失败时回放离线只读缓存。"""
+        method = method.upper()
+        raw = base64.b64decode(body_b64) if body_b64 else None
+        headers = {"Content-Type": content_type} if content_type else None
+        cache = OfflineCache(self.home / "cache")
+        try:
+            response = self._request(method, path, content=raw, headers=headers)
+        except ClientError as exc:
+            if method == "GET" and cache.cacheable(path):
+                cached = cache.get(self.server, path)
+                if cached is not None:
+                    payload, cached_type = cached
+                    return {
+                        "status": 200,
+                        "content_type": cached_type,
+                        "body": base64.b64encode(payload).decode("ascii"),
+                        "offline": True,
+                        "cached_at": cache.saved_at(self.server, path),
+                    }
+            detail = json.dumps({"detail": str(exc)}, ensure_ascii=False).encode()
+            return {
+                "status": 503,
+                "content_type": "application/json; charset=utf-8",
+                "body": base64.b64encode(detail).decode("ascii"),
+                "offline": True,
+            }
+        payload = response.content
+        ctype = response.headers.get("Content-Type", "application/json")
+        if method == "GET" and response.status_code == 200 and cache.cacheable(path):
+            cache.put(self.server, path, payload, ctype)
+        return {
+            "status": response.status_code,
+            "content_type": ctype,
+            "body": base64.b64encode(payload).decode("ascii"),
+            "offline": False,
+        }
 
     def download(self, url: str, dest: str | Path) -> Path:
         target = Path(dest).expanduser()

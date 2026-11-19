@@ -4,6 +4,7 @@ import { useHealth } from '../context/useHealth'
 import { useHelp } from '../context/useHelp'
 import { useAuth } from '../context/useAuth'
 import { UserMenu } from './UserMenu'
+import { OfflineBanner } from './OfflineBanner'
 import { PendingApprovals } from './PendingApprovals'
 import { className } from '../lib/format'
 
@@ -26,6 +27,7 @@ export function Masthead() {
 
   return (
     <header className="masthead">
+      <OfflineBanner />
       <div className="masthead-inner">
         <Link to="/" className="brand" aria-label="BidCraft 项目列表">
           <span className="brand-seal" aria-hidden>

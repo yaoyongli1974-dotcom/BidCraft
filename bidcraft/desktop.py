@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .client import BidCraftClient, ClientError
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 PICKER_SUFFIXES = {
@@ -89,11 +90,20 @@ _OPENER = urllib.request.build_opener(_NoRedirect)
 class _GatewayServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address: tuple[str, int], upstream: str, spa_dir: Path, token: str):
+    def __init__(
+        self,
+        address: tuple[str, int],
+        upstream: str,
+        spa_dir: Path,
+        token: str,
+        *,
+        proxy_enabled: bool = True,
+    ):
         super().__init__(address, _GatewayHandler)
         self.upstream = upstream.rstrip("/")
         self.spa_dir = Path(spa_dir)
         self.token = token
+        self.proxy_enabled = proxy_enabled
 
 
 class _GatewayHandler(BaseHTTPRequestHandler):
@@ -182,6 +192,15 @@ class _GatewayHandler(BaseHTTPRequestHandler):
             return
         if path.startswith("/__client/"):
             self._send_json(404, {"detail": "未知的客户端接口"})
+            return
+        if not self.server.proxy_enabled:
+            if (
+                method in {"GET", "HEAD"}
+                and not self._is_api(path)
+                and self._serve_static(path, head_only=method == "HEAD")
+            ):
+                return
+            self._send_json(404, {"detail": "API 由客户端原生桥处理"})
             return
         if (
             method in {"GET", "HEAD"}
@@ -565,11 +584,14 @@ def start_gateway(
     port: int = 0,
     spa_dir: str | Path = DEFAULT_SPA_DIR,
     token: str,
+    proxy_enabled: bool = True,
 ) -> ThreadingHTTPServer:
-    """创建（但不启动）本地网关，返回 ThreadingHTTPServer。"""
+    """创建（但不启动）本地静态服务/网关，返回 ThreadingHTTPServer。"""
     if not upstream.startswith(("http://", "https://")):
         raise ValueError("upstream 必须以 http:// 或 https:// 开头")
-    return _GatewayServer(("127.0.0.1", port), upstream, Path(spa_dir), token)
+    return _GatewayServer(
+        ("127.0.0.1", port), upstream, Path(spa_dir), token, proxy_enabled=proxy_enabled
+    )
 
 
 def run_desktop(server: str, *, port: int = 0, open_browser: bool = True) -> None:
@@ -594,3 +616,98 @@ def run_desktop(server: str, *, port: int = 0, open_browser: bool = True) -> Non
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+class _DesktopApi:
+    """暴露给窗口 JS 的原生桥：所有 C/S 通信直连 REST API。
+
+    GET 失败时回放本机只读缓存，并把 ``offline`` 标志带回前端。
+    """
+
+    def __init__(self, server: str) -> None:
+        self.client = BidCraftClient(server)
+
+    def info(self) -> dict[str, Any]:
+        return {"server": self.client.server, "version": __version__, "bridge": "api"}
+
+    def api_request(
+        self,
+        method: str,
+        path: str,
+        body_b64: str = "",
+        content_type: str = "",
+    ) -> dict[str, Any]:
+        return self.client.bridge_request(
+            method, path, body_b64=body_b64, content_type=content_type
+        )
+
+    def pick_and_upload(self, kind: str = "doc", project: str = "") -> dict[str, Any]:
+        """原生文件对话框选择本机文件并直接上传。"""
+        try:
+            import webview
+        except ImportError:  # pragma: no cover - 打包环境必有
+            return {"ok": False, "error": "当前环境不支持原生文件选择"}
+        windows = getattr(webview, "windows", [])
+        if not windows:
+            return {"ok": False, "error": "窗口尚未就绪"}
+        try:
+            selected = windows[0].create_file_dialog(webview.OPEN_DIALOG, allow_multiple=False)
+        except Exception as exc:  # noqa: BLE001 - 平台差异
+            return {"ok": False, "error": f"文件选择失败：{exc}"}
+        if not selected:
+            return {"ok": False, "cancelled": True}
+        path = selected[0]
+        try:
+            if kind == "project_source":
+                payload = self.client.upload_source(project, path)
+            else:
+                payload = self.client.upload_doc(path)
+        except ClientError as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "payload": payload, "path": path}
+
+
+def run_window(
+    server: str,
+    *,
+    port: int = 0,
+    width: int = 1280,
+    height: int = 860,
+    api: _DesktopApi | None = None,
+) -> None:
+    """原生窗口模式：本地静态服务 + pywebview 窗口 + API 桥。"""
+    try:
+        import webview
+    except ImportError:
+        print("未安装 pywebview，回退到浏览器模式（uv pip install pywebview）", flush=True)
+        run_desktop(server, port=port, open_browser=True)
+        return
+
+    token = secrets.token_urlsafe(24)
+    httpd = start_gateway(server, port=port, spa_dir=DEFAULT_SPA_DIR, token=token, proxy_enabled=False)
+    host, actual_port = httpd.server_address[:2]
+    url = f"http://{host}:{actual_port}/"
+    thread = threading.Thread(target=httpd.serve_forever, name="bidcraft-desktop-static", daemon=True)
+    thread.start()
+
+    bridge = api or _DesktopApi(server)
+    print(f"BidCraft 客户端已启动：{url}", flush=True)
+    print(f"上游服务器：{server}（API 直连）", flush=True)
+    try:
+        webview.create_window(
+            "BidCraft 投标工作台",
+            url,
+            width=width,
+            height=height,
+            min_size=(960, 640),
+            js_api=bridge,
+        )
+        webview.start()
+    except Exception as exc:  # noqa: BLE001 - 平台缺少 WebView 时回退
+        httpd.shutdown()
+        httpd.server_close()
+        print(f"原生窗口不可用（{exc}），回退浏览器模式", flush=True)
+        print("Linux 需安装 PySide6 或 python3-gi + WebKitGTK；Windows/macOS 开箱即用", flush=True)
+        run_desktop(server, port=actual_port, open_browser=True)
+    finally:
+        httpd.shutdown()
