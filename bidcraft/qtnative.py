@@ -422,7 +422,13 @@ if QT_AVAILABLE:
             item = self.selected()
             if not item:
                 return
-            target, _ = QFileDialog.getSaveFileName(self, "保存文档", item.get("filename", ""))
+            target, _ = QFileDialog.getSaveFileName(
+                self,
+                "保存文档",
+                item.get("filename", ""),
+                "",
+                options=QFileDialog.Option.DontUseNativeDialog,
+            )
             if not target:
                 return
 

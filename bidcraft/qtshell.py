@@ -146,7 +146,7 @@ def latest_version(timeout: float = 8.0) -> str:
 
 
 try:  # pragma: no cover - 依赖系统 Qt
-    from PySide6.QtCore import QFile, QObject, QSettings, QTimer, QUrl, Slot
+    from PySide6.QtCore import QFile, QObject, QSettings, Qt, QTimer, QUrl, Slot
     from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
     from PySide6.QtWebChannel import QWebChannel
@@ -219,7 +219,13 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
 
         @Slot(str, str, result=str)
         def pick_and_upload(self, kind: str = "doc", project: str = "") -> str:
-            path, _ = QFileDialog.getOpenFileName(None, "选择要上传的文件")
+            path, _ = QFileDialog.getOpenFileName(
+                QApplication.activeWindow(),
+                "选择要上传的文件",
+                "",
+                "",
+                options=QFileDialog.Option.DontUseNativeDialog,
+            )
             if not path:
                 return json.dumps({"ok": False, "error": "未选择文件"})
             try:
@@ -668,7 +674,12 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
 
         def _choose_download_dir(self) -> None:
             current = self.settings.value(KEY_DOWNLOAD_DIR) or str(Path.home())
-            directory = QFileDialog.getExistingDirectory(self, "选择下载目录", str(current))
+            directory = QFileDialog.getExistingDirectory(
+                self,
+                "选择下载目录",
+                str(current),
+                QFileDialog.Option.DontUseNativeDialog,
+            )
             if directory:
                 self.settings.setValue(KEY_DOWNLOAD_DIR, directory)
                 self.status_hint.setText(f"下载目录：{directory}")
@@ -692,7 +703,13 @@ if QT_AVAILABLE:  # pragma: no cover - GUI 代码由手工/集成验证
         def _on_download(self, item: Any) -> None:
             default_dir = self.settings.value(KEY_DOWNLOAD_DIR) or str(Path.home())
             suggested = getattr(item, "downloadFileName", lambda: "download")()
-            target, _ = QFileDialog.getSaveFileName(self, "保存文件", f"{default_dir}/{suggested}")
+            target, _ = QFileDialog.getSaveFileName(
+                self,
+                "保存文件",
+                f"{default_dir}/{suggested}",
+                "",
+                options=QFileDialog.Option.DontUseNativeDialog,
+            )
             if not target:
                 item.cancel()
                 return
@@ -753,6 +770,8 @@ def run_qt(
     """启动 Qt 原生外壳；Qt 不可用返回 False 供上层回退。"""
     if not QT_AVAILABLE:
         return False
+    # Wayland 下 xdg-desktop-portal 未注册时原生对话框会静默失败，改用 Qt 自绘对话框
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeDialogs, True)
     app = QApplication.instance() or QApplication([])
     app.setApplicationName(SETTINGS_APP)
     app.setOrganizationName(SETTINGS_ORG)
