@@ -1202,3 +1202,36 @@ def desktop(
 
 if __name__ == "__main__":
     app()
+
+
+@app.command("knowledge-audit")
+def knowledge_audit(
+    directory: Path = typer.Argument(..., help="待入库素材目录（md/txt）"),
+    package: str | None = typer.Option(None, "--package", "-p", help="只看某个行业包"),
+    threshold: float = typer.Option(0.62, "--threshold", help="章节匹配阈值 0–1"),
+    output: Path | None = typer.Option(None, "--output", "-o", help="完整报告 JSON 输出路径"),
+    as_json: bool = typer.Option(False, "--json", help="直接输出 JSON"),
+) -> None:
+    """素材体检与行业包章节覆盖度对比（只读，不写库）。"""
+    from .knowledge_audit import audit, render, to_json
+
+    if not directory.is_dir():
+        console.print(f"[red]目录不存在：{directory}[/red]")
+        raise typer.Exit(1)
+
+    report = audit(directory, threshold=threshold)
+    if package:
+        if package not in report["packages"]:
+            console.print(f"[red]未知行业包：{package}[/red]")
+            raise typer.Exit(2)
+        report["packages"] = {package: report["packages"][package]}
+
+    if as_json:
+        console.print_json(to_json(report))
+    else:
+        console.print(render(report))
+
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(to_json(report) + "\n", encoding="utf-8")
+        console.print(f"[green]报告已写入 {output}[/green]")
