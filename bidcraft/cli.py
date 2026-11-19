@@ -1235,3 +1235,32 @@ def knowledge_audit(
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(to_json(report) + "\n", encoding="utf-8")
         console.print(f"[green]报告已写入 {output}[/green]")
+
+
+@app.command("data-audit")
+def data_audit(
+    path: Path = typer.Argument(..., help="开放数据文件（csv/txt/xlsx）"),
+    mode: str = typer.Option("reasons", "--mode", "-m", help="reasons=废标原因归因；bids=开标报价离散度"),
+    output: Path | None = typer.Option(None, "--output", "-o", help="完整报告 JSON 输出路径"),
+    as_json: bool = typer.Option(False, "--json", help="直接输出 JSON"),
+) -> None:
+    """分析公共资源交易开放数据（只读，不联网）。"""
+    import json as _json
+
+    from .tender_stats import DataAuditError, audit_file, write_json
+
+    if not path.is_file():
+        console.print(f"[red]文件不存在：{path}[/red]")
+        raise typer.Exit(1)
+    try:
+        result = audit_file(path, mode)
+    except DataAuditError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
+    if as_json:
+        console.print_json(_json.dumps(result, ensure_ascii=False))
+    else:
+        console.print(result["markdown"])
+    if output is not None:
+        write_json(result, output)
+        console.print(f"[green]报告已写入 {output}[/green]")

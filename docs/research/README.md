@@ -24,3 +24,24 @@
   本仓库 `LICENSE` 的兼容性。
 
 联系方式：GitHub Issues（仓库 `yaoyongli1974-dotcom/BidCraft`）。
+
+## 开放交易数据的用法（无条件开放数据集）
+
+山东公共数据开放网（data.sd.gov.cn）与全国公共资源交易平台（data.ggzy.gov.cn）的
+开放数据集（开标明细、中标结果、招标异常）标注为「无条件开放」，可直接下载
+CSV/JSON/XLSX。本仓库**不内置这些数据**，只提供只读分析命令：
+
+```bash
+# 废标原因归因：把原因字段归类，反推 blocking 规则覆盖面
+bidcraft data-audit 招标异常.csv --mode reasons -o reasons.json
+
+# 开标报价离散度：同标段报价变异系数过低时标记人工复核
+bidcraft data-audit 开标明细.csv --mode bids -o bids.json
+```
+
+用途与边界：
+
+- 归因结果用于发现规则缺口（例如「未按要求签章」应触发 blocking 级核对），
+  不用于给任何具体企业贴标签；
+- 报价离散度只是弱信号，家数少或清单差异大的标段会误报，必须人工复核；
+- 引用公开数据时保留来源与更新时间，不把原始明细再分发给第三方。
