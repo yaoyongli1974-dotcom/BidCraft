@@ -7,7 +7,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import terms
+from . import terms, textqa
 from .config import settings
 from .ledger import build_ledger, load_ledger, save_ledger
 from .models import Issue, Project, SourceFile
@@ -172,6 +172,25 @@ def _term_results(db: Session, sections: list[dict]) -> list[CheckResult]:
     ]
 
 
+def _textqa_results(sections: list[dict]) -> list[CheckResult]:
+    """Turn typo / consistency / duplication findings into check results."""
+
+    return [
+        CheckResult(
+            code=finding["id"],
+            level=finding["level"],
+            category=finding["category"],
+            message=finding["message"],
+            location=finding["location"],
+            finding=finding["message"],
+            recommendation=finding["recommendation"],
+            evidence=finding["evidence"],
+            passed=False,
+        )
+        for finding in textqa.scan_sections(sections)
+    ]
+
+
 def check_project(db: Session, project_id: str) -> tuple[list, dict]:
     from .generation.outline import load_outline
 
@@ -183,6 +202,7 @@ def check_project(db: Session, project_id: str) -> tuple[list, dict]:
     nodes = load_outline(db, project_id)
     all_results = run_checks(package, ledger, nodes, include_passed=True)
     all_results.extend(_term_results(db, nodes))
+    all_results.extend(_textqa_results(nodes))
     results = [result for result in all_results if not result.passed]
     db.query(Issue).filter(Issue.project_id == project_id).delete()
     for result in results:
