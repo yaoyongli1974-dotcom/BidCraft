@@ -1232,6 +1232,74 @@ export interface PreflightReport {
   summary: PreflightSummary
 }
 
+/** R34 人员台账：本人维护的注册人员与在建锁定状态。 */
+export interface Personnel {
+  id: string
+  name: string
+  title: string
+  specialty: string
+  cert_no: string
+  /** 社保连续缴纳月数，0–600。 */
+  social_months: number
+  /** 在建项目锁定：锁定期间不参与新的投标配置。 */
+  locked: boolean
+  note: string
+  created_at: string | null
+  updated_at: string | null
+}
+
+/** 新建 / 编辑人员的入参；`name` 必填，文本字段留空由后端截断为 0–80 字。 */
+export interface PersonnelInput {
+  name: string
+  title?: string
+  specialty?: string
+  cert_no?: string
+  social_months?: number
+  locked?: boolean
+  note?: string
+}
+
+// ---------------------------------------------------------------- 知识库素材元数据（R34）
+
+/** 素材类型策略中的一项；`required` 为空表示无需额外字段。 */
+export interface KbDocPolicyEntry {
+  label: string
+  required: string[]
+  hint?: string
+}
+
+/** 以素材类型为键的策略表；`other` 始终存在。 */
+export type KbDocPolicy = Record<string, KbDocPolicyEntry>
+
+/** 一条已登记的素材元数据。未知类型回退为 `other`。 */
+export interface KbDocMetaItem {
+  source: string
+  kind: string
+  fields: Record<string, string>
+  ok: boolean
+  reason: string
+}
+
+/** 知识库内出现过的一个片段来源；`chunks` 为片段数。 */
+export interface KbDocSource {
+  source: string
+  chunks: number
+}
+
+/** `GET /admin/kbs/{id}/docs` 的归一化响应。 */
+export interface KbDocMetaResponse {
+  policy: KbDocPolicy
+  items: KbDocMetaItem[]
+  sources: KbDocSource[]
+}
+
+/** `PUT /admin/kbs/{id}/docs` 的请求体。 */
+export interface KbDocMetaInput {
+  source: string
+  kind: string
+  fields: Record<string, string>
+}
+
 // ---------------------------------------------------------------- 协作与审计
 
 /** `owner` is synthesised by the server from `project.owner_id` and always listed first. */

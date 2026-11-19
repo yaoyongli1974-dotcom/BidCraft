@@ -40,6 +40,7 @@
 | 向量语义检索 | ✅ 可选 | `knowledge.py`、`model_config.resolve_embedding_endpoint`、`/admin/kbs/{id}/embed`、`web/` | embedding 向量索引与混合重排；换模型自动失效；无模型/失败回退关键词召回 |
 | 桌面客户端（C/S） | ✅ | `desktop.py`、`client.py`、`bidcraft desktop`、`bidcraft client`、`docs/desktop.md` | 本机网关反代远端服务（仅 127.0.0.1、令牌门禁）、Cookie/SSE 透传、静态与 SPA 回退；本地文件桥选择本机文件直传我的文档/项目原件；命令行客户端登录/项目/上传/下载与 Cookie 持久化 |
 | 素材可信度分级 | ✅ | `material_policy.py`、`resources/packages/*.yaml`、`/admin/kbs/{id}/docs` | 规则包 `material_policy` 声明每类素材必填生命周期字段；检索注入按可信度分级，缺失/过期降级为题录；文档元数据存 `knowledge_bases.options.docs` |
+| 人员与素材元数据 | ✅ | `personnel.py`、`/my/personnel`、`/admin/kbs/{id}/docs`、`web/` | 人员台账（证书号/社保月数/在建锁定）；知识库逐文档元数据登记与可信度判定，缺字段降级题录 |
 | 资质与投标前自查 | ✅ | `qualifications.py`、`/my/qualifications`、`/my/preflight`、`web/` | 资质/业绩台账与证据存证；按开标日六项自查（有效/临期/过期/缺失）与到期预警；不联网查询官方平台，只留人工截图证据 |
 | 我的文档（个人知识库） | ✅ | `user_docs.py`、`models.UserDoc`、`/my/docs`、`web/MyDocsPage` | 普通用户上传文件到服务器个人目录并自动建索引；个人 local KB（options.personal）；生成检索只注入本人个人 KB 且默认搜索排除个人库防泄漏；列表/下载/删除与审计 |
 | 注册与计费 | ✅ | `billing.py`、`wechat.py`、`wechatpay.py`、`web/` | 用户名/微信扫码注册、独立项目、按章扣点、兑换码、微信支付 Native/mock |

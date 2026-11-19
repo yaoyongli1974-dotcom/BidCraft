@@ -7,6 +7,7 @@ import {
   Plus,
   RefreshCw,
   RotateCw,
+  Tags,
   Trash2,
   Waypoints,
   type LucideIcon,
@@ -47,6 +48,7 @@ import {
   AdminKnowledgeModal,
   type KnowledgeModalState,
 } from './AdminKnowledgeModal'
+import { AdminKbDocsModal } from './AdminKbDocsModal'
 
 interface KnowledgeTabProps {
   kbs: KnowledgeBase[]
@@ -101,6 +103,7 @@ export function AdminKnowledgeTab({
   const confirm = useConfirm()
   const [kindFilter, setKindFilter] = useState('all')
   const [modal, setModal] = useState<KnowledgeModalState | null>(null)
+  const [docsKb, setDocsKb] = useState<KnowledgeBase | null>(null)
   const [testingId, setTestingId] = useState<string | null>(null)
   const [reindexingId, setReindexingId] = useState<string | null>(null)
   const [reindexJobId, setReindexJobId] = useState<string | null>(null)
@@ -667,6 +670,14 @@ export function AdminKnowledgeTab({
                             <Button
                               variant="ghost"
                               size="sm"
+                              icon={<Tags size={12} />}
+                              onClick={() => setDocsKb(kb)}
+                            >
+                              素材元数据
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
                               icon={<Pencil size={12} />}
                               onClick={() => setModal({ mode: 'edit', kb })}
                             >
@@ -708,6 +719,14 @@ export function AdminKnowledgeTab({
           initialKind={modal.mode === 'create' ? modal.kind : 'local'}
           onClose={() => setModal(null)}
           onSaved={onSaved}
+        />
+      )}
+
+      {docsKb && (
+        <AdminKbDocsModal
+          key={docsKb.id}
+          kb={docsKb}
+          onClose={() => setDocsKb(null)}
         />
       )}
     </div>

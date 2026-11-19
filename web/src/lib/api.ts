@@ -31,6 +31,12 @@ import type {
   CreditAdjustResult,
   KnowledgeBase,
   KnowledgeBaseInput,
+  KbDocMetaInput,
+  KbDocMetaItem,
+  KbDocMetaResponse,
+  KbDocPolicy,
+  KbDocPolicyEntry,
+  KbDocSource,
   KbVectorResult,
   ChapterDetail,
   CheckResult,
@@ -55,6 +61,8 @@ import type {
   PackageInfo,
   ParseResult,
   PendingApproval,
+  Personnel,
+  PersonnelInput,
   Plugin,
   PreflightItem,
   PreflightReport,
@@ -801,6 +809,88 @@ export async function getPreflight(deadline?: string | null): Promise<PreflightR
   return normalizePreflight(data, value)
 }
 
+// ---------------------------------------------------------------- personnel (R34)
+
+const MAX_SOCIAL_MONTHS = 600
+
+/** 兼容 `{ personnel: {...} }` 包装；平铺 payload 原样返回。 */
+function unwrapPersonnel(value: unknown): unknown {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const raw = value as Record<string, unknown>
+    if (raw.personnel) return raw.personnel
+  }
+  return value
+}
+
+/**
+ * 归一化一条人员记录。缺失的文本字段补空串，社保月数收敛到 0–600，
+ * 没有 id 的条目直接丢弃（与资质台账相同的容错策略）。
+ */
+export function normalizePersonnel(value: unknown): Personnel | null {
+  const payload = unwrapPersonnel(value)
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
+  const raw = payload as Record<string, unknown>
+  const id = asText(raw.id).trim()
+  if (!id) return null
+  const months = Math.round(asNumber(raw.social_months, 0))
+  return {
+    id,
+    name: asText(raw.name).trim() || '未命名人员',
+    title: asText(raw.title),
+    specialty: asText(raw.specialty),
+    cert_no: asText(raw.cert_no),
+    social_months: Math.max(0, Math.min(MAX_SOCIAL_MONTHS, months)),
+    locked: asBool(raw.locked),
+    note: asText(raw.note),
+    created_at: typeof raw.created_at === 'string' ? raw.created_at : null,
+    updated_at: typeof raw.updated_at === 'string' ? raw.updated_at : null,
+  }
+}
+
+function requirePersonnel(value: unknown): Personnel {
+  const person = normalizePersonnel(value)
+  if (!person) {
+    throw new ApiError(500, null, '服务端返回的人员信息无法识别，请刷新后重试。')
+  }
+  return person
+}
+
+const personnelPath = (id: string) => `/my/personnel/${encodeURIComponent(id)}`
+
+/** 当前用户的人员台账（平铺数组，后端按姓名升序）。 */
+export async function getPersonnel(): Promise<Personnel[]> {
+  const data = await request<unknown>('/my/personnel')
+  const list = asArray<unknown>(data, 'personnel')
+  const items = list.length ? list : asArray<unknown>(data, 'items')
+  return items
+    .map(normalizePersonnel)
+    .filter((item): item is Personnel => item !== null)
+}
+
+export async function createPersonnel(input: PersonnelInput): Promise<Personnel> {
+  const data = await request<unknown>('/my/personnel', jsonBody(input))
+  return requirePersonnel(data)
+}
+
+export async function updatePersonnel(
+  id: string,
+  input: Partial<PersonnelInput>,
+): Promise<Personnel> {
+  const data = await request<unknown>(personnelPath(id), {
+    method: 'PATCH',
+    body: JSON.stringify(input),
+  })
+  return requirePersonnel(data)
+}
+
+export async function deletePersonnel(
+  id: string,
+): Promise<{ deleted: boolean; id: string }> {
+  const data = await request<unknown>(personnelPath(id), { method: 'DELETE' })
+  const raw = data && typeof data === 'object' ? (data as Record<string, unknown>) : {}
+  return { deleted: asBool(raw.deleted), id: asText(raw.id) || id }
+}
+
 // ---------------------------------------------------------------- health & packages
 
 export const getHealth = () => request<Health>('/health')
@@ -1055,6 +1145,217 @@ export const deleteKnowledgeBase = (id: string) =>
 
 export const testKnowledgeBase = (id: string) =>
   request<TestResult>(`/admin/kbs/${encodeURIComponent(id)}/test`, { method: 'POST' })
+
+// ---------------------------------------------------------------- kb document metadata (R34)
+
+/** 后端契约缺失 `policy` 时的兜底（与 material_policy.DEFAULT_POLICY 对齐）。 */
+export const DEFAULT_KB_DOC_POLICY: KbDocPolicy = {
+  qualification: {
+    label: '资质证书',
+    required: ['cert_no', 'valid_to'],
+    hint: '证书编号与有效期',
+  },
+  performance: {
+    label: '业绩合同',
+    required: ['contract_no', 'owner', 'amount', 'acceptance'],
+    hint: '合同编号、业主、金额、验收结论',
+  },
+  personnel: {
+    label: '人员证书',
+    required: ['cert_no', 'social_months', 'locked'],
+    hint: '证书号、社保月份、是否在建锁定',
+  },
+  standard: {
+    label: '标准规范',
+    required: ['source_url'],
+    hint: '官方出处',
+  },
+  other: { label: '其他素材', required: [], hint: '' },
+}
+
+function normalizeKbDocPolicyEntry(value: unknown, kind: string): KbDocPolicyEntry {
+  const raw =
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {}
+  const required = Array.isArray(raw.required)
+    ? raw.required.map((item) => asText(item).trim()).filter(Boolean)
+    : []
+  return {
+    label: asText(raw.label).trim() || kind,
+    required: Array.from(new Set(required)),
+    hint: asText(raw.hint),
+  }
+}
+
+/**
+ * 归一化素材类型策略；空 / 非法值回退到默认策略，并保证 `other` 始终存在，
+ * 这样类型下拉框在最老的服务器上也能工作。
+ */
+export function normalizeKbDocPolicy(value: unknown): KbDocPolicy {
+  const raw =
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {}
+  const policy: KbDocPolicy = {}
+  Object.entries(raw).forEach(([rawKind, entry]) => {
+    const kind = rawKind.trim()
+    if (!kind) return
+    policy[kind] = normalizeKbDocPolicyEntry(entry, kind)
+  })
+  if (Object.keys(policy).length === 0) {
+    return Object.fromEntries(
+      Object.entries(DEFAULT_KB_DOC_POLICY).map(([kind, entry]) => [kind, { ...entry }]),
+    )
+  }
+  if (!policy.other) policy.other = { label: '其他素材', required: [], hint: '' }
+  return policy
+}
+
+const KB_DOC_RESERVED_KEYS = new Set(['source', 'kind', 'fields', 'ok', 'reason'])
+
+/** 新旧后端兼容：优先读嵌套 `fields`，否则把其余标量键当作字段。 */
+function normalizeKbDocFields(raw: Record<string, unknown>): Record<string, string> {
+  const fields: Record<string, string> = {}
+  const nested = raw.fields
+  if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+    Object.entries(nested as Record<string, unknown>).forEach(([key, value]) => {
+      if (!key.trim()) return
+      if (value === undefined || value === null) return
+      if (typeof value === 'object') return
+      fields[key.trim()] = asText(value)
+    })
+  }
+  Object.entries(raw).forEach(([key, value]) => {
+    if (KB_DOC_RESERVED_KEYS.has(key)) return
+    if (value === undefined || value === null || typeof value === 'object') return
+    if (!(key in fields)) fields[key] = asText(value)
+  })
+  return fields
+}
+
+export function normalizeKbDocItem(
+  value: unknown,
+  policy: KbDocPolicy = DEFAULT_KB_DOC_POLICY,
+): KbDocMetaItem | null {
+  const payload = value
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
+  const raw = payload as Record<string, unknown>
+  const source = asText(raw.source).trim()
+  if (!source) return null
+  const rawKind = asText(raw.kind).trim().toLowerCase() || 'other'
+  const kind = policy[rawKind] ? rawKind : 'other'
+  const reason = asText(raw.reason)
+  const ok =
+    raw.ok === undefined || raw.ok === null ? reason === '' : asBool(raw.ok)
+  return {
+    source,
+    kind,
+    fields: normalizeKbDocFields(raw),
+    ok,
+    reason,
+  }
+}
+
+function normalizeKbDocSource(value: unknown): KbDocSource | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  const source = asText(raw.source).trim()
+  if (!source) return null
+  return {
+    source,
+    chunks: Math.max(0, Math.round(asNumber(raw.chunks, 0))),
+  }
+}
+
+/**
+ * 归一化 `GET /admin/kbs/{id}/docs`。`items` / `sources` 中的无效项会被过滤；
+ * 老后端没有 `sources` 时用已登记项回填，保证左侧文档列表仍然可用。
+ */
+export function normalizeKbDocs(value: unknown): KbDocMetaResponse {
+  const raw =
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {}
+  const policy = normalizeKbDocPolicy(raw.policy)
+  const items = asArray<unknown>(raw.items, 'items')
+    .map((item) => normalizeKbDocItem(item, policy))
+    .filter((item): item is KbDocMetaItem => item !== null)
+
+  const rawSources = asArray<unknown>(raw.sources, 'sources')
+    .map(normalizeKbDocSource)
+    .filter((item): item is KbDocSource => item !== null)
+
+  let sources = rawSources
+  if (sources.length === 0 && items.length > 0) {
+    sources = items.map((item) => ({ source: item.source, chunks: 0 }))
+  }
+  const deduped = new Map<string, KbDocSource>()
+  sources.forEach((entry) => {
+    const existing = deduped.get(entry.source)
+    if (!existing || entry.chunks > existing.chunks) deduped.set(entry.source, entry)
+  })
+
+  return { policy, items, sources: Array.from(deduped.values()) }
+}
+
+const kbDocsPath = (id: string) => `/admin/kbs/${encodeURIComponent(id)}/docs`
+
+/** 读取某个知识库的素材元数据、策略与全部片段来源。 */
+export async function getKbDocs(id: string): Promise<KbDocMetaResponse> {
+  const data = await request<unknown>(kbDocsPath(id))
+  return normalizeKbDocs(data)
+}
+
+/** 新增 / 覆盖登记一个来源的素材元数据；返回归一化后的条目。 */
+export async function updateKbDoc(
+  id: string,
+  input: KbDocMetaInput,
+): Promise<KbDocMetaItem> {
+  const data = await request<unknown>(kbDocsPath(id), {
+    method: 'PUT',
+    body: JSON.stringify(input),
+  })
+  const raw =
+    data && typeof data === 'object' && !Array.isArray(data)
+      ? (data as Record<string, unknown>)
+      : {}
+  // 允许服务端自定义素材类型：把本次提交的类型补进策略，避免回退为 other。
+  const policy: KbDocPolicy = {
+    ...DEFAULT_KB_DOC_POLICY,
+    [input.kind]: DEFAULT_KB_DOC_POLICY[input.kind] || {
+      label: input.kind,
+      required: [],
+      hint: '',
+    },
+  }
+  const item = normalizeKbDocItem(
+    {
+      ...raw,
+      source: input.source,
+      kind: raw.kind ?? input.kind,
+      fields: raw.fields ?? input.fields,
+    },
+    policy,
+  )
+  if (!item) {
+    throw new ApiError(500, null, '服务端返回的素材元数据无法识别，请刷新后重试。')
+  }
+  return item
+}
+
+/** 删除一个来源的登记（按 source 查询参数）。 */
+export async function deleteKbDoc(
+  id: string,
+  source: string,
+): Promise<{ deleted: boolean; source: string }> {
+  const data = await request<unknown>(
+    `${kbDocsPath(id)}?source=${encodeURIComponent(source)}`,
+    { method: 'DELETE' },
+  )
+  const raw = data && typeof data === 'object' ? (data as Record<string, unknown>) : {}
+  return { deleted: asBool(raw.deleted), source: asText(raw.source) || source }
+}
 
 /** Vector fields are optional: an older server simply reports zeroes. */
 function normalizeKbVector(value: unknown): KbVectorResult | null {

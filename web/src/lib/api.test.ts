@@ -11,6 +11,7 @@ import {
   cnyTotalWithTax,
   createBillingOrder,
   createBoqVersion,
+  createPersonnel,
   createPlugin,
   createQualification,
   createSubAccount,
@@ -18,6 +19,8 @@ import {
   createUserDoc,
   createVipOrder,
   deleteBoqVersion,
+  deleteKbDoc,
+  deletePersonnel,
   deleteQualification,
   deleteSubAccount,
   deleteUserDoc,
@@ -25,7 +28,9 @@ import {
   errorDetailText,
   exportPluginPackage,
   getBoqVersion,
+  getKbDocs,
   getPendingApprovals,
+  getPersonnel,
   getPreflight,
   getProject,
   getProjectTemplates,
@@ -42,6 +47,8 @@ import {
   normalizeBoqQuoteVersion,
   normalizeBoqSummary,
   normalizeImagePolicy,
+  normalizeKbDocPolicy,
+  normalizeKbDocs,
   normalizePlugin,
   normalizePreflight,
   normalizePricePolicy,
@@ -55,6 +62,8 @@ import {
   unapproveBoqVersion,
   updatePlugin,
   updateProject,
+  updateKbDoc,
+  updatePersonnel,
   updateQualification,
   updateSubAccount,
   uploadForm,
@@ -2169,6 +2178,247 @@ describe('qualifications & preflight (R32)', () => {
     )
     expect(fallback.deadline).toBe('2026-12-02')
     expect(fallback.summary).toEqual({ ok: 1, warn: 1, missing: 1, total: 3 })
+  })
+})
+
+describe('personnel & kb document metadata (R34)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const jsonResponse = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+  it('normalizes the flat personnel list and clamps social months', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse([
+        {
+          id: 'p/1',
+          name: ' 张工 ',
+          title: '项目经理',
+          specialty: '机电工程',
+          cert_no: 'D-1',
+          social_months: '240',
+          locked: true,
+          note: '可出差',
+        },
+        { id: '', name: '应被忽略' },
+        { id: 'p-2', name: '', social_months: 999, locked: 'true' },
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const list = await getPersonnel()
+    expect(fetchMock.mock.calls[0][0]).toBe('/my/personnel')
+    expect(
+      (fetchMock.mock.calls[0][1] as RequestInit | undefined)?.method,
+    ).toBeUndefined()
+    expect(list).toHaveLength(2)
+    expect(list[0]).toMatchObject({
+      id: 'p/1',
+      name: '张工',
+      title: '项目经理',
+      specialty: '机电工程',
+      cert_no: 'D-1',
+      social_months: 240,
+      locked: true,
+      note: '可出差',
+      created_at: null,
+    })
+    expect(list[1]).toMatchObject({
+      id: 'p-2',
+      name: '未命名人员',
+      social_months: 600,
+      locked: true,
+    })
+    expect(list[1].title).toBe('')
+  })
+
+  it('posts, patches and deletes personnel with encoded ids', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'DELETE') return jsonResponse({ deleted: true })
+      return jsonResponse({ id: 'p/1', name: '张工', social_months: 12, locked: false })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await createPersonnel({
+      name: ' 张工 ',
+      title: '项目经理',
+      specialty: '机电工程',
+      cert_no: 'D-1',
+      social_months: 12,
+      locked: false,
+      note: '备注',
+    })
+    expect(fetchMock.mock.calls[0][0]).toBe('/my/personnel')
+    const createInit = fetchMock.mock.calls[0][1] as RequestInit
+    expect(createInit.method).toBe('POST')
+    expect(JSON.parse(String(createInit.body))).toEqual({
+      name: ' 张工 ',
+      title: '项目经理',
+      specialty: '机电工程',
+      cert_no: 'D-1',
+      social_months: 12,
+      locked: false,
+      note: '备注',
+    })
+
+    await updatePersonnel('p/1', { name: '李工', locked: true })
+    expect(fetchMock.mock.calls[1][0]).toBe('/my/personnel/p%2F1')
+    const updateInit = fetchMock.mock.calls[1][1] as RequestInit
+    expect(updateInit.method).toBe('PATCH')
+    expect(JSON.parse(String(updateInit.body))).toEqual({
+      name: '李工',
+      locked: true,
+    })
+
+    const deleted = await deletePersonnel('p/1')
+    expect(fetchMock.mock.calls[2][0]).toBe('/my/personnel/p%2F1')
+    expect((fetchMock.mock.calls[2][1] as RequestInit).method).toBe('DELETE')
+    expect(deleted).toEqual({ deleted: true, id: 'p/1' })
+  })
+
+  it('falls back to the default material policy and fills other', () => {
+    const fallback = normalizeKbDocPolicy(undefined)
+    expect(fallback.qualification.required).toEqual(['cert_no', 'valid_to'])
+    expect(fallback.personnel.required).toEqual([
+      'cert_no',
+      'social_months',
+      'locked',
+    ])
+    expect(fallback.other).toEqual({ label: '其他素材', required: [], hint: '' })
+
+    const custom = normalizeKbDocPolicy({
+      custom: { label: '自定义', required: ['x', 'x', ''] },
+    })
+    expect(custom.custom).toEqual({ label: '自定义', required: ['x'], hint: '' })
+    expect(custom.other.required).toEqual([])
+  })
+
+  it('normalizes kb docs, filters invalid items and dedupes sources', () => {
+    const docs = normalizeKbDocs({
+      policy: { qualification: { label: '资质', required: ['cert_no'] } },
+      items: [
+        {
+          source: 'a.pdf',
+          kind: 'qualification',
+          fields: { cert_no: 'D-1' },
+          ok: true,
+          reason: '',
+        },
+        { source: 'b.pdf', kind: 'nope', ok: false, reason: '缺少证书编号' },
+        { source: '', kind: 'qualification' },
+      ],
+      sources: [
+        { source: 'a.pdf', chunks: 3 },
+        { source: 'a.pdf', chunks: 5 },
+        { source: 'b.pdf', chunks: '2' },
+        { source: '', chunks: 1 },
+      ],
+    })
+    expect(docs.items).toHaveLength(2)
+    expect(docs.items[0]).toMatchObject({
+      source: 'a.pdf',
+      kind: 'qualification',
+      fields: { cert_no: 'D-1' },
+      ok: true,
+      reason: '',
+    })
+    expect(docs.items[1]).toMatchObject({
+      source: 'b.pdf',
+      kind: 'other',
+      ok: false,
+      reason: '缺少证书编号',
+    })
+    expect(docs.sources).toEqual([
+      { source: 'a.pdf', chunks: 5 },
+      { source: 'b.pdf', chunks: 2 },
+    ])
+    expect(docs.policy.qualification.required).toEqual(['cert_no'])
+    expect(docs.policy.other).toBeDefined()
+  })
+
+  it('reads flat legacy items as fields and derives sources from them', () => {
+    const docs = normalizeKbDocs({
+      items: [
+        {
+          source: 'c.pdf',
+          kind: 'qualification',
+          cert_no: 'C-9',
+          valid_to: '2027-01-01',
+          ok: 'true',
+        },
+      ],
+    })
+    expect(docs.items[0].fields).toMatchObject({
+      cert_no: 'C-9',
+      valid_to: '2027-01-01',
+    })
+    expect(docs.items[0].ok).toBe(true)
+    expect(docs.sources).toEqual([{ source: 'c.pdf', chunks: 0 }])
+  })
+
+  it('loads kb docs from the encoded admin path', async () => {
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL) =>
+      jsonResponse({
+        items: [{ source: 'a.pdf', kind: 'standard', fields: { source_url: 'https://x' }, ok: true }],
+        sources: [{ source: 'a.pdf', chunks: 4 }],
+        policy: {},
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const docs = await getKbDocs('kb/1')
+    expect(fetchMock.mock.calls[0][0]).toBe('/admin/kbs/kb%2F1/docs')
+    expect(docs.items).toHaveLength(1)
+    expect(docs.items[0].fields.source_url).toBe('https://x')
+    expect(docs.sources).toEqual([{ source: 'a.pdf', chunks: 4 }])
+  })
+
+  it('puts source/kind/fields and deletes by encoded source', async () => {
+    const source = '目录/证书 1.pdf'
+    const fetchMock = vi.fn(async (_path: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === 'DELETE'
+        ? jsonResponse({ deleted: true, source })
+        : jsonResponse({
+            source,
+            kind: 'qualification',
+            fields: { cert_no: 'D-1' },
+            ok: true,
+            reason: '',
+          }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const saved = await updateKbDoc('kb/1', {
+      source,
+      kind: 'qualification',
+      fields: { cert_no: 'D-1' },
+    })
+    expect(fetchMock.mock.calls[0][0]).toBe('/admin/kbs/kb%2F1/docs')
+    const putInit = fetchMock.mock.calls[0][1] as RequestInit
+    expect(putInit.method).toBe('PUT')
+    expect(JSON.parse(String(putInit.body))).toEqual({
+      source,
+      kind: 'qualification',
+      fields: { cert_no: 'D-1' },
+    })
+    expect(saved).toMatchObject({
+      source,
+      kind: 'qualification',
+      fields: { cert_no: 'D-1' },
+      ok: true,
+    })
+
+    const removed = await deleteKbDoc('kb/1', source)
+    expect(fetchMock.mock.calls[1][0]).toBe(
+      '/admin/kbs/kb%2F1/docs?source=%E7%9B%AE%E5%BD%95%2F%E8%AF%81%E4%B9%A6%201.pdf',
+    )
+    expect((fetchMock.mock.calls[1][1] as RequestInit).method).toBe('DELETE')
+    expect(removed).toEqual({ deleted: true, source })
   })
 })
 

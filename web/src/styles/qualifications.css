@@ -494,6 +494,96 @@
   gap: 6px;
 }
 
+/* ------------------------------------------------------------------ personnel */
+
+.qual-personnel-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding-right: 4px;
+}
+
+.qual-personnel-stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--muted);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.qual-personnel-stat strong {
+  font-family: var(--font-serif);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.qual-personnel-stat--locked {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: rgba(141, 96, 27, 0.2);
+}
+
+.qual-personnel-stat--locked strong {
+  color: var(--warn);
+}
+
+.qual-personnel-table td {
+  vertical-align: middle;
+}
+
+.qual-personnel-row.is-locked {
+  background: color-mix(in srgb, var(--warn-soft) 42%, transparent);
+}
+
+.qual-personnel-months {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.qual-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  cursor: pointer;
+}
+
+.qual-check input {
+  margin-top: 3px;
+  accent-color: var(--jade);
+}
+
+.qual-check span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.qual-check strong {
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.qual-check small {
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
 /* ------------------------------------------------------------------ responsive */
 
 @media (max-width: 860px) {

@@ -17,21 +17,29 @@ import {
   Trash2,
   Upload,
   UploadCloud,
+  UserPlus,
+  Users,
   XCircle,
 } from 'lucide-react'
 import {
   ApiError,
+  createPersonnel,
   createQualification,
+  deletePersonnel,
   deleteQualification,
   deleteQualificationEvidence,
+  getPersonnel,
   getPreflight,
   getQualifications,
   messageOf,
   qualificationEvidenceUrl,
+  updatePersonnel,
   updateQualification,
   uploadQualificationEvidence,
 } from '../lib/api'
 import type {
+  Personnel,
+  PersonnelInput,
   PreflightItem,
   PreflightStatus,
   Qualification,
@@ -94,6 +102,10 @@ const MAX_EVIDENCE_BYTES = 10 * 1024 * 1024
 type QualificationModalState =
   | { mode: 'create'; kind: QualificationKind }
   | { mode: 'edit'; qualification: Qualification }
+
+type PersonnelModalState =
+  | { mode: 'create' }
+  | { mode: 'edit'; person: Personnel }
 
 function pad2(value: number): string {
   return String(value).padStart(2, '0')
@@ -168,12 +180,15 @@ export function QualificationsPage() {
   const [deadline, setDeadline] = useState(todayValue)
   const effectiveDeadline = deadline || todayValue()
   const [modal, setModal] = useState<QualificationModalState | null>(null)
+  const [personnelModal, setPersonnelModal] = useState<PersonnelModalState | null>(null)
+  const [deletingPersonnelId, setDeletingPersonnelId] = useState<string | null>(null)
   const [evidenceId, setEvidenceId] = useState<string | null>(null)
   const [pickerItem, setPickerItem] = useState<PreflightItem | null>(null)
   const [focusId, setFocusId] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
 
   const qualificationsQuery = useQuery('qualifications', () => getQualifications())
+  const personnelQuery = useQuery('personnel', () => getPersonnel())
   const preflightQuery = useQuery(`preflight:${effectiveDeadline}`, () =>
     getPreflight(effectiveDeadline),
   )
@@ -187,6 +202,14 @@ export function QualificationsPage() {
       return left.name.localeCompare(right.name, 'zh-CN')
     })
   }, [qualificationsQuery.data])
+
+  const personnel = useMemo(() => {
+    const list = personnelQuery.data || []
+    return [...list].sort((left, right) =>
+      left.name.localeCompare(right.name, 'zh-CN'),
+    )
+  }, [personnelQuery.data])
+  const lockedPersonnelCount = personnel.filter((person) => person.locked).length
 
   const preflightItems = preflightQuery.data?.items || []
   const summary = preflightQuery.data?.summary
@@ -202,6 +225,7 @@ export function QualificationsPage() {
 
   const refreshAll = () => {
     qualificationsQuery.refresh()
+    personnelQuery.refresh()
     preflightQuery.refresh()
   }
 
@@ -277,6 +301,48 @@ export function QualificationsPage() {
     setModal(null)
     mergeQualification(saved)
     toast.success(created ? '资质已登记' : '资质已保存', saved.name)
+  }
+
+  const mergePersonnel = (next: Personnel) => {
+    personnelQuery.setData((current) => {
+      const list = (current || []).filter((item) => item.id !== next.id)
+      return [...list, next]
+    })
+  }
+
+  const onPersonnelSaved = (saved: Personnel, created: boolean) => {
+    setPersonnelModal(null)
+    mergePersonnel(saved)
+    toast.success(created ? '人员已添加' : '人员已保存', saved.name)
+  }
+
+  const removePersonnel = async (person: Personnel) => {
+    if (deletingPersonnelId) return
+    const accepted = await confirm({
+      title: `删除人员「${person.name}」？`,
+      description: (
+        <>
+          将删除 <strong>{person.name}</strong>
+          {person.locked ? ' 的在建锁定信息' : ''}。
+        </>
+      ),
+      note: '删除后无法恢复；已上传的资质与证据文件不受影响。',
+      confirmLabel: '删除人员',
+      tone: 'danger',
+    })
+    if (!accepted) return
+    setDeletingPersonnelId(person.id)
+    try {
+      await deletePersonnel(person.id)
+      personnelQuery.setData((current) =>
+        (current || []).filter((item) => item.id !== person.id),
+      )
+      toast.success('人员已删除', person.name)
+    } catch (error) {
+      toast.error('删除人员失败', messageOf(error))
+    } finally {
+      setDeletingPersonnelId(null)
+    }
   }
 
   const qualsError = qualificationsQuery.error
@@ -649,12 +715,176 @@ export function QualificationsPage() {
         )}
       </section>
 
+      <section className="panel qual-panel" aria-labelledby="qual-personnel-heading">
+        <div className="panel-head">
+          <div>
+            <div className="eyebrow">投标团队</div>
+            <h3 id="qual-personnel-heading">人员</h3>
+          </div>
+          <div className="qual-panel-actions">
+            <span className="qual-personnel-summary">
+              <span className="qual-personnel-stat">
+                <span>总人数</span>
+                <strong>
+                  {personnelQuery.loading && !personnelQuery.data
+                    ? '—'
+                    : personnel.length}
+                </strong>
+              </span>
+              <span className="qual-personnel-stat qual-personnel-stat--locked">
+                <span>在建锁定</span>
+                <strong>
+                  {personnelQuery.loading && !personnelQuery.data
+                    ? '—'
+                    : lockedPersonnelCount}
+                </strong>
+              </span>
+            </span>
+            <Button
+              variant="primary"
+              size="sm"
+              icon={<UserPlus size={14} />}
+              onClick={() => setPersonnelModal({ mode: 'create' })}
+            >
+              新增人员
+            </Button>
+          </div>
+        </div>
+
+        {personnelQuery.error && !personnelQuery.data ? (
+          <div className="qual-panel-body">
+            <ErrorState
+              message={personnelQuery.error}
+              onRetry={personnelQuery.refresh}
+            />
+          </div>
+        ) : personnelQuery.loading && !personnelQuery.data ? (
+          <QualTableSkeleton rows={3} />
+        ) : personnel.length === 0 ? (
+          <EmptyState
+            icon={Users}
+            title="还没有人员记录"
+            description="登记注册建造师、职称人员与关键岗位人员；在建锁定的成员会在汇总中单独统计，便于配置投标团队时避开冲突。"
+            actions={
+              <Button
+                variant="primary"
+                icon={<UserPlus size={15} />}
+                onClick={() => setPersonnelModal({ mode: 'create' })}
+              >
+                添加第一名人员
+              </Button>
+            }
+          />
+        ) : (
+          <div className="table-scroll">
+            <table className="data-table qual-personnel-table">
+              <thead>
+                <tr>
+                  <th>姓名</th>
+                  <th>职务</th>
+                  <th>注册专业</th>
+                  <th>证书号</th>
+                  <th>社保月数</th>
+                  <th>在建状态</th>
+                  <th>备注</th>
+                  <th className="qual-col-actions">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {personnel.map((person) => (
+                  <tr
+                    key={person.id}
+                    className={className(
+                      'qual-personnel-row',
+                      person.locked && 'is-locked',
+                    )}
+                  >
+                    <td>
+                      <strong>{person.name}</strong>
+                    </td>
+                    <td>{person.title || <span className="subtle">—</span>}</td>
+                    <td>
+                      {person.specialty || <span className="subtle">—</span>}
+                    </td>
+                    <td>
+                      <span className="mono">{person.cert_no || '—'}</span>
+                    </td>
+                    <td>
+                      <span className="qual-personnel-months">
+                        {person.social_months} 个月
+                      </span>
+                    </td>
+                    <td>
+                      <Badge
+                        tone={person.locked ? 'warn' : 'success'}
+                        dot
+                        subtle
+                      >
+                        {person.locked ? '在建锁定' : '正常'}
+                      </Badge>
+                    </td>
+                    <td className="qual-hint-cell" title={person.note || undefined}>
+                      {person.note ? truncate(person.note, 36) : (
+                        <span className="subtle">—</span>
+                      )}
+                    </td>
+                    <td className="qual-col-actions">
+                      <div className="qual-row-actions">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          icon={<Pencil size={12} />}
+                          disabled={deletingPersonnelId !== null}
+                          onClick={() =>
+                            setPersonnelModal({ mode: 'edit', person })
+                          }
+                        >
+                          编辑
+                        </Button>
+                        <IconButton
+                          label={`删除人员 ${person.name}`}
+                          tone="danger"
+                          disabled={deletingPersonnelId !== null}
+                          onClick={() => void removePersonnel(person)}
+                        >
+                          {deletingPersonnelId === person.id ? (
+                            <Loader2 size={14} className="spin" />
+                          ) : (
+                            <Trash2 size={14} />
+                          )}
+                        </IconButton>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div className="qual-panel-foot">
+          <Info size={13} aria-hidden />
+          <span>
+            「在建状态」由人工维护：锁定表示该人员当前已在其他项目任职，配置新项目团队时请避开。
+          </span>
+        </div>
+      </section>
+
       {modal && (
         <QualificationModal
           open
           state={modal}
           onClose={() => setModal(null)}
           onSaved={onSaved}
+        />
+      )}
+
+      {personnelModal && (
+        <PersonnelModal
+          open
+          state={personnelModal}
+          onClose={() => setPersonnelModal(null)}
+          onSaved={onPersonnelSaved}
         />
       )}
 
@@ -1075,6 +1305,264 @@ function QualificationModal({
 }
 
 /** 证据管理：上传 multipart、新窗口打开、逐条删除。 */
+/** 新增 / 编辑人员：姓名必填，社保月数 0–600，锁定状态决定投标配置提示。 */
+function PersonnelModal({
+  open,
+  state,
+  onClose,
+  onSaved,
+}: {
+  open: boolean
+  state: PersonnelModalState
+  onClose: () => void
+  onSaved: (person: Personnel, created: boolean) => void
+}) {
+  const editing = state.mode === 'edit' ? state.person : undefined
+  const [name, setName] = useState('')
+  const [title, setTitle] = useState('')
+  const [specialty, setSpecialty] = useState('')
+  const [certNo, setCertNo] = useState('')
+  const [socialMonths, setSocialMonths] = useState('0')
+  const [locked, setLocked] = useState(false)
+  const [note, setNote] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [touched, setTouched] = useState(false)
+
+  useEffect(() => {
+    if (!open) return
+    setSaving(false)
+    setError(null)
+    setTouched(false)
+    setName(editing?.name ?? '')
+    setTitle(editing?.title ?? '')
+    setSpecialty(editing?.specialty ?? '')
+    setCertNo(editing?.cert_no ?? '')
+    setSocialMonths(String(editing?.social_months ?? 0))
+    setLocked(Boolean(editing?.locked))
+    setNote(editing?.note ?? '')
+  }, [open, editing])
+
+  const nameMissing = !name.trim()
+  const monthsValue = Number(socialMonths)
+  const monthsInvalid =
+    !socialMonths.trim() ||
+    !Number.isInteger(monthsValue) ||
+    monthsValue < 0 ||
+    monthsValue > 600
+
+  const submit = async () => {
+    setTouched(true)
+    if (nameMissing) return
+    if (monthsInvalid) {
+      setError('社保月数必须是 0–600 之间的整数。')
+      return
+    }
+    const payload: PersonnelInput = {
+      name: name.trim(),
+      title: title.trim(),
+      specialty: specialty.trim(),
+      cert_no: certNo.trim(),
+      social_months: monthsValue,
+      locked,
+      note: note.trim(),
+    }
+    setSaving(true)
+    setError(null)
+    try {
+      const saved = editing
+        ? await updatePersonnel(editing.id, payload)
+        : await createPersonnel(payload)
+      onSaved(saved, !editing)
+    } catch (err) {
+      setError(messageOf(err))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={saving ? () => undefined : onClose}
+      title={editing ? '编辑人员' : '新增人员'}
+      eyebrow="投标团队"
+      size="md"
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={saving}>
+            取消
+          </Button>
+          <Button
+            variant="primary"
+            type="submit"
+            form="personnel-form"
+            loading={saving}
+            disabled={touched && (nameMissing || monthsInvalid)}
+          >
+            {editing ? '保存修改' : '添加人员'}
+          </Button>
+        </>
+      }
+    >
+      <form
+        id="personnel-form"
+        className="qual-form"
+        onSubmit={(event) => {
+          event.preventDefault()
+          void submit()
+        }}
+      >
+        <div className="qual-modal-note">
+          <Users size={15} aria-hidden />
+          <span>
+            人员信息只用于投标团队配置；在建锁定为人工标记，不会自动同步其他项目。
+          </span>
+        </div>
+
+        <div className="qual-form-grid">
+          <div className="form-field">
+            <label htmlFor="person-name">
+              姓名 <span className="required-mark">必填</span>
+            </label>
+            <input
+              id="person-name"
+              className={className('input', touched && nameMissing && 'input--error')}
+              value={name}
+              onChange={(event) => {
+                setName(event.target.value)
+                if (error) setError(null)
+              }}
+              placeholder="例如：张工"
+              maxLength={80}
+              autoComplete="off"
+              data-autofocus
+              disabled={saving}
+            />
+            {touched && nameMissing && (
+              <span className="field-error">请填写姓名。</span>
+            )}
+          </div>
+
+          <div className="form-field">
+            <label htmlFor="person-title">
+              职务 <span className="optional-mark">可选</span>
+            </label>
+            <input
+              id="person-title"
+              className="input"
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              placeholder="例如：项目经理"
+              maxLength={80}
+              autoComplete="off"
+              disabled={saving}
+            />
+          </div>
+
+          <div className="form-field">
+            <label htmlFor="person-specialty">
+              注册专业 <span className="optional-mark">可选</span>
+            </label>
+            <input
+              id="person-specialty"
+              className="input"
+              value={specialty}
+              onChange={(event) => setSpecialty(event.target.value)}
+              placeholder="例如：机电工程"
+              maxLength={80}
+              autoComplete="off"
+              disabled={saving}
+            />
+          </div>
+
+          <div className="form-field">
+            <label htmlFor="person-cert-no">
+              证书号 <span className="optional-mark">可选</span>
+            </label>
+            <input
+              id="person-cert-no"
+              className="input mono"
+              value={certNo}
+              onChange={(event) => setCertNo(event.target.value)}
+              placeholder="注册证书编号"
+              maxLength={80}
+              autoComplete="off"
+              disabled={saving}
+            />
+          </div>
+
+          <div className="form-field">
+            <label htmlFor="person-social-months">
+              社保月数 <span className="optional-mark">可选</span>
+            </label>
+            <input
+              id="person-social-months"
+              className={className(
+                'input',
+                touched && monthsInvalid && 'input--error',
+              )}
+              type="number"
+              min={0}
+              max={600}
+              step={1}
+              value={socialMonths}
+              onChange={(event) => {
+                setSocialMonths(event.target.value)
+                if (error) setError(null)
+              }}
+              disabled={saving}
+            />
+            <p className="field-hint">连续缴纳月数，0–600；新建默认 0。</p>
+            {touched && monthsInvalid && (
+              <span className="field-error">请输入 0–600 之间的整数。</span>
+            )}
+          </div>
+
+          <div className="form-field qual-form-span">
+            <label className="qual-check" htmlFor="person-locked">
+              <input
+                id="person-locked"
+                type="checkbox"
+                checked={locked}
+                onChange={(event) => setLocked(event.target.checked)}
+                disabled={saving}
+              />
+              <span>
+                <strong>在建锁定</strong>
+                <small>该人员当前已在其他项目任职，配置新团队时避开。</small>
+              </span>
+            </label>
+          </div>
+
+          <div className="form-field qual-form-span">
+            <label htmlFor="person-note">
+              备注 <span className="optional-mark">可选</span>
+            </label>
+            <textarea
+              id="person-note"
+              className="textarea"
+              value={note}
+              onChange={(event) => setNote(event.target.value)}
+              placeholder="职称、注册单位、可用时间等需要提醒的要点"
+              maxLength={200}
+              rows={3}
+              disabled={saving}
+            />
+            <p className="field-hint">不超过 200 字。</p>
+          </div>
+        </div>
+
+        {error && (
+          <div className="form-alert" role="alert">
+            {error}
+          </div>
+        )}
+      </form>
+    </Modal>
+  )
+}
+
 function EvidenceModal({
   open,
   qualification,

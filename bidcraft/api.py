@@ -37,6 +37,7 @@ from . import (
     knowledge,
     material_policy,
     model_config,
+    personnel,
     plugin_pack,
     plugins,
     qualifications,
@@ -329,6 +330,28 @@ class QualificationUpdate(BaseModel):
     note: str | None = None
 
 
+class PersonnelCreate(BaseModel):
+    name: str = ""
+    title: str = ""
+    specialty: str = ""
+    cert_no: str = ""
+    # ``Any`` so out-of-range / non-integer values reach the module validator
+    # and produce a 400 (contract), not FastAPI's default 422.
+    social_months: Any = 0
+    locked: Any = False
+    note: str = ""
+
+
+class PersonnelUpdate(BaseModel):
+    name: str | None = None
+    title: str | None = None
+    specialty: str | None = None
+    cert_no: str | None = None
+    social_months: Any = None
+    locked: Any = None
+    note: str | None = None
+
+
 class PackageCreate(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     number: str = Field(default="", max_length=40)
@@ -459,6 +482,7 @@ class KbDocMeta(BaseModel):
     source_url: str = Field(default="", max_length=500)
     verifiable_at: str = Field(default="", max_length=200)
     note: str = Field(default="", max_length=200)
+    fields: dict[str, Any] | None = None
 
 
 class KbCreate(BaseModel):
@@ -2440,18 +2464,33 @@ def create_app():
             docs = material_policy.doc_map(row)
             items = []
             for source, meta in sorted(docs.items()):
-                verdict = material_policy.assess(meta)
+                record = dict(meta or {})
+                kind = str(record.get("kind") or "other")
+                fields = {key: value for key, value in record.items() if key != "kind"}
+                verdict = material_policy.assess(record)
                 items.append(
                     {
                         "source": source,
-                        **meta,
+                        "kind": kind,
+                        "fields": fields,
                         "ok": verdict.ok,
                         "reason": verdict.reason,
                     }
                 )
+            counts = db.execute(
+                select(KbChunk.source, func.count(KbChunk.id))
+                .where(KbChunk.kb_id == kb_id)
+                .group_by(KbChunk.source)
+            ).all()
+            sources = [
+                {"source": str(source), "chunks": int(count)}
+                for source, count in sorted(counts, key=lambda entry: str(entry[0] or ""))
+                if str(source or "").strip()
+            ]
             return {
-                "items": items,
                 "policy": material_policy.load_policy(),
+                "items": items,
+                "sources": sources,
                 "kinds": material_policy.kinds(),
             }
 
@@ -2463,7 +2502,13 @@ def create_app():
             if row is None:
                 raise HTTPException(status_code=404, detail="知识库不存在")
             try:
-                record = material_policy.set_meta(db, row, payload.source, payload.model_dump())
+                meta = payload.model_dump()
+                extra = meta.pop("fields", None) or {}
+                if isinstance(extra, dict):
+                    for key, value in extra.items():
+                        if key in meta and meta.get(key) in ("", None):
+                            meta[key] = "" if value is None else str(value)
+                record = material_policy.set_meta(db, row, payload.source, meta)
             except knowledge.KnowledgeError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             audit(db, None, "kb.doc_meta", {"kb_id": kb_id, "source": payload.source})
@@ -4539,6 +4584,63 @@ def create_app():
                 {"id": row.id, "filename": name, "action": "delete"},
             )
             return {"deleted": True, "filename": name}
+
+    # ----------------------------------------------------------- personnel
+    @app.get("/my/personnel")
+    def my_personnel() -> list[dict[str, Any]]:
+        with session_scope() as db:
+            user = billing_user(db)
+            rows = personnel.list_personnel(db, user)
+            return [personnel.person_payload(row) for row in rows]
+
+    @app.post("/my/personnel", status_code=201)
+    def create_my_personnel(payload: PersonnelCreate) -> dict[str, Any]:
+        with session_scope() as db:
+            user = billing_user(db)
+            try:
+                row = personnel.create_personnel(db, user, payload.model_dump())
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            audit(
+                db,
+                None,
+                "personnel.create",
+                {"id": row.id, "name": row.name},
+            )
+            return personnel.person_payload(row)
+
+    @app.patch("/my/personnel/{person_id}")
+    def update_my_personnel(
+        person_id: str, payload: PersonnelUpdate
+    ) -> dict[str, Any]:
+        with session_scope() as db:
+            user = billing_user(db)
+            try:
+                row = personnel.update_personnel(
+                    db, user, person_id, payload.model_dump(exclude_unset=True)
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            audit(
+                db,
+                None,
+                "personnel.update",
+                {"id": row.id, "keys": sorted(payload.model_fields_set)},
+            )
+            return personnel.person_payload(row)
+
+    @app.delete("/my/personnel/{person_id}")
+    def delete_my_personnel(person_id: str) -> dict[str, Any]:
+        with session_scope() as db:
+            user = billing_user(db)
+            row = personnel.delete_personnel(db, user, person_id)
+            audit(
+                db,
+                None,
+                "personnel.delete",
+                {"id": row.id, "name": row.name},
+            )
+            return {"deleted": True, "id": row.id}
 
     # ------------------------------------------------------------- sources
     @app.get("/projects/{ref}/sources")

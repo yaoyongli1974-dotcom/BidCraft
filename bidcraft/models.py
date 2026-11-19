@@ -212,6 +212,28 @@ class Qualification(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class Personnel(Base):
+    """投标人员台账（owner 私有）。
+
+    与 ``Qualification`` 分离：人员需要职务、注册专业、社保缴纳月份与在建
+    锁定状态，便于资格自查与素材元数据登记时引用。
+    """
+
+    __tablename__ = "personnel"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    title: Mapped[str] = mapped_column(String(80), default="")
+    specialty: Mapped[str] = mapped_column(String(80), default="")
+    cert_no: Mapped[str] = mapped_column(String(80), default="")
+    social_months: Mapped[int] = mapped_column(Integer, default=0)
+    locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    note: Mapped[str] = mapped_column(String(200), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class QuotaItem(Base):
     """Enterprise quota entry (企业定额) maintained by a super administrator.
 
