@@ -1,7 +1,8 @@
 BidCraft Proprietary License
 Copyright (c) 2026 yaoyongli1974-dotcom. All rights reserved.
 
-BidCraft 专有许可协议 / BidCraft Proprietary License
+BidCraft 专有许可协议 v1.1 / BidCraft Proprietary License v1.1
+(2026-11 修订：明确运营方授权与分层许可)
 
 本许可同时以中英文书写；如两种文本存在歧义，以英文文本为准。
 This license is written in both Chinese and English; in case of ambiguity, the
@@ -21,21 +22,27 @@ English text prevails.
    在遵守本协议全部条款的前提下，许可方授予你一项非排他、不可转让、可撤销的许可，
    允许你：
    (a) 为个人学习、内部评估或自身业务需要而使用、复制、修改本软件；
-   (b) 在你拥有或控制的设备上运行本软件，包括将其部署于你所在组织内部的服务器。
+   (b) 在你拥有或控制的设备上运行本软件，包括将其部署于你所在组织内部的服务器；
+   (c) 若你是版权持有人，或持有版权持有人书面签发的《运营授权》，可将本软件作为
+       对外托管服务（SaaS）运营并就此收费。
 
    Subject to full compliance with this License, the Licensor grants you a
    non-exclusive, non-transferable, revocable license to:
    (a) use, copy and modify the Software for personal study, internal evaluation, or
        your own business operations;
    (b) run the Software on machines you own or control, including deployment on servers
-       internal to your organization.
+       internal to your organization;
+   (c) if you are the copyright holder, or hold a written Operator Authorization issued
+       by the copyright holder, operate the Software as a hosted service (SaaS) and
+       charge for it.
 
 3. 限制 / Restrictions
 
    未经许可方事先书面授权，你不得：
    (a) 向任何第三方分发、发布、出租、出售、转授权或以其他方式提供本软件或其修改版本，
        无论是否收取费用，无论以源代码还是二进制形式；
-   (b) 将本软件或其修改版本作为托管服务、SaaS 或 API 提供给第三方使用；
+   (b) 将本软件或其修改版本作为托管服务、SaaS 或 API 提供给第三方使用，
+       但第 2(c) 条授权的版权持有人与运营方除外；
    (c) 移除、遮蔽或篡改本软件中的版权声明、许可声明或归属标识；
    (d) 使用许可方的名称、商标或标识为衍生产品背书。
 
@@ -44,7 +51,7 @@ English text prevails.
        modified version available to any third party, with or without charge, in source
        or binary form;
    (b) provide the Software or a modified version to third parties as a hosted service,
-       SaaS or API;
+       SaaS or API, except for the copyright holder and authorized operators under 2(c);
    (c) remove, obscure or alter any copyright, license or attribution notice in the
        Software;
    (d) use the Licensor's name, trademarks or logos to endorse derivative products.
@@ -52,6 +59,21 @@ English text prevails.
    你制作的修改版本仍受本协议约束，且不得以本软件名义对外发布。
    Modified versions you create remain subject to this License and may not be published
    under the name of the Software.
+
+3A. 分层许可 / License Tiers
+
+   本软件按用途分为三层，均受本协议约束：
+   (a) 个人与内部使用：免费，可为学习、评估或自身业务部署，无需另行授权；
+   (b) 商业自用：免费，可在你的组织内部用于商业投标活动，须保留版权与许可声明；
+   (c) 对外托管 / 再分发：需版权持有人书面《运营授权》或单独商业许可，授权范围、
+       期限、地域与费用以书面协议为准。
+
+   The Software is offered in three tiers, all subject to this License:
+   (a) Personal and internal use: free for study, evaluation or your own business;
+   (b) Commercial self-use: free for commercial bidding activity inside your organization,
+       provided copyright and license notices are retained;
+   (c) Hosted service / redistribution: requires a written Operator Authorization or a
+       separate commercial license; scope, term, territory and fees are set in writing.
 
 4. 上游规格说明 / Upstream Specification Notice
 
