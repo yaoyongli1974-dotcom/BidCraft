@@ -50,3 +50,74 @@ HTTP-01 验证无法通过。备案完成后：
 - 备份：`/opt/bidcraft/data`（业务数据）+ `/opt/bidcraft/compose/.env`（管理员密码）
 - 升级：构建新镜像 → load → 改 compose 的 image 标签 → `docker compose up -d`
 - 重启持久化：docker/1panel 服务均 enabled；容器 restart=unless-stopped/always
+## 6. 上线前的暴露面收紧（v0.6.3+ 内置）
+
+| 项 | 默认行为 | 说明 |
+|---|---|---|
+| `/docs`、`/redoc`、`/openapi.json` | **404** | 由 `BIDCRAFT_DOCS_ENABLED=0` 控制；仅排障时临时置 1 并重启 |
+| `/health` | 最小字段 | 只返回 `status` 与前端必需字段，不含版本、绝对路径、库内计数；Docker HEALTHCHECK 仍可用 |
+| 安全响应头 | 全站注入 | `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`、CSP（`default-src 'self'`、`frame-ancestors 'none'`、`object-src 'none'`）、HTTPS 下加 HSTS |
+
+`.env` 追加：
+
+```bash
+BIDCRAFT_DOCS_ENABLED=0
+# 私有化部署排查问题时可临时设 1，用完改回
+```
+
+## 7. OpenResty：80 只做跳转，并补齐响应头
+
+在 1Panel 网站 → 配置文件 中，HTTP(80) server 块内改为只跳转（替换原有 content 段落）：
+
+```nginx
+server {
+    listen 80;
+    server_name bid.xalcy.cn bidcraft.cn www.bidcraft.cn;
+
+    # 备案完成前如需 HTTP 访问，保留下面一行注释；备案后打开
+    return 301 https://$host$request_uri;
+}
+```
+
+HTTPS(443) server 块建议追加（应用已注入主要头，反代侧再兜一层）：
+
+```nginx
+add_header X-Content-Type-Options nosniff always;
+add_header X-Frame-Options DENY always;
+add_header Referrer-Policy no-referrer always;
+add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+client_max_body_size 60m;   # 个人文档/招标原件 50MB 上限 + 余量
+```
+
+验证：
+
+```bash
+curl -I https://bid.xalcy.cn/health        # 200，且无 version/home 字段
+curl -s -o /dev/null -w '%{http_code}\n' https://bid.xalcy.cn/docs   # 404
+curl -I http://bid.xalcy.cn/ | head -3     # 301 → https
+```
+
+## 8. 升级到最新版本（当前线上 0.4.8 → 最新）
+
+线上 0.4.8 缺少审批条件分支、VIP/子账号/优先级队列、模板库等本轮能力。步骤：
+
+```bash
+cd /opt/bidcraft
+docker compose -f compose/docker-compose.yml down          # 可选，改镜像后 up 即可
+# 方式 A：服务器上构建
+git clone https://github.com/yaoyongli1974-dotcom/BidCraft.git src && cd src
+git checkout v0.6.2        # 或最新 tag
+docker build -t bidcraft:0.6.2 .
+# 方式 B：本地构建后导出/导入
+# docker save bidcraft:0.6.2 | gzip > bidcraft-0.6.2.tar.gz   （本地）
+# docker load < bidcraft-0.6.2.tar.gz                          （服务器）
+
+sed -i 's/image: bidcraft:.*/image: bidcraft:0.6.2/' /opt/bidcraft/compose/docker-compose.yml
+cd /opt/bidcraft/compose && docker compose up -d
+
+sleep 5
+curl -s http://127.0.0.1:8000/health     # 最小字段（不显示版本）
+docker exec bidcraft python -c "import bidcraft;print(bidcraft.__version__)"   # 0.6.2
+```
+
+升级后 `/opt/bidcraft/data` 不变，数据库增量列由启动时迁移自动补齐；建议先备份该目录。

@@ -18,6 +18,7 @@ services:
       BIDCRAFT_ADMIN_PASSWORD: ${BIDCRAFT_ADMIN_PASSWORD:?在 .env 中设置}
       # HTTPS 反代后必须为 1；仅 HTTP 访问（如备案期间用 IP）时设为 0，否则浏览器不回传会话 Cookie 导致无法登录
       BIDCRAFT_SECURE_COOKIE: ${BIDCRAFT_SECURE_COOKIE:-1}
+      BIDCRAFT_DOCS_ENABLED: ${BIDCRAFT_DOCS_ENABLED:-0}
       # 知识库向量化每批文本数；本地 CPU 向量模型（TEI fp16）较慢，建议 4，避免单批超时
       BIDCRAFT_KB_VECTOR_BATCH: ${BIDCRAFT_KB_VECTOR_BATCH:-16}
     mem_limit: 4g

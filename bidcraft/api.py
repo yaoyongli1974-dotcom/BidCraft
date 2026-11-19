@@ -1638,7 +1638,23 @@ def create_app():
         _recover_interrupted_jobs()
     except Exception:  # noqa: BLE001 - startup must not fail on cleanup
         logger.exception("恢复中断任务失败")
-    app = FastAPI(title="BidCraft", version=__version__, description="投标文件编制系统")
+    docs_on = settings.docs_enabled
+    app = FastAPI(
+        title="BidCraft",
+        version=__version__,
+        description="投标文件编制系统",
+        docs_url="/docs" if docs_on else None,
+        redoc_url="/redoc" if docs_on else None,
+        openapi_url="/openapi.json" if docs_on else None,
+    )
+
+    if not docs_on:
+
+        @app.get("/docs", include_in_schema=False)
+        @app.get("/redoc", include_in_schema=False)
+        @app.get("/openapi.json", include_in_schema=False)
+        def docs_disabled() -> None:
+            raise HTTPException(status_code=404, detail="接口文档已关闭")
 
     @app.middleware("http")
     async def auth_guard(request: Request, call_next):
@@ -1693,6 +1709,24 @@ def create_app():
         ):
             return JSONResponse(status_code=403, content={"detail": "只读成员不能执行此操作"})
         return await call_next(request)
+
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; "
+            "object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+        )
+        if settings.secure_cookie:
+            response.headers.setdefault(
+                "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+            )
+        return response
 
     @app.exception_handler(LookupError)
     async def not_found(_request, exc: LookupError):
@@ -3262,6 +3296,20 @@ def create_app():
             embedding = model_config.resolve_embedding_endpoint(db)
             models = db.scalar(select(func.count()).select_from(ModelConfig)) or 0
             kbs = db.scalar(select(func.count()).select_from(KnowledgeBase)) or 0
+        if settings.health_public:
+            # 公网探活只返回前端必需的最少字段，不泄露版本、路径与库内计数
+            return {
+                "status": "ok",
+                "offline": settings.offline,
+                "model_configured": bool(endpoint),
+                "embedding_configured": bool(embedding),
+                "auth_required": True,
+                "registration": True,
+                "wechat_login": wechat.available(),
+                "wechat_mock": settings.wechat_mock,
+                "wechat_pay": wechatpay.available(),
+                "wechat_pay_mock": settings.wechat_pay_mock,
+            }
         return {
             "version": __version__,
             "model_configured": bool(endpoint),

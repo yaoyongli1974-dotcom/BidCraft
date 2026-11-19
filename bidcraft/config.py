@@ -42,6 +42,12 @@ class Settings:
         default_factory=lambda: int(os.getenv("BIDCRAFT_SESSION_DAYS", "7"))
     )
     secure_cookie: bool = field(default_factory=lambda: _bool("BIDCRAFT_SECURE_COOKIE"))
+    docs_enabled: bool = field(default_factory=lambda: _bool("BIDCRAFT_DOCS_ENABLED"))
+    health_public: bool = field(
+        default_factory=lambda: os.getenv("BIDCRAFT_HEALTH_PUBLIC", "minimal")
+        .strip().lower()
+        in {"minimal", "public"}
+    )
     wechat_app_id: str = field(default_factory=lambda: os.getenv("BIDCRAFT_WECHAT_APP_ID", ""))
     wechat_app_secret: str = field(
         default_factory=lambda: os.getenv("BIDCRAFT_WECHAT_APP_SECRET", "")
