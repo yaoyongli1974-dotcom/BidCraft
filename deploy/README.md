@@ -6,10 +6,10 @@
 ## 1. 镜像
 
 ```bash
-docker build -t bidcraft:0.6.4 .          # 构建机
-docker save bidcraft:0.6.4 | gzip -1 > bidcraft-0.6.4.tar.gz
+docker build -t bidcraft:0.6.5 .          # 构建机
+docker save bidcraft:0.6.5 | gzip -1 > bidcraft-0.6.5.tar.gz
 # 传到服务器后：
-docker load -i bidcraft-0.6.4.tar.gz
+docker load -i bidcraft-0.6.5.tar.gz
 ```
 
 ## 2. 数据目录与配置
@@ -59,7 +59,7 @@ HTTP-01 验证无法通过。备案完成后：
 - 备份：`/opt/bidcraft/data`（业务数据）+ `/opt/bidcraft/compose/.env`（管理员密码）
 - 升级：构建新镜像 → load → 改 compose 的 image 标签 → `docker compose up -d`
 - 重启持久化：docker/1panel 服务均 enabled；容器 restart=unless-stopped/always
-## 6. 上线前的暴露面收紧（v0.6.3+ 内置，0.6.4 增补 `/admin/health`）
+## 6. 上线前的暴露面收紧（v0.6.3+ 内置，0.6.5 增补 `/admin/health`）
 
 | 项 | 默认行为 | 说明 |
 |---|---|---|
@@ -107,7 +107,7 @@ curl -s -o /dev/null -w '%{http_code}\n' https://bid.xalcy.cn/docs   # 404
 curl -I http://bid.xalcy.cn/ | head -3     # 301 → https
 ```
 
-## 8. 升级到最新版本（示例：→ 0.6.4）
+## 8. 升级到最新版本（示例：→ 0.6.5）
 
 线上 0.4.8 缺少审批条件分支、VIP/子账号/优先级队列、模板库等本轮能力。步骤：
 
@@ -116,19 +116,19 @@ cd /opt/bidcraft
 docker compose -f compose/docker-compose.yml down          # 可选，改镜像后 up 即可
 # 方式 A：服务器上构建
 git clone https://github.com/yaoyongli1974-dotcom/BidCraft.git src && cd src
-git fetch origin main && git checkout origin/main   # 0.6.4 未打 tag，用 main
-docker build -t bidcraft:0.6.4 .
+git fetch origin main && git checkout origin/main   # 0.6.5 未打 tag，用 main
+docker build -t bidcraft:0.6.5 .
 # 方式 B：本地构建后导出/导入
-# docker save bidcraft:0.6.4 | gzip > bidcraft-0.6.4.tar.gz   （本地）
-# docker load < bidcraft-0.6.4.tar.gz                          （服务器）
+# docker save bidcraft:0.6.5 | gzip > bidcraft-0.6.5.tar.gz   （本地）
+# docker load < bidcraft-0.6.5.tar.gz                          （服务器）
 
-sed -i 's/image: bidcraft:.*/image: bidcraft:0.6.4/' /opt/bidcraft/compose/docker-compose.yml
+sed -i 's/image: bidcraft:.*/image: bidcraft:0.6.5/' /opt/bidcraft/compose/docker-compose.yml
 cd /opt/bidcraft/compose && docker compose up -d
 
 sleep 5
 curl -s http://127.0.0.1:8000/health     # 最小字段（不显示版本）
 # 超管确认版本：带 Cookie 访问 /admin/health，见「5. 运维」
-docker exec bidcraft python -c "import bidcraft;print(bidcraft.__version__)"   # 0.6.4
+docker exec bidcraft python -c "import bidcraft;print(bidcraft.__version__)"   # 0.6.5
 ```
 
 升级后 `/opt/bidcraft/data` 不变，数据库增量列由启动时迁移自动补齐；建议先备份该目录。
