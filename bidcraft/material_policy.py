@@ -15,6 +15,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from . import clock
 from .knowledge import KnowledgeError, Passage  # noqa: F401 (便于调用方捕获)
 
 POLICY_KEY = "material_policy"
@@ -99,8 +100,17 @@ def kinds(policy: dict[str, dict[str, Any]] | None = None) -> list[str]:
     return sorted((policy or load_policy()).keys())
 
 
+#: 有效期按北京时间日历日判定（见 ``bidcraft.clock``）。
+BEIJING_TZ = clock.BEIJING_TZ
+
+
+def _now() -> dt.datetime:
+    """当前北京时间（测试可替换 ``_now`` 来锁定边界时刻）。"""
+    return clock.now()
+
+
 def _today() -> dt.date:
-    return dt.datetime.now(dt.UTC).date()
+    return _now().date()
 
 
 def _as_date(value: Any) -> dt.date | None:
@@ -119,8 +129,14 @@ def assess(meta: dict[str, Any] | None, policy: dict[str, dict[str, Any]] | None
     """判断一条素材是否可全文引用。"""
     rules = policy or load_policy()
     meta = dict(meta or {})
-    kind = str(meta.get("kind") or "other")
-    spec = rules.get(kind) or rules.get("other") or {"required": []}
+    kind = str(meta.get("kind") or "").strip()
+    # 未知/缺失的类型不能落回 other（required 为空会整段放行）。写入侧本就硬校验，
+    # 读取侧同样按失败关闭处理，避免旧元数据或拼错的 kind 绕过生命周期检查。
+    if not kind:
+        return Verdict(ok=False, kind="unknown", reason="缺少素材类型，未注入正文")
+    if kind not in rules:
+        return Verdict(ok=False, kind=kind, reason="未知素材类型，未注入正文")
+    spec = rules[kind]
     missing = [key for key in spec.get("required", []) if not str(meta.get(key) or "").strip()]
     expired = False
     valid_to = _as_date(meta.get("valid_to"))

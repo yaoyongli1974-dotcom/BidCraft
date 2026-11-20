@@ -14,6 +14,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 
+from . import clock
 from .config import settings
 from .models import Qualification, utcnow
 
@@ -128,7 +129,8 @@ def _iso(value: datetime | None) -> str | None:
 
 def _today(today: date | datetime | None = None) -> date:
     if today is None:
-        return date.today()
+        # 按北京时间而非进程 TZ 判定到期日（容器默认 UTC 会晚一天）
+        return clock.today()
     if isinstance(today, datetime):
         return today.date()
     return today

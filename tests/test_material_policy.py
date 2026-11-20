@@ -1,4 +1,6 @@
 
+import datetime as dt
+
 import pytest
 
 from bidcraft import material_policy
@@ -28,9 +30,66 @@ def test_assess_ok_missing_expired():
     assert other.ok
 
 
-def test_assess_unknown_kind_falls_back_to_other():
-    verdict = material_policy.assess({"kind": "nonsense"})
-    assert verdict.ok and verdict.kind == "nonsense"
+def test_assess_unknown_or_missing_kind_fails_closed():
+    """拼错/缺失的 kind 不得落回 other（required 为空会整段放行）。"""
+    typo = material_policy.assess({"kind": "qualifcation"})
+    assert not typo.ok and typo.kind == "qualifcation"
+    assert "未知素材类型" in typo.reason
+
+    missing = material_policy.assess({"cert_no": "D1", "valid_to": "2099-01-01"})
+    assert not missing.ok
+    assert "缺少素材类型" in missing.reason
+
+    # 覆盖包被隐藏后，旧元数据的自定义 kind 同样降级
+    hidden = material_policy.assess(
+        {"kind": "custom_old"},
+        policy={"other": {"label": "其他素材", "required": []}},
+    )
+    assert not hidden.ok and "未知素材类型" in hidden.reason
+
+
+BJ = dt.timezone(dt.timedelta(hours=8), "Asia/Shanghai")
+
+
+def _freeze(monkeypatch, moment: dt.datetime) -> None:
+    monkeypatch.setattr(material_policy, "_now", lambda: moment)
+
+
+def test_today_uses_beijing_date(monkeypatch):
+    # 北京时间 00:30 对应 UTC 前一日 16:30，按 UTC 取日期会晚一天
+    _freeze(monkeypatch, dt.datetime(2026, 11, 20, 0, 30, tzinfo=BJ))
+    assert material_policy._today() == dt.date(2026, 11, 20)
+
+
+def test_assess_boundary_beijing_early_morning(monkeypatch):
+    # 证书有效期至昨天：北京时间今晨 00:30 必须判过期
+    _freeze(monkeypatch, dt.datetime(2026, 11, 20, 0, 30, tzinfo=BJ))
+    verdict = material_policy.assess(
+        {"kind": "qualification", "cert_no": "D1", "valid_to": "2026-11-19"}
+    )
+    assert not verdict.ok and verdict.expired
+    assert "2026-11-19" in verdict.reason
+
+    # 当日到期当天仍有效（valid_to 与本地日期同日）
+    same_day = material_policy.assess(
+        {"kind": "qualification", "cert_no": "D1", "valid_to": "2026-11-20"}
+    )
+    assert same_day.ok and not same_day.expired
+
+
+def test_assess_boundary_before_local_eight_am(monkeypatch):
+    # 07:59 仍属北京 20 日（UTC 还是 19 日 23:59）
+    _freeze(monkeypatch, dt.datetime(2026, 11, 20, 7, 59, tzinfo=BJ))
+    verdict = material_policy.assess(
+        {
+            "kind": "personnel",
+            "cert_no": "P1",
+            "social_months": "6",
+            "locked": "否",
+            "valid_to": "2026-11-19",
+        }
+    )
+    assert not verdict.ok and verdict.expired
 
 
 def _kb_with_docs(docs):
@@ -127,3 +186,18 @@ def test_set_meta_validates_and_persists(db):
         record2 = material_policy.set_meta(session, kb, "a.md", {"kind": "other", "title": "改名"})
         assert record2["title"] == "改名"
         assert len(material_policy.doc_map(kb)) == 1
+
+
+def test_context_block_downgrades_unknown_kind(monkeypatch):
+    """读取侧失败关闭：未知 kind 的片段只出题录，不注入正文。"""
+    monkeypatch.setattr(
+        material_policy,
+        "find_meta",
+        lambda db, source: (None, {"kind": "qualifcation", "title": "资质X"}),
+    )
+    block, downgraded = material_policy.context_block(
+        None, [Passage(kb="k", source="/kb/x.md", text="某证书有效期已过正文", score=0.9)]
+    )
+    assert downgraded == 1
+    assert "某证书有效期已过正文" not in block
+    assert "[题录] 资质X" in block and "未知素材类型" in block

@@ -39,7 +39,7 @@
 | 知识库对接 | ✅ | `knowledge.py`、`/admin/kbs`、`web/` | 本地目录索引；通用/Dify/RAGFlow API；章节检索注入；台账优先 |
 | 向量语义检索 | ✅ 可选 | `knowledge.py`、`model_config.resolve_embedding_endpoint`、`/admin/kbs/{id}/embed`、`web/` | embedding 向量索引与混合重排；换模型自动失效；无模型/失败回退关键词召回 |
 | 桌面客户端（C/S） | ✅ | `desktop.py`、`client.py`、`bidcraft desktop`、`bidcraft client`、`docs/desktop.md` | 本机网关反代远端服务（仅 127.0.0.1、令牌门禁）、Cookie/SSE 透传、静态与 SPA 回退；本地文件桥选择本机文件直传我的文档/项目原件；命令行客户端登录/项目/上传/下载与 Cookie 持久化 |
-| 素材可信度分级 | ✅ | `material_policy.py`、`resources/packages/*.yaml`、`/admin/kbs/{id}/docs` | 规则包 `material_policy` 声明每类素材必填生命周期字段；检索注入按可信度分级，缺失/过期降级为题录；文档元数据存 `knowledge_bases.options.docs` |
+| 素材可信度分级 | ✅ | `material_policy.py`、`resources/packages/*.yaml`、`/admin/kbs/{id}/docs` | 规则包 `material_policy` 声明每类素材必填生命周期字段；检索注入按可信度分级，缺失/过期降级为题录；有效期按北京时间判定（`clock.py`），未知/缺失 kind 失败关闭；文档元数据存 `knowledge_bases.options.docs` |
 | 解析深度（MinerU） | ✅ 可选 | `parsing/mineru.py`、`BIDCRAFT_MINERU_URL`、`bidcraft mineru-check` | 复杂版面/扫描件交给 MinerU，取 Markdown + 表格；失败/超时回退内置链路；页数为估算 |
 | 全局事实设定 | ✅ | `profile.py`、`/projects/{ref}/profile`、`generation/prompts.py`、`textqa.profile_conflicts` | 项目级事实注入生成；核对按锚点比对，不一致报 CON；存 `project.meta["writing_profile"]` |
 | 评分回填与失分复盘 | ✅ | `scoring.py`、`/projects/{ref}/scores`、`web/` | 评分项实际得分回填与得分率/分类聚合/失分 Top20；失分摘要注入生成提示 |
