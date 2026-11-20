@@ -12,7 +12,7 @@ import shutil
 import sqlite3
 import tempfile
 import zipfile
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,7 @@ from sqlalchemy import select
 
 from .models import (
     AppSetting,
+    AuditLog,
     CreditTransaction,
     Material,
     OutlineNode,
@@ -30,7 +31,9 @@ from .models import (
     Section,
     User,
     UserDoc,
+    utcnow,
 )
+from .security import verify_password
 
 PROFILE_KEY = "billing_profile:{}"
 DELETE_CONFIRM = "注销"
@@ -172,6 +175,110 @@ def delete_account(db, user: User) -> dict[str, int]:
     db.delete(user)
     db.flush()
     return removed
+
+
+# --------------------------------------------------------------------- 注销冷静期
+
+COOLING_OFF_DAYS = 7
+
+
+def deletion_payload(user: User) -> dict[str, Any]:
+    """Describe the pending deletion window for one account."""
+
+    due = user.deletion_due_at
+    requested = user.deletion_requested_at
+    days_left = 0
+    if due is not None:
+        days_left = max(0, (due - utcnow()).days + (1 if (due - utcnow()).seconds else 0))
+    return {
+        "pending": bool(due),
+        "requested_at": requested.isoformat() if requested else None,
+        "due_at": due.isoformat() if due else None,
+        "days_left": days_left,
+        "cooling_off_days": COOLING_OFF_DAYS,
+    }
+
+
+def request_deletion(db, user: User, password: str) -> dict[str, Any]:
+    """Start a cooling-off window instead of deleting immediately."""
+
+    if not password:
+        raise ComplianceError("请输入密码确认注销")
+    if not verify_password(password, user.password_hash):
+        raise ComplianceError("密码不正确")
+    subs = db.scalars(select(User).where(User.parent_id == user.id)).first()
+    if subs is not None:
+        raise ComplianceError("请先删除或移交名下子账号，再注销主账号")
+    now = utcnow()
+    user.deletion_requested_at = now
+    user.deletion_due_at = now + timedelta(days=COOLING_OFF_DAYS)
+    db.flush()
+    return deletion_payload(user)
+
+
+def cancel_deletion(db, user: User) -> dict[str, Any]:
+    """Revoke a pending deletion inside the cooling-off window."""
+
+    if user.deletion_due_at is None:
+        raise ComplianceError("当前没有待执行的注销申请")
+    user.deletion_requested_at = None
+    user.deletion_due_at = None
+    db.flush()
+    return deletion_payload(user)
+
+
+def _audit_purge(db, user: User, removed: dict[str, int]) -> None:
+    """Keep an append-only record after the user row is gone."""
+
+    db.add(
+        AuditLog(
+            project_id=None,
+            user_id=user.id,
+            username=user.username or "",
+            display_name=user.display_name or "",
+            action="account.purge",
+            detail={
+                "username": user.username,
+                "requested_at": (
+                    user.deletion_requested_at.isoformat()
+                    if user.deletion_requested_at
+                    else None
+                ),
+                "due_at": user.deletion_due_at.isoformat() if user.deletion_due_at else None,
+                "removed": removed,
+            },
+        )
+    )
+
+
+def purge_due_accounts(db, *, now: datetime | None = None, dry_run: bool = False) -> dict[str, Any]:
+    """Delete every account whose cooling-off window has elapsed."""
+
+    moment = now or utcnow()
+    rows = db.scalars(
+        select(User).where(User.deletion_due_at.isnot(None), User.deletion_due_at <= moment)
+    ).all()
+    purged: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    for user in rows:
+        entry = {"id": user.id, "username": user.username}
+        if dry_run:
+            purged.append(entry)
+            continue
+        subs = db.scalars(select(User).where(User.parent_id == user.id)).first()
+        if subs is not None:
+            skipped.append({**entry, "reason": "仍有子账号"})
+            continue
+        try:
+            removed = delete_account(db, user)
+        except ComplianceError as exc:
+            skipped.append({**entry, "reason": str(exc)})
+            continue
+        _audit_purge(db, user, removed)
+        purged.append({**entry, "removed": removed})
+    if not dry_run:
+        db.flush()
+    return {"purged": purged, "skipped": skipped, "checked_at": moment.isoformat()}
 
 
 # --------------------------------------------------------------------- 导出

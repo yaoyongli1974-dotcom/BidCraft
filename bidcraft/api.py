@@ -5265,21 +5265,51 @@ def create_app():
             raise HTTPException(status_code=404, detail="文档不存在") from exc
         return {"name": name, "text": text}
 
+    @app.get("/account/deletion")
+    def account_deletion() -> dict[str, Any]:
+        with session_scope() as db:
+            user = billing_user(db)
+            return compliance.deletion_payload(user)
+
     @app.post("/account/delete")
     def account_delete(payload: AccountDelete) -> dict[str, Any]:
         with session_scope() as db:
             user = billing_user(db)
             if payload.confirm.strip() != compliance.DELETE_CONFIRM:
                 raise HTTPException(status_code=400, detail="请输入「注销」以确认")
-            if not verify_password(payload.password, user.password_hash):
-                raise HTTPException(status_code=400, detail="密码不正确")
-            audit(db, None, "account.delete", {"user_id": user.id, "username": user.username})
             try:
-                removed = compliance.delete_account(db, user)
+                state = compliance.request_deletion(db, user, payload.password)
             except compliance.ComplianceError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+            audit(
+                db,
+                None,
+                "account.delete_request",
+                {"user_id": user.id, "username": user.username, "due_at": state["due_at"]},
+            )
             db.flush()
-            return {"deleted": True, **removed}
+            return {"deleted": False, **state}
+
+    @app.post("/account/delete/cancel")
+    def account_delete_cancel() -> dict[str, Any]:
+        with session_scope() as db:
+            user = billing_user(db)
+            try:
+                state = compliance.cancel_deletion(db, user)
+            except compliance.ComplianceError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            audit(db, None, "account.delete_cancel", {"user_id": user.id})
+            db.flush()
+            return {"deleted": False, **state}
+
+    @app.post("/admin/accounts/purge")
+    def admin_purge_accounts(request: Request, dry_run: bool = False) -> dict[str, Any]:
+        require_super(request)
+        with session_scope() as db:
+            result = compliance.purge_due_accounts(db, dry_run=dry_run)
+            audit(db, None, "account.purge_batch", {"purged": len(result["purged"]), "dry_run": dry_run})
+            db.flush()
+            return result
 
     @app.get("/account/export")
     def account_export() -> FileResponse:

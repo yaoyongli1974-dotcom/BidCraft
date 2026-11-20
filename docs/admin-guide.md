@@ -357,3 +357,18 @@ run_check、export_document、search_knowledge），供 Claude Desktop / Cursor 
 - 自定义规则优先于内置（同一错词以自定义「改为」为准），命中写入问题台账 `TXT-###`，证据标记 `custom: true`；
 - 上限 500 条、错词/改为各 ≤20 字、备注 ≤60 字；保存后下一次核对即生效；
 - 所有改动记审计 `textqa.config`。
+
+
+## 注销冷静期与删除审计
+
+- 用户提交注销需**密码 + 输入「注销」**，进入 **7 天冷静期**；期间账号仍可登录，页面显示剩余天数与可撤销按钮。
+- 冷静期内撤销即恢复；再次申请会重置到期时间。
+- 到期后由运维执行删除：
+  ```bash
+  bidcraft purge-accounts --dry-run   # 先看到期名单
+  bidcraft purge-accounts             # 真正删除
+  ```
+  或超管调用 `POST /admin/accounts/purge?dry_run=1`。
+- 有子账号的主账号不会被自动删除（返回 skipped），需先处理子账号。
+- 每次执行写审计 `account.purge`：用户名、申请/到期时间、删除的项目/文档/资质/人员/流水数量；批量调用另记 `account.purge_batch`。
+- 建议 cron 每日跑一次；审计记录不随用户删除而清除，保留追责依据。

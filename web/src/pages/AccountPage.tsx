@@ -3,7 +3,9 @@ import { Download, FileSpreadsheet, ShieldAlert, Trash2 } from 'lucide-react'
 import { Button } from '../components/Button'
 import { useToast } from '../context/useToast'
 import {
+  cancelAccountDeletion,
   deleteAccount,
+  getDeletionState,
   downloadAccountExport,
   downloadStatement,
   getBillingProfile,
@@ -11,6 +13,7 @@ import {
   messageOf,
 } from '../lib/api'
 import { useEffect } from 'react'
+import type { DeletionState } from '../lib/api'
 
 export default function AccountPage() {
   const toast = useToast()
@@ -23,6 +26,13 @@ export default function AccountPage() {
   const [confirm, setConfirm] = useState('')
   const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState('')
+  const [deletion, setDeletion] = useState<DeletionState | null>(null)
+
+  useEffect(() => {
+    getDeletionState()
+      .then(setDeletion)
+      .catch(() => undefined)
+  }, [])
 
   useEffect(() => {
     getBillingProfile()
@@ -60,13 +70,29 @@ export default function AccountPage() {
   }
 
   async function removeAccount() {
-    if (!window.confirm('注销后账号与名下项目将被删除，且不可恢复。确定继续？')) return
+    if (!window.confirm('提交注销申请后将进入 7 天冷静期，到期才真正删除。确定继续？')) return
     setDeleting(true)
     setError('')
     try {
-      await deleteAccount(password, confirm)
-      toast.success('账号已注销')
-      window.location.replace('/login')
+      const state = await deleteAccount(password, confirm)
+      setDeletion(state)
+      setPassword('')
+      setConfirm('')
+      toast.success('注销申请已提交，冷静期内可随时撤销')
+    } catch (err) {
+      setError(messageOf(err))
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  async function revokeDeletion() {
+    setDeleting(true)
+    setError('')
+    try {
+      const state = await cancelAccountDeletion()
+      setDeletion(state)
+      toast.success('已撤销注销申请')
     } catch (err) {
       setError(messageOf(err))
     } finally {
@@ -118,7 +144,24 @@ export default function AccountPage() {
         <h2>
           <ShieldAlert size={16} /> 注销账号
         </h2>
-        <p>注销会删除账号、名下项目、个人文档、资质与人员台账，且不可恢复。存在子账号时需先处理。</p>
+        {deletion?.pending ? (
+          <>
+            <p>
+              注销申请已提交，<strong>{deletion.days_left}</strong> 天后（{deletion.due_at?.slice(0, 10)}）执行删除。
+              冷静期内账号仍可正常使用，可随时撤销。
+            </p>
+            <div className="account-actions">
+              <Button variant="secondary" loading={deleting} onClick={revokeDeletion}>
+                撤销注销申请
+              </Button>
+            </div>
+          </>
+        ) : (
+          <>
+        <p>
+          提交后进入 {deletion?.cooling_off_days ?? 7} 天冷静期，到期才删除账号、名下项目、个人文档、资质与人员台账；
+          冷静期内可撤销。存在子账号时需先处理。
+        </p>
         <div className="account-form">
           <label>
             登录密码
@@ -136,9 +179,11 @@ export default function AccountPage() {
             loading={deleting}
             onClick={removeAccount}
           >
-            永久注销账号
+            提交注销申请
           </Button>
         </div>
+          </>
+        )}
       </section>
 
       {error && <p className="form-alert">{error}</p>}

@@ -1336,3 +1336,20 @@ def backup_verify(
     typer.echo(
         f"备份完整：{report['tables']} 张表，{report['rows']} 行数据（{path}）"
     )
+
+
+@app.command("purge-accounts")
+def purge_accounts(
+    dry_run: bool = typer.Option(False, "--dry-run", help="只列出到期账号，不删除"),
+) -> None:
+    """执行注销冷静期到期的账号删除（建议由 cron 每日调用）。"""
+    from .compliance import purge_due_accounts
+    from .db import session_scope
+
+    with session_scope() as db:
+        report = purge_due_accounts(db, dry_run=dry_run)
+    prefix = "[dry-run] " if dry_run else ""
+    usernames = ", ".join(item["username"] for item in report["purged"]) or "无"
+    skipped = ", ".join(item["username"] for item in report["skipped"]) or "无"
+    typer.echo(f"{prefix}到期账号 {len(report['purged'])} 个：{usernames}")
+    typer.echo(f"{prefix}跳过（仍有子账号）{len(report['skipped'])} 个：{skipped}")

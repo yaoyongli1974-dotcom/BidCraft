@@ -71,6 +71,8 @@ def _migrate_columns(engine) -> None:
             ("avatar_url", "VARCHAR(500) DEFAULT ''"),
             ("vip_expires_at", "DATETIME"),
             ("parent_id", "VARCHAR(36)"),
+            ("deletion_requested_at", "DATETIME"),
+            ("deletion_due_at", "DATETIME"),
         ],
         "jobs": [("priority", "INTEGER DEFAULT 1")],
         "boq_snapshots": [("prices", "JSON"), ("package_id", "VARCHAR(36)")],

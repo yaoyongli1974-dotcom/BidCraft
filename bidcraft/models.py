@@ -442,6 +442,9 @@ class User(Base):
     vip_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     #: 子账号指向主账号 id；主账号为 None。子账号消费计入主账号。
     parent_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    #: 注销冷静期：申请后到期前可撤销，到期由 purge 任务真正删除。
+    deletion_requested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    deletion_due_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     wechat_openid: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     wechat_unionid: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     wechat_nickname: Mapped[str] = mapped_column(String(120), default="")

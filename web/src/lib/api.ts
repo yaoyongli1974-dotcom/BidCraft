@@ -3922,9 +3922,40 @@ export async function downloadStatement(start = '', end = ''): Promise<void> {
   downloadBlob(await response.blob(), 'bidcraft-statement.csv')
 }
 
-export async function deleteAccount(password: string, confirm: string): Promise<void> {
-  await request('/account/delete', {
-    method: 'POST',
-    body: JSON.stringify({ password, confirm }),
-  })
+export interface DeletionState {
+  pending: boolean
+  requested_at: string | null
+  due_at: string | null
+  days_left: number
+  cooling_off_days: number
+}
+
+function normalizeDeletionState(value: unknown): DeletionState {
+  const raw = (value ?? {}) as Record<string, unknown>
+  return {
+    pending: Boolean(raw.pending),
+    requested_at: typeof raw.requested_at === 'string' ? raw.requested_at : null,
+    due_at: typeof raw.due_at === 'string' ? raw.due_at : null,
+    days_left: Number(raw.days_left ?? 0),
+    cooling_off_days: Number(raw.cooling_off_days ?? 0),
+  }
+}
+
+export async function getDeletionState(): Promise<DeletionState> {
+  return normalizeDeletionState(await request<unknown>('/account/deletion'))
+}
+
+export async function deleteAccount(password: string, confirm: string): Promise<DeletionState> {
+  return normalizeDeletionState(
+    await request<unknown>('/account/delete', {
+      method: 'POST',
+      body: JSON.stringify({ password, confirm }),
+    }),
+  )
+}
+
+export async function cancelAccountDeletion(): Promise<DeletionState> {
+  return normalizeDeletionState(
+    await request<unknown>('/account/delete/cancel', { method: 'POST' }),
+  )
 }
