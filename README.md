@@ -1,6 +1,6 @@
 # BidCraft · 弱电投标文件编制系统
 
-按「C 方案：只借规格重制」实现的自研薄内核 + B/S 客户端。不复制任何上游代码，
+按「C 方案：只借规格重制」实现的自研薄内核 + B/S 服务端（另附已归档的桌面客户端）。不复制任何上游代码，
 只复用 `fb-labs/ZhiBiao` 与 `FB208/OpenBidKit_Yibiao` 的领域规格（字段口径、
 核对规则、章节骨架）并做成配置包。
 
@@ -94,7 +94,7 @@ bidcraft schema                     # 输出 C1 事实台账 JSON Schema
 bidcraft export <项目ID> -f xlsx     # 导出事实台账/材料/参数/评分/风险工作簿
 bidcraft backup                     # 在线一致性备份 db + secret.key 为 zip
 
-# B/S 客户端（推荐；需要 Node.js 20+）
+# B/S 服务端（唯一持续维护的形态；需要 Node.js 20+）
 uv pip install -e '.[api]'
 cd web && npm install && npm run build && cd ..
 bidcraft serve --open               # http://127.0.0.1:8000
@@ -124,8 +124,10 @@ bidcraft serve --open                 # 127.0.0.1:8000，浏览器自动打开
 BIDCRAFT_HOME=/srv/bidcraft-data bidcraft serve --host 0.0.0.0 --port 8000
 ```
 
-客户端只需访问 `http://<服务器IP>:8000`，无需安装任何软件。服务端内置登录与
-RBAC（超级管理员 / 投标经理 / 只读成员），首次启动会创建超级管理员：
+客户端只需访问 `http://<服务器IP>:8000`，无需安装任何软件。（桌面客户端已归档，
+浏览器访问是官方推荐形态。）
+
+服务端内置登录与 RBAC（超级管理员 / 投标经理 / 只读成员），首次启动会创建超级管理员：
 
 - 设置 `BIDCRAFT_ADMIN_PASSWORD` 时使用该密码；未设置则生成随机密码写入
   `BIDCRAFT_HOME/initial-admin.txt`（0600，仅首次）。
@@ -254,7 +256,7 @@ export BIDCRAFT_WECHAT_PAY_MOCK=1         # 本地演示支付
 - [`docs/billing.md`](docs/billing.md)：注册、按章扣点、兑换码与微信支付。
 - [`docs/roadmap.md`](docs/roadmap.md)：已落地能力与后续版本计划。
 - [`docs/mcp.md`](docs/mcp.md)：MCP（JSON-RPC 2.0）服务与 6 个工具接入。
-- [`docs/desktop.md`](docs/desktop.md)：桌面客户端（C/S 模式）、本地文件桥与命令行客户端。
+- [`docs/desktop.md`](docs/desktop.md)：桌面客户端（C/S 模式）、本地文件桥与命令行客户端。**（已归档）**
 - [`docs/plugins.md`](docs/plugins.md)：MCP 客户端插件市场、聚合与安全边界。
 - [`docs/calibration.md`](docs/calibration.md)：真实招标文件回归校准命令与报告字段。
 - [`docs/C1-spec.md`](docs/C1-spec.md)：领域规格（事实台账 Schema 与规则口径）。
@@ -288,7 +290,7 @@ export BIDCRAFT_WECHAT_PAY_MOCK=1         # 本地演示支付
 | 模型配置 | ✅ | 管理控制台维护对话/图片/向量模型；默认对话与图片模型接入生成；连通性测试；密钥加密 |
 | 知识库 | ✅ | 本地目录索引或通用/Dify/RAGFlow API；可选 embedding 向量索引与混合重排（无模型自动回退关键词）；章节检索注入；台账事实优先 |
 | 注册与计费 | ✅ | 用户名/微信扫码注册、独立项目空间、按章扣点、兑换码、微信支付 Native（可 mock） |
-| 桌面客户端（C/S） | ✅ | `bidcraft desktop --server URL` 启动 **Qt 原生外壳**（PySide6 + QtWebEngine）：菜单栏/工具栏/状态栏、原生导航与快捷键、应用图标与窗口标题、系统托盘与最小化到托盘、单实例激活、窗口几何与服务器记忆、原生文件对话框上传与下载保存、托盘通知、在线状态轮询与检查更新；界面内请求经 **JS 桥直连服务端 REST API**（Cookie 由客户端持有），断网时回放**只读离线缓存**并显示离线横幅；Qt 不可用时逐级回退 pywebview 内嵌窗口 → 浏览器网关（仅绑定 127.0.0.1）；另有 PyInstaller 打包脚本与 GitHub Actions 三平台构建（Windows `.exe`、macOS `.app`、Linux `.deb`/`.rpm`）；`bidcraft client` 命令行完成登录/项目/上传/下载；见 `docs/desktop.md` |
+| 桌面客户端（C/S） | 📦 已归档 | **冻结于 v0.6.3，不再更新**。Qt 原生外壳 + JS 桥直连 REST API、原生文件对话框、离线只读缓存、`bidcraft client` 命令行；代码与 `packaging/` 保留在仓库内可自行构建，但不接受功能 PR、不提供安装包更新；仅当服务端接口变更时由 `tests/test_client.py`、`tests/test_desktop.py`、`tests/test_qtshell.py` 保证不回退。 |
 | 解析深度（MinerU） | ✅ 可选 | 复杂版面/图片型 PDF 可接 MinerU 解析服务：优先返回结构化 Markdown 与表格，自动映射页/表；服务不可达或超时自动回退内置 pypdf/pdfplumber+OCR，不阻塞上传；`bidcraft mineru-check --pdf 样本.pdf` 实测 |
 | 全局事实设定 | ✅ | 项目级 `writing_profile`（公司/法人/项目/招标人/总价/工期/质保/质量标准/语气/禁用表达/自定义事实）：每次章节生成前注入「全局事实」块；核对时正文取值与设定不符报 `CON-###`（major，附正文值与设定值） |
 | 评分回填与失分复盘 | ✅ | 评分办法逐项回填实际得分（≤分值、可清空）、备注扣分原因；自动算总得分率、按类别聚合强弱、失分 Top20；失分摘要注入生成提示（「历史评分失分项，写作时优先补齐」） |

@@ -1,5 +1,10 @@
 # 桌面客户端（C/S 模式）
 
+> **归档声明（2026-11-20）**：桌面客户端冻结于 v0.6.3，后续只维护服务端。
+> 本文档保留用于说明既有行为与自行构建方法；其中的功能不再新增，
+> 官方推荐形态是 B/S 部署（`bidcraft serve`）。服务端接口若变更导致客户端不可用，
+> 以 CI 中的 `tests/test_client.py`、`tests/test_desktop.py`、`tests/test_qtshell.py` 为准。
+
 BidCraft 默认是 B/S 部署：服务器跑 `bidcraft serve`，用户用浏览器访问。
 **桌面客户端**在 B/S 之上增加一个本机进程，用同一套服务端接口提供「客户端」体验：
 
