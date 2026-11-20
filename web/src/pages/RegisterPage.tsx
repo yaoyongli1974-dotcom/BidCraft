@@ -32,6 +32,7 @@ export function RegisterPage() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [touched, setTouched] = useState(false)
+  const [accepted, setAccepted] = useState(false)
 
   if (loading) return <AuthSplash title="正在检查登录状态" description="正在读取本机会话与权限。" />
   if (user) return <Navigate to="/" replace />
@@ -41,6 +42,10 @@ export function RegisterPage() {
 
   const submit = async () => {
     setTouched(true)
+    if (!accepted) {
+      setError('请先阅读并同意服务条款与隐私政策')
+      return
+    }
     if (
       !USERNAME_PATTERN.test(username.trim()) ||
       password.length < 8 ||
@@ -51,7 +56,7 @@ export function RegisterPage() {
     setSubmitting(true)
     setError(null)
     try {
-      await register(username.trim(), password, displayName.trim())
+      await register(username.trim(), password, displayName.trim(), accepted)
       navigate('/', { replace: true })
     } catch (err) {
       setError(messageOf(err))
@@ -216,6 +221,24 @@ export function RegisterPage() {
                   <span className="field-error">两次输入的密码不一致。</span>
                 )}
               </div>
+
+              <label className="login-terms">
+                <input
+                  type="checkbox"
+                  checked={accepted}
+                  onChange={(event) => setAccepted(event.target.checked)}
+                />
+                <span>
+                  我已阅读并同意
+                  <a href="/legal/terms" target="_blank" rel="noreferrer">
+                    《服务条款》
+                  </a>
+                  与
+                  <a href="/legal/privacy" target="_blank" rel="noreferrer">
+                    《隐私政策》
+                  </a>
+                </span>
+              </label>
 
               {error && (
                 <div className="login-error" role="alert">

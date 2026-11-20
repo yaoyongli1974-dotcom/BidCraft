@@ -80,8 +80,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const register = useCallback(
-    async (username: string, password: string, displayName = '') => {
-      const result = await registerRequest(username, password, displayName)
+    async (username: string, password: string, displayName = '', acceptTerms = true) => {
+      const result = await registerRequest(username, password, displayName, acceptTerms)
       clearQueryCache()
       setUser(result.user)
       setError(null)

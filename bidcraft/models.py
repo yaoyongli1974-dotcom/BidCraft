@@ -445,6 +445,9 @@ class User(Base):
     #: 注销冷静期：申请后到期前可撤销，到期由 purge 任务真正删除。
     deletion_requested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     deletion_due_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    #: 同意条款的版本与时间（注册时留痕，便于合规举证）。
+    terms_version: Mapped[str] = mapped_column(String(20), default="")
+    terms_accepted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     wechat_openid: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     wechat_unionid: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     wechat_nickname: Mapped[str] = mapped_column(String(120), default="")
@@ -720,5 +723,27 @@ class ImageAsset(Base):
     model: Mapped[str] = mapped_column(String(200), default="")
     last_error: Mapped[str] = mapped_column(Text, default="")
     options: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class InvoiceRequest(Base):
+    """开票申请：用户提交抬头与金额，管理员开具后上传发票文件。"""
+
+    __tablename__ = "invoice_requests"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    tax_no: Mapped[str] = mapped_column(String(80), default="")
+    email: Mapped[str] = mapped_column(String(200), default="")
+    amount_cents: Mapped[int] = mapped_column(Integer, default=0)
+    note: Mapped[str] = mapped_column(String(500), default="")
+    # requested | issued | rejected
+    status: Mapped[str] = mapped_column(String(20), default="requested", index=True)
+    invoice_no: Mapped[str] = mapped_column(String(80), default="")
+    reject_reason: Mapped[str] = mapped_column(String(500), default="")
+    file_path: Mapped[str] = mapped_column(String(500), default="")
+    issued_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)

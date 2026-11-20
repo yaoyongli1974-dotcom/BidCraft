@@ -114,7 +114,35 @@ LEGAL_PRIVACY = """# BidCraft 隐私政策（内测版）
 政策更新会在站内公告；继续使用视为接受更新后的条款。
 """
 
+LEGAL_VERSION = "2026-11-20"
+
+LEGAL_PRIVACY = LEGAL_PRIVACY + """
+
+## 7. 备份与保留期限
+
+- 在线备份默认保留最近 10 份（可用 `bidcraft backup-prune --keep N` 调整），按日轮转；
+- 备份中的历史数据最长保留至对应备份被轮转删除为止；账号注销后，其数据会从在线库删除，但可能仍存在于轮转期内的备份中；
+- 备份仅用于故障恢复，不用于分析或对外提供。
+"""
+
 LEGAL_DOCS = {"terms": LEGAL_TERMS, "privacy": LEGAL_PRIVACY}
+
+
+def record_consent(user: User, version: str = LEGAL_VERSION) -> None:
+    """Record that the user accepted the current legal documents."""
+
+    user.terms_version = (version or LEGAL_VERSION)[:20]
+    user.terms_accepted_at = utcnow()
+
+
+def consent_payload(user: User) -> dict[str, Any]:
+    accepted = user.terms_accepted_at
+    return {
+        "version": user.terms_version or "",
+        "accepted_at": accepted.isoformat() if accepted else None,
+        "current_version": LEGAL_VERSION,
+        "up_to_date": bool(user.terms_version) and user.terms_version == LEGAL_VERSION,
+    }
 
 
 def legal_doc(name: str) -> str:
@@ -172,9 +200,50 @@ def delete_account(db, user: User) -> dict[str, int]:
     db.query(CreditTransaction).filter(CreditTransaction.user_id == user.id).delete(
         synchronize_session=False
     )
+    try:
+        from .invoices import delete_user_files
+
+        delete_user_files(user.id)
+    except Exception:  # noqa: BLE001, S110 - 清理失败不影响账号删除
+        pass
     db.delete(user)
     db.flush()
     return removed
+
+
+# --------------------------------------------------------------------- 备份保留
+
+BACKUP_KEEP_DEFAULT = 10
+
+
+def list_backups() -> list[Path]:
+    from .config import settings
+
+    folder = settings.home / "backups"
+    if not folder.is_dir():
+        return []
+    return sorted(folder.glob("bidcraft-*.zip"), key=lambda item: item.stat().st_mtime, reverse=True)
+
+
+def prune_backups(keep: int = BACKUP_KEEP_DEFAULT, *, dry_run: bool = False) -> dict[str, Any]:
+    """Keep the newest ``keep`` backups and delete the rest."""
+
+    if keep < 1:
+        raise ComplianceError("保留份数至少为 1")
+    files = list_backups()
+    doomed = files[keep:]
+    removed = []
+    for path in doomed:
+        removed.append(path.name)
+        if not dry_run:
+            path.unlink(missing_ok=True)
+    return {
+        "keep": keep,
+        "total": len(files),
+        "removed": removed,
+        "dry_run": dry_run,
+        "checked_at": utcnow().isoformat(),
+    }
 
 
 # --------------------------------------------------------------------- 注销冷静期

@@ -372,3 +372,11 @@ run_check、export_document、search_knowledge），供 Claude Desktop / Cursor 
 - 有子账号的主账号不会被自动删除（返回 skipped），需先处理子账号。
 - 每次执行写审计 `account.purge`：用户名、申请/到期时间、删除的项目/文档/资质/人员/流水数量；批量调用另记 `account.purge_batch`。
 - 建议 cron 每日跑一次；审计记录不随用户删除而清除，保留追责依据。
+
+
+## 开票与条款同意
+
+- 注册必须勾选同意《服务条款》《隐私政策》，系统记录版本与时间（`terms_version`、`terms_accepted_at`），便于合规举证；条款更新后 `GET /legal/versions` 返回当前版本。
+- 用户提交开票申请（抬头、税号、邮箱、金额、备注）→ `/admin/invoices` 查看待开具 → 上传 PDF/图片并填写发票号即完成开具；也可填原因驳回，用户端显示驳回原因并可重新申请。
+- 审计：`invoice.request` / `invoice.issue` / `invoice.reject`。
+- 备份默认保留 10 份：`bidcraft backup-prune --keep 10 --dry-run` 先看名单，再去掉 `--dry-run` 执行。隐私政策已说明备份轮转期内的数据保留。

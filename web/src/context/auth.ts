@@ -8,7 +8,12 @@ export interface AuthApi {
   isSuperAdmin: boolean
   canWrite: boolean
   login: (username: string, password: string) => Promise<User>
-  register: (username: string, password: string, displayName?: string) => Promise<User>
+  register: (
+    username: string,
+    password: string,
+    displayName?: string,
+    acceptTerms?: boolean,
+  ) => Promise<User>
   updateUser: (user: User) => void
   syncUser: () => Promise<void>
   logout: () => Promise<void>

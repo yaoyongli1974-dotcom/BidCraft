@@ -33,6 +33,7 @@ from . import (
     boq,
     compliance,
     images,
+    invoices,
     jobqueue,
     jobs,
     knowledge,
@@ -381,10 +382,25 @@ class RegisterRequest(BaseModel):
     username: str = Field(min_length=3, max_length=40)
     password: str = Field(min_length=8, max_length=200)
     display_name: str = ""
+    #: 勾选同意《服务条款》《隐私政策》（默认 True 以兼容旧客户端）。
+    accept_terms: bool = True
+    terms_version: str = ""
 
 
 class OrderCreate(BaseModel):
     package_id: str
+
+
+class InvoiceCreate(BaseModel):
+    title: str = ""
+    amount_cents: int = 0
+    tax_no: str = ""
+    email: str = ""
+    note: str = ""
+
+
+class InvoiceReject(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
 
 
 class RedeemRequest(BaseModel):
@@ -1858,12 +1874,15 @@ def create_app():
     def register(payload: RegisterRequest, request: Request, response: Response) -> dict[str, Any]:
         with session_scope() as db:
             try:
+                if not payload.accept_terms:
+                    raise ValueError("请先阅读并同意服务条款与隐私政策")
                 user = auth.register_user(
                     db,
                     username=payload.username,
                     password=payload.password,
                     display_name=payload.display_name,
                 )
+                compliance.record_consent(user, payload.terms_version)
                 # Commit the new account before auth.login opens its own session
                 # for the persistent login-throttle counter (SQLite single writer).
                 db.commit()
@@ -5256,6 +5275,102 @@ def create_app():
 
     class ExportTemplateUpdate(BaseModel):
         id: str
+
+    @app.get("/legal/versions")
+    def legal_versions() -> dict[str, str]:
+        return {"version": compliance.LEGAL_VERSION, "terms": "terms", "privacy": "privacy"}
+
+    @app.get("/billing/invoices")
+    def billing_invoices() -> list[dict[str, Any]]:
+        with session_scope() as db:
+            user = billing_user(db)
+            return [invoices.invoice_payload(row) for row in invoices.list_requests(db, user.id)]
+
+    @app.post("/billing/invoices", status_code=201)
+    def billing_invoice_create(payload: InvoiceCreate) -> dict[str, Any]:
+        with session_scope() as db:
+            user = billing_user(db)
+            try:
+                row = invoices.create_request(
+                    db,
+                    user,
+                    title=payload.title,
+                    amount_cents=payload.amount_cents,
+                    tax_no=payload.tax_no,
+                    email=payload.email,
+                    note=payload.note,
+                )
+            except invoices.InvoiceError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            audit(db, None, "invoice.request", {"invoice_id": row.id, "amount_cents": row.amount_cents})
+            return invoices.invoice_payload(row)
+
+    @app.get("/billing/invoices/{invoice_id}/file")
+    def billing_invoice_file(invoice_id: str) -> FileResponse:
+        with session_scope() as db:
+            user = billing_user(db)
+            try:
+                path = invoices.invoice_file(db, invoice_id, user.id)
+            except LookupError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            return FileResponse(path, filename=path.name)
+
+    @app.get("/admin/invoices")
+    def admin_invoices(request: Request, status: str = "") -> list[dict[str, Any]]:
+        require_super(request)
+        with session_scope() as db:
+            try:
+                rows = invoices.list_all(db, status=status)
+            except invoices.InvoiceError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            ids = {row.user_id for row in rows}
+            names = {
+                user.id: (user.display_name or user.username)
+                for user in db.scalars(select(User).where(User.id.in_(ids))).all()
+            } if ids else {}
+            return [invoices.invoice_payload(row, username=names.get(row.user_id, "")) for row in rows]
+
+    @app.post("/admin/invoices/{invoice_id}/issue")
+    async def admin_invoice_issue(
+        invoice_id: str,
+        request: Request,
+        invoice_no: str = Form(...),
+        file: UploadFile = File(...),
+    ) -> dict[str, Any]:
+        require_super(request)
+        content = await file.read()
+        if len(content) > invoices.MAX_INVOICE_BYTES:
+            raise HTTPException(status_code=400, detail="发票文件不能超过 10MB")
+        with session_scope() as db:
+            try:
+                row = invoices.issue_request(
+                    db,
+                    invoice_id,
+                    invoice_no=invoice_no,
+                    filename=file.filename or "",
+                    content=content,
+                )
+            except LookupError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except invoices.InvoiceError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            audit(db, None, "invoice.issue", {"invoice_id": row.id, "invoice_no": row.invoice_no})
+            return invoices.invoice_payload(row)
+
+    @app.post("/admin/invoices/{invoice_id}/reject")
+    def admin_invoice_reject(
+        invoice_id: str, payload: InvoiceReject, request: Request
+    ) -> dict[str, Any]:
+        require_super(request)
+        with session_scope() as db:
+            try:
+                row = invoices.reject_request(db, invoice_id, payload.reason)
+            except LookupError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except invoices.InvoiceError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            audit(db, None, "invoice.reject", {"invoice_id": row.id})
+            return invoices.invoice_payload(row)
 
     @app.get("/legal/{name}")
     def legal_document(name: str) -> dict[str, str]:

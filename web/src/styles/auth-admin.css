@@ -4701,3 +4701,57 @@
     grid-template-columns: 1fr;
   }
 }
+
+
+.login-terms {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted, #6b7280);
+  line-height: 1.5;
+}
+.login-terms input {
+  margin-top: 2px;
+}
+.login-terms a {
+  color: var(--jade, #0f766e);
+  text-decoration: none;
+}
+.login-terms a:hover {
+  text-decoration: underline;
+}
+
+
+.account-invoice-table {
+  width: 100%;
+  margin-top: 16px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.account-invoice-table th,
+.account-invoice-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line, #e5e7eb);
+  text-align: left;
+}
+.invoice-status {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-sunken, #f3f4f6);
+  font-size: 12px;
+}
+.invoice-status--issued {
+  background: color-mix(in srgb, var(--jade, #0f766e) 14%, transparent);
+  color: var(--jade, #0f766e);
+}
+.invoice-status--rejected {
+  background: color-mix(in srgb, #b42318 12%, transparent);
+  color: #b42318;
+}
+.invoice-reason {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted, #6b7280);
+  font-size: 12px;
+}

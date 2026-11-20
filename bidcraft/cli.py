@@ -1322,6 +1322,27 @@ def mineru_check(
 
 
 @app.command("backup-verify")
+@app.command("backup-prune")
+def backup_prune(
+    keep: int = typer.Option(10, "--keep", "-k", help="保留最近多少份备份"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只显示将删除的文件"),
+) -> None:
+    """按保留份数清理旧备份（默认保留 10 份）。"""
+    from . import compliance
+
+    try:
+        result = compliance.prune_backups(keep, dry_run=dry_run)
+    except compliance.ComplianceError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
+    console.print(
+        f"备份共 {result['total']} 份，保留 {result['keep']} 份，"
+        f"{'将删除' if dry_run else '已删除'} {len(result['removed'])} 份"
+    )
+    for name in result["removed"]:
+        console.print(f"  - {name}")
+
+
 def backup_verify(
     path: str = typer.Argument(..., help="备份文件（SQLite .db）"),
 ) -> None:

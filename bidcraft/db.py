@@ -73,6 +73,8 @@ def _migrate_columns(engine) -> None:
             ("parent_id", "VARCHAR(36)"),
             ("deletion_requested_at", "DATETIME"),
             ("deletion_due_at", "DATETIME"),
+            ("terms_version", "VARCHAR(20) DEFAULT ''"),
+            ("terms_accepted_at", "DATETIME"),
         ],
         "jobs": [("priority", "INTEGER DEFAULT 1")],
         "boq_snapshots": [("prices", "JSON"), ("package_id", "VARCHAR(36)")],

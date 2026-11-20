@@ -1084,11 +1084,91 @@ export const logout = () =>
 
 export const getMe = () => request<{ user: User }>('/auth/me')
 
-export const register = (username: string, password: string, displayName = '') =>
+export const register = (
+  username: string,
+  password: string,
+  displayName = '',
+  acceptTerms = true,
+) =>
   request<{ user: User }>(
     '/auth/register',
-    jsonBody({ username, password, display_name: displayName }),
+    jsonBody({
+      username,
+      password,
+      display_name: displayName,
+      accept_terms: acceptTerms,
+    }),
   )
+
+export interface InvoiceRequest {
+  id: string
+  user_id: string
+  username: string
+  title: string
+  tax_no: string
+  email: string
+  amount_cents: number
+  note: string
+  status: 'requested' | 'issued' | 'rejected'
+  status_label: string
+  invoice_no: string
+  reject_reason: string
+  has_file: boolean
+  issued_at: string | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+const normalizeInvoice = (value: unknown): InvoiceRequest | null => {
+  if (!value || typeof value !== 'object') return null
+  const raw = value as Record<string, unknown>
+  if (typeof raw.id !== 'string') return null
+  const status = raw.status === 'issued' || raw.status === 'rejected' ? raw.status : 'requested'
+  return {
+    id: raw.id,
+    user_id: typeof raw.user_id === 'string' ? raw.user_id : '',
+    username: typeof raw.username === 'string' ? raw.username : '',
+    title: typeof raw.title === 'string' ? raw.title : '',
+    tax_no: typeof raw.tax_no === 'string' ? raw.tax_no : '',
+    email: typeof raw.email === 'string' ? raw.email : '',
+    amount_cents: typeof raw.amount_cents === 'number' ? raw.amount_cents : 0,
+    note: typeof raw.note === 'string' ? raw.note : '',
+    status,
+    status_label: typeof raw.status_label === 'string' ? raw.status_label : '',
+    invoice_no: typeof raw.invoice_no === 'string' ? raw.invoice_no : '',
+    reject_reason: typeof raw.reject_reason === 'string' ? raw.reject_reason : '',
+    has_file: Boolean(raw.has_file),
+    issued_at: typeof raw.issued_at === 'string' ? raw.issued_at : null,
+    created_at: typeof raw.created_at === 'string' ? raw.created_at : null,
+    updated_at: typeof raw.updated_at === 'string' ? raw.updated_at : null,
+  }
+}
+
+export const getInvoices = async (): Promise<InvoiceRequest[]> => {
+  const data = await request<unknown>('/billing/invoices')
+  const items = Array.isArray(data)
+    ? data
+    : Array.isArray((data as { items?: unknown[] })?.items)
+      ? (data as { items: unknown[] }).items
+      : []
+  return items.map(normalizeInvoice).filter((item): item is InvoiceRequest => item !== null)
+}
+
+export const createInvoice = async (input: {
+  title: string
+  amount_cents: number
+  tax_no?: string
+  email?: string
+  note?: string
+}): Promise<InvoiceRequest> => {
+  const data = await request<unknown>('/billing/invoices', jsonBody(input))
+  const normalized = normalizeInvoice(data)
+  if (!normalized) throw new ApiError(500, '开票申请返回格式异常')
+  return normalized
+}
+
+export const invoiceFileUrl = (invoiceId: string): string =>
+  `/billing/invoices/${encodeURIComponent(invoiceId)}/file`
 
 export function wechatLoginUrl(health: { wechat_mock?: boolean } | null, next = '/'): string {
   const path = health?.wechat_mock ? '/auth/wechat/mock' : '/auth/wechat/start'

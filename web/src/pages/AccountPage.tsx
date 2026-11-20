@@ -4,7 +4,10 @@ import { Button } from '../components/Button'
 import { useToast } from '../context/useToast'
 import {
   cancelAccountDeletion,
+  createInvoice,
   deleteAccount,
+  getInvoices,
+  invoiceFileUrl,
   getDeletionState,
   downloadAccountExport,
   downloadStatement,
@@ -13,7 +16,7 @@ import {
   messageOf,
 } from '../lib/api'
 import { useEffect } from 'react'
-import type { DeletionState } from '../lib/api'
+import type { DeletionState, InvoiceRequest } from '../lib/api'
 
 export default function AccountPage() {
   const toast = useToast()
@@ -27,6 +30,14 @@ export default function AccountPage() {
   const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState('')
   const [deletion, setDeletion] = useState<DeletionState | null>(null)
+  const [invoices, setInvoices] = useState<InvoiceRequest[]>([])
+  const [amountYuan, setAmountYuan] = useState('')
+  const [invoiceNote, setInvoiceNote] = useState('')
+  const [requesting, setRequesting] = useState(false)
+
+  useEffect(() => {
+    void loadInvoices()
+  }, [])
 
   useEffect(() => {
     getDeletionState()
@@ -54,6 +65,45 @@ export default function AccountPage() {
       setError(messageOf(err))
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function loadInvoices() {
+    try {
+      setInvoices(await getInvoices())
+    } catch {
+      /* 未登录或接口不可用时静默 */
+    }
+  }
+
+  async function requestInvoice() {
+    const amount = Math.round(Number(amountYuan) * 100)
+    if (!title.trim()) {
+      setError('请填写发票抬头')
+      return
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setError('请填写正确的开票金额（元）')
+      return
+    }
+    setRequesting(true)
+    setError('')
+    try {
+      await createInvoice({
+        title: title.trim(),
+        amount_cents: amount,
+        tax_no: taxNo.trim(),
+        email: email.trim(),
+        note: invoiceNote.trim(),
+      })
+      setAmountYuan('')
+      setInvoiceNote('')
+      toast.success('开票申请已提交，管理员开具后可在此下载')
+      await loadInvoices()
+    } catch (err) {
+      setError(messageOf(err))
+    } finally {
+      setRequesting(false)
     }
   }
 
@@ -138,6 +188,68 @@ export default function AccountPage() {
             保存开票信息
           </Button>
         </div>
+      </section>
+
+      <section className="account-card">
+        <h2>开票申请</h2>
+        <p>提交后由管理员开具，发票文件（PDF/图片）开具后可在此下载。</p>
+        <div className="account-form">
+          <label>
+            开票金额（元）
+            <input
+              inputMode="decimal"
+              value={amountYuan}
+              onChange={(e) => setAmountYuan(e.target.value)}
+              placeholder="例如 39.90"
+            />
+          </label>
+          <label>
+            备注
+            <input value={invoiceNote} maxLength={200} onChange={(e) => setInvoiceNote(e.target.value)} />
+          </label>
+        </div>
+        <div className="account-actions">
+          <Button loading={requesting} onClick={requestInvoice}>
+            提交开票申请
+          </Button>
+        </div>
+        {invoices.length > 0 && (
+          <table className="account-invoice-table">
+            <thead>
+              <tr>
+                <th>抬头</th>
+                <th>金额</th>
+                <th>状态</th>
+                <th>发票</th>
+              </tr>
+            </thead>
+            <tbody>
+              {invoices.map((row) => (
+                <tr key={row.id}>
+                  <td>{row.title}</td>
+                  <td>¥{(row.amount_cents / 100).toFixed(2)}</td>
+                  <td>
+                    <span className={`invoice-status invoice-status--${row.status}`}>
+                      {row.status_label || row.status}
+                    </span>
+                    {row.status === 'rejected' && row.reject_reason ? (
+                      <span className="invoice-reason">{row.reject_reason}</span>
+                    ) : null}
+                  </td>
+                  <td>
+                    {row.has_file ? (
+                      <a href={invoiceFileUrl(row.id)} target="_blank" rel="noreferrer">
+                        下载
+                      </a>
+                    ) : (
+                      <span className="muted">—</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </section>
 
       <section className="account-card account-danger">
