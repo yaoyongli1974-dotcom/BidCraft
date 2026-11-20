@@ -45,7 +45,16 @@ HTTP-01 验证无法通过。备案完成后：
 
 ## 5. 运维
 
-- 健康检查：`curl http://127.0.0.1:8000/health`
+- 健康检查：`curl http://127.0.0.1:8000/health`（公开，只返回最小字段）
+- 版本与运行状态（超级管理员）：登录后带 Cookie 访问 `/admin/health`，可看到版本、启动时间与
+  uptime、Python/平台、DB 大小与磁盘余量、模型/知识库/用户计数、`docs_enabled` 等开关：
+
+  ```bash
+  curl -s -c /tmp/bc.cookie -H 'Content-Type: application/json' \
+    -d '{"username":"admin","password":"<密码>"}' http://127.0.0.1:8000/auth/login
+  curl -s -b /tmp/bc.cookie http://127.0.0.1:8000/admin/health
+  rm -f /tmp/bc.cookie
+  ```
 - 日志：`docker logs bidcraft`；站点访问日志在 1Panel 网站目录 `log/`
 - 备份：`/opt/bidcraft/data`（业务数据）+ `/opt/bidcraft/compose/.env`（管理员密码）
 - 升级：构建新镜像 → load → 改 compose 的 image 标签 → `docker compose up -d`
@@ -56,6 +65,7 @@ HTTP-01 验证无法通过。备案完成后：
 |---|---|---|
 | `/docs`、`/redoc`、`/openapi.json` | **404** | 由 `BIDCRAFT_DOCS_ENABLED=0` 控制；仅排障时临时置 1 并重启 |
 | `/health` | 最小字段 | 只返回 `status` 与前端必需字段，不含版本、绝对路径、库内计数；Docker HEALTHCHECK 仍可用 |
+| `/admin/health` | 超级管理员 | 完整运行状态（版本、uptime、Python/平台、DB 大小与磁盘余量、模型/知识库/用户计数、开关项）；匿名 401、普通成员 403，不会落到公开探活里 |
 | 安全响应头 | 全站注入 | `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`、CSP（`default-src 'self'`、`frame-ancestors 'none'`、`object-src 'none'`）、HTTPS 下加 HSTS |
 
 `.env` 追加：
@@ -117,6 +127,7 @@ cd /opt/bidcraft/compose && docker compose up -d
 
 sleep 5
 curl -s http://127.0.0.1:8000/health     # 最小字段（不显示版本）
+# 超管确认版本：带 Cookie 访问 /admin/health，见「5. 运维」
 docker exec bidcraft python -c "import bidcraft;print(bidcraft.__version__)"   # 0.6.2
 ```
 

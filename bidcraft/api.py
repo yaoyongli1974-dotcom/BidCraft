@@ -1748,6 +1748,7 @@ def create_app():
         redoc_url="/redoc" if docs_on else None,
         openapi_url="/openapi.json" if docs_on else None,
     )
+    app.state.started_at = datetime.now(UTC)
 
     if not docs_on:
 
@@ -3538,6 +3539,54 @@ def create_app():
             "wechat_pay_mock": settings.wechat_pay_mock,
             "home": str(settings.home),
             "web_ready": (Path(__file__).resolve().parent / "web_dist" / "index.html").is_file(),
+        }
+
+    @app.get("/admin/health")
+    def admin_health(request: Request) -> dict[str, Any]:
+        """完整运行状态，仅超级管理员可见（公开 /health 保持最小化）。"""
+        import platform as platform_module
+
+        require_super(request)
+        with session_scope() as db:
+            endpoint = model_config.resolve_chat_endpoint(db)
+            embedding = model_config.resolve_embedding_endpoint(db)
+            models = db.scalar(select(func.count()).select_from(ModelConfig)) or 0
+            kbs = db.scalar(select(func.count()).select_from(KnowledgeBase)) or 0
+            users = db.scalar(select(func.count()).select_from(User)) or 0
+        started = getattr(app.state, "started_at", None)
+        db_path = settings.home / "bidcraft.db"
+        db_size = db_path.stat().st_size if db_path.is_file() else 0
+        try:
+            disk_free = shutil.disk_usage(settings.home).free
+        except OSError:  # pragma: no cover - 极少数文件系统不支持
+            disk_free = 0
+        uptime = int((datetime.now(UTC) - started).total_seconds()) if started else 0
+        return {
+            "status": "ok",
+            "version": __version__,
+            "started_at": started.isoformat() if started else None,
+            "uptime_seconds": max(0, uptime),
+            "python": platform_module.python_version(),
+            "platform": platform_module.platform(),
+            "home": str(settings.home),
+            "db_size_bytes": db_size,
+            "disk_free_bytes": disk_free,
+            "web_ready": (Path(__file__).resolve().parent / "web_dist" / "index.html").is_file(),
+            "offline": settings.offline,
+            "docs_enabled": settings.docs_enabled,
+            "health_public": settings.health_public,
+            "secure_cookie": settings.secure_cookie,
+            "model_configured": bool(endpoint),
+            "model_label": endpoint.label if endpoint else "",
+            "embedding_configured": bool(embedding),
+            "embedding_model": embedding.model_name if embedding else "",
+            "models": models,
+            "knowledge_bases": kbs,
+            "users": users,
+            "auth_required": True,
+            "registration": True,
+            "wechat_login": wechat.available(),
+            "wechat_pay": wechatpay.available(),
         }
 
     @app.get("/packages")

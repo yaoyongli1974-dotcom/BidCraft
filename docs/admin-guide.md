@@ -261,6 +261,9 @@ run_check、export_document、search_knowledge），供 Claude Desktop / Cursor 
 - 会话 Cookie 为 HttpOnly、SameSite=Lax；密码使用 scrypt 加盐哈希；登录失败按用户名限流。
 - 系统无遥测；除显式配置的模型与知识库端点（以及图片端点返回的临时下载 URL）外
   不发起外部请求。
+- 公开 `/health` 只返回 `status` 与前端必需字段（不含版本、路径、计数），便于探活且不泄露部署细节；
+  排障与确认版本用 `/admin/health`（仅超级管理员，返回版本、启动时间/uptime、Python 与平台、
+  数据库大小与磁盘余量、模型/知识库/用户计数及 `docs_enabled` 等开关）。
 - 项目级成员权限与操作审计已内置：owner 管理成员，写操作按 editor/viewer 门禁，
   关键操作写入 `audit_logs`（项目页「协作」与管理端「审计日志」可查）。
   公网多人场景仍建议配合反向代理与网络隔离。

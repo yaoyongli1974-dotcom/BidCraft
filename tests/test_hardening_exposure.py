@@ -59,3 +59,37 @@ def test_security_headers_on_api_and_spa(monkeypatch):
         csp = response.headers["Content-Security-Policy"]
         assert "frame-ancestors 'none'" in csp
         assert "object-src 'none'" in csp
+
+
+def test_admin_health_requires_super_admin(db, monkeypatch):
+    """超管可拿完整运行状态；匿名 401、普通成员 403，公开 /health 仍然最小化。"""
+    from bidcraft import __version__
+
+    client = _app(monkeypatch, health_public=True)
+    assert client.get("/admin/health").status_code == 401
+
+    member = _app(monkeypatch, health_public=True)
+    assert (
+        member.post(
+            "/auth/register",
+            json={"username": "health-member", "password": "Passw0rd!123"},
+        ).status_code
+        == 201
+    )
+    assert member.get("/admin/health").status_code == 403
+
+    admin = _app(monkeypatch, health_public=True)
+    login = admin.post("/auth/login", json={"username": "admin", "password": "test-admin"})
+    assert login.status_code == 200, login.text
+    body = admin.get("/admin/health").json()
+    assert body["status"] == "ok"
+    assert body["version"] == __version__
+    assert body["uptime_seconds"] >= 0
+    assert body["started_at"]
+    assert body["health_public"] is True
+    assert "home" in body and body["users"] >= 2
+    assert body["db_size_bytes"] > 0
+
+    # 公开端点不因超管 cookie 而变大
+    minimal = admin.get("/health").json()
+    assert "version" not in minimal and "home" not in minimal
