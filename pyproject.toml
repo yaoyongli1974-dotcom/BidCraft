@@ -1,6 +1,6 @@
 [project]
 name = "bidcraft"
-version = "0.6.3"
+version = "0.6.4"
 description = "弱电行业投标文件生成内核：解析 → 事实台账 → 规则引擎 → 大纲/正文 → 核对 → DOCX"
 readme = "README.md"
 requires-python = ">=3.11"
