@@ -44,6 +44,7 @@ from . import (
     plugin_pack,
     plugins,
     profile,
+    provenance,
     qualifications,
     scoring,
     terms,
@@ -1147,9 +1148,18 @@ def _apply_issue_status(issue: Issue, status: str, note: str, username: str) -> 
 
 def _outline_payload(db, project_id: str) -> list[dict[str, Any]]:
     chapters = []
+    flags = provenance.node_flags(db, project_id)
     for node in load_outline(db, project_id):
         body = node.pop("body", "")
-        chapters.append({**node, "has_body": bool(body)})
+        flag = flags.get(node["id"], {})
+        chapters.append(
+            {
+                **node,
+                "has_body": bool(body),
+                "citations": int(flag.get("citations", 0)),
+                "citations_stale": int(flag.get("stale", 0)),
+            }
+        )
     return chapters
 
 
@@ -5117,13 +5127,20 @@ def create_app():
                 row = update_fact(db, project.id, key, value=payload.value, status=payload.status)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(db, project.id, "fact.update", {"key": row.key, "status": row.status})
+            affected = provenance.affected_by_change(db, project.id, row.key, row.value or "")
+            audit(
+                db,
+                project.id,
+                "fact.update",
+                {"key": row.key, "status": row.status, "stale_citations": len(affected)},
+            )
             return {
                 "key": row.key,
                 "label": row.label,
                 "value": row.value,
                 "status": row.status,
                 "required": row.required,
+                "stale_sections": affected,
             }
 
     # ------------------------------------------------------------- outline
@@ -5197,6 +5214,7 @@ def create_app():
 
     def _chapter_payload(db, node: OutlineNode) -> dict[str, Any]:
         section = db.scalar(select(Section).where(Section.node_id == node.id))
+        citations = provenance.node_citations(db, node.project_id, node.id)
         return {
             "id": node.id,
             "heading": node.heading,
@@ -5207,6 +5225,8 @@ def create_app():
             "words": section.words if section else 0,
             "status": section.status if section else node.status,
             "revision": (section.revision or 0) if section else 0,
+            "citations": len(citations),
+            "citations_stale": sum(1 for item in citations if item["stale"]),
         }
 
     @app.get("/projects/{ref}/chapters/{node_id}")
@@ -5214,6 +5234,29 @@ def create_app():
         with session_scope() as db:
             project, _role = _project(db, ref)
             return _chapter_payload(db, _node(db, project.id, node_id))
+
+    @app.get("/projects/{ref}/chapters/{node_id}/citations")
+    def chapter_citations(ref: str, node_id: str) -> dict[str, Any]:
+        """本章正文里出现的台账取值，逐条给出字段、当前值与原件出处。"""
+
+        with session_scope() as db:
+            project, _role = _project(db, ref)
+            node = _node(db, project.id, node_id)
+            items = provenance.node_citations(db, project.id, node.id)
+            return {
+                "node_id": node.id,
+                "heading": node.heading,
+                "citations": items,
+                "stale": sum(1 for item in items if item["stale"]),
+            }
+
+    @app.get("/projects/{ref}/citations")
+    def project_citations(ref: str) -> dict[str, Any]:
+        """全书来源追溯：哪些章节引用了台账哪个字段、哪些已与台账不一致。"""
+
+        with session_scope() as db:
+            project, _role = _project(db, ref)
+            return {"project_id": project.id, **provenance.report(db, project.id)}
 
     @app.put("/projects/{ref}/chapters/{node_id}")
     def save_chapter(ref: str, node_id: str, payload: ChapterSave) -> Any:
@@ -5242,6 +5285,7 @@ def create_app():
             section.revision = current_revision + 1
             node.status = "edited"
             db.flush()
+            provenance.refresh_node(db, project.id, node.id, payload.body)
             audit(db, project.id, "chapter.save", {"heading": node.heading})
             return _chapter_payload(db, node)
 
@@ -5282,6 +5326,7 @@ def create_app():
                 billing.refund_chapters(db, user, charged, project_id=project.id)
             project.status = "drafting"
             db.flush()
+            provenance.refresh_node(db, project.id, node.id)
             audit(db, project.id, "chapter.generate", {"heading": node.heading})
             return _report_payload(report)
 

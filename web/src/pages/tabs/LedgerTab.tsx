@@ -51,6 +51,7 @@ import {
   TabHeading,
 } from '../../components/Workbench'
 import { useConfirm } from '../../context/useConfirm'
+import { useToast } from '../../context/useToast'
 
 type LedgerTab = 'facts' | 'materials' | 'parameters' | 'scoring' | 'requirements' | 'risks'
 
@@ -75,6 +76,7 @@ function isEditableTarget(target: EventTarget | null): boolean {
 export function LedgerTab() {
   const { ref, project, reloadProject, setUnsaved, canWrite } = useWorkspace()
   const confirm = useConfirm()
+  const toast = useToast()
   const navigate = useNavigate()
   const location = useLocation()
   const ledgerQuery = useQuery(`ledger:${ref}`, () => getLedger(ref))
@@ -302,6 +304,20 @@ export function LedgerTab() {
       setEdit(null)
       setSavedKey(fact.key)
       window.setTimeout(() => setSavedKey(null), 2400)
+      const stale = updated.stale_sections || []
+      if (stale.length > 0) {
+        const headings = stale
+          .map((item) => item.heading)
+          .filter(Boolean)
+          .slice(0, 3)
+          .join('、')
+        toast.warning(
+          '已标记待复核的章节',
+          `${stale.length} 个章节引用过旧值${
+            headings ? `（${headings}${stale.length > 3 ? ' 等' : ''}）` : ''
+          }，请按新值核对正文。`,
+        )
+      }
       setHighlight((current) => {
         const next = new Set(current)
         next.delete(fact.key)

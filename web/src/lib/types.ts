@@ -457,6 +457,10 @@ export interface OutlineChapter {
   status?: string
   words?: number
   has_body?: boolean
+  /** 本章正文命中的台账字段数（来源追溯）。 */
+  citations?: number
+  /** 命中字段中，台账取值已被改写、正文仍是旧值的数量。 */
+  citations_stale?: number
 }
 
 export interface ChapterDetail {
@@ -469,6 +473,66 @@ export interface ChapterDetail {
   status?: string
   /** Monotonic optimistic-lock counter; older servers omit it. */
   revision?: number
+  citations?: number
+  citations_stale?: number
+}
+
+/** 正文里出现的一处台账取值。 */
+export interface FactCitation {
+  node_id: string
+  heading: string
+  position: number
+  fact_key: string
+  label: string
+  /** 扫描时正文里的取值。 */
+  value: string
+  /** 台账当前取值；与 value 不同即说明正文写着旧值。 */
+  current_value: string
+  occurrences: number
+  stale: boolean
+  status: string
+  source_quote: string
+  source_file_id?: string | null
+  source_page: number
+  checked_at?: string | null
+}
+
+export interface ChapterCitations {
+  node_id: string
+  heading: string
+  citations: FactCitation[]
+  stale: number
+}
+
+export interface CitationChapterSummary {
+  node_id: string
+  heading: string
+  position: number
+  citations: number
+  stale: number
+}
+
+export interface ProjectCitations {
+  project_id: string
+  summary: {
+    citations: number
+    facts_cited: number
+    stale: number
+    sections_citing: number
+    sections_needing_review: number
+  }
+  citations: FactCitation[]
+  chapters: CitationChapterSummary[]
+}
+
+export interface FactUpdateResult {
+  key: string
+  label?: string
+  value: string
+  status: string
+  required?: boolean
+  /** 该字段被改写后，正文仍写着旧值的章节。 */
+  stale_sections?: Array<{ node_id: string; heading: string; stale_value: string }>
 }
 
 export interface Issue {

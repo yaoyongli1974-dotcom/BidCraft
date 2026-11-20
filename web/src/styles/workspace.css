@@ -2878,6 +2878,10 @@
 
 .chapter-item-status {
   padding-top: 1px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
 }
 
 .chapter-item-status .badge {
@@ -6403,4 +6407,134 @@ button.risk-anchor:hover {
   color: var(--faint);
   font-size: 9.5px;
   line-height: 1.65;
+}
+
+/* ---------------------------------------------------- 来源追溯（provenance） */
+
+.trace-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--info-soft);
+  color: var(--info);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.trace-summary strong {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: inherit;
+}
+
+.trace-summary.is-stale {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.trace-hit {
+  background: color-mix(in srgb, var(--info-soft) 70%, transparent);
+  color: inherit;
+  border-bottom: 1px dashed color-mix(in srgb, var(--info) 55%, transparent);
+  border-radius: 2px;
+  padding: 0 1px;
+  cursor: help;
+}
+
+.trace-hit:hover,
+.trace-hit:focus-visible {
+  background: var(--info-soft);
+  outline: none;
+}
+
+.trace-hit.is-stale {
+  background: color-mix(in srgb, var(--warn-soft) 80%, transparent);
+  border-bottom-color: var(--warn);
+  text-decoration: underline wavy color-mix(in srgb, var(--warn) 60%, transparent);
+  text-underline-offset: 3px;
+}
+
+.trace-card {
+  margin: 0 0 14px;
+  padding: 11px 13px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--info);
+  border-radius: 6px;
+  background: var(--paper);
+}
+
+.trace-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.trace-card-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+}
+
+.trace-card-close:hover {
+  background: var(--line-soft);
+  color: var(--ink);
+}
+
+.trace-card-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 4px;
+}
+
+.trace-card-title strong {
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.trace-card-fields {
+  display: grid;
+  gap: 5px;
+  margin: 9px 0 0;
+}
+
+.trace-card-fields > div {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+
+.trace-card-fields dt {
+  color: var(--faint);
+  font-size: 10.5px;
+}
+
+.trace-card-fields dd {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.trace-card-hint {
+  margin: 9px 0 0;
+  padding: 7px 9px;
+  border-radius: 5px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 11px;
+  line-height: 1.6;
 }

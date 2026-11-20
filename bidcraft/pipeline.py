@@ -8,7 +8,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import clock, substantive, terms, textqa
+from . import clock, provenance, substantive, terms, textqa
 from .config import settings
 from .ledger import build_ledger, load_ledger, save_ledger
 from .models import Issue, Project, Requirement, SourceFile
@@ -336,6 +336,9 @@ def check_project(db: Session, project_id: str) -> tuple[list, dict]:
             )
         )
     project.status = "review"
+    # 核对同时重扫来源追溯：生成的正文也要能被追溯到台账字段，
+    # 不依赖用户是否打开过某一章。
+    provenance.refresh_project(db, project_id)
     db.flush()
     from .rules.engine import summarize_results
 

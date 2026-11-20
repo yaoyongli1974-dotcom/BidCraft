@@ -32,6 +32,7 @@ import {
   deleteImage,
   generateChapter,
   getChapter,
+  getChapterCitations,
   getImagePlan,
   getImagePolicy,
   getJob,
@@ -73,6 +74,7 @@ import {
   useUnsavedGuard,
 } from '../../lib/hooks'
 import { MarkdownPreview } from '../../lib/markdown'
+import { markTraceHits } from '../../lib/trace'
 import { Badge } from '../../components/Badge'
 import { Button, IconButton } from '../../components/Button'
 import { EmptyState, ErrorState, ProgressBar, Skeleton } from '../../components/Feedback'
@@ -278,6 +280,12 @@ export function DraftTab() {
   const location = useLocation()
   const outlineQuery = useQuery(`outline:${ref}`, () => getOutline(ref))
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const citationsQuery = useQuery(
+    `citations:${ref}:${selectedId || 'none'}`,
+    () => getChapterCitations(ref, selectedId as string),
+    { enabled: Boolean(selectedId) },
+  )
+  const [activeFactKey, setActiveFactKey] = useState<string | null>(null)
   const [body, setBody] = useState('')
   const [savedBody, setSavedBody] = useState('')
   const [loadedId, setLoadedId] = useState<string | null>(null)
@@ -1634,6 +1642,25 @@ export function DraftTab() {
       })
     : { label: '未选择', tone: 'neutral' as const }
 
+  // 来源追溯：正文里每个命中台账取值的片段都可点开看出处。
+  const citations = citationsQuery.data?.citations || []
+  const staleCitations = citations.filter((item) => item.stale)
+  const activeCitation = activeFactKey
+    ? citations.find((item) => item.fact_key === activeFactKey) || null
+    : null
+
+  useEffect(() => {
+    setActiveFactKey(null)
+  }, [selectedId])
+
+  useEffect(() => {
+    const root = editorPreviewRef.current
+    if (!preview || !root || loadedId !== selectedId) return
+    markTraceHits(root, citations)
+    // citations 来自 query 缓存，body 变化后需要重包
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preview, loadedId, selectedId, body, citationsQuery.data])
+
   return (
     <div className="tab-content draft-tab">
       <TabHeading
@@ -1870,6 +1897,11 @@ export function DraftTab() {
                       </span>
                     </span>
                     <span className="chapter-item-status">
+                      {chapter.citations_stale ? (
+                        <Badge tone="warn" subtle>
+                          需复核
+                        </Badge>
+                      ) : null}
                       <Badge tone={meta.tone} subtle>
                         {meta.label}
                       </Badge>
@@ -1919,6 +1951,20 @@ export function DraftTab() {
                           : '未设目标字数'}
                       </span>
                       {dirty && <span className="unsaved-chip">未保存</span>}
+                      {citations.length > 0 && (
+                        <span
+                          className={className(
+                            'trace-summary',
+                            staleCitations.length > 0 && 'is-stale',
+                          )}
+                          title="正文中命中事实台账取值的数量"
+                        >
+                          来源 <strong>{citations.length}</strong> 处
+                          {staleCitations.length > 0
+                            ? ` · ${staleCitations.length} 处待复核`
+                            : ''}
+                        </span>
+                      )}
                     </div>
                   </div>
                   <div className="editor-actions">
@@ -1964,6 +2010,59 @@ export function DraftTab() {
                     </Button>
                   </div>
                 </header>
+
+                {activeCitation && (
+                  <div className="trace-card" role="status">
+                    <div className="trace-card-head">
+                      <span className="eyebrow">来源追溯</span>
+                      <button
+                        type="button"
+                        className="trace-card-close"
+                        onClick={() => setActiveFactKey(null)}
+                        aria-label="关闭来源信息"
+                      >
+                        <X size={13} />
+                      </button>
+                    </div>
+                    <div className="trace-card-title">
+                      <strong>{activeCitation.label}</strong>
+                      <code className="key-chip">{activeCitation.fact_key}</code>
+                      <Badge tone={activeCitation.stale ? 'warn' : 'success'} subtle>
+                        {activeCitation.stale ? '正文与台账不一致' : '与台账一致'}
+                      </Badge>
+                    </div>
+                    <dl className="trace-card-fields">
+                      <div>
+                        <dt>正文引用</dt>
+                        <dd>
+                          {activeCitation.value}
+                          {activeCitation.occurrences > 1
+                            ? `（本章 ${activeCitation.occurrences} 处）`
+                            : ''}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>台账当前值</dt>
+                        <dd>{activeCitation.current_value || '（空）'}</dd>
+                      </div>
+                      <div>
+                        <dt>原件出处</dt>
+                        <dd>
+                          {activeCitation.source_quote || '（未记录原文）'}
+                          {activeCitation.source_page > 0
+                            ? ` · 第 ${activeCitation.source_page} 页`
+                            : ''}
+                        </dd>
+                      </div>
+                    </dl>
+                    {activeCitation.stale ? (
+                      <p className="trace-card-hint">
+                        台账已改为「{activeCitation.current_value}」，正文仍是旧值。
+                        按新值修改正文并保存后，此处会自动恢复一致。
+                      </p>
+                    ) : null}
+                  </div>
+                )}
 
                 <section className="image-studio" aria-label="图片工作台">
                   <div className="image-studio-head">
@@ -2813,7 +2912,16 @@ export function DraftTab() {
                     <Skeleton width="60%" height={16} />
                   </div>
                 ) : preview ? (
-                  <div className="editor-preview" ref={editorPreviewRef}>
+                  <div
+                    className="editor-preview"
+                    ref={editorPreviewRef}
+                    onClick={(event) => {
+                      const hit = (event.target as HTMLElement).closest(
+                        'mark.trace-hit',
+                      ) as HTMLElement | null
+                      if (hit?.dataset.factKey) setActiveFactKey(hit.dataset.factKey)
+                    }}
+                  >
                     <MarkdownPreview text={body} />
                   </div>
                 ) : (

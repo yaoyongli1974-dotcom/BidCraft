@@ -92,6 +92,26 @@ class Fact(Base):
     project: Mapped[Project] = relationship(back_populates="facts")
 
 
+class FactCitation(Base):
+    """正文引用某条事实取值的记录（来源追溯的基础数据）。
+
+    ``value`` 是扫描时正文里出现的取值。台账字段被改写后，``value`` 与当前
+    ``Fact.value`` 不一致即视为 stale：正文还写着旧值，所在章节提示「需复核」。
+    判定只认「正文里出现了台账里的这个值」，不做语义推断。
+    """
+
+    __tablename__ = "fact_citations"
+    __table_args__ = (UniqueConstraint("node_id", "fact_key", name="uq_citation_node_fact"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    node_id: Mapped[str] = mapped_column(ForeignKey("outline_nodes.id"), index=True)
+    fact_key: Mapped[str] = mapped_column(String(120), index=True)
+    value: Mapped[str] = mapped_column(Text, default="")
+    occurrences: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class Material(Base):
     __tablename__ = "materials"
 

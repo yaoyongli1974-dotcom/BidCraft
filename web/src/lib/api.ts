@@ -36,6 +36,8 @@ import type {
   IssueStatus,
   ScoreAnalysis,
   ChapterConflict,
+  ChapterCitations,
+  ProjectCitations,
   CreditAdjustResult,
   KnowledgeBase,
   KnowledgeBaseInput,
@@ -2048,7 +2050,7 @@ export async function getLedger(ref: string): Promise<Ledger> {
 }
 
 export const updateFact = (ref: string, key: string, value: string, status: string) =>
-  request<{ key: string; value: string; status: string }>(
+  request<import('./types').FactUpdateResult>(
     `/projects/${encodeURIComponent(ref)}/facts/${encodeURIComponent(key)}`,
     { method: 'PATCH', body: JSON.stringify({ value, status }) },
   )
@@ -2092,6 +2094,41 @@ export async function getChapter(ref: string, nodeId: string): Promise<ChapterDe
   )
   if (data && typeof data === 'object' && 'chapter' in data && data.chapter) return data.chapter
   return data as ChapterDetail
+}
+
+/** 本章正文的台账来源追溯（读侧，viewer 也可读）。 */
+export async function getChapterCitations(
+  ref: string,
+  nodeId: string,
+): Promise<ChapterCitations> {
+  const data = await request<ChapterCitations>(
+    `/projects/${encodeURIComponent(ref)}/chapters/${encodeURIComponent(nodeId)}/citations`,
+  )
+  return {
+    node_id: data?.node_id || nodeId,
+    heading: data?.heading || '',
+    citations: Array.isArray(data?.citations) ? data.citations : [],
+    stale: Number(data?.stale || 0),
+  }
+}
+
+/** 全书来源追溯：哪些章节引用了哪个台账字段、哪些已与台账不一致。 */
+export async function getProjectCitations(ref: string): Promise<ProjectCitations> {
+  const data = await request<ProjectCitations>(
+    `/projects/${encodeURIComponent(ref)}/citations`,
+  )
+  return {
+    project_id: data?.project_id || '',
+    summary: {
+      citations: Number(data?.summary?.citations || 0),
+      facts_cited: Number(data?.summary?.facts_cited || 0),
+      stale: Number(data?.summary?.stale || 0),
+      sections_citing: Number(data?.summary?.sections_citing || 0),
+      sections_needing_review: Number(data?.summary?.sections_needing_review || 0),
+    },
+    citations: Array.isArray(data?.citations) ? data.citations : [],
+    chapters: Array.isArray(data?.chapters) ? data.chapters : [],
+  }
 }
 
 export async function saveChapter(
