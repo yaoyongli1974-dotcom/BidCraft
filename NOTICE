@@ -77,6 +77,41 @@ System packages are invoked as separate executables and are not statically linke
 BidCraft. Anyone redistributing the Docker image must independently satisfy their
 licenses (notably GPL-2.0 for Poppler and MPL-2.0 for LibreOffice).
 
+== 桌面客户端（已归档，仅自行构建时涉及）/ Desktop client (archived; self-build only) ==
+
+PySide6 / shiboken6 / Qt 6        LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only
+  （QtCore、QtGui、QtWidgets、QtNetwork、QtWebChannel、QtWebEngineWidgets 等；
+    亦可向 The Qt Company 取得商业许可）
+Qt WebEngine 内含组件             Chromium/Blink 等，BSD/MIT/LGPL 等各自许可
+QtPy                            MIT License
+pywebview                       BSD-3-Clause
+PyInstaller                     GPL-2.0-or-later，附 bootloader 特殊例外
+                                （允许以任意许可分发所打包的应用，含商业软件）
+
+桌面客户端已冻结于 v0.6.3 并停止分发安装包（见 docs/desktop.md 顶部归档声明）。
+桌面端如需自行构建，请注意 Qt/PySide6 的 LGPL-3.0 动态链接与可替换要求：
+
+1. 以动态链接方式使用 Qt/PySide6：保留独立的 .so/.dylib/.dll 与可替换的加载路径，
+   不要把 Qt 库静态合并进可执行文件（PyInstaller 默认按独立库收集，请勿改为静态链接）。
+2. 随产物提供 LGPL-3.0 许可文本、Qt/PySide6 的版权声明与本 NOTICE，并明确告知用户
+   有权替换这些库（提供替换所需的库文件与说明）。
+3. 若修改了 Qt/PySide6 本身，须按 LGPL-3.0 公开修改部分的源码。
+4. Qt WebEngine 内含 Chromium 等第三方组件，其许可义务由构建/分发方一并遵守。
+5. 取得 Qt 商业许可可豁免上述 LGPL 义务（授权需自行向 The Qt Company 获取）。
+
+`.github/workflows/desktop-release.yml` 仍允许任何人手动触发重建。任何重新分发
+安装包的人都是 LGPL 意义上的分发者，须自行履行上述义务；本仓库不再提供官方安装包。
+
+The desktop client is frozen at v0.6.3 and its installers are no longer distributed.
+If you build it yourself, note the LGPL-3.0 dynamic-linking and relinking requirements
+for Qt/PySide6: keep the Qt libraries as separate replaceable shared libraries, ship
+the LGPL-3.0 text and copyright notices, allow users to relink/replace those libraries,
+and publish sources of any modifications you make to Qt itself. Qt WebEngine bundles
+Chromium and other components under their own licenses. A Qt commercial license
+removes the LGPL obligations. Anyone who re-distributes installers built via the
+manual `desktop-release` workflow is a distributor under the LGPL and must satisfy
+those obligations independently.
+
 == 上游规格参考 / Upstream specification references ==
 
 fb-labs/ZhiBiao                 AGPL-3.0（仅参考领域规格，未包含源代码）
