@@ -1,12 +1,12 @@
 [project]
 name = "bidcraft"
-version = "0.6.7"
-description = "弱电行业投标文件生成内核：解析 → 事实台账 → 规则引擎 → 大纲/正文 → 核对 → DOCX"
+version = "0.6.8"
+description = "投标文件编制系统：招标解析 → 事实台账 → 规则引擎 → 大纲/正文 → 合规核对 → 清单报价 → DOCX/PDF 导出"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Proprietary (All Rights Reserved)" }
 authors = [{ name = "yaoyongli1974-dotcom" }]
-keywords = ["tender", "bid", "docx", "weak-current", "rules-engine"]
+keywords = ["tender", "bid", "bidding", "boq", "docx", "rules-engine", "compliance"]
 classifiers = [
   "License :: Other/Proprietary License",
   "Programming Language :: Python :: 3",
@@ -48,6 +48,10 @@ dev = [
   "ruff>=0.5",
   "httpx>=0.27",
 ]
+# 桌面客户端已归档（v0.6.3）。以下 extra 仅用于可复现地重建既有产物，不随新功能演进。
+# 精确版本以 uv.lock 为准：uv sync --frozen --extra desktop --extra build
+desktop = ["qtpy>=2.4", "PySide6>=6.6", "pywebview>=5.1"]
+build = ["pyinstaller>=6.6"]
 
 [project.scripts]
 bidcraft = "bidcraft.cli:app"

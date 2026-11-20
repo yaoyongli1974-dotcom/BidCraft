@@ -28,7 +28,7 @@
 | C7 可插拔 Agent / API | ✅ | `generation/agent.py`、`bidcraft/api.py`、`bidcraft/mcp.py` | OpenAI 兼容端点；FastAPI + 后台生成任务；MCP stdio 服务 |
 | C8 行业包 | ✅ 8 个行业包 + 通用基包 | `bidcraft/resources/packages/*.yaml` | 弱电（综合布线/安防/BA）+ 消防、安装、土建、暖通、装修；管理员可在 `/admin` 维护 YAML 覆盖包 |
 | 规则包管理 | ✅ | `rules/store.py`、`/admin/rule-packages`、`web/` | 超级管理员创建/修改/隐藏/恢复规则包；新建时可填写名称、唯一包名并选择工程类型；内置包只读，用户覆盖写入 `BIDCRAFT_HOME/packages`；保存前校验继承、字段、大纲与核对表达式 |
-| C9 回归/部署 | ✅ 基本 | `tests/`、`Dockerfile`、`web/` | 718 个测试；Docker 多阶段构建 Web（含 OCR 依赖）；本地/局域网两种部署 |
+| C9 回归/部署 | ✅ 基本 | `tests/`、`Dockerfile`、`web/` | 723 个测试；Docker 多阶段构建 Web（含 OCR 依赖）；本地/局域网两种部署 |
 | SSE 流式进度 | ✅ | `bidcraft/jobs.py`、`/jobs/{id}/events`、`web/` | 章节/逐字事件持久化；Last-Event-ID 断线续传；SSE 失败回退轮询；刷新后重新挂接任务 |
 | Excel 清单双向对齐 | ✅ | `boq.py`、`export/boq_xlsx.py`、`/projects/{ref}/boq`、`web/` | 清单导入与表头识别、材料模糊匹配、缺项/多项/数量·单位·规格差异、差异回写、响应表导出 |
 | 清单报价 | ✅ | `boq.py`、`/projects/{ref}/boq/price`、`export/boq_xlsx.py`、`web/` | 逐行单价录入/清除、按清单数量计算合价、已报价/未报价/缺数量统计、报价汇总与响应表价格列；不自动生成价格 |
@@ -38,7 +38,7 @@
 | 模型配置中心 | ✅ | `model_config.py`、`/admin/models`、`web/` | 对话/图片/向量模型；默认对话与图片模型接入生成；连通性测试；密钥加密 |
 | 知识库对接 | ✅ | `knowledge.py`、`/admin/kbs`、`web/` | 本地目录索引；通用/Dify/RAGFlow API；章节检索注入；台账优先 |
 | 向量语义检索 | ✅ 可选 | `knowledge.py`、`model_config.resolve_embedding_endpoint`、`/admin/kbs/{id}/embed`、`web/` | embedding 向量索引与混合重排；换模型自动失效；无模型/失败回退关键词召回 |
-| 桌面客户端（C/S） | 📦 已归档 v0.6.3 | `desktop.py`、`client.py`、`bidcraft desktop`、`bidcraft client`、`docs/desktop.md` | Qt 原生外壳 + QWebChannel 桥直连 REST API（`--browser` 保留本地网关：仅 127.0.0.1 + 令牌门禁，作为回退）；Cookie/SSE 透传、静态与 SPA 回退；本地文件桥选择本机文件直传我的文档/项目原件；命令行客户端登录/项目/上传/下载与 Cookie 持久化。冻结于 v0.6.3，不再新增功能 |
+| 桌面客户端（C/S） | 📦 已归档 v0.6.3 | `desktop.py`、`client.py`、`bidcraft desktop`、`bidcraft client`、`docs/desktop.md` | Qt 原生外壳 + QWebChannel 桥直连 REST API（`--browser` 保留本地网关：仅 127.0.0.1 + 令牌门禁，作为回退）；Cookie/SSE 透传、静态与 SPA 回退；本地文件桥选择本机文件直传我的文档/项目原件；命令行客户端登录/项目/上传/下载与 Cookie 持久化。冻结于 v0.6.3，不再新增功能；依赖冻结配方（`desktop`/`build` extra + `uv.lock`），CI 仅手动触发且默认不附加 Release |
 | 时区一致性 | ✅ | `clock.py`、`tests/test_clock.py` | 存储 naive UTC；日历日按北京时间；对外时间戳带偏移；源级护栏防回退 |
 | 素材可信度分级 | ✅ | `material_policy.py`、`resources/packages/*.yaml`、`/admin/kbs/{id}/docs` | 规则包 `material_policy` 声明每类素材必填生命周期字段；检索注入按可信度分级，缺失/过期降级为题录；有效期按北京时间判定（`clock.py`），未知/缺失 kind 失败关闭，写入侧类型必填；「其他素材」必须带出处（`source_url`），不留免检类别；文档元数据存 `knowledge_bases.options.docs` |
 | 解析深度（MinerU） | ✅ 可选 | `parsing/mineru.py`、`BIDCRAFT_MINERU_URL`、`bidcraft mineru-check` | 复杂版面/扫描件交给 MinerU，取 Markdown + 表格；失败/超时回退内置链路；页数为估算 |

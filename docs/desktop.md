@@ -72,7 +72,7 @@ GET 请求成功时按「服务器 + 路径」缓存到 `~/.config/bidcraft-clie
 
 - **Windows**：WebView2（Win10+ 通常自带）
 - **macOS**：系统 WKWebView
-- **Linux**：需要 `PySide6` + `qtpy`（推荐，`uv pip install PySide6 qtpy`）或 `python3-gi` + WebKitGTK；缺失时自动回退浏览器模式。Wayland 桌面建议 `QT_QPA_PLATFORM=wayland`，容器/root 环境加 `QTWEBENGINE_DISABLE_SANDBOX=1`
+- **Linux**：需要 `PySide6` + `qtpy`（推荐，`uv sync --frozen --extra desktop`）或 `python3-gi` + WebKitGTK；缺失时自动回退浏览器模式。Wayland 桌面建议 `QT_QPA_PLATFORM=wayland`，容器/root 环境加 `QTWEBENGINE_DISABLE_SANDBOX=1`
 
 ## 启动
 
@@ -144,7 +144,16 @@ bidcraft client download DOC_ID --out ./downloads/
 | Windows | `packaging/build_windows.ps1` | `dist/bidcraft-desktop-<版本>-windows.zip`（内含 `BidCraft.exe`） |
 | macOS | `bash packaging/build_macos_app.sh` | `dist/bidcraft-desktop-<版本>-macos.zip`（内含 `BidCraft.app`） |
 
-前置：`npm run build`（web）→ `uv pip install pyinstaller` → `bash packaging/build_pyinstaller.sh`。
+前置（依赖已固化为「冻结配方」，精确版本由 `uv.lock` 锁定）：
+
+```bash
+cd web && npm run build && cd ..
+uv sync --frozen --extra desktop --extra build   # qtpy / PySide6 / pywebview / pyinstaller
+bash packaging/build_pyinstaller.sh
+```
+
+`pyproject.toml` 的 `desktop` / `build` 两个 extra 仅用于可复现地重建既有产物，不随新功能演进；
+`build_pyinstaller.sh` 会先检查这四个依赖是否装齐，缺失时直接给出上面的命令。
 deb 使用 `dpkg-deb` 直接构建（无 debhelper 依赖），rpm 使用 `nfpm`。
 
 安装后：
@@ -155,7 +164,11 @@ deb 使用 `dpkg-deb` 直接构建（无 debhelper 依赖），rpm 使用 `nfpm`
 启动时可用 `--server URL` 指定服务器，或设置环境变量 `BIDCRAFT_SERVER`，
 或先执行一次 `bidcraft client login --server URL` 保存地址，之后双击即自动连接。
 
-跨平台构建由 `.github/workflows/desktop-release.yml` 负责，**仅手动触发**（客户端已暂停更新）：
+跨平台构建由 `.github/workflows/desktop-release.yml` 负责，**仅手动触发**（客户端已归档）：
 在 Actions → desktop-release → Run workflow 选择 release 分支或 tag，才会在 Windows / macOS /
-Ubuntu 三个原生 runner 上构建并把 `.zip`、`.deb`、`.rpm` 附加到 Release。
+Ubuntu 三个原生 runner 上构建，产物以 Actions artifact 形式留存。
 服务端提交与打 tag 不再连带构建客户端。
+
+**是否重新对外分发由 `attach_to_release` 输入决定，默认关闭**：只有勾选它且 ref 是 tag 时，
+才会把 `.zip` / `.deb` / `.rpm` 附加到 Release。v0.6.3 的安装包已撤下，勾选即等于恢复分发，
+届时须自行履行 `NOTICE` 中 Qt/PySide6 的 LGPL-3.0 义务。
