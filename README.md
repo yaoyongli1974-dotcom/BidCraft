@@ -260,6 +260,8 @@ export BIDCRAFT_WECHAT_PAY_MOCK=1         # 本地演示支付
 - [`docs/plugins.md`](docs/plugins.md)：MCP 客户端插件市场、聚合与安全边界。
 - [`docs/calibration.md`](docs/calibration.md)：真实招标文件回归校准命令与报告字段。
 - [`docs/C1-spec.md`](docs/C1-spec.md)：领域规格（事实台账 Schema 与规则口径）。
+- [`docs/release-notes/`](docs/release-notes/README.md)：按版本归档的对外发版口径（Release 正文源文件）、
+  桌面客户端归档声明与统一回复模板。
 - [`LICENSE`](LICENSE) / [`NOTICE`](NOTICE)：专有许可条款与第三方组件许可。
 
 ## MVP 范围（C1–C4 + 最小交付）
