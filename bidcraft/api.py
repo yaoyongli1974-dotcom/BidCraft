@@ -500,7 +500,8 @@ class ModelUpdate(BaseModel):
 
 class KbDocMeta(BaseModel):
     source: str = Field(min_length=1, max_length=1000)
-    kind: str = "other"
+    #: 必填：缺省不再默认成 other，避免把未分类素材当免检类别。
+    kind: str = Field(min_length=1, max_length=40)
     title: str = Field(default="", max_length=200)
     cert_no: str = Field(default="", max_length=120)
     contract_no: str = Field(default="", max_length=120)
@@ -2503,7 +2504,7 @@ def create_app():
             items = []
             for source, meta in sorted(docs.items()):
                 record = dict(meta or {})
-                kind = str(record.get("kind") or "other")
+                kind = str(record.get("kind") or "")
                 fields = {key: value for key, value in record.items() if key != "kind"}
                 verdict = material_policy.assess(record)
                 items.append(

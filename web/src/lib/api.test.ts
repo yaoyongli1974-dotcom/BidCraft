@@ -2382,13 +2382,17 @@ describe('personnel & kb document metadata (R34)', () => {
       'social_months',
       'locked',
     ])
-    expect(fallback.other).toEqual({ label: '其他素材', required: [], hint: '' })
+    expect(fallback.other).toEqual({
+      label: '其他素材',
+      required: ['source_url'],
+      hint: '官方出处或来源链接',
+    })
 
     const custom = normalizeKbDocPolicy({
       custom: { label: '自定义', required: ['x', 'x', ''] },
     })
     expect(custom.custom).toEqual({ label: '自定义', required: ['x'], hint: '' })
-    expect(custom.other.required).toEqual([])
+    expect(custom.other.required).toEqual(['source_url'])
   })
 
   it('normalizes kb docs, filters invalid items and dedupes sources', () => {

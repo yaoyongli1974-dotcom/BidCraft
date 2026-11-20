@@ -26,8 +26,10 @@ def test_assess_ok_missing_expired():
         {"kind": "qualification", "cert_no": "D1", "valid_to": "2000-01-01"}
     )
     assert not expired.ok and expired.expired and "已过期" in expired.reason
+    # other 不是免检通道：没有可追溯出处时降级
     other = material_policy.assess({"kind": "other"})
-    assert other.ok
+    assert not other.ok and "官方出处" in other.reason
+    assert material_policy.assess({"kind": "other", "source_url": "https://x"}).ok
 
 
 def test_assess_unknown_or_missing_kind_fails_closed():
@@ -182,6 +184,11 @@ def test_set_meta_validates_and_persists(db):
                 material_policy.set_meta(session, kb, "b.md", payload)
         with pytest.raises(material_policy.KnowledgeError):
             material_policy.set_meta(session, kb, "  ", {"kind": "other"})
+        # 缺 kind 不再静默落成 other
+        for payload in ({}, {"kind": ""}, {"kind": "   "}):
+            with pytest.raises(material_policy.KnowledgeError) as excinfo:
+                material_policy.set_meta(session, kb, "c.md", payload)
+            assert "素材类型必填" in str(excinfo.value)
 
         record2 = material_policy.set_meta(session, kb, "a.md", {"kind": "other", "title": "改名"})
         assert record2["title"] == "改名"
@@ -201,3 +208,27 @@ def test_context_block_downgrades_unknown_kind(monkeypatch):
     assert downgraded == 1
     assert "某证书有效期已过正文" not in block
     assert "[题录] 资质X" in block and "未知素材类型" in block
+
+def test_context_block_downgrades_unattributed_other(monkeypatch):
+    """语义层失败关闭：other 没有出处也不能整段注入。"""
+    monkeypatch.setattr(
+        material_policy,
+        "find_meta",
+        lambda db, source: (None, {"kind": "other", "title": "某扫描件"}),
+    )
+    block, downgraded = material_policy.context_block(
+        None, [Passage(kb="k", source="/kb/scan.pdf", text="一页资质证书扫描件正文", score=0.9)]
+    )
+    assert downgraded == 1
+    assert "一页资质证书扫描件正文" not in block
+    assert "[题录] 某扫描件" in block and "未注入正文" in block
+
+    monkeypatch.setattr(
+        material_policy,
+        "find_meta",
+        lambda db, source: (None, {"kind": "other", "title": "行业白皮书", "source_url": "https://x"}),
+    )
+    block2, downgraded2 = material_policy.context_block(
+        None, [Passage(kb="k", source="/kb/paper.md", text="行业背景正文", score=0.9)]
+    )
+    assert downgraded2 == 0 and "行业背景正文" in block2

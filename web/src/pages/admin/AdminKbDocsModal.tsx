@@ -58,7 +58,7 @@ export function AdminKbDocsModal({
   const [error, setError] = useState<string | null>(null)
   const [reloadKey, setReloadKey] = useState(0)
   const [selected, setSelected] = useState('')
-  const [kind, setKind] = useState('other')
+  const [kind, setKind] = useState('')
   const [fields, setFields] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
@@ -95,7 +95,7 @@ export function AdminKbDocsModal({
   useEffect(() => {
     if (!data) return
     const item = data.items.find((entry) => entry.source === selected)
-    setKind(item?.kind || 'other')
+    setKind(item?.kind || '')
     setFields(item ? { ...item.fields } : {})
   }, [selected, data])
 
@@ -114,6 +114,10 @@ export function AdminKbDocsModal({
 
   const save = async () => {
     if (!selected || saving) return
+    if (!kind) {
+      setActionError('请先选择素材类型')
+      return
+    }
     setSaving(true)
     setActionError(null)
     try {
@@ -423,10 +427,13 @@ export function AdminKbDocsModal({
                     }}
                     disabled={saving || deleting}
                   >
+                    <option value="" disabled>
+                      请选择素材类型
+                    </option>
                     {kindOptions.map(([value, spec]) => (
                       <option key={value} value={value}>
                         {spec.label || value}
-                        {value === 'other' ? '（无需必填）' : ''}
+                        {value === 'other' ? '（需出处）' : ''}
                       </option>
                     ))}
                   </select>

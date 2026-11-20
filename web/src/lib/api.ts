@@ -1255,7 +1255,11 @@ export const DEFAULT_KB_DOC_POLICY: KbDocPolicy = {
     required: ['source_url'],
     hint: '官方出处',
   },
-  other: { label: '其他素材', required: [], hint: '' },
+  other: {
+    label: '其他素材',
+    required: ['source_url'],
+    hint: '官方出处或来源链接',
+  },
 }
 
 function normalizeKbDocPolicyEntry(value: unknown, kind: string): KbDocPolicyEntry {
@@ -1293,7 +1297,7 @@ export function normalizeKbDocPolicy(value: unknown): KbDocPolicy {
       Object.entries(DEFAULT_KB_DOC_POLICY).map(([kind, entry]) => [kind, { ...entry }]),
     )
   }
-  if (!policy.other) policy.other = { label: '其他素材', required: [], hint: '' }
+  if (!policy.other) policy.other = { ...DEFAULT_KB_DOC_POLICY.other }
   return policy
 }
 

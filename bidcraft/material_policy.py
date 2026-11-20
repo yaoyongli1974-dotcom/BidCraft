@@ -41,7 +41,12 @@ DEFAULT_POLICY: dict[str, dict[str, Any]] = {
         "required": ["source_url"],
         "hint": "官方出处",
     },
-    "other": {"label": "其他素材", "required": [], "hint": ""},
+    # other 不是免检通道：至少要求可追溯出处，否则过期/无据素材会整段注入正文。
+    "other": {
+        "label": "其他素材",
+        "required": ["source_url"],
+        "hint": "官方出处或来源链接",
+    },
 }
 
 FIELD_LABELS = {
@@ -186,7 +191,10 @@ def set_meta(db, kb, source: str, meta: dict[str, Any]) -> dict[str, Any]:
     if not source:
         raise KnowledgeError("来源不能为空")
     rules = load_policy()
-    kind = str(meta.get("kind") or "other")
+    # 缺 kind 不能静默落成 other（否则写入侧与读取侧的失败关闭不对称）
+    kind = str(meta.get("kind") or "").strip()
+    if not kind:
+        raise KnowledgeError("素材类型必填")
     if kind not in rules:
         raise KnowledgeError(f"素材类型无效：{kind}")
     valid_to = str(meta.get("valid_to") or "").strip()

@@ -280,4 +280,6 @@ material_policy:
     hint: 官方出处
   other:
     label: 其他素材
-    required: []
+    # 不是免检通道：至少要有可追溯出处
+    required: [source_url]
+    hint: 官方出处或来源链接
