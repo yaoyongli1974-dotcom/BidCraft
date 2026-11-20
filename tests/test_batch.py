@@ -183,6 +183,11 @@ def test_batch_export_zip_partial_failure_and_download(team):
     blank = _make_project(admin, "无正文项目")
     _give_body(admin, first["id"])
     _give_body(admin, second["id"])
+    # 批量导出同样是交付路径，只读已确认章节（复核流转本身另有专门用例）。
+    from helpers import confirm_project_chapters
+
+    confirm_project_chapters(first["id"])
+    confirm_project_chapters(second["id"])
 
     started = admin.post(
         "/projects/batch-export",

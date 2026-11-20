@@ -117,7 +117,17 @@ def _migrate_columns(engine) -> None:
             ("node_id", "VARCHAR(36)"),
             ("auto_covered", "BOOLEAN DEFAULT 0"),
         ],
-        "sections": [("revision", "INTEGER DEFAULT 0")],
+        "sections": [
+            ("revision", "INTEGER DEFAULT 0"),
+            ("review_status", "VARCHAR(16) DEFAULT 'draft'"),
+            ("review_note", "TEXT DEFAULT ''"),
+            ("review_requested_at", "DATETIME"),
+            ("review_requested_by", "VARCHAR(80)"),
+            ("confirmed_at", "DATETIME"),
+            ("confirmed_by", "VARCHAR(80)"),
+            ("locked_at", "DATETIME"),
+            ("locked_by", "VARCHAR(80)"),
+        ],
         "kb_chunks": [
             ("embedding", "JSON"),
             ("embed_key", "VARCHAR(200) DEFAULT ''"),

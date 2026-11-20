@@ -784,6 +784,7 @@ def run(
         from .export.docx import export_docx
 
         # 一条命令跑到 DOCX 也是真实导出路径，同样过交付硬门禁（按本地操作者处理）。
+        # 但 `run` 本身没有复核环节，章节确认在这里不适用（人工检查点在交互式导出）。
         try:
             enforce_export_gate(
                 db,
@@ -792,6 +793,7 @@ def run(
                 force=force,
                 force_reason=force_reason,
                 source="cli",
+                require_confirmed_chapters=False,
             )
         except ExportGateError as exc:
             console.print(f"[red]{exc}[/red]")

@@ -448,6 +448,10 @@ def _prepared_project(client, tender_path, name: str = "门禁项目") -> str:
     written = client.post(f"/projects/{project_id}/write")
     assert written.status_code == 200, written.text
     assert written.json()["failed"] == []
+    # 章节确认是独立硬检查点；本文件只关心风险门禁，这里直接置为已确认
+    from helpers import confirm_project_chapters
+
+    confirm_project_chapters(project_id)
     return project_id
 
 
@@ -544,6 +548,7 @@ def _project_with_body(name: str) -> str:
                 body="本方案采用 Cat6A 综合布线系统，满足招标要求。",
                 status="written",
                 words=20,
+                review_status="confirmed",
             )
         )
         return project.id

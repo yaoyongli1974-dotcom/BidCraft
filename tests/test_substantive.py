@@ -91,7 +91,15 @@ def _seed_section(project_id: str, heading: str, body: str, position: int = 1) -
         node = OutlineNode(project_id=project_id, heading=heading, position=position)
         session.add(node)
         session.flush()
-        session.add(Section(node_id=node.id, body=body, status="written", words=len(body)))
+        session.add(
+            Section(
+                node_id=node.id,
+                body=body,
+                status="written",
+                words=len(body),
+                review_status="confirmed",
+            )
+        )
         session.flush()
         return node.id
 

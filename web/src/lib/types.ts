@@ -461,6 +461,8 @@ export interface OutlineChapter {
   citations?: number
   /** 命中字段中，台账取值已被改写、正文仍是旧值的数量。 */
   citations_stale?: number
+  /** 章节复核状态：draft / review / confirmed / locked。 */
+  review_status?: string
 }
 
 export interface ChapterDetail {
@@ -475,6 +477,14 @@ export interface ChapterDetail {
   revision?: number
   citations?: number
   citations_stale?: number
+  review_status?: string
+  review_note?: string
+  review_requested_at?: string | null
+  review_requested_by?: string
+  confirmed_at?: string | null
+  confirmed_by?: string
+  locked_at?: string | null
+  locked_by?: string
 }
 
 /** 正文里出现的一处台账取值。 */

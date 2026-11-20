@@ -60,6 +60,10 @@ def test_api_project_lifecycle(db, tender_path):
     assert written.status_code == 200
     assert written.json()["failed"] == []
 
+    from helpers import confirm_project_chapters
+
+    confirm_project_chapters(project_id)
+
     checked = client.post(f"/projects/{project_id}/check")
     assert checked.status_code == 200
     assert checked.json()["verdict"] in {"pass", "warn"}

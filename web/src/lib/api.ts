@@ -2097,6 +2097,18 @@ export async function getChapter(ref: string, nodeId: string): Promise<ChapterDe
 }
 
 /** 本章正文的台账来源追溯（读侧，viewer 也可读）。 */
+export async function reviewChapter(
+  ref: string,
+  nodeId: string,
+  action: 'submit' | 'confirm' | 'revert' | 'lock' | 'unlock',
+  note = '',
+): Promise<ChapterDetail> {
+  return request<ChapterDetail>(
+    `/projects/${encodeURIComponent(ref)}/chapters/${encodeURIComponent(nodeId)}/review`,
+    { method: 'POST', body: JSON.stringify({ action, note }) },
+  )
+}
+
 export async function getChapterCitations(
   ref: string,
   nodeId: string,

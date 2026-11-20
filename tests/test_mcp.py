@@ -58,7 +58,15 @@ def _seed_chapter(project_id: str, body: str = "本方案采用 Cat6A 综合布�
         node = OutlineNode(project_id=project_id, heading="总体方案", position=1)
         db.add(node)
         db.flush()
-        db.add(Section(node_id=node.id, body=body, status="written", words=len(body)))
+        db.add(
+            Section(
+                node_id=node.id,
+                body=body,
+                status="written",
+                words=len(body),
+                review_status="confirmed",
+            )
+        )
         return node.id
 
 

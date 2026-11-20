@@ -386,6 +386,16 @@ class Section(Base):
     # Optimistic concurrency token, bumped on every manual chapter save.
     revision: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+    # 章节复核流转：draft → review → confirmed → locked。
+    # 投标团队的人工检查点，不追求可配置流程；已确认/锁定后正文不可改，导出只认已确认。
+    review_status: Mapped[str] = mapped_column(String(16), default="draft")
+    review_note: Mapped[str] = mapped_column(Text, default="")
+    review_requested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    review_requested_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    confirmed_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    locked_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
 
 
 class Issue(Base):

@@ -41,6 +41,7 @@ import {
   listImages,
   messageOf,
   regenerateImage,
+  reviewChapter,
   saveChapter,
   startDocumentGeneration,
   startImageBatch,
@@ -56,6 +57,14 @@ import type {
   ImagePolicy,
   Job,
 } from '../../lib/types'
+import {
+  isChapterFrozen,
+  reviewDoneMessage,
+  reviewMeta,
+  reviewStatus,
+  reviewSteps,
+  type ReviewAction,
+} from '../../lib/review'
 import {
   chapterStatus,
   className,
@@ -295,6 +304,9 @@ export function DraftTab() {
   const [conflict, setConflict] = useState<ChapterConflict | null>(null)
   const [resolvingConflict, setResolvingConflict] = useState(false)
   const [generatingChapter, setGeneratingChapter] = useState(false)
+  const [reviewBusy, setReviewBusy] = useState(false)
+  const [reviewNoteFor, setReviewNoteFor] = useState<ReviewAction | null>(null)
+  const [reviewNote, setReviewNote] = useState('')
   const [job, setJob] = useState<Job | null>(null)
   const [streamFallback, setStreamFallback] = useState(false)
   const [streamPreview, setStreamPreview] = useState<{
@@ -747,6 +759,40 @@ export function DraftTab() {
     setPreview(Boolean((detail.body || '').trim()))
     return detail
   }, [ref])
+
+  const reviewOwner = project?.my_role === 'owner' || project?.my_role === 'admin'
+  const chapterReview = chapterQuery.data?.review_status || selectedChapter?.review_status
+  const reviewFrozen = isChapterFrozen(chapterReview)
+  const steps = reviewSteps(chapterReview, Boolean(reviewOwner))
+
+  const applyReview = async (action: ReviewAction, note = '') => {
+    if (!selectedId) return
+    setReviewBusy(true)
+    try {
+      const updated = await reviewChapter(ref, selectedId, action, note)
+      chapterQuery.setData(updated)
+      setRevision(updated.revision ?? 0)
+      setSavedBody(updated.body || '')
+      await outlineQuery.refresh()
+      await reloadProject()
+      toast.success(reviewDoneMessage(action), selectedChapter?.heading || '当前章节')
+      setReviewNoteFor(null)
+      setReviewNote('')
+    } catch (error) {
+      handleError(error, '章节状态流转失败')
+    } finally {
+      setReviewBusy(false)
+    }
+  }
+
+  const startReview = (action: ReviewAction, needsNote?: boolean) => {
+    if (needsNote) {
+      setReviewNote('')
+      setReviewNoteFor(action)
+      return
+    }
+    void applyReview(action)
+  }
 
   const runChapter = async () => {
     if (!canWrite || !selectedId || !selectedChapter || generatingChapter) return
@@ -1902,6 +1948,11 @@ export function DraftTab() {
                           需复核
                         </Badge>
                       ) : null}
+                      {reviewStatus(chapter.review_status) !== 'draft' && (
+                        <Badge tone={reviewMeta(chapter.review_status).tone} subtle>
+                          {reviewMeta(chapter.review_status).label}
+                        </Badge>
+                      )}
                       <Badge tone={meta.tone} subtle>
                         {meta.label}
                       </Badge>
@@ -1936,6 +1987,12 @@ export function DraftTab() {
                     <div className="editor-meta">
                       <Badge tone={currentStatus.tone} subtle>
                         {currentStatus.label}
+                      </Badge>
+                      <Badge
+                        tone={reviewMeta(chapterReview).tone}
+                        title={reviewMeta(chapterReview).hint}
+                      >
+                        {reviewMeta(chapterReview).label}
                       </Badge>
                       <span>
                         目标 <strong>{formatNumber(targetWords)}</strong> 字
@@ -1991,8 +2048,14 @@ export function DraftTab() {
                       size="sm"
                       icon={<Save size={14} />}
                       loading={saving}
-                      disabled={!canWrite || !dirty}
-                      title={!canWrite ? '只读成员不能保存正文' : undefined}
+                      disabled={!canWrite || !dirty || reviewFrozen}
+                      title={
+                        reviewFrozen
+                          ? '本章已确认，需先撤回为草稿才能修改'
+                          : !canWrite
+                            ? '只读成员不能保存正文'
+                            : undefined
+                      }
                       onClick={() => void save()}
                     >
                       保存
@@ -2002,14 +2065,61 @@ export function DraftTab() {
                       size="sm"
                       icon={<Wand2 size={14} />}
                       loading={generatingChapter}
-                      disabled={!canWrite || jobActive || !loadedId}
-                      title={!canWrite ? '只读成员不能生成正文' : undefined}
+                      disabled={!canWrite || jobActive || !loadedId || reviewFrozen}
+                      title={
+                        reviewFrozen
+                          ? '本章已确认，需先撤回为草稿才能重新生成'
+                          : !canWrite
+                            ? '只读成员不能生成正文'
+                            : undefined
+                      }
                       onClick={() => void runChapter()}
                     >
                       {savedBody ? '重新生成本章' : '生成本章'}
                     </Button>
                   </div>
                 </header>
+
+                {(steps.length > 0 || reviewFrozen) && (
+                  <div
+                    className={className('review-bar', reviewFrozen && 'is-frozen')}
+                    role="status"
+                  >
+                    <div className="review-bar-text">
+                      <Badge tone={reviewMeta(chapterReview).tone} subtle>
+                        {reviewMeta(chapterReview).label}
+                      </Badge>
+                      <span>{reviewMeta(chapterReview).hint}</span>
+                      {chapterQuery.data?.confirmed_by && (
+                        <span className="review-bar-meta">
+                          确认人 {chapterQuery.data.confirmed_by}
+                          {chapterQuery.data.confirmed_at
+                            ? ` · ${formatRelative(chapterQuery.data.confirmed_at)}`
+                            : ''}
+                        </span>
+                      )}
+                      {chapterQuery.data?.locked_by && (
+                        <span className="review-bar-meta">
+                          锁定人 {chapterQuery.data.locked_by}
+                        </span>
+                      )}
+                    </div>
+                    <div className="review-bar-actions">
+                      {steps.map((step) => (
+                        <Button
+                          key={step.action}
+                          variant={step.variant}
+                          size="sm"
+                          loading={reviewBusy}
+                          disabled={!canWrite || reviewBusy}
+                          onClick={() => startReview(step.action, step.needsNote)}
+                        >
+                          {step.label}
+                        </Button>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 {activeCitation && (
                   <div className="trace-card" role="status">
@@ -2936,8 +3046,14 @@ export function DraftTab() {
                     placeholder="开始书写本章正文。支持 Markdown：# 标题、**加粗**、- 列表、| 表格 |。"
                     spellCheck={false}
                     aria-label={`${selectedChapter.heading} 正文`}
-                    readOnly={!canWrite}
-                    title={!canWrite ? '只读成员不能编辑正文' : undefined}
+                    readOnly={!canWrite || reviewFrozen}
+                    title={
+                      reviewFrozen
+                        ? '本章已确认，需先撤回为草稿才能编辑'
+                        : !canWrite
+                          ? '只读成员不能编辑正文'
+                          : undefined
+                    }
                   />
                 )}
 
@@ -3033,6 +3149,53 @@ export function DraftTab() {
             </p>
           </div>
         )}
+      </Modal>
+
+      <Modal
+        open={reviewNoteFor !== null}
+        onClose={() => {
+          setReviewNoteFor(null)
+          setReviewNote('')
+        }}
+        title={reviewNoteFor === 'unlock' ? '解锁本章' : '撤回本章'}
+        eyebrow="章节复核"
+        size="sm"
+        footer={
+          <>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setReviewNoteFor(null)
+                setReviewNote('')
+              }}
+            >
+              取消
+            </Button>
+            <Button
+              variant="primary"
+              loading={reviewBusy}
+              disabled={reviewNote.trim().length < 4}
+              onClick={() => reviewNoteFor && void applyReview(reviewNoteFor, reviewNote)}
+            >
+              {reviewNoteFor === 'unlock' ? '确认解锁' : '确认撤回'}
+            </Button>
+          </>
+        }
+      >
+        <p className="review-note-hint">
+          {reviewNoteFor === 'unlock'
+            ? '解锁后本章回到「已确认」，正文仍不可直接编辑；要改还需撤回为草稿。'
+            : '撤回后本章回到草稿，正文可以继续修改；已确认状态与确认人记录会被清空。'}
+        </p>
+        <label className="review-note-field">
+          <span>原因（至少 4 个字，写入审计）</span>
+          <textarea
+            value={reviewNote}
+            onChange={(event) => setReviewNote(event.target.value)}
+            rows={3}
+            placeholder="例如：客户要求补充分包说明"
+          />
+        </label>
       </Modal>
     </div>
   )

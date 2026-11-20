@@ -218,6 +218,7 @@ def load_outline(db: Session, project_id: str) -> list[dict[str, Any]]:
                 "body": section.body if section else "",
                 "words": section.words if section else 0,
                 "section_id": section.id if section else None,
+                "review_status": (section.review_status if section else "draft") or "draft",
             }
         )
     return out

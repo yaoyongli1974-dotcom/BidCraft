@@ -234,6 +234,13 @@ class ChapterSave(BaseModel):
     base_revision: int | None = None
 
 
+class ChapterReview(BaseModel):
+    """章节复核流转：草稿 → 待复核 → 已确认 → 已锁定。"""
+
+    action: Literal["submit", "confirm", "revert", "lock", "unlock"]
+    note: str = Field(default="", max_length=500)
+
+
 class GenerateRequest(BaseModel):
     force: bool = False
 
@@ -5227,6 +5234,16 @@ def create_app():
             "revision": (section.revision or 0) if section else 0,
             "citations": len(citations),
             "citations_stale": sum(1 for item in citations if item["stale"]),
+            "review_status": (section.review_status if section else "draft") or "draft",
+            "review_note": section.review_note if section else "",
+            "review_requested_at": clock.iso_beijing(section.review_requested_at)
+            if section
+            else None,
+            "review_requested_by": (section.review_requested_by or "") if section else "",
+            "confirmed_at": clock.iso_beijing(section.confirmed_at) if section else None,
+            "confirmed_by": (section.confirmed_by or "") if section else "",
+            "locked_at": clock.iso_beijing(section.locked_at) if section else None,
+            "locked_by": (section.locked_by or "") if section else "",
         }
 
     @app.get("/projects/{ref}/chapters/{node_id}")
@@ -5276,6 +5293,12 @@ def create_app():
                         "current_words": section.words if section is not None else 0,
                     },
                 )
+            review_before = (section.review_status if section is not None else "draft") or "draft"
+            if review_before in {"confirmed", "locked"}:
+                raise _http_error(
+                    409,
+                    "本章已确认，不能再直接修改；如需改动请先撤回为草稿",
+                )
             if section is None:
                 section = Section(node_id=node.id)
                 db.add(section)
@@ -5284,9 +5307,107 @@ def create_app():
             section.status = "edited"
             section.revision = current_revision + 1
             node.status = "edited"
+            # 待复核的正文一旦被改写，复核对象已变，自动退回草稿（不可绕过检查点）。
+            if review_before == "review":
+                section.review_status = "draft"
+                section.review_requested_at = None
+                section.review_requested_by = None
             db.flush()
             provenance.refresh_node(db, project.id, node.id, payload.body)
-            audit(db, project.id, "chapter.save", {"heading": node.heading})
+            detail = {"heading": node.heading}
+            if review_before == "review":
+                detail["review_reverted"] = True
+            audit(db, project.id, "chapter.save", detail)
+            return _chapter_payload(db, node)
+
+    @app.post("/projects/{ref}/chapters/{node_id}/review")
+    def review_chapter(ref: str, node_id: str, payload: ChapterReview) -> dict[str, Any]:
+        """章节复核流转，写入审计。
+
+        草稿 --提交--> 待复核 --负责人确认--> 已确认 --负责人锁定--> 已锁定。
+        已确认/已锁定的正文不可编辑、不可重生成；导出只读取已确认（含已锁定）的章节。
+        """
+
+        with session_scope() as db:
+            project, role = _project(db, ref)
+            node = _node(db, project.id, node_id)
+            section = db.scalar(select(Section).where(Section.node_id == node.id))
+            if section is None:
+                section = Section(node_id=node.id)
+                db.add(section)
+                db.flush()
+            current = (section.review_status or "draft")
+            action = payload.action
+            note = (payload.note or "").strip()
+            username = str((current_user() or {}).get("username") or "")
+
+            def need_note(message: str) -> None:
+                if len(note) < 4:
+                    raise _http_error(400, message)
+
+            if action == "submit":
+                _require_write(role)
+                if current != "draft":
+                    raise _http_error(409, "只有草稿可以提交复核")
+                if not (section.body or "").strip():
+                    raise _http_error(409, "本章还没有正文，无法提交复核")
+                section.review_status = "review"
+                section.review_requested_at = clock.utc_now()
+                section.review_requested_by = username
+                section.review_note = note
+            elif action == "confirm":
+                _require_owner(role)
+                if current != "review":
+                    raise _http_error(409, "只有待复核的章节可以确认")
+                section.review_status = "confirmed"
+                section.confirmed_at = clock.utc_now()
+                section.confirmed_by = username
+                section.review_note = note
+            elif action == "lock":
+                _require_owner(role)
+                if current != "confirmed":
+                    raise _http_error(409, "只有已确认的章节可以锁定")
+                section.review_status = "locked"
+                section.locked_at = clock.utc_now()
+                section.locked_by = username
+            elif action == "unlock":
+                _require_owner(role)
+                if current != "locked":
+                    raise _http_error(409, "只有已锁定的章节可以解锁")
+                need_note("解锁章节必须说明原因（至少 4 个字）")
+                section.review_status = "confirmed"
+                section.locked_at = None
+                section.locked_by = None
+                section.review_note = note
+            else:  # revert
+                if current in {"confirmed", "locked"}:
+                    _require_owner(role)
+                    need_note("撤回已确认的章节必须说明原因（至少 4 个字）")
+                else:
+                    _require_write(role)
+                if current == "draft":
+                    raise _http_error(409, "本章已经是草稿")
+                section.review_status = "draft"
+                section.review_requested_at = None
+                section.review_requested_by = None
+                section.confirmed_at = None
+                section.confirmed_by = None
+                section.locked_at = None
+                section.locked_by = None
+                section.review_note = note
+            db.flush()
+            audit(
+                db,
+                project.id,
+                "chapter.review",
+                {
+                    "heading": node.heading,
+                    "action": action,
+                    "from": current,
+                    "to": section.review_status,
+                    "note": note,
+                },
+            )
             return _chapter_payload(db, node)
 
     @app.post("/projects/{ref}/chapters/{node_id}/generate")
@@ -5295,6 +5416,14 @@ def create_app():
             project, _role = _project(db, ref)
             _require_write(_role)
             node = _node(db, project.id, node_id)
+            existing = db.scalar(select(Section).where(Section.node_id == node.id))
+            if existing is not None and (existing.review_status or "draft") in {
+                "confirmed",
+                "locked",
+            }:
+                raise _http_error(
+                    409, "本章已确认，不能再重新生成；如需重写请先撤回为草稿"
+                )
             ledger = load_ledger(db, project.id)
             problems = ledger_gate(ledger)
             if problems:
