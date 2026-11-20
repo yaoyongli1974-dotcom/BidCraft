@@ -405,7 +405,9 @@ def extract_parameters(tables: list[Table], text: str, vocab: list[str]) -> list
     return items[:300]
 
 
-_REQ_SECTION = re.compile(r"资格|资质|实质性|废标|否决|无效|商务要求|技术要求|符合性")
+_REQ_SECTION = re.compile(r"资格|资质|实质性|废标|否决|无效|商务要求|技术要求|符合性|评标|评审|评分")
+# ★/▲ 是招标文件里最常见的「实质性条款」标记，必须保留符号本身而不只是布尔。
+_REQ_MARKER = re.compile(r"[★▲]")
 _REQ_LINE = re.compile(
     r"^(?:\d{1,2}[、.．)]|[（(]\d{1,2}[）)]|[（(][一二三四五六七八九十]{1,3}[）)]|[-*•●◆■★▲])\s*"
 )
@@ -433,12 +435,15 @@ def extract_requirements_and_risks(
             if stripped in seen_req:
                 continue
             seen_req.add(stripped)
+            marker_match = _REQ_MARKER.search(stripped)
             requirements.append(
                 RequirementItem(
                     kind=kind,
                     text=stripped[:500],
                     mandatory=bool(re.search(r"必须|不得|★|▲|废标|否决|无效", stripped)),
-                    source_quote=heading,
+                    # 原文行比章节标题有用：总览页要能指着这一条说「就是它没响应」。
+                    source_quote=stripped[:300],
+                    marker=marker_match.group(0) if marker_match else "",
                 )
             )
             if len(requirements) >= 120:

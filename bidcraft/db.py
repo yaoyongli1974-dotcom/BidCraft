@@ -107,6 +107,16 @@ def _migrate_columns(engine) -> None:
             ("resolved_by", "VARCHAR(80)"),
             ("resolution_note", "TEXT DEFAULT ''"),
         ],
+        "requirements": [
+            ("marker", "VARCHAR(8) DEFAULT ''"),
+            ("response_status", "VARCHAR(16) DEFAULT 'pending'"),
+            ("response_note", "TEXT DEFAULT ''"),
+            ("responded_by", "VARCHAR(80)"),
+            ("responded_at", "DATETIME"),
+            ("section_id", "VARCHAR(36)"),
+            ("node_id", "VARCHAR(36)"),
+            ("auto_covered", "BOOLEAN DEFAULT 0"),
+        ],
         "sections": [("revision", "INTEGER DEFAULT 0")],
         "kb_chunks": [
             ("embedding", "JSON"),

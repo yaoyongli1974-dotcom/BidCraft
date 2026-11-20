@@ -2,8 +2,13 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { RiskTab } from './RiskTab'
-import { getRiskOverview, updateIssueStatus } from '../../lib/api'
-import type { Issue, RiskOverview } from '../../lib/types'
+import {
+  getRequirements,
+  getRiskOverview,
+  updateIssueStatus,
+  updateRequirementResponse,
+} from '../../lib/api'
+import type { Issue, RequirementResponse, RiskOverview } from '../../lib/types'
 import { clearQueryCache } from '../../lib/queryCache'
 
 const workspace = vi.hoisted(() => ({
@@ -48,6 +53,8 @@ vi.mock('../../lib/api', async (importOriginal) => {
     updateIssueStatus: vi.fn(),
     bulkIssueStatus: vi.fn(),
     runCheck: vi.fn(),
+    getRequirements: vi.fn(),
+    updateRequirementResponse: vi.fn(),
   }
 })
 
@@ -163,6 +170,7 @@ beforeEach(() => {
   workspace.project.my_role = 'owner'
   confirmStub.mockResolvedValue(true)
   vi.mocked(getRiskOverview).mockResolvedValue(makeOverview())
+  vi.mocked(getRequirements).mockResolvedValue([])
   vi.mocked(updateIssueStatus).mockImplementation(async (_ref, id, status) => {
     const source = [OPEN_BLOCKING, HANDLED_BLOCKING, CRITICAL, MAJOR, MINOR].find(
       (item) => item.id === id,
@@ -294,5 +302,119 @@ describe('RiskTab', () => {
     const card = await waitFor(() => itemCard(MAJOR.finding as string))
     expect(within(card).getByText(/未定位到章节/)).toBeInTheDocument()
     expect(within(card).getByRole('button', { name: '跳转修改' })).toBeDisabled()
+  })
+})
+
+function requirement(overrides: Partial<RequirementResponse> = {}): RequirementResponse {
+  return {
+    id: 'r1',
+    kind: 'substantive',
+    marker: '★',
+    text: '★ 投标人须提供近三年同类项目业绩不少于3项并附合同复印件',
+    mandatory: true,
+    source_quote: '★ 投标人须提供近三年同类项目业绩不少于3项并附合同复印件',
+    response_status: 'pending',
+    response_note: '',
+    responded_by: '',
+    responded_at: null,
+    section_id: null,
+    node_id: null,
+    section_heading: '',
+    auto_covered: false,
+    ...overrides,
+  }
+}
+
+/** 实质性条款区块：★ 未响应最优先，人工确认必须留痕。 */
+describe('RiskTab substantive clauses', () => {
+  it('shows an unanswered ★ clause as top priority', async () => {
+    const clause = requirement({ id: 'r1' })
+    vi.mocked(getRequirements).mockResolvedValue([clause])
+    renderRisk()
+
+    const panel = await screen.findByRole('region', { name: '实质性条款响应' })
+    expect(within(panel).getByText(/1 条 ★ 条款未响应/)).toBeInTheDocument()
+    const card = within(panel).getByText(clause.text).closest('article') as HTMLElement
+    expect(within(card).getByText('★')).toBeInTheDocument()
+    expect(within(card).getByText('最高优先级')).toBeInTheDocument()
+    expect(within(card).getByText('待确认')).toBeInTheDocument()
+  })
+
+  it('requires a reason before marking a clause as not applicable', async () => {
+    const clause = requirement({ id: 'r2', marker: '▲', text: '▲ 项目经理须具备一级建造师执业资格' })
+    vi.mocked(getRequirements).mockResolvedValue([clause])
+    vi.mocked(updateRequirementResponse).mockResolvedValue({
+      ...clause,
+      response_status: 'na',
+      response_note: '本次为设备采购，不涉及项目经理执业资格。',
+      responded_by: '张三',
+      responded_at: '2026-11-20T10:00:00+08:00',
+    })
+    renderRisk()
+
+    const panel = await screen.findByRole('region', { name: '实质性条款响应' })
+    fireEvent.click(within(panel).getByRole('button', { name: '标记不适用' }))
+
+    const reason = await screen.findByLabelText('不适用原因')
+    fireEvent.change(reason, { target: { value: '无' } })
+    fireEvent.click(screen.getByRole('button', { name: '确认不适用' }))
+    expect(await screen.findByText(/至少 4 个字/)).toBeInTheDocument()
+    expect(updateRequirementResponse).not.toHaveBeenCalled()
+
+    fireEvent.change(reason, { target: { value: '本次为设备采购，不涉及项目经理执业资格。' } })
+    fireEvent.click(screen.getByRole('button', { name: '确认不适用' }))
+    await waitFor(() =>
+      expect(updateRequirementResponse).toHaveBeenCalledWith(
+        'p1',
+        'r2',
+        'na',
+        '本次为设备采购，不涉及项目经理执业资格。',
+      ),
+    )
+  })
+
+  it('links a covered clause to the chapter that already responds to it', async () => {
+    const covered = requirement({
+      id: 'r3',
+      marker: '★',
+      text: '★ 投标人须提供近三年同类项目业绩不少于3项',
+      source_quote: '★ 投标人须提供近三年同类项目业绩不少于3项',
+      auto_covered: true,
+      section_id: 'sec-9',
+      node_id: 'ch-9',
+      section_heading: '商务响应',
+    })
+    vi.mocked(getRequirements).mockResolvedValue([covered])
+    renderRisk()
+
+    const panel = await screen.findByRole('region', { name: '实质性条款响应' })
+    fireEvent.click(within(panel).getByRole('button', { name: /正文已覆盖/ }))
+
+    const card = (await within(panel).findByText(/正文已覆盖于「商务响应」/)).closest(
+      'article',
+    ) as HTMLElement
+    fireEvent.click(within(card).getByRole('button', { name: '查看章节' }))
+
+    const location = await screen.findByTestId('location')
+    expect(location.textContent).toContain('/app/projects/p1/draft')
+    const state = JSON.parse(location.textContent?.split('|')[1] || 'null') as {
+      focusNode?: string
+      quote?: string
+    }
+    expect(state.focusNode).toBe('ch-9')
+    expect(state.quote).toBe('★ 投标人须提供近三年同类项目业绩不少于3项')
+  })
+
+  it('disables clause confirmation for viewers', async () => {
+    workspace.canWrite = false
+    workspace.readOnly = true
+    workspace.project.my_role = 'viewer'
+    vi.mocked(getRequirements).mockResolvedValue([requirement({ id: 'r4' })])
+    renderRisk()
+
+    const panel = await screen.findByRole('region', { name: '实质性条款响应' })
+    expect(within(panel).getByRole('button', { name: '标记已响应' })).toBeDisabled()
+    expect(within(panel).getByRole('button', { name: '标记不适用' })).toBeDisabled()
+    expect(within(panel).queryByRole('button', { name: '查看章节' })).toBeNull()
   })
 })

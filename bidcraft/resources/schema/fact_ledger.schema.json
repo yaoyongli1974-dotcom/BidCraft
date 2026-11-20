@@ -161,6 +161,11 @@
           "default": "",
           "title": "Source Quote",
           "type": "string"
+        },
+        "marker": {
+          "default": "",
+          "title": "Marker",
+          "type": "string"
         }
       },
       "required": [

@@ -546,6 +546,30 @@ export interface RiskOverview {
   items: Issue[]
 }
 
+/** 实质性条款的人工响应状态：待确认 / 已响应 / 不适用。 */
+export type RequirementResponseStatus = 'pending' | 'responded' | 'na'
+
+/**
+ * `GET /projects/{ref}/requirements` 的一条实质性条款。
+ * marker 为 ★ / ▲（空串表示只是 mandatory，没有标记符号）。
+ */
+export interface RequirementResponse {
+  id: string
+  kind: string
+  marker: string
+  text: string
+  mandatory: boolean
+  source_quote: string
+  response_status: RequirementResponseStatus
+  response_note: string
+  responded_by: string
+  responded_at: string | null
+  section_id: string | null
+  node_id: string | null
+  section_heading: string
+  auto_covered: boolean
+}
+
 /** `POST /projects/{ref}/issues/bulk-status` 的响应。 */
 export interface BulkIssueStatusResult {
   updated: number

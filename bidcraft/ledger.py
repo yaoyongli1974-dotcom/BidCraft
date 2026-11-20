@@ -151,6 +151,7 @@ def save_ledger(db: Session, project_id: str, ledger: FactLedger) -> None:
                 text=item.text,
                 mandatory=item.mandatory,
                 source_quote=item.source_quote,
+                marker=item.marker,
             )
             for item in ledger.requirements
         ]
@@ -234,6 +235,7 @@ def load_ledger(db: Session, project_id: str) -> FactLedger:
                 text=row.text,
                 mandatory=row.mandatory,
                 source_quote=row.source_quote,
+                marker=row.marker or "",
             )
             for row in requirements
         ],
@@ -282,7 +284,8 @@ def render_ledger(ledger: FactLedger, *, max_chars: int = 16000) -> str:
         lines.append("\n【实质性/资格要求】")
         for item in ledger.requirements[:80]:
             mark = "（强制）" if item.mandatory else ""
-            lines.append(f"- [{item.kind}]{mark} {item.text}")
+            badge = f"{item.marker}" if item.marker else ""
+            lines.append(f"- {badge}[{item.kind}]{mark} {item.text}")
 
     if ledger.risks:
         lines.append("\n【废标/否决风险】")

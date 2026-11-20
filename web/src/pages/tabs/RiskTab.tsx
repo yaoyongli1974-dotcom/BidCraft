@@ -16,18 +16,27 @@ import {
   Search,
   ShieldAlert,
   ShieldCheck,
+  Star,
   X,
 } from 'lucide-react'
 import { useWorkspace } from '../useWorkspace'
 import {
   ApiError,
   bulkIssueStatus,
+  getRequirements,
   getRiskOverview,
   messageOf,
   runCheck,
   updateIssueStatus,
+  updateRequirementResponse,
 } from '../../lib/api'
-import type { Issue, RiskOverview, RiskTierLevel } from '../../lib/types'
+import type {
+  Issue,
+  RequirementResponse,
+  RequirementResponseStatus,
+  RiskOverview,
+  RiskTierLevel,
+} from '../../lib/types'
 import {
   className,
   evidenceText,
@@ -690,6 +699,7 @@ export function RiskTab() {
             </div>
           </section>
 
+          <SubstantiveSection />
         </>
       )}
 
@@ -751,6 +761,407 @@ export function RiskTab() {
         </div>
       </Modal>
     </div>
+  )
+}
+
+type SubstantiveFilter = 'unanswered' | 'covered' | 'responded' | 'na' | 'all'
+
+const SUBSTANTIVE_FILTERS: { id: SubstantiveFilter; label: string }[] = [
+  { id: 'unanswered', label: '未响应' },
+  { id: 'covered', label: '正文已覆盖' },
+  { id: 'responded', label: '已响应' },
+  { id: 'na', label: '不适用' },
+  { id: 'all', label: '全部' },
+]
+
+const SUBSTANTIVE_STATUS: Record<
+  string,
+  { label: string; tone: 'danger' | 'warn' | 'success' | 'neutral' }
+> = {
+  pending: { label: '待确认', tone: 'warn' },
+  responded: { label: '已响应', tone: 'success' },
+  na: { label: '不适用', tone: 'neutral' },
+}
+
+function requirementMatches(item: RequirementResponse, filter: SubstantiveFilter): boolean {
+  if (filter === 'all') return true
+  if (filter === 'unanswered') return item.response_status === 'pending' && !item.auto_covered
+  if (filter === 'covered') return item.response_status === 'pending' && item.auto_covered
+  return item.response_status === filter
+}
+
+/**
+ * 实质性条款响应：把「评分办法里标了 ★/▲、正文却没写」的条款摆到最前面。
+ * 自动判定只做字符覆盖，人工可以标「已响应」或「不适用」并留痕。
+ */
+function SubstantiveSection() {
+  const { ref, basePath, canWrite } = useWorkspace()
+  const navigate = useNavigate()
+  const toast = useToast()
+  const query = useQuery(`requirements:${ref}`, () => getRequirements(ref))
+  const items: RequirementResponse[] = useMemo(() => query.data || [], [query.data])
+
+  const [filter, setFilter] = useState<SubstantiveFilter>('unanswered')
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const [naTarget, setNaTarget] = useState<RequirementResponse | null>(null)
+  const [naNote, setNaNote] = useState('')
+  const [naError, setNaError] = useState('')
+  const [naBusy, setNaBusy] = useState(false)
+
+  const counts = useMemo(() => {
+    let unanswered = 0
+    let covered = 0
+    let responded = 0
+    let na = 0
+    for (const item of items) {
+      if (item.response_status === 'responded') responded += 1
+      else if (item.response_status === 'na') na += 1
+      else if (item.auto_covered) covered += 1
+      else unanswered += 1
+    }
+    return { unanswered, covered, responded, na, total: items.length }
+  }, [items])
+
+  const starOpen = items.filter(
+    (item) => item.marker === '★' && item.response_status === 'pending' && !item.auto_covered,
+  ).length
+  const visible = items.filter((item) => requirementMatches(item, filter))
+
+  const applyUpdate = (updated: RequirementResponse) => {
+    query.setData((current) => (current || []).map((row) => (row.id === updated.id ? updated : row)))
+  }
+
+  const confirmResponse = async (item: RequirementResponse, status: RequirementResponseStatus) => {
+    if (!canWrite || busyId) return
+    setBusyId(item.id)
+    try {
+      const updated = await updateRequirementResponse(ref, item.id, status)
+      applyUpdate(updated)
+      query.refresh()
+      toast.success(
+        status === 'responded' ? '已标记为已响应' : '已恢复为待确认',
+        item.text.slice(0, 30),
+      )
+    } catch (error) {
+      toast.error('更新失败', messageOf(error))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const openNa = (item: RequirementResponse) => {
+    if (!canWrite) return
+    setNaTarget(item)
+    setNaNote('')
+    setNaError('')
+  }
+
+  const submitNa = async () => {
+    if (!naTarget || naBusy) return
+    const note = naNote.trim()
+    if (note.length < 4) {
+      setNaError('请说明为什么这一条不适用（至少 4 个字），便于复核与留痕。')
+      return
+    }
+    setNaBusy(true)
+    try {
+      const updated = await updateRequirementResponse(ref, naTarget.id, 'na', note)
+      applyUpdate(updated)
+      query.refresh()
+      toast.success('已标记为不适用', note)
+      setNaTarget(null)
+    } catch (error) {
+      setNaError(messageOf(error))
+      toast.error('标记失败', messageOf(error))
+    } finally {
+      setNaBusy(false)
+    }
+  }
+
+  const jumpToSection = (item: RequirementResponse) => {
+    if (!item.node_id) return
+    navigate(`${basePath}/draft`, {
+      state: { focusNode: item.node_id, quote: item.source_quote || item.text.slice(0, 40) },
+    })
+  }
+
+  return (
+    <section className="panel substantive-panel" aria-label="实质性条款响应">
+      <div className="panel-head">
+        <div>
+          <div className="eyebrow">评分办法绑定</div>
+          <h3>实质性条款响应</h3>
+          <p className="panel-sub">
+            {counts.total > 0
+              ? `共 ${counts.total} 条实质性条款 · 未响应 ${counts.unanswered} · 正文已覆盖 ${counts.covered} · 已响应 ${counts.responded} · 不适用 ${counts.na}`
+              : '招标文件里标了 ★/▲ 或写明「必须 / 不得」的条款，会在这里逐条对照正文。'}
+          </p>
+        </div>
+        {starOpen > 0 && (
+          <span className="substantive-alert" role="status">
+            <ShieldAlert size={14} /> {starOpen} 条 ★ 条款未响应，导出会被拦截
+          </span>
+        )}
+      </div>
+
+      {query.loading && !query.data ? (
+        <div className="substantive-skeleton" aria-busy="true">
+          <Skeleton width="100%" height={64} radius={8} />
+          <Skeleton width="100%" height={64} radius={8} />
+        </div>
+      ) : query.error && !query.data ? (
+        <ErrorState message={query.error} onRetry={query.refresh} compact />
+      ) : items.length === 0 ? (
+        <EmptyState
+          icon={Star}
+          compact
+          title="没有解析出实质性条款"
+          description="解析招标文件后，标了 ★/▲ 或写明「必须 / 不得」的条款会出现在这里。若确有此类条款却为空，请确认招标文件是否解析完整。"
+        />
+      ) : (
+        <>
+          <div className="level-filters substantive-filters" role="group" aria-label="按响应状态筛选">
+            {SUBSTANTIVE_FILTERS.map((entry) => {
+              const count =
+                entry.id === 'all'
+                  ? counts.total
+                  : entry.id === 'unanswered'
+                    ? counts.unanswered
+                    : entry.id === 'covered'
+                      ? counts.covered
+                      : entry.id === 'responded'
+                        ? counts.responded
+                        : counts.na
+              return (
+                <button
+                  key={entry.id}
+                  type="button"
+                  className={className('filter-chip', filter === entry.id && 'is-active')}
+                  aria-pressed={filter === entry.id}
+                  onClick={() => setFilter(entry.id)}
+                >
+                  {entry.label} <span className="chip-count">{count}</span>
+                </button>
+              )
+            })}
+          </div>
+
+          {visible.length === 0 ? (
+            <EmptyState
+              icon={Check}
+              compact
+              title={filter === 'unanswered' ? '所有实质性条款都有下落' : '这一档暂时是空的'}
+              description={
+                filter === 'unanswered'
+                  ? '未响应的条款已全部人工确认或已在正文覆盖。导出前如正文又有修改，建议重新核对一次。'
+                  : '切换上方状态筛选查看其它条款。'
+              }
+            />
+          ) : (
+            <div className="substantive-list">
+              {visible.map((item) => {
+                const statusMeta =
+                  SUBSTANTIVE_STATUS[item.response_status] || SUBSTANTIVE_STATUS.pending
+                const unresponded = item.response_status === 'pending' && !item.auto_covered
+                const isExpanded = Boolean(expanded[item.id])
+                return (
+                  <article
+                    key={item.id}
+                    className={className(
+                      'substantive-item',
+                      item.marker === '★' && 'substantive-item--star',
+                      item.marker === '▲' && 'substantive-item--triangle',
+                      unresponded && 'is-unanswered',
+                    )}
+                  >
+                    <header className="substantive-head">
+                      <span className="substantive-tags">
+                        {item.marker ? (
+                          <span
+                            className={className(
+                              'substantive-marker',
+                              `substantive-marker--${item.marker === '★' ? 'star' : 'triangle'}`,
+                            )}
+                          >
+                            {item.marker}
+                          </span>
+                        ) : (
+                          <span className="substantive-marker substantive-marker--plain">条款</span>
+                        )}
+                        <Badge tone={statusMeta.tone} subtle>
+                          {statusMeta.label}
+                        </Badge>
+                        {item.auto_covered && (
+                          <Badge tone="success" subtle>
+                            正文已覆盖
+                          </Badge>
+                        )}
+                        {unresponded && (
+                          <Badge tone={item.marker === '★' ? 'danger' : 'warn'} subtle>
+                            {item.marker === '★' ? '最高优先级' : '未找到响应'}
+                          </Badge>
+                        )}
+                      </span>
+                    </header>
+
+                    <p className={className('substantive-text', isExpanded && 'is-expanded')}>
+                      {item.text}
+                    </p>
+                    {item.text.length > 64 && (
+                      <button
+                        type="button"
+                        className="text-btn substantive-toggle"
+                        onClick={() =>
+                          setExpanded((current) => ({ ...current, [item.id]: !current[item.id] }))
+                        }
+                      >
+                        {isExpanded ? '收起原文' : '展开原文'}
+                      </button>
+                    )}
+
+                    {item.source_quote && item.source_quote !== item.text && (
+                      <p className="substantive-quote">招标原文：{item.source_quote}</p>
+                    )}
+
+                    {item.auto_covered && item.section_heading && (
+                      <p className="substantive-cover">
+                        <MapPin size={12} /> 正文已覆盖于「{item.section_heading}」
+                      </p>
+                    )}
+
+                    {item.response_status !== 'pending' && (
+                      <p className="substantive-resolution">
+                        <Check size={12} />
+                        {statusMeta.label}
+                        {item.responded_by ? ` · ${item.responded_by}` : ''}
+                        {item.responded_at ? ` · ${formatRelative(item.responded_at)}` : ''}
+                        {item.response_note ? ` · ${item.response_note}` : ''}
+                      </p>
+                    )}
+
+                    <footer className="substantive-actions">
+                      {item.node_id && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          icon={<LocateFixed size={13} />}
+                          onClick={() => jumpToSection(item)}
+                        >
+                          查看章节
+                        </Button>
+                      )}
+                      {item.response_status === 'pending' ? (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="primary"
+                            icon={<Check size={13} />}
+                            loading={busyId === item.id}
+                            disabled={!canWrite}
+                            title={!canWrite ? '只读成员不能确认条款响应' : '确认正文已逐条响应'}
+                            onClick={() => void confirmResponse(item, 'responded')}
+                          >
+                            标记已响应
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={!canWrite}
+                            title={!canWrite ? '只读成员不能标记不适用' : '本项目不涉及该条款'}
+                            onClick={() => openNa(item)}
+                          >
+                            标记不适用
+                          </Button>
+                        </>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          icon={<RotateCcw size={13} />}
+                          loading={busyId === item.id}
+                          disabled={!canWrite}
+                          title={!canWrite ? '只读成员不能撤销确认' : '恢复为待确认'}
+                          onClick={() => void confirmResponse(item, 'pending')}
+                        >
+                          撤销确认
+                        </Button>
+                      )}
+                    </footer>
+                  </article>
+                )
+              })}
+            </div>
+          )}
+        </>
+      )}
+
+      <div className="check-footnote">
+        <AlertTriangle size={14} />
+        <span>
+          标记为「已响应」只表示你确认正文已经写了，系统不会替你核对内容；★ 条款默认按未响应计入阻断并拦截导出，
+          ▲ 与「必须 / 不得」条款按严重提示。撤销确认后会重新参与核对。
+        </span>
+      </div>
+
+      <Modal
+        open={Boolean(naTarget)}
+        onClose={() => {
+          if (!naBusy) setNaTarget(null)
+        }}
+        size="sm"
+        eyebrow="标记不适用"
+        title="这一条为什么用不上"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setNaTarget(null)} disabled={naBusy}>
+              取消
+            </Button>
+            <Button
+              variant="primary"
+              loading={naBusy}
+              disabled={!naNote.trim()}
+              onClick={() => void submitNa()}
+            >
+              确认不适用
+            </Button>
+          </>
+        }
+      >
+        <div className="risk-ignore-body">
+          <p>
+            标记为「不适用」后，该条款不再计入未响应数量，也不会拦截导出；原因会随确认记录保存，供后续复核。
+          </p>
+          {naTarget && (
+            <div className="risk-ignore-target">
+              <span className="issue-code mono">{naTarget.marker || '条款'}</span>
+              <span>{naTarget.text.slice(0, 80)}</span>
+            </div>
+          )}
+          <label className="risk-ignore-field">
+            <span>
+              不适用原因 <em>必填</em>
+            </span>
+            <textarea
+              className="textarea"
+              rows={3}
+              value={naNote}
+              placeholder="例如：本次为设备采购，不含施工内容，无需提供施工总承包资质。"
+              onChange={(event) => {
+                setNaNote(event.target.value)
+                if (naError) setNaError('')
+              }}
+              aria-label="不适用原因"
+            />
+          </label>
+          {naError && (
+            <p className="field-error" role="alert">
+              {naError}
+            </p>
+          )}
+        </div>
+      </Modal>
+    </section>
   )
 }
 

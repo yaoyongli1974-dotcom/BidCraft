@@ -118,6 +118,9 @@
 核对（blocking/critical/major/minor）→ 问题清单（锚定大纲章节 + 人工处置状态）
    │
    ▼
+实质性条款（★/▲）逐条对照正文 → 未响应即阻断
+   │
+   ▼
 风险总览（四档聚合）→ 存在未处置阻断项时拦截导出（owner/admin 可强制，写审计）
    │
    ▼
@@ -182,7 +185,7 @@ SSE 不可用时回退到约 1.6 秒一次的任务轮询。刷新页面后通�
 | 章节 | `GET/PUT /projects/{ref}/chapters/{id}`、`POST .../generate` |
 | 生成 | `POST /projects/{ref}/write`（同步兼容）、`POST /projects/{ref}/generate`（后台）、`GET /projects/{ref}/jobs`、`GET /jobs/{id}`、`GET /jobs/{id}/events`（SSE） |
 | 配图 | `GET/PUT /projects/{ref}/image-policy`、`GET/POST /projects/{ref}/images`、`GET /projects/{ref}/images/plan`、`POST /projects/{ref}/images/apply-plan`、`POST /projects/{ref}/images/generate-missing`（后台 Job）、`POST /projects/{ref}/images/{id}/regenerate`、`POST /projects/{ref}/images/upload`、`GET/DELETE /projects/{ref}/images/{id}`；`GET /projects/{ref}/jobs?kind=images` 用于刷新后重新挂接 |
-| 核对 | `POST /projects/{ref}/check`、`GET /projects/{ref}/issues`、`GET /projects/{ref}/risk-overview`（四档聚合 + 门禁状态）、`PATCH /projects/{ref}/issues/{id}`、`POST /projects/{ref}/issues/bulk-status` |
+| 核对 | `POST /projects/{ref}/check`、`GET /projects/{ref}/issues`、`GET /projects/{ref}/risk-overview`（四档聚合 + 门禁状态）、`PATCH /projects/{ref}/issues/{id}`、`POST /projects/{ref}/issues/bulk-status`、`GET /projects/{ref}/requirements`（实质性条款 + 响应状态）、`PATCH /projects/{ref}/requirements/{id}` |
 | 导出 | `POST /projects/{ref}/export`（docx/pdf/xlsx/md，返回二进制；未处置阻断项使 docx/pdf/md 返回 409，`force`+`force_reason` 仅 owner/admin 可用并写 `export.force` 审计） |
 | 批量 | `POST /projects/batch-check`、`POST /projects/batch-export`（后台 Job，202）、`GET /batch-jobs/{id}/download`（zip，仅任务所有者/超管） |
 | MCP | `bidcraft mcp [--readonly]` stdio JSON-RPC：list_projects/get_project/get_ledger/run_check/export_document/search_knowledge，见 `docs/mcp.md`；`tools/list` = 本征 6 工具 + 启用插件工具（`{插件}__{工具}` 前缀，allowlist 过滤），`tools/call` 按前缀路由，只读模式拒绝插件调用，见 `docs/plugins.md` |

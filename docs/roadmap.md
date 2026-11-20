@@ -28,7 +28,7 @@
 | C7 可插拔 Agent / API | ✅ | `generation/agent.py`、`bidcraft/api.py`、`bidcraft/mcp.py` | OpenAI 兼容端点；FastAPI + 后台生成任务；MCP stdio 服务 |
 | C8 行业包 | ✅ 8 个行业包 + 通用基包 | `bidcraft/resources/packages/*.yaml` | 弱电（综合布线/安防/BA）+ 消防、安装、土建、暖通、装修；管理员可在 `/admin` 维护 YAML 覆盖包 |
 | 规则包管理 | ✅ | `rules/store.py`、`/admin/rule-packages`、`web/` | 超级管理员创建/修改/隐藏/恢复规则包；新建时可填写名称、唯一包名并选择工程类型；内置包只读，用户覆盖写入 `BIDCRAFT_HOME/packages`；保存前校验继承、字段、大纲与核对表达式 |
-| C9 回归/部署 | ✅ 基本 | `tests/`、`Dockerfile`、`web/` | 738 个测试；Docker 多阶段构建 Web（含 OCR 依赖）；本地/局域网两种部署 |
+| C9 回归/部署 | ✅ 基本 | `tests/`、`Dockerfile`、`web/` | 748 个测试；Docker 多阶段构建 Web（含 OCR 依赖）；本地/局域网两种部署 |
 | SSE 流式进度 | ✅ | `bidcraft/jobs.py`、`/jobs/{id}/events`、`web/` | 章节/逐字事件持久化；Last-Event-ID 断线续传；SSE 失败回退轮询；刷新后重新挂接任务 |
 | Excel 清单双向对齐 | ✅ | `boq.py`、`export/boq_xlsx.py`、`/projects/{ref}/boq`、`web/` | 清单导入与表头识别、材料模糊匹配、缺项/多项/数量·单位·规格差异、差异回写、响应表导出 |
 | 清单报价 | ✅ | `boq.py`、`/projects/{ref}/boq/price`、`export/boq_xlsx.py`、`web/` | 逐行单价录入/清除、按清单数量计算合价、已报价/未报价/缺数量统计、报价汇总与响应表价格列；不自动生成价格 |
@@ -43,6 +43,7 @@
 | 素材可信度分级 | ✅ | `material_policy.py`、`resources/packages/*.yaml`、`/admin/kbs/{id}/docs` | 规则包 `material_policy` 声明每类素材必填生命周期字段；检索注入按可信度分级，缺失/过期降级为题录；有效期按北京时间判定（`clock.py`），未知/缺失 kind 失败关闭，写入侧类型必填；「其他素材」必须带出处（`source_url`），不留免检类别；文档元数据存 `knowledge_bases.options.docs` |
 | 解析深度（MinerU） | ✅ 可选 | `parsing/mineru.py`、`BIDCRAFT_MINERU_URL`、`bidcraft mineru-check` | 复杂版面/扫描件交给 MinerU，取 Markdown + 表格；失败/超时回退内置链路；页数为估算 |
 | 全局事实设定 | ✅ | `profile.py`、`/projects/{ref}/profile`、`generation/prompts.py`、`textqa.profile_conflicts` | 项目级事实注入生成；核对按锚点比对，不一致报 CON；存 `project.meta["writing_profile"]` |
+| 实质性条款响应绑定 | ✅ | `substantive.py`、`parsing/extract.py`、`/projects/{ref}/requirements`、`web/RiskTab` | ★/▲ 保留为一等标记与原文行；3-gram 覆盖判定逐条对照正文，未响应即 blocking/critical 并进导出硬门禁；人工确认「已响应/不适用」带原因与操作人留痕，可撤销；总览页可跳转覆盖章节 |
 | 评分回填与失分复盘 | ✅ | `scoring.py`、`/projects/{ref}/scores`、`web/` | 评分项实际得分回填与得分率/分类聚合/失分 Top20；失分摘要注入生成提示 |
 | 长文一致性续写 | ✅ | `generation/writer.continuity_digest` | 全书章节索引 + 近期摘要注入，跨章承接与去重 |
 | 导出格式模板 | ✅ | `export/templates.py`、`/projects/{ref}/export-template` | 四套预设与项目级记忆；DOCX 字体/字号/行距/页边距/封面目录页码 |
@@ -80,6 +81,6 @@
    做回归门禁，按字段命中率与别名缺口扩充 `FIELD_ALIAS_AUGMENT`。
 2. 报价与文档进阶：审批链已支持多级流转、并行会签/或签、金额门槛与包件/币种条件分支，后续可做规则命中条件与真实招标件回归基线扩充。
 3. 插件远程市场：受控的自动安装与升级流程（远程源校验、依赖声明与回滚）。
-4. **实质性条款响应绑定**（下一步）：`★/▲` 标记目前在解析时被折叠成 `mandatory` 布尔，原文标记未保留；
-   计划将其作为一等字段解析，把评分办法中的实质性条款与正文章节逐条绑定，未明确响应即在风险总览
-   以最高优先级标红，并支持人工标注「已响应 / 不适用」与原因留痕。
+4. **实质性条款判定的语义增强**：当前用字符 3-gram 覆盖率做保守判定，改写幅度大的响应可能被判未响应
+   （人工可确认，但会增加复核量）；后续可引入条款类型的结构化规则（资质/业绩/参数/承诺），
+   并把评分办法的分值绑定到章节篇幅分配。

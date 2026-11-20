@@ -267,6 +267,11 @@ class IssueBulkStatusUpdate(BaseModel):
     note: str = ""
 
 
+class RequirementResponseUpdate(BaseModel):
+    response_status: Literal["responded", "na", "pending"]
+    note: str = ""
+
+
 class BoqApplyRequest(BaseModel):
     boq_row: int
     action: str
@@ -972,6 +977,58 @@ def _issue_is_open(issue: Issue) -> bool:
 
 def _issue_tier(level: str) -> str:
     return level if level in {"blocking", "critical", "major"} else "minor"
+
+
+REQUIREMENT_RESPONSE_MIN_NOTE = 4
+
+
+def _requirement_payload(db: Session, requirement: Requirement) -> dict[str, Any]:
+    heading = ""
+    node_id = requirement.node_id
+    if node_id:
+        node = db.get(OutlineNode, node_id)
+        if node is not None:
+            heading = node.heading or ""
+    return {
+        "id": requirement.id,
+        "kind": requirement.kind,
+        "marker": requirement.marker or "",
+        "text": requirement.text,
+        "mandatory": bool(requirement.mandatory),
+        "source_quote": requirement.source_quote or "",
+        "response_status": requirement.response_status or "pending",
+        "response_note": requirement.response_note or "",
+        "responded_by": requirement.responded_by or "",
+        "responded_at": clock.iso_beijing(requirement.responded_at),
+        "section_id": requirement.section_id,
+        "node_id": node_id,
+        "section_heading": heading,
+        "auto_covered": bool(requirement.auto_covered),
+    }
+
+
+def _validate_requirement_note(status: str, note: str) -> str:
+    cleaned = (note or "").strip()
+    if status == "na" and len(cleaned) < REQUIREMENT_RESPONSE_MIN_NOTE:
+        raise _http_error(
+            400,
+            f"标记为不适用必须填写原因（至少 {REQUIREMENT_RESPONSE_MIN_NOTE} 个字）",
+        )
+    return cleaned
+
+
+def _apply_requirement_status(
+    requirement: Requirement, status: str, note: str, username: str
+) -> None:
+    requirement.response_status = status
+    if status == "pending":
+        requirement.response_note = ""
+        requirement.responded_by = None
+        requirement.responded_at = None
+        return
+    requirement.response_note = note
+    requirement.responded_by = username or "system"
+    requirement.responded_at = clock.utc_now()
 
 
 def _issue_node_map(db: Session, issues: list[Issue]) -> dict[str, tuple[str, int]]:
@@ -5466,6 +5523,47 @@ def create_app():
             project, _role = _project(db, ref)
             rows = list(db.scalars(select(Issue).where(Issue.project_id == project.id)))
             return _risk_overview_payload(db, project.id, rows)
+
+    @app.get("/projects/{ref}/requirements")
+    def requirements(ref: str) -> list[dict[str, Any]]:
+        """实质性条款及其正文响应状态；只读成员也能看（交付风险需要被看见）。"""
+
+        with session_scope() as db:
+            project, _role = _project(db, ref)
+            rows = list(
+                db.scalars(
+                    select(Requirement)
+                    .where(Requirement.project_id == project.id)
+                    .order_by(Requirement.marker.desc(), Requirement.text)
+                )
+            )
+            return [_requirement_payload(db, row) for row in rows]
+
+    @app.patch("/projects/{ref}/requirements/{req_id}")
+    def requirement_response_update(
+        ref: str, req_id: str, payload: RequirementResponseUpdate
+    ) -> dict[str, Any]:
+        with session_scope() as db:
+            project, role = _project(db, ref)
+            _require_write(role)
+            requirement = db.get(Requirement, req_id)
+            if requirement is None or requirement.project_id != project.id:
+                raise LookupError(f"条款不存在: {req_id}")
+            note = _validate_requirement_note(payload.response_status, payload.note)
+            username = str((current_user() or {}).get("username") or "")
+            _apply_requirement_status(requirement, payload.response_status, note, username)
+            audit(
+                db,
+                project.id,
+                "requirement.response",
+                {
+                    "requirement_id": requirement.id,
+                    "status": payload.response_status,
+                    "note": note,
+                },
+            )
+            db.flush()
+            return _requirement_payload(db, requirement)
 
     @app.patch("/projects/{ref}/issues/{issue_id}")
     def issue_status_update(

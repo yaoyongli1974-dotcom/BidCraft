@@ -55,6 +55,8 @@ class RequirementItem(BaseModel):
     text: str
     mandatory: bool = True
     source_quote: str = ""
+    # 招标文件中的 ★/▲ 标记（实质性条款的一等公民，不再折叠进 mandatory）
+    marker: str = ""
 
 
 class RiskItem(BaseModel):

@@ -8,10 +8,10 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import clock, terms, textqa
+from . import clock, substantive, terms, textqa
 from .config import settings
 from .ledger import build_ledger, load_ledger, save_ledger
-from .models import Issue, Project, SourceFile
+from .models import Issue, Project, Requirement, SourceFile
 from .parsing.extract import extract
 from .parsing.loader import Table, load_document
 from .rules import store as package_store
@@ -241,6 +241,25 @@ def _issue_anchor(location: str, anchors: list[dict]) -> dict | None:
     return None
 
 
+def _annotate_requirement_coverage(requirements: list[Requirement], nodes: list[dict]) -> None:
+    """把「这一条被哪一章覆盖了」写回 Requirement，供风险总览展示与跳转。
+
+    只改自动匹配结果，不动人工确认过的 status / note。
+    """
+
+    for requirement in requirements:
+        section = substantive.find_covering_section(requirement.text or "", nodes)
+        if section is None:
+            requirement.auto_covered = False
+            if requirement.response_status == "pending":
+                requirement.section_id = None
+                requirement.node_id = None
+            continue
+        requirement.auto_covered = True
+        requirement.section_id = section.get("section_id")
+        requirement.node_id = section.get("id")
+
+
 def check_project(db: Session, project_id: str) -> tuple[list, dict]:
     from .generation.outline import load_outline
 
@@ -254,6 +273,13 @@ def check_project(db: Session, project_id: str) -> tuple[list, dict]:
     all_results.extend(_term_results(db, nodes))
     all_results.extend(_textqa_results(db, nodes))
     all_results.extend(_profile_results(db, project, nodes))
+    # 实质性条款 → 正文响应：未响应的条款在这里变成 blocking/critical 问题，
+    # 直接进入导出硬门禁；人工标记 responded/na 的条款由 requirement_issues 跳过。
+    requirements = list(
+        db.scalars(select(Requirement).where(Requirement.project_id == project_id))
+    )
+    _annotate_requirement_coverage(requirements, nodes)
+    all_results.extend(substantive.requirement_issues(requirements, nodes))
     results = [result for result in all_results if not result.passed]
     anchors = [
         {

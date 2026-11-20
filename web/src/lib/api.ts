@@ -103,6 +103,8 @@ import type {
   QuotaProposal,
   RechargeOrder,
   RedeemResult,
+  RequirementResponse,
+  RequirementResponseStatus,
   RulePackageSummary,
   RulePackageValidation,
   SourceFile,
@@ -2219,6 +2221,73 @@ export async function updateIssueStatus(
   )
   if (data && typeof data === 'object' && 'issue' in data && data.issue) return data.issue
   return data as Issue
+}
+
+// ------------------------------------------------------- substantive requirements
+
+function normalizeRequirement(value: unknown): RequirementResponse | null {
+  const raw = value && typeof value === 'object' ? (value as Record<string, unknown>) : null
+  if (!raw || !asText(raw.id) || !asText(raw.text)) return null
+  const status = asText(raw.response_status).toLowerCase()
+  return {
+    id: asText(raw.id),
+    kind: asText(raw.kind) || 'substantive',
+    marker: asText(raw.marker),
+    text: asText(raw.text),
+    mandatory: Boolean(raw.mandatory),
+    source_quote: asText(raw.source_quote),
+    response_status:
+      status === 'responded' || status === 'na' ? (status as RequirementResponseStatus) : 'pending',
+    response_note: asText(raw.response_note),
+    responded_by: asText(raw.responded_by),
+    responded_at: asText(raw.responded_at) || null,
+    section_id: asText(raw.section_id) || null,
+    node_id: asText(raw.node_id) || null,
+    section_heading: asText(raw.section_heading),
+    auto_covered: Boolean(raw.auto_covered),
+  }
+}
+
+/** 实质性条款及正文响应状态；旧后端没有该端点时按空列表处理（页面不报错）。 */
+export async function getRequirements(ref: string): Promise<RequirementResponse[]> {
+  try {
+    const data = await request<unknown>(`/projects/${encodeURIComponent(ref)}/requirements`)
+    const list = Array.isArray(data)
+      ? data
+      : data && typeof data === 'object' && Array.isArray((data as { items?: unknown }).items)
+        ? ((data as { items: unknown[] }).items)
+        : []
+    return list
+      .map(normalizeRequirement)
+      .filter((item): item is RequirementResponse => item !== null)
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return []
+    throw error
+  }
+}
+
+/** 人工确认实质性条款的响应状态（na 必须带原因，服务端会再校验一次）。 */
+export async function updateRequirementResponse(
+  ref: string,
+  requirementId: string,
+  status: RequirementResponseStatus,
+  note?: string,
+): Promise<RequirementResponse> {
+  const payload: { response_status: RequirementResponseStatus; note?: string } = {
+    response_status: status,
+  }
+  const trimmed = (note || '').trim()
+  if (trimmed) payload.note = trimmed
+  const data = await request<RequirementResponse | { requirement?: RequirementResponse }>(
+    `/projects/${encodeURIComponent(ref)}/requirements/${encodeURIComponent(requirementId)}`,
+    { method: 'PATCH', body: JSON.stringify(payload) },
+  )
+  const normalized =
+    data && typeof data === 'object' && 'requirement' in data && data.requirement
+      ? normalizeRequirement(data.requirement)
+      : normalizeRequirement(data)
+  if (!normalized) throw new Error('服务端返回的条款数据不完整')
+  return normalized
 }
 
 /** 批量更新处置状态；返回被更新的问题列表。 */

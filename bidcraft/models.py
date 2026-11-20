@@ -317,6 +317,17 @@ class Requirement(Base):
     text: Mapped[str] = mapped_column(Text, nullable=False)
     mandatory: Mapped[bool] = mapped_column(Boolean, default=True)
     source_quote: Mapped[str] = mapped_column(Text, default="")
+    # ★/▲ 实质性标记：保留原文符号，供风险总览按最高优先级呈现。
+    marker: Mapped[str] = mapped_column(String(8), default="")
+    # 人工确认的响应状态：pending（未确认）/ responded（已响应）/ na（不适用）。
+    response_status: Mapped[str] = mapped_column(String(16), default="pending")
+    response_note: Mapped[str] = mapped_column(Text, default="")
+    responded_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    responded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 自动匹配到的正文章节（section_id 对应 Section 行，node_id 对应大纲节点，供跳转）。
+    section_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    node_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    auto_covered: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class Risk(Base):
