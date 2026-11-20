@@ -21,6 +21,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from . import clock
 from .db import session_scope
 from .models import TermItem
 
@@ -83,8 +84,8 @@ def term_payload(row: TermItem) -> dict[str, Any]:
         "target": row.target or "",
         "note": row.note or "",
         "enabled": bool(row.enabled),
-        "created_at": created.isoformat() if created else None,
-        "updated_at": updated.isoformat() if updated else None,
+        "created_at": clock.iso_utc(created),
+        "updated_at": clock.iso_utc(updated),
     }
 
 

@@ -2852,9 +2852,9 @@ def create_app():
                         "status": code.status,
                         "batch": code.batch,
                         "used_by": code.used_by,
-                        "used_at": code.used_at.isoformat() if code.used_at else None,
-                        "expires_at": code.expires_at.isoformat() if code.expires_at else None,
-                        "created_at": code.created_at.isoformat() if code.created_at else None,
+                        "used_at": _iso(code.used_at),
+                        "expires_at": _iso(code.expires_at),
+                        "created_at": _iso(code.created_at),
                     }
                     for code in codes
                 ],

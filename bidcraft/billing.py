@@ -14,6 +14,7 @@ from datetime import timedelta
 
 from sqlalchemy import func, select, update
 
+from . import clock
 from .config import settings
 from .models import AppSetting, CreditTransaction, RechargeOrder, RedeemCode, User, utcnow
 
@@ -296,7 +297,7 @@ def transactions(db, user_id: str, limit: int = 50) -> list[dict]:
             "note": row.note,
             "ref_type": row.ref_type,
             "ref_id": row.ref_id,
-            "created_at": row.created_at.isoformat() + "+00:00" if row.created_at else None,
+            "created_at": clock.iso_utc(row.created_at),
         }
         for row in rows
     ]

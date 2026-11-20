@@ -12,12 +12,13 @@ import shutil
 import sqlite3
 import tempfile
 import zipfile
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
 
+from . import clock
 from .models import (
     AppSetting,
     AuditLog,
@@ -139,7 +140,7 @@ def consent_payload(user: User) -> dict[str, Any]:
     accepted = user.terms_accepted_at
     return {
         "version": user.terms_version or "",
-        "accepted_at": accepted.isoformat() if accepted else None,
+        "accepted_at": clock.iso_utc(accepted),
         "current_version": LEGAL_VERSION,
         "up_to_date": bool(user.terms_version) and user.terms_version == LEGAL_VERSION,
     }
@@ -242,7 +243,7 @@ def prune_backups(keep: int = BACKUP_KEEP_DEFAULT, *, dry_run: bool = False) -> 
         "total": len(files),
         "removed": removed,
         "dry_run": dry_run,
-        "checked_at": utcnow().isoformat(),
+        "checked_at": clock.iso_utc(utcnow()),
     }
 
 
@@ -261,8 +262,8 @@ def deletion_payload(user: User) -> dict[str, Any]:
         days_left = max(0, (due - utcnow()).days + (1 if (due - utcnow()).seconds else 0))
     return {
         "pending": bool(due),
-        "requested_at": requested.isoformat() if requested else None,
-        "due_at": due.isoformat() if due else None,
+        "requested_at": clock.iso_utc(requested),
+        "due_at": clock.iso_utc(due),
         "days_left": days_left,
         "cooling_off_days": COOLING_OFF_DAYS,
     }
@@ -308,12 +309,8 @@ def _audit_purge(db, user: User, removed: dict[str, int]) -> None:
             action="account.purge",
             detail={
                 "username": user.username,
-                "requested_at": (
-                    user.deletion_requested_at.isoformat()
-                    if user.deletion_requested_at
-                    else None
-                ),
-                "due_at": user.deletion_due_at.isoformat() if user.deletion_due_at else None,
+                "requested_at": clock.iso_utc(user.deletion_requested_at),
+                "due_at": clock.iso_utc(user.deletion_due_at),
                 "removed": removed,
             },
         )
@@ -347,7 +344,7 @@ def purge_due_accounts(db, *, now: datetime | None = None, dry_run: bool = False
         purged.append({**entry, "removed": removed})
     if not dry_run:
         db.flush()
-    return {"purged": purged, "skipped": skipped, "checked_at": moment.isoformat()}
+    return {"purged": purged, "skipped": skipped, "checked_at": clock.iso_utc(moment)}
 
 
 # --------------------------------------------------------------------- 导出
@@ -355,12 +352,12 @@ def purge_due_accounts(db, *, now: datetime | None = None, dry_run: bool = False
 
 def export_account(db, user: User, home: Path) -> Path:
     """Build a ZIP with the user's projects and personal records."""
-    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    stamp = clock.now().strftime("%Y%m%d-%H%M%S")
     target = Path(home) / "exports" / f"bidcraft-export-{stamp}.zip"
     target.parent.mkdir(parents=True, exist_ok=True)
     projects = db.scalars(select(Project).where(Project.owner_id == user.id)).all()
     manifest: dict[str, Any] = {
-        "exported_at": datetime.now(UTC).isoformat(),
+        "exported_at": clock.now().isoformat(),
         "user": {"id": user.id, "username": user.username},
         "projects": [],
         "qualifications": [],
@@ -477,14 +474,15 @@ def statement_csv(db, user_id: str, *, start: str = "", end: str = "") -> str:
     def _in_range(value: datetime | None) -> bool:
         if value is None:
             return False
-        stamp = value.date().isoformat()
+        # 按北京日历日归档：UTC 00:00 前 8 小时属于北京同一天的更早时段
+        stamp = clock.local_date(value).isoformat()
         if start and stamp < start:
             return False
         return not (end and stamp > end)
 
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(["类型", "时间", "条目", "数量", "余额", "备注"])
+    writer.writerow(["类型", "时间（北京时间）", "条目", "数量", "余额", "备注"])
     for tx in db.scalars(
         select(CreditTransaction)
         .where(CreditTransaction.user_id == user_id)
@@ -493,7 +491,7 @@ def statement_csv(db, user_id: str, *, start: str = "", end: str = "") -> str:
         if not _in_range(tx.created_at):
             continue
         writer.writerow(
-            ["流水", tx.created_at.isoformat(timespec="seconds"), tx.kind, tx.amount, tx.balance_after, tx.note or ""]
+            ["流水", clock.format_local(tx.created_at), tx.kind, tx.amount, tx.balance_after, tx.note or ""]
         )
     for order in db.scalars(
         select(RechargeOrder)
@@ -505,7 +503,7 @@ def statement_csv(db, user_id: str, *, start: str = "", end: str = "") -> str:
         writer.writerow(
             [
                 "订单",
-                order.created_at.isoformat(timespec="seconds"),
+                clock.format_local(order.created_at),
                 order.out_trade_no,
                 order.amount_cents / 100,
                 order.credits,

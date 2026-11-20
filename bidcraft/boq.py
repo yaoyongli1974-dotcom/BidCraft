@@ -24,7 +24,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from . import auth
+from . import auth, clock
 from .config import settings
 from .models import (
     BidPackage,
@@ -642,7 +642,7 @@ def _snapshot_payload(snapshot: BoqSnapshot) -> dict[str, Any]:
         "header_row": snapshot.header_row,
         "item_count": len(snapshot.items or []),
         "warnings": list(snapshot.warnings or []),
-        "created_at": created.isoformat() if created else None,
+        "created_at": clock.iso_utc(created),
     }
 
 
@@ -940,17 +940,15 @@ def version_payload(
         "note": version.note or "",
         "package_id": version.package_id,
         "summary": summary,
-        "created_at": version.created_at.isoformat() if version.created_at else None,
+        "created_at": clock.iso_utc(version.created_at),
         "price_count": len(prices),
         "status": version.status or "draft",
         "submit_note": version.submit_note or "",
         "submitted_by": version.submitted_by or "",
-        "submitted_at": (
-            version.submitted_at.isoformat() if version.submitted_at else None
-        ),
+        "submitted_at": clock.iso_utc(version.submitted_at),
         "review_note": version.review_note or "",
         "reviewed_by": version.reviewed_by or "",
-        "reviewed_at": version.reviewed_at.isoformat() if version.reviewed_at else None,
+        "reviewed_at": clock.iso_utc(version.reviewed_at),
         "approvals": approvals,
         "approval_stage": (
             completed_stages(chain, approvals, total_amount, package_id, currency)
@@ -1170,7 +1168,7 @@ def review_version(
                 "name": _clean_actor(actor),
                 "decision": decision,
                 "note": _clean_note(note),
-                "at": now.isoformat(),
+                "at": clock.iso_utc(now),
             }
         )
         version.approvals = approvals
@@ -1313,9 +1311,7 @@ def pending_for_user(db: Session, user: dict) -> list[dict[str, Any]]:
                     "stage_count": stage_count,
                     "mode": mode,
                     "submitted_by": version.submitted_by or "",
-                    "submitted_at": (
-                        version.submitted_at.isoformat() if version.submitted_at else None
-                    ),
+                    "submitted_at": clock.iso_utc(version.submitted_at),
                     "total_amount": (version.summary or {}).get("total_amount"),
                 }
             )
@@ -1699,8 +1695,8 @@ def quota_payload(quota: QuotaItem) -> dict[str, Any]:
         "unit_price": round(float(quota.unit_price or 0.0), 4),
         "category": quota.category or "",
         "note": quota.note or "",
-        "created_at": created.isoformat() if created else None,
-        "updated_at": updated.isoformat() if updated else None,
+        "created_at": clock.iso_utc(created),
+        "updated_at": clock.iso_utc(updated),
     }
 
 

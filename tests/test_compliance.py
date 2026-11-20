@@ -70,7 +70,7 @@ def test_statement_csv_has_rows(db):
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/csv")
     body = response.content.decode("utf-8-sig")
-    assert body.splitlines()[0] == "类型,时间,条目,数量,余额,备注"
+    assert body.splitlines()[0] == "类型,时间（北京时间）,条目,数量,余额,备注"
     # 注册赠送会写一条 signup 流水
     assert "signup" in body
 

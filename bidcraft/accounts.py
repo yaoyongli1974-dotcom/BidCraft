@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from . import auth, billing
+from . import auth, billing, clock
 from .models import Project, User
 from .security import hash_password
 
@@ -38,8 +38,8 @@ def sub_payload(user: User) -> dict[str, Any]:
         "username": user.username,
         "display_name": user.display_name or user.username,
         "active": bool(user.active),
-        "created_at": user.created_at.isoformat() if user.created_at else None,
-        "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
+        "created_at": clock.iso_utc(user.created_at),
+        "last_login_at": clock.iso_utc(user.last_login_at),
     }
 
 

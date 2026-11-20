@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +12,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
+from .. import clock
 from ..schemas import FactLedger
 
 PLACEHOLDER = re.compile(r"(\{\{待填:[^}]*\}\}|\{\{图片占位:[^}]*\}\})")
@@ -110,7 +110,7 @@ def _add_cover(document: Document, ledger: FactLedger) -> None:
         ("项目编号", ledger.value("project.number") or "{{待填:项目编号}}"),
         ("招标人", ledger.value("project.buyer") or "{{待填:招标人}}"),
         ("投标人", ledger.value("bidder.name") or "{{待填:投标人名称}}"),
-        ("日期", date.today().strftime("%Y 年 %m 月 %d 日")),
+        ("日期", clock.today().strftime("%Y 年 %m 月 %d 日")),
     ]
     for label, value in info:
         paragraph = document.add_paragraph()

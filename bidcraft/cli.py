@@ -926,7 +926,9 @@ def backup(
         console.print("[dim]请先运行 bidcraft init 或 bidcraft doctor 初始化。[/dim]")
         raise typer.Exit(1)
 
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    from . import clock
+
+    stamp = clock.now().strftime("%Y%m%d-%H%M%S")
     default_name = f"bidcraft-{stamp}.zip"
     if output is None:
         target = backup_dir / default_name

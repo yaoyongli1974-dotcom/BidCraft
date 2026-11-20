@@ -26,8 +26,8 @@ SOCIAL_MAX = 600
 def _iso(value: datetime | None) -> str | None:
     if value is None:
         return None
-    if value.tzinfo is not None:
-        value = value.astimezone(UTC).replace(tzinfo=None)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
     return value.replace(microsecond=0).isoformat()
 
 

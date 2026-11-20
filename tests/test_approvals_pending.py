@@ -458,8 +458,8 @@ def test_payload_shape_sorting_and_none_last(db, tmp_path):
 
     items = _pending(owner)
     assert _ids(items) == [third["id"], second["id"], first["id"]]
-    assert items[0]["submitted_at"] == "2026-06-01T08:00:00"
-    assert items[1]["submitted_at"] == "2026-01-01T08:00:00"
+    assert items[0]["submitted_at"] == "2026-06-01T08:00:00+00:00"
+    assert items[1]["submitted_at"] == "2026-01-01T08:00:00+00:00"
     assert items[2]["submitted_at"] is None  # None sorts last
     for item in items:
         assert set(item) == PENDING_KEYS
