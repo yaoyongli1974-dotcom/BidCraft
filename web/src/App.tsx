@@ -55,6 +55,9 @@ const DraftTab = lazy(() =>
 const CheckTab = lazy(() =>
   import('./pages/tabs/CheckTab').then((module) => ({ default: module.CheckTab })),
 )
+const RiskTab = lazy(() =>
+  import('./pages/tabs/RiskTab').then((module) => ({ default: module.RiskTab })),
+)
 const ExportTab = lazy(() =>
   import('./pages/tabs/ExportTab').then((module) => ({ default: module.ExportTab })),
 )
@@ -99,6 +102,7 @@ export const router = createBrowserRouter([
           { path: 'boq', element: page(<BoqTab />, <TabFallback />) },
           { path: 'outline', element: page(<OutlineTab />, <TabFallback />) },
           { path: 'draft', element: page(<DraftTab />, <TabFallback />) },
+          { path: 'risk', element: page(<RiskTab />, <TabFallback />) },
           { path: 'check', element: page(<CheckTab />, <TabFallback />) },
           { path: 'export', element: page(<ExportTab />, <TabFallback />) },
           { path: 'collab', element: page(<CollabTab />, <TabFallback />) },

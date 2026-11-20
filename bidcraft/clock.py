@@ -23,6 +23,27 @@ def today() -> dt.date:
     return now().date()
 
 
+def utc_now() -> dt.datetime:
+    """当前 UTC 时间（naive，落库口径，与 ``models.utcnow`` 一致）。
+
+    时间一律从本模块取，避免各模块再写裸 ``datetime.now()``。
+    """
+    return now().astimezone(dt.UTC).replace(tzinfo=None)
+
+
+def iso_beijing(value: dt.datetime | None) -> str | None:
+    """把库里的 naive UTC 时间戳序列化为**北京时间** ISO 字符串（+08:00）。
+
+    风险总览契约要求 ``checked_at`` / ``resolved_at`` 带 +08:00 偏移；
+    与 ``iso_utc`` 一样不允许输出不带时区的字符串。
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=dt.UTC)
+    return value.astimezone(BEIJING_TZ).isoformat()
+
+
 def iso_utc(value: dt.datetime | dt.date | None) -> str | None:
     """序列化数据库里的 naive UTC 时间戳为**带时区**的 ISO 字符串。
 

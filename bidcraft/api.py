@@ -31,6 +31,7 @@ from . import (
     auth,
     billing,
     boq,
+    clock,
     compliance,
     images,
     invoices,
@@ -51,11 +52,19 @@ from . import (
     wechat,
     wechatpay,
 )
+from .audit import record_audit
 from .config import settings
 from .context import current_user, set_current_user
 from .db import init_db, session_scope
 from .duplicate import duplicate_project
 from .export.docx import export_docx, export_markdown
+from .export_gate import (
+    EXPORT_GATE_FORMATS,  # noqa: F401 - 保留 from bidcraft.api import 的既有导出面
+    ISSUE_RESOLVED_STATUSES,  # noqa: F401 - 同上，定义迁至 export_gate
+    ExportGateError,
+    enforce_export_gate,
+    issue_is_open,
+)
 from .generation.agent import ModelClient
 from .generation.outline import build_outline, load_outline, save_outline
 from .generation.writer import count_words, generate_document
@@ -98,6 +107,16 @@ from .rules.loader import (
 )
 
 SEVERITY_ORDER = {"blocking": 0, "critical": 1, "major": 2, "minor": 3, "info": 4}
+
+#: ISSUE_RESOLVED_STATUSES / EXPORT_GATE_FORMATS 定义在 export_gate（HTTP/MCP/CLI 共用口径）。
+#: 风险总览四档：minor 与 info 合并进「提示」档（items 仍保留原始 level）。
+ISSUE_TIERS = (
+    ("blocking", "废标/阻断"),
+    ("critical", "严重"),
+    ("major", "主要"),
+    ("minor", "提示"),
+)
+ISSUE_BULK_LIMIT = 200
 
 logger = logging.getLogger("bidcraft.api")
 
@@ -233,6 +252,19 @@ class ImageBatchRequest(BaseModel):
 
 class ExportRequest(BaseModel):
     format: str = "docx"
+    force: bool = False
+    force_reason: str = ""
+
+
+class IssueStatusUpdate(BaseModel):
+    status: Literal["handled", "ignored", "open"]
+    note: str = ""
+
+
+class IssueBulkStatusUpdate(BaseModel):
+    ids: list[str] = Field(default_factory=list)
+    status: Literal["handled", "ignored", "open"]
+    note: str = ""
 
 
 class BoqApplyRequest(BaseModel):
@@ -776,18 +808,7 @@ def audit(
 ) -> AuditLog:
     """Record a successful mutating action for the current request user."""
 
-    user = current_user() or {}
-    row = AuditLog(
-        project_id=project_id,
-        user_id=user.get("id"),
-        username=user.get("username") or "system",
-        display_name=user.get("display_name") or user.get("username") or "system",
-        action=action,
-        detail=detail or {},
-    )
-    db.add(row)
-    db.flush()
-    return row
+    return record_audit(db, project_id, action, detail)
 
 
 def _job(db, job_id: str) -> Job:
@@ -945,7 +966,28 @@ def _source_payload(source: SourceFile) -> dict[str, Any]:
     }
 
 
-def _issue_payload(issue: Issue) -> dict[str, Any]:
+def _issue_is_open(issue: Issue) -> bool:
+    return issue_is_open(issue)
+
+
+def _issue_tier(level: str) -> str:
+    return level if level in {"blocking", "critical", "major"} else "minor"
+
+
+def _issue_node_map(db: Session, issues: list[Issue]) -> dict[str, tuple[str, int]]:
+    """Batch-resolve anchored OutlineNodes (heading/position) — one query, no N+1."""
+
+    node_ids = {issue.node_id for issue in issues if issue.node_id}
+    if not node_ids:
+        return {}
+    rows = db.scalars(select(OutlineNode).where(OutlineNode.id.in_(node_ids)))
+    return {row.id: (row.heading, row.position) for row in rows}
+
+
+def _issue_payload(
+    issue: Issue, node_map: dict[str, tuple[str, int]] | None = None
+) -> dict[str, Any]:
+    heading, position = (node_map or {}).get(issue.node_id or "", ("", None))
     return {
         "id": issue.id,
         "code": issue.code,
@@ -956,7 +998,94 @@ def _issue_payload(issue: Issue) -> dict[str, Any]:
         "recommendation": issue.recommendation,
         "status": issue.status,
         "evidence": issue.evidence or {},
+        "node_id": issue.node_id,
+        "section_id": issue.section_id,
+        "heading": heading,
+        "position": position,
+        "checked_at": clock.iso_beijing(issue.checked_at),
+        "resolved_at": clock.iso_beijing(issue.resolved_at),
+        "resolved_by": issue.resolved_by or "",
+        "resolution_note": issue.resolution_note or "",
     }
+
+
+def _risk_overview_payload(db: Session, project_id: str, rows: list[Issue]) -> dict[str, Any]:
+    tiers = {
+        level: {"level": level, "label": label, "total": 0, "open": 0, "handled": 0, "ignored": 0}
+        for level, label in ISSUE_TIERS
+    }
+    categories: dict[str, dict[str, Any]] = {}
+    blocking_open = 0
+    warn_open = 0
+    checked_at = None
+    for row in rows:
+        tier = tiers[_issue_tier(row.level)]
+        tier["total"] += 1
+        is_open = _issue_is_open(row)
+        if is_open:
+            tier["open"] += 1
+        elif row.status == "ignored":
+            tier["ignored"] += 1
+        else:
+            # handled 以及历史值 resolved/closed 都计入「已处理」。
+            tier["handled"] += 1
+        category = categories.setdefault(
+            row.category or "",
+            {"category": row.category or "", "total": 0, "open": 0, "blocking_open": 0},
+        )
+        category["total"] += 1
+        if is_open:
+            category["open"] += 1
+            if row.level == "blocking":
+                category["blocking_open"] += 1
+                blocking_open += 1
+            elif row.level in {"critical", "major"}:
+                warn_open += 1
+        if row.checked_at is not None and (checked_at is None or row.checked_at > checked_at):
+            checked_at = row.checked_at
+    verdict = "blocked" if blocking_open else ("warn" if warn_open else "pass")
+    node_map = _issue_node_map(db, rows)
+    items = sorted(
+        rows,
+        key=lambda row: (SEVERITY_ORDER.get(row.level, 9), 0 if _issue_is_open(row) else 1),
+    )
+    by_category = sorted(
+        categories.values(),
+        key=lambda entry: (-entry["open"], -entry["total"], entry["category"]),
+    )
+    return {
+        "project_id": project_id,
+        "verdict": verdict,
+        "checked_at": clock.iso_beijing(checked_at),
+        "gate": {
+            "blocked": blocking_open > 0,
+            "blocking_open": blocking_open,
+            "reason": f"存在 {blocking_open} 项未处置的废标/阻断风险" if blocking_open else "",
+        },
+        "tiers": [tiers[level] for level, _label in ISSUE_TIERS],
+        "by_category": by_category,
+        "items": [_issue_payload(row, node_map) for row in items],
+    }
+
+
+def _validate_issue_note(status: str, note: str) -> str:
+    cleaned = (note or "").strip()
+    if status == "ignored" and not cleaned:
+        raise _http_error(400, "忽略风险必须填写原因")
+    return cleaned
+
+
+def _apply_issue_status(issue: Issue, status: str, note: str, username: str) -> None:
+    if status == "open":
+        issue.status = "open"
+        issue.resolved_at = None
+        issue.resolved_by = None
+        issue.resolution_note = ""
+        return
+    issue.status = status
+    issue.resolved_at = clock.utc_now()
+    issue.resolved_by = username
+    issue.resolution_note = note
 
 
 def _outline_payload(db, project_id: str) -> list[dict[str, Any]]:
@@ -1577,14 +1706,18 @@ def _run_kb_reindex_job(job_id: str, kb_id: str) -> None:
 def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None:
     """Background worker: export each project, then bundle the files into a zip.
 
-    Projects without body text fail only for non-xlsx formats; the batch keeps
-    going and the final zip contains whatever succeeded.
+    Projects without body text fail only for non-xlsx formats; projects with
+    unresolved blocking risks are skipped by the delivery gate and recorded in
+    ``failed`` with the same message as the single-project export endpoint.
+    The batch keeps going and the final zip contains whatever succeeded
+    (fail-closed: background batches have no force channel).
     """
 
     total = len(project_ids)
     files: list[dict[str, Any]] = []
     failed_items: list[dict[str, Any]] = []
     entries: list[tuple[Path, str]] = []
+    blocked = 0
     try:
         with session_scope() as db:
             job = db.get(Job, job_id)
@@ -1604,6 +1737,8 @@ def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None
                     if project is None:
                         raise ValueError("项目不存在")
                     name = project.name
+                    # 交付硬门禁与单项目导出同一口径；后台批量无 force 通道（fail-closed）。
+                    enforce_export_gate(db, project_id, fmt)
                     ledger = load_ledger(db, project_id)
                     nodes = load_outline(db, project_id)
                     if fmt != "xlsx" and (
@@ -1640,6 +1775,8 @@ def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None
                     "arcname": arcname,
                 }
             except Exception as exc:  # noqa: BLE001 - recorded per project
+                if isinstance(exc, ExportGateError):
+                    blocked += 1
                 item = {
                     "project_id": project_id,
                     "name": name,
@@ -1690,7 +1827,10 @@ def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None
             if job is not None:
                 job.status = "done"
                 job.progress = 100
-                job.message = f"导出完成：成功 {len(files)}，失败 {len(failed_items)}"
+                message = f"导出完成：成功 {len(files)}，失败 {len(failed_items)}"
+                if blocked:
+                    message += f"（其中风险阻断 {blocked}）"
+                job.message = message
                 job.result = {
                     "zip_path": str(zip_path),
                     "files": files,
@@ -3712,7 +3852,12 @@ def create_app():
 
     @app.post("/projects/batch-export", status_code=202)
     def batch_export(payload: BatchExportRequest) -> dict[str, Any]:
-        """Queue a background export and return the job whose zip can be downloaded."""
+        """Queue a background export and return the job whose zip can be downloaded.
+
+        交付硬门禁：存在未处置废标/阻断风险的项目会被跳过（不进入 zip），
+        原因见任务结果 ``failed`` 列表中的 ``error``；其余项目照常导出。
+        批量后台任务不提供 force 通道（fail-closed）。
+        """
 
         fmt = (payload.format or "docx").strip().lower()
         if fmt not in {"docx", "md", "xlsx"}:
@@ -5311,7 +5456,93 @@ def create_app():
                 db.scalars(select(Issue).where(Issue.project_id == project.id))
             )
             rows.sort(key=lambda row: SEVERITY_ORDER.get(row.level, 9))
-            return [_issue_payload(row) for row in rows[start : start + capped]]
+            page = rows[start : start + capped]
+            node_map = _issue_node_map(db, page)
+            return [_issue_payload(row, node_map) for row in page]
+
+    @app.get("/projects/{ref}/risk-overview")
+    def risk_overview(ref: str) -> dict[str, Any]:
+        with session_scope() as db:
+            project, _role = _project(db, ref)
+            rows = list(db.scalars(select(Issue).where(Issue.project_id == project.id)))
+            return _risk_overview_payload(db, project.id, rows)
+
+    @app.patch("/projects/{ref}/issues/{issue_id}")
+    def issue_status_update(
+        ref: str, issue_id: str, payload: IssueStatusUpdate
+    ) -> dict[str, Any]:
+        with session_scope() as db:
+            project, role = _project(db, ref)
+            _require_write(role)
+            issue = db.get(Issue, issue_id)
+            if issue is None or issue.project_id != project.id:
+                raise LookupError(f"风险不存在: {issue_id}")
+            note = _validate_issue_note(payload.status, payload.note)
+            previous = issue.status
+            username = str((current_user() or {}).get("username") or "")
+            _apply_issue_status(issue, payload.status, note, username)
+            audit(
+                db,
+                project.id,
+                "issue.status",
+                {
+                    "issue_id": issue.id,
+                    "code": issue.code,
+                    "level": issue.level,
+                    "from": previous,
+                    "to": payload.status,
+                    "note": note,
+                },
+            )
+            db.flush()
+            return _issue_payload(issue, _issue_node_map(db, [issue]))
+
+    @app.post("/projects/{ref}/issues/bulk-status")
+    def issue_bulk_status(ref: str, payload: IssueBulkStatusUpdate) -> dict[str, Any]:
+        with session_scope() as db:
+            project, role = _project(db, ref)
+            _require_write(role)
+            ids = list(dict.fromkeys(payload.ids))
+            if len(ids) > ISSUE_BULK_LIMIT:
+                raise _http_error(400, f"一次最多批量处置 {ISSUE_BULK_LIMIT} 项风险")
+            note = _validate_issue_note(payload.status, payload.note)
+            rows = (
+                {
+                    row.id: row
+                    for row in db.scalars(
+                        select(Issue).where(
+                            Issue.project_id == project.id, Issue.id.in_(ids)
+                        )
+                    )
+                }
+                if ids
+                else {}
+            )
+            username = str((current_user() or {}).get("username") or "")
+            updated: list[Issue] = []
+            for issue_id in ids:
+                issue = rows.get(issue_id)
+                if issue is None:
+                    continue  # 不属于该项目的 id 直接忽略
+                _apply_issue_status(issue, payload.status, note, username)
+                updated.append(issue)
+            audit(
+                db,
+                project.id,
+                "issue.bulk_status",
+                {
+                    "ids": len(ids),
+                    "updated": len(updated),
+                    "status": payload.status,
+                    "note": note,
+                },
+            )
+            db.flush()
+            node_map = _issue_node_map(db, updated)
+            return {
+                "updated": len(updated),
+                "items": [_issue_payload(row, node_map) for row in updated],
+            }
 
     # -------------------------------------------------------------- export
     class AccountDelete(BaseModel):
@@ -5549,8 +5780,22 @@ def create_app():
     def export(ref: str, payload: ExportRequest) -> FileResponse:
         fmt = payload.format.lower()
         with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
+            project, role = _project(db, ref)
+            _require_write(role)
+            # 交付硬门禁：未处置的废标/阻断风险禁止导出正文类格式；
+            # 强制覆盖仅限 owner/admin，且必须留痕（export.force 审计）。
+            # 统计/校验/审计与 MCP、CLI 共用 export_gate，保证口径与文案一致。
+            try:
+                enforce_export_gate(
+                    db,
+                    project.id,
+                    fmt,
+                    force=payload.force,
+                    force_reason=payload.force_reason,
+                    authorize_force=lambda: _require_owner(role),
+                )
+            except ExportGateError as exc:
+                raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
             ledger = load_ledger(db, project.id)
             nodes = load_outline(db, project.id)
             if fmt != "xlsx" and (not nodes or not any(node.get("body") for node in nodes)):

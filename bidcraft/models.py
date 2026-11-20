@@ -363,6 +363,8 @@ class Issue(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
     section_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    #: 锚定到的大纲节点（OutlineNode.id）；location 匹配不到时留空。
+    node_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     code: Mapped[str] = mapped_column(String(40), default="")
     level: Mapped[str] = mapped_column(String(16), default="major")
     category: Mapped[str] = mapped_column(String(80), default="")
@@ -371,6 +373,12 @@ class Issue(Base):
     recommendation: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(16), default="open")
     evidence: Mapped[dict] = mapped_column(JSON, default=dict)
+    #: 最近一次核对时间（naive UTC 落库，序列化见 clock.iso_beijing）。
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    #: 人工处置时间/处置人/备注；status=open 时三者清空。
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resolved_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    resolution_note: Mapped[str] = mapped_column(Text, default="")
 
 
 class Delivery(Base):

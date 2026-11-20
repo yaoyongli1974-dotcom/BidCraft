@@ -272,7 +272,8 @@ export BIDCRAFT_WECHAT_PAY_MOCK=1         # 本地演示支付
 | C2 解析与台账 | ✅ | PDF/DOCX/TXT/XLSX；扫描 PDF 可选 `pdftoppm + tesseract` OCR；29 类可扩展字段、评分表、材料清单、参数、要求、废标风险；支持人工校订 |
 | C3 规则引擎 | ✅ | YAML 驱动章节识别、评分对齐、核对；安全表达式 DSL，换招标文件不改代码 |
 | C4 生成链路 | ✅ | 大纲 → 单章流式/续写 → 事实注入 → 去重 → 数字复核 → 确定性回落；后台任务支持 SSE 逐字预览 |
-| C5 核对 | ✅ 最小 | 阻断/严重/主要/提示四级；问题带位置与修订建议；不自动改写 |
+| C5 核对 | ✅ | 阻断/严重/主要/提示四级；问题带位置与修订建议，并锚定到大纲章节（node_id/section_id/heading）；人工处置状态（已处理/已忽略+原因/恢复）跨重复核对保留，`finding` 变化才重开；不自动改写正文 |
+| 交付前风险总览与导出门禁 | ✅ | 独立「风险总览」页按废标/阻断、严重、主要、提示四档聚合，每项可一键跳转正文定位并高亮段落，或标记已处理/忽略（忽略必填原因）；**存在未处置阻断项时 docx/pdf/md 导出返回 409**，仅 owner/admin 可填写原因强制导出并写 `export.force` 审计；HTTP、MCP、CLI、批量导出四条路径同一门禁，xlsx 不受限 |
 | C6 文档交付 | ✅ 最小 | DOCX 封面、TOC 域、页码、宋体/黑体、Markdown 表格、占位标红；Markdown / PDF（LibreOffice，刷新目录页码）/ Excel 工作簿 |
 | Excel 清单对齐 | ✅ | 导入招标工程量清单，按行匹配台账材料，标注缺项/多项/数量·单位·规格差异（整数数量精确比对，非整数计量按 0.5% 容差），差异双向回写；支持逐行录入单价、自动计算合价与报价汇总并导出响应表 |
 | 图片配图 | ✅ | 按章节生成工程示意配图：画面描述/风格/尺寸、章节正文上下文、失败资产保留与重试、本地 PNG/JPEG 上传、重新生成、按图名精确匹配占位符或按光标插入；项目图库支持跨章节复用，全文配图计划统计各章占位/已匹配/失败/缺失并按章节字数计算预算，可批量生成缺失/失败配图，也可一键按计划插入已匹配配图；整篇配图策略（全文上限/默认风格尺寸/图注/版心宽度）与「生成并插入」一键编排；DOCX 导出嵌入图片并自动图注编号排版 |
@@ -432,7 +433,7 @@ DOCX 图注编号与版心宽度、批量生成默认风格尺寸；`tests/test_
 覆盖项目复制的全量深拷贝、外键重映射、可选清单/配图、排除项与失败清理；`tests/test_project_templates.py`
 覆盖模板标记权限、模板列表与从模板创建（含非成员实例化与失败清理）；
 `tests/test_vip.py`、`tests/test_subaccounts.py`、`tests/test_jobqueue.py` 覆盖 VIP 授权/续期/折扣、
-子账号共享计费与权限隔离、优先级队列调度、审批条件分支；`tests/test_user_docs.py` 覆盖个人文档上传/索引、列表/下载/删除、跨用户隔离与检索防泄漏、审计；`tests/test_client.py`、`tests/test_desktop.py` 覆盖客户端登录/Cookie 复用、文档与原件上传、下载、网关反代与 Cookie 透传、静态/SPA 回退、令牌门禁与本地文件桥；`tests/test_offline_cache.py`、`tests/test_qtshell.py` 覆盖只读离线缓存回放与淘汰、Qt 外壳版本比较/桥接注入脚本/导航映射/设置键、Qt 缺失回退与原生页面辅助函数；`tests/test_qualifications.py` 覆盖资质台账 CRUD 与归属隔离、证据上传/下载/删除与越界防护、按开标日的自查判定与汇总、审计；`tests/test_personnel.py` 覆盖人员台账 CRUD 与归属隔离、字段校验、在建锁定、审计与知识库文档元数据接口；`tests/test_textqa.py` 覆盖错别字/重复标点规则、截止/截至语境、跨章节一致性、段落重复与核对集成；`tests/test_mineru.py` 覆盖 MinerU 响应映射、表格还原、异常回退与内置链优先级；`tests/test_dedup.py` 覆盖跨文件/同文件重复、阈值与截断、docx 跳过、CLI 行为；`tests/test_invoices.py` 覆盖注册同意留痕、开票申请/开具/下载/驳回、备份保留与注销清理；`tests/test_clock.py` 覆盖北京日历日判定、带时区的时间戳序列化与对账单按日归档；`tests/test_desktop_recipe.py` 守住桌面端归档后的冻结配方（desktop/build extra、uv.lock 锁定、构建脚本查齐四依赖、CI 仅手动触发且默认不重新附加 Release）（当前全量 **723 passed**）。
+子账号共享计费与权限隔离、优先级队列调度、审批条件分支；`tests/test_user_docs.py` 覆盖个人文档上传/索引、列表/下载/删除、跨用户隔离与检索防泄漏、审计；`tests/test_client.py`、`tests/test_desktop.py` 覆盖客户端登录/Cookie 复用、文档与原件上传、下载、网关反代与 Cookie 透传、静态/SPA 回退、令牌门禁与本地文件桥；`tests/test_offline_cache.py`、`tests/test_qtshell.py` 覆盖只读离线缓存回放与淘汰、Qt 外壳版本比较/桥接注入脚本/导航映射/设置键、Qt 缺失回退与原生页面辅助函数；`tests/test_qualifications.py` 覆盖资质台账 CRUD 与归属隔离、证据上传/下载/删除与越界防护、按开标日的自查判定与汇总、审计；`tests/test_personnel.py` 覆盖人员台账 CRUD 与归属隔离、字段校验、在建锁定、审计与知识库文档元数据接口；`tests/test_textqa.py` 覆盖错别字/重复标点规则、截止/截至语境、跨章节一致性、段落重复与核对集成；`tests/test_mineru.py` 覆盖 MinerU 响应映射、表格还原、异常回退与内置链优先级；`tests/test_dedup.py` 覆盖跨文件/同文件重复、阈值与截断、docx 跳过、CLI 行为；`tests/test_invoices.py` 覆盖注册同意留痕、开票申请/开具/下载/驳回、备份保留与注销清理；`tests/test_clock.py` 覆盖北京日历日判定、带时区的时间戳序列化与对账单按日归档；`tests/test_desktop_recipe.py` 守住桌面端归档后的冻结配方（desktop/build extra、uv.lock 锁定、构建脚本查齐四依赖、CI 仅手动触发且默认不重新附加 Release）；`tests/test_risk_overview.py` 覆盖风险总览四档聚合、问题锚定章节、处置状态跨核对保留、忽略必填原因、批量处置，以及 HTTP/MCP/CLI/批量导出四条路径的交付门禁与强制导出留痕（当前全量 **738 passed**）。
 
 前端验证：`cd web && npm run build`（TypeScript 编译 + Vite 产物输出到
 `bidcraft/web_dist`），随后 `bidcraft serve --open` 做浏览器全流程验收。

@@ -100,6 +100,13 @@ def _migrate_columns(engine) -> None:
             ("score_note", "VARCHAR(200) DEFAULT ''"),
         ],
         "image_assets": [("options", "JSON")],
+        "issues": [
+            ("node_id", "VARCHAR(36)"),
+            ("checked_at", "DATETIME"),
+            ("resolved_at", "DATETIME"),
+            ("resolved_by", "VARCHAR(80)"),
+            ("resolution_note", "TEXT DEFAULT ''"),
+        ],
         "sections": [("revision", "INTEGER DEFAULT 0")],
         "kb_chunks": [
             ("embedding", "JSON"),

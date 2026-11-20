@@ -11,13 +11,21 @@ import {
   FileText,
   FileType2,
   HardDrive,
+  ShieldAlert,
   ShieldCheck,
   WifiOff,
   type LucideIcon,
 } from 'lucide-react'
 import { useWorkspace } from '../useWorkspace'
-import { downloadBlob, exportProject, messageOf } from '../../lib/api'
-import type { ExportFormat, ExportRecord } from '../../lib/types'
+import {
+  ApiError,
+  downloadBlob,
+  exportProject,
+  getRiskOverview,
+  messageOf,
+  type ExportForceOptions,
+} from '../../lib/api'
+import type { ExportFormat, ExportRecord, RiskOverview } from '../../lib/types'
 import {
   className,
   formatDate,
@@ -26,10 +34,11 @@ import {
   projectStats,
 } from '../../lib/format'
 import { useHealth } from '../../context/useHealth'
-import { useLocalStorageState } from '../../lib/hooks'
+import { useLocalStorageState, useQuery } from '../../lib/hooks'
 import { Badge } from '../../components/Badge'
 import { Button } from '../../components/Button'
 import { ProgressBar } from '../../components/Feedback'
+import { Modal } from '../../components/Modal'
 import { StatTile, TabHeading } from '../../components/Workbench'
 import { useToast } from '../../context/useToast'
 
@@ -73,10 +82,15 @@ export function ExportTab() {
   const { ref, basePath, project, reloadProject, canWrite } = useWorkspace()
   const toast = useToast()
   const { health, error: healthError } = useHealth()
+  const riskQuery = useQuery(`risk-overview:${ref}`, () => getRiskOverview(ref))
+  const riskOverview: RiskOverview | undefined = riskQuery.data
   const stats = projectStats(project)
   const outline = outlineCount(project)
   const [exporting, setExporting] = useState<string | null>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
+  const [forceTarget, setForceTarget] = useState<(ExportFormat & { title: string }) | null>(null)
+  const [forceReason, setForceReason] = useState('')
+  const [forceError, setForceError] = useState('')
   const [records, setRecords] = useLocalStorageState<Record<string, ExportRecord[]>>(
     'bidcraft:exports',
     {},
@@ -86,7 +100,15 @@ export function ExportTab() {
   const missingRequired = stats.missing_required
   const issues = stats.issues_open
 
-  const runExport = async (format: ExportFormat) => {
+  const gateBlocked = Boolean(riskOverview?.gate?.blocked)
+  const blockingOpen = riskOverview?.gate?.blocking_open ?? 0
+  const gateReason =
+    riskOverview?.gate?.reason?.trim() ||
+    `存在 ${blockingOpen} 项未处置的废标/阻断风险，请先在风险总览中处置。`
+  const canForce = project.my_role === 'owner' || project.my_role === 'admin'
+  const forceReasonValid = forceReason.trim().length >= 4
+
+  const runExport = async (format: ExportFormat, force?: ExportForceOptions) => {
     if (!canWrite || exporting) return
     if (format.id !== 'xlsx' && !hasBody) {
       toast.warning('还没有正文', '先在大纲页生成章节，或在正文页书写后再导出。')
@@ -95,7 +117,7 @@ export function ExportTab() {
     setExporting(format.id)
     setErrors((current) => ({ ...current, [format.id]: '' }))
     try {
-      const { blob, filename } = await exportProject(ref, format.id)
+      const { blob, filename } = await exportProject(ref, format.id, force)
       downloadBlob(blob, filename)
       const record: ExportRecord = {
         filename,
@@ -106,7 +128,10 @@ export function ExportTab() {
         ...current,
         [ref]: [record, ...(current[ref] || [])].slice(0, 8),
       }))
-      toast.success('导出完成', `已开始下载 ${filename}`)
+      toast.success(
+        force?.force ? '已强制导出' : '导出完成',
+        `已开始下载 ${filename}`,
+      )
       try {
         await reloadProject()
       } catch {
@@ -114,11 +139,33 @@ export function ExportTab() {
       }
     } catch (error) {
       const message = messageOf(error)
+      // 409 说明门禁在我们展示后又被触发（例如别处新增了阻断项）：刷新总览并回填原因。
+      if (error instanceof ApiError && error.status === 409) {
+        riskQuery.refresh()
+      }
       setErrors((current) => ({ ...current, [format.id]: message }))
       toast.error(`导出 ${format.title} 失败`, message)
     } finally {
       setExporting(null)
     }
+  }
+
+  const openForce = (format: ExportFormat & { title: string }) => {
+    if (!canForce) return
+    setForceTarget(format)
+    setForceReason('')
+    setForceError('')
+  }
+
+  const submitForce = async () => {
+    if (!forceTarget) return
+    if (!forceReasonValid) {
+      setForceError('请填写至少 4 个字的原因，说明为何确需跳过交付门禁。')
+      return
+    }
+    const target = forceTarget
+    setForceTarget(null)
+    await runExport(target, { force: true, force_reason: forceReason.trim() })
   }
 
   const readiness = [
@@ -139,10 +186,21 @@ export function ExportTab() {
     },
     {
       key: 'issues',
-      label: issues > 0 ? `${issues} 项未关闭核对问题` : '没有未关闭的核对问题',
+      label: issues > 0 ? `${issues} 项未处置核对问题` : '没有未处置的核对问题',
       ok: issues === 0,
       to: `${basePath}/check`,
       action: issues > 0 ? '去核对' : '查看核对',
+    },
+    {
+      key: 'gate',
+      label: gateBlocked
+        ? `${blockingOpen} 项未处置的废标/阻断风险`
+        : riskOverview
+          ? '交付门禁未拦截'
+          : '门禁状态未读取',
+      ok: !gateBlocked,
+      to: `${basePath}/risk`,
+      action: gateBlocked ? '去风险总览处置' : '查看风险总览',
     },
   ]
 
@@ -182,8 +240,12 @@ export function ExportTab() {
 
           <div className="format-grid">
             {FORMATS.map((format) => {
+              const gateLocked = gateBlocked && format.id !== 'xlsx'
               const disabled =
-                !canWrite || (format.id !== 'xlsx' && !hasBody) || Boolean(exporting)
+                !canWrite ||
+                (format.id !== 'xlsx' && !hasBody) ||
+                Boolean(exporting) ||
+                gateLocked
               const Icon = format.icon
               const error = errors[format.id]
               return (
@@ -194,6 +256,7 @@ export function ExportTab() {
                     `format-card--${format.id}`,
                     format.recommended && 'is-recommended',
                     disabled && 'is-disabled',
+                    gateLocked && 'is-gate-locked',
                   )}
                 >
                   <div className="format-card-head">
@@ -208,25 +271,58 @@ export function ExportTab() {
                     {format.note && <span className="format-note">{format.note}</span>}
                   </div>
                   <p className="format-desc">{format.description}</p>
+                  {gateLocked && (
+                    <div className="format-gate-note" role="note">
+                      <ShieldAlert size={13} />
+                      <span>
+                        门禁未通过：{blockingOpen} 项废标/阻断风险未处置。
+                        <Link to={`${basePath}/risk`} className="text-link">
+                          去风险总览处置 <ArrowRight size={11} />
+                        </Link>
+                      </span>
+                    </div>
+                  )}
                   <div className="format-foot">
                     <span className="format-availability">
                       {format.id === 'xlsx'
                         ? '台账就绪即可导出'
-                        : hasBody
-                          ? `${stats.written} 章正文`
-                          : '尚无可导出正文'}
+                        : gateLocked
+                          ? '阻断风险未处置'
+                          : hasBody
+                            ? `${stats.written} 章正文`
+                            : '尚无可导出正文'}
                     </span>
-                    <Button
-                      size="sm"
-                      variant={format.recommended ? 'primary' : 'secondary'}
-                      icon={<Download size={13} />}
-                      loading={exporting === format.id}
-                      disabled={disabled}
-                      title={!canWrite ? '只读成员不能导出文件' : undefined}
-                      onClick={() => void runExport(format)}
-                    >
-                      {format.id === 'xlsx' ? '导出台账' : '导出'}
-                    </Button>
+                    <span className="format-actions">
+                      {gateLocked && canForce && hasBody && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          icon={<ShieldAlert size={13} />}
+                          disabled={Boolean(exporting)}
+                          title="跳过交付门禁并导出，需填写原因"
+                          onClick={() => openForce(format)}
+                        >
+                          强制导出
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        variant={format.recommended ? 'primary' : 'secondary'}
+                        icon={<Download size={13} />}
+                        loading={exporting === format.id}
+                        disabled={disabled}
+                        title={
+                          !canWrite
+                            ? '只读成员不能导出文件'
+                            : gateLocked
+                              ? '存在未处置的废标/阻断风险，请先处置后再导出'
+                              : undefined
+                        }
+                        onClick={() => void runExport(format)}
+                      >
+                        {format.id === 'xlsx' ? '导出台账' : '导出'}
+                      </Button>
+                    </span>
                   </div>
                   {error && (
                     <div className="export-error" role="alert">
@@ -238,6 +334,43 @@ export function ExportTab() {
               )
             })}
           </div>
+
+          {gateBlocked ? (
+            <div className="export-gate" role="alert">
+              <span className="export-gate-icon" aria-hidden>
+                <ShieldAlert size={20} />
+              </span>
+              <div className="export-gate-copy">
+                <strong>导出门禁未通过 · {blockingOpen} 项废标/阻断风险未处置</strong>
+                <p>{gateReason}</p>
+                <p className="export-gate-hint">
+                  docx / pdf / md 暂不可导出；台账工作簿（xlsx）不受影响。
+                  {canForce
+                    ? '如确需先导出，可填写原因后强制导出。'
+                    : '如需强制导出，请联系项目负责人。'}
+                </p>
+              </div>
+              <Link to={`${basePath}/risk`} className="text-link">
+                去风险总览 <ArrowRight size={11} />
+              </Link>
+            </div>
+          ) : riskOverview && riskOverview.checked_at ? (
+            <div className="export-gate export-gate--ok">
+              <span className="export-gate-icon" aria-hidden>
+                <ShieldCheck size={20} />
+              </span>
+              <div className="export-gate-copy">
+                <strong>导出门禁通过</strong>
+                <p>
+                  没有未处置的废标/阻断风险 · 上次核对{' '}
+                  {formatRelative(riskOverview.checked_at)}
+                </p>
+              </div>
+              <Link to={`${basePath}/risk`} className="text-link">
+                查看风险总览 <ArrowRight size={11} />
+              </Link>
+            </div>
+          ) : null}
 
           <div className="export-callout">
             <FileDown size={17} />
@@ -306,7 +439,7 @@ export function ExportTab() {
               detail="已写 / 大纲"
             />
             <StatTile
-              label="未关闭问题"
+              label="未处置问题"
               value={issues}
               tone={issues > 0 ? 'warn' : 'success'}
               detail="核对后更新"
@@ -396,6 +529,63 @@ export function ExportTab() {
           导出文件保存在浏览器下载目录，后端不复制到外部位置。敏感招标文件请仅在受控设备上处理。
         </span>
       </div>
+
+      <Modal
+        open={Boolean(forceTarget)}
+        onClose={() => setForceTarget(null)}
+        size="sm"
+        eyebrow="强制导出"
+        title={forceTarget ? `强制导出 ${forceTarget.title}` : '强制导出'}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setForceTarget(null)}>
+              取消
+            </Button>
+            <Button
+              variant="danger"
+              icon={<ShieldAlert size={14} />}
+              disabled={!forceReasonValid || Boolean(exporting)}
+              onClick={() => void submitForce()}
+            >
+              确认强制导出
+            </Button>
+          </>
+        }
+      >
+        <div className="export-force-body">
+          <div className="export-force-alert">
+            <ShieldAlert size={16} aria-hidden />
+            <p>
+              仍有 {blockingOpen} 项未处置的废标/阻断风险。强制导出的文件可能无法通过评审，
+              该操作会记入项目审计。仅项目负责人或管理员可以执行。
+            </p>
+          </div>
+          <label className="risk-ignore-field">
+            <span>
+              强制导出原因 <em>至少 4 个字，必填</em>
+            </span>
+            <textarea
+              className="textarea"
+              rows={3}
+              value={forceReason}
+              placeholder="例如：业主临时要求先行提交，阻断项将在澄清阶段补充。"
+              onChange={(event) => {
+                setForceReason(event.target.value)
+                if (forceError) setForceError('')
+              }}
+              aria-label="强制导出原因"
+            />
+          </label>
+          {forceError && (
+            <p className="field-error" role="alert">
+              {forceError}
+            </p>
+          )}
+          <p className="export-force-hint">
+            原因会随导出记录写入审计日志，便于交付后追溯。
+          </p>
+        </div>
+      </Modal>
     </div>
   )
 }

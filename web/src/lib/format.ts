@@ -657,15 +657,50 @@ export function evidenceText(evidence: unknown): string {
   }
 }
 
+/**
+ * 问题处置状态元数据。新契约取值 open / handled / ignored；
+ * 旧值 resolved / closed 兼容显示为「已处理」。
+ */
+export const ISSUE_STATUS: Record<string, Meta> = {
+  open: { label: '待处理', tone: 'warn' },
+  handled: { label: '已处理', tone: 'success' },
+  resolved: { label: '已处理', tone: 'success' },
+  closed: { label: '已处理', tone: 'success' },
+  ignored: { label: '已忽略', tone: 'neutral' },
+}
+
+export function issueStatusMeta(status?: string): Meta {
+  if (!status) return { label: '待处理', tone: 'warn' }
+  return ISSUE_STATUS[status.toLowerCase()] || { label: status, tone: 'neutral' }
+}
+
+/** 一条问题是否已离开「待处理」（含旧值 resolved / closed）。 */
+export function issueResolved(status?: string): boolean {
+  const normalized = (status || '').toLowerCase()
+  return ['handled', 'ignored', 'resolved', 'closed'].includes(normalized)
+}
+
+/**
+ * 交付前风险总览的四档标签。配色沿用 ISSUE_LEVEL 的 tone，
+ * 只是把 minor 与 info 合并成「提示」一档，不另造配色体系。
+ */
+export const RISK_TIER: Record<string, Meta> = {
+  blocking: { label: '废标/阻断', tone: 'danger' },
+  critical: { label: '严重', tone: 'danger' },
+  major: { label: '主要', tone: 'warn' },
+  minor: { label: '提示', tone: 'info' },
+}
+
+export function riskTier(level?: string): Meta {
+  const normalized = (level || '').toLowerCase()
+  // info 并入「提示」档；未知等级也落入提示档，不凭空造出第五档。
+  const key = normalized === 'info' ? 'minor' : normalized
+  return RISK_TIER[key] || RISK_TIER.minor
+}
+
 export function issueStatus(status?: string): string {
   if (!status) return ''
-  const map: Record<string, string> = {
-    open: '待处理',
-    resolved: '已处理',
-    ignored: '已忽略',
-    closed: '已关闭',
-  }
-  return map[status.toLowerCase()] || status
+  return ISSUE_STATUS[status.toLowerCase()]?.label || status
 }
 
 export function issueTitle(issue: Issue): string {

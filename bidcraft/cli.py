@@ -11,6 +11,7 @@ from rich.table import Table
 from . import __version__, knowledge, model_config
 from .config import settings
 from .db import init_db, session_scope
+from .export_gate import ExportGateError, enforce_export_gate
 from .generation.agent import ModelClient
 from .generation.outline import build_outline, load_outline, save_outline
 from .generation.writer import generate_document
@@ -548,12 +549,29 @@ def export(
     ref: str = typer.Argument(..., help="项目 ID/名称"),
     fmt: str = typer.Option("docx", "--format", "-f", help="docx|md|pdf|xlsx"),
     output: Path = typer.Option(None, "--output", "-o"),
+    force: bool = typer.Option(False, "--force", help="存在未处置废标/阻断风险时强制导出"),
+    force_reason: str = typer.Option(
+        "", "--force-reason", help="强制导出原因（去空白后不少于 4 个字）"
+    ),
 ) -> None:
     """导出 DOCX / Markdown / PDF / Excel。"""
     from .export.docx import export_docx, export_markdown
 
     with _db() as db:
         project = _project_or_exit(db, ref)
+        # 交付硬门禁与 HTTP/MCP/CLI 共用 export_gate；CLI 按本地操作者（等同 owner）处理。
+        try:
+            enforce_export_gate(
+                db,
+                project.id,
+                fmt,
+                force=force,
+                force_reason=force_reason,
+                source="cli",
+            )
+        except ExportGateError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1) from exc
         ledger = load_ledger(db, project.id)
         nodes = load_outline(db, project.id)
         if fmt not in {"xlsx"} and (not nodes or not any(node.get("body") for node in nodes)):
@@ -566,7 +584,7 @@ def export(
         target = output or (settings.project_dir(project.id) / "output" / f"bid.{suffix}")
         target.parent.mkdir(parents=True, exist_ok=True)
         if fmt == "docx":
-            path = export_docx(target, ledger, nodes, image_resolver=_image_resolver(target.id))
+            path = export_docx(target, ledger, nodes, image_resolver=_image_resolver(project.id))
         elif fmt in {"md", "markdown"}:
             path = export_markdown(target, ledger, nodes)
         elif fmt == "xlsx":
@@ -708,6 +726,10 @@ def run(
     package: str = typer.Option("weakcurrent-cabling", "--package", "-p"),
     mode: str = typer.Option("auto", "--mode"),
     no_write: bool = typer.Option(False, "--no-write", help="只解析并建大纲，不生成正文"),
+    force: bool = typer.Option(False, "--force", help="存在未处置废标/阻断风险时强制导出 DOCX"),
+    force_reason: str = typer.Option(
+        "", "--force-reason", help="强制导出原因（去空白后不少于 4 个字）"
+    ),
 ) -> None:
     """一条命令跑通：导入 → 台账 → 大纲 → 正文 → 核对 → DOCX。"""
     with _db() as db:
@@ -760,6 +782,20 @@ def run(
         console.print(f"核对未通过 {verdict['failed']} 项，结论 {verdict['verdict']}")
 
         from .export.docx import export_docx
+
+        # 一条命令跑到 DOCX 也是真实导出路径，同样过交付硬门禁（按本地操作者处理）。
+        try:
+            enforce_export_gate(
+                db,
+                project.id,
+                "docx",
+                force=force,
+                force_reason=force_reason,
+                source="cli",
+            )
+        except ExportGateError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1) from exc
 
         target = settings.project_dir(project.id) / "output" / "bid.docx"
         path = export_docx(

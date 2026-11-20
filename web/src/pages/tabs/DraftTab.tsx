@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
   AlertTriangle,
   ArrowRight,
@@ -237,12 +237,45 @@ function jobEventUrl(jobId: string): string {
   return `/jobs/${encodeURIComponent(jobId)}/events`
 }
 
+interface DraftFocusTarget {
+  nodeId: string
+  quote: string
+}
+
+const QUOTE_BLOCK_SELECTOR =
+  'p, h1, h2, h3, h4, h5, h6, li, td, th, blockquote, pre, .md-placeholder'
+
+function normalizeForSearch(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * 在预览 DOM 里按文本查找 quote 所在块：不做标题 id 体系，只认渲染后的文字。
+ * 长引文逐级截短重试，尽量命中段落。
+ */
+function findQuoteBlock(root: HTMLElement, quote: string): HTMLElement | null {
+  const target = normalizeForSearch(quote)
+  if (target.length < 4) return null
+  const blocks = Array.from(root.querySelectorAll<HTMLElement>(QUOTE_BLOCK_SELECTOR))
+  const candidates = [target, target.slice(0, 48), target.slice(0, 16)].filter(
+    (value, index, list) => value.length >= 4 && list.indexOf(value) === index,
+  )
+  for (const candidate of candidates) {
+    const hit = blocks.find((block) =>
+      normalizeForSearch(block.textContent || '').includes(candidate),
+    )
+    if (hit) return hit
+  }
+  return null
+}
+
 export function DraftTab() {
   const { ref, basePath, project, reloadProject, setUnsaved, canWrite } = useWorkspace()
   const { syncUser } = useAuth()
   const toast = useToast()
   const confirm = useConfirm()
   const navigate = useNavigate()
+  const location = useLocation()
   const outlineQuery = useQuery(`outline:${ref}`, () => getOutline(ref))
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [body, setBody] = useState('')
@@ -310,6 +343,11 @@ export function DraftTab() {
   const studioFileInputRef = useRef<HTMLInputElement | null>(null)
   const caretRef = useRef<{ start: number; end: number } | null>(null)
   const pendingCaret = useRef<number | null>(null)
+  // 风险总览「跳转修改」带来的定位目标：选中章节后按 quote 在预览里定位。
+  const [focusTarget, setFocusTarget] = useState<DraftFocusTarget | null>(null)
+  const editorPreviewRef = useRef<HTMLDivElement | null>(null)
+  const focusSelectingRef = useRef<string | null>(null)
+  const focusTimerRef = useRef<number | null>(null)
 
   const outline = useMemo(() => outlineQuery.data || [], [outlineQuery.data])
   const selectedChapter = outline.find((chapter) => chapter.id === selectedId) || null
@@ -747,6 +785,105 @@ export function DraftTab() {
 
   const dirtyRef = useRef(dirty)
   dirtyRef.current = dirty
+
+  // 选中跳转目标章节；沿用切换章节时的未保存确认流程。
+  const applyFocusSelection = useCallback(
+    async (nodeId: string) => {
+      if (selectedIdRef.current === nodeId) return true
+      if (dirtyRef.current) {
+        const accepted = await confirm({
+          title: '切换章节？',
+          description: '当前章节有未保存的修改，切换后会丢失。',
+          confirmLabel: '放弃修改并切换',
+          tone: 'warning',
+        })
+        if (!accepted) return false
+      }
+      setSelectedId(nodeId)
+      setLoadedId(null)
+      setBody('')
+      setSavedBody('')
+      setRevision(null)
+      return true
+    },
+    [confirm],
+  )
+
+  // 1) 消费风险总览带来的定位 state（读一次即清除，刷新不会重复触发）。
+  useEffect(() => {
+    const state = location.state as { focusNode?: string; quote?: string } | null
+    if (!state?.focusNode) return
+    const nodeId = String(state.focusNode)
+    navigate(location.pathname, { replace: true, state: null })
+    setFocusTarget((current) =>
+      current?.nodeId === nodeId ? current : { nodeId, quote: state.quote || '' },
+    )
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.key])
+
+  // 2) 选中目标章节；大纲里已不存在该节点时给出提示并放弃定位。
+  useEffect(() => {
+    const target = focusTarget
+    if (!target) return
+    if (outlineQuery.loading) return
+    if (outline.length === 0) {
+      toast.warning('未找到对应章节', '当前项目还没有大纲，无法定位风险所在章节。')
+      setFocusTarget(null)
+      return
+    }
+    if (!outline.some((chapter) => chapter.id === target.nodeId)) {
+      toast.warning('未找到对应章节', '大纲中已没有该章节，可能已被调整或删除。')
+      setFocusTarget(null)
+      return
+    }
+    if (selectedId === target.nodeId) return
+    if (focusSelectingRef.current === target.nodeId) return
+    focusSelectingRef.current = target.nodeId
+    void (async () => {
+      const accepted = await applyFocusSelection(target.nodeId)
+      focusSelectingRef.current = null
+      if (!accepted) setFocusTarget(null)
+    })()
+  }, [focusTarget, outline, outlineQuery.loading, selectedId, applyFocusSelection, toast])
+
+  // 3) 正文载入后在预览 DOM 里定位 quote 并临时高亮；找不到则退化为章节提示。
+  useEffect(() => {
+    const target = focusTarget
+    if (!target || loadedId !== target.nodeId) return
+    if (!preview) {
+      if (!body.trim()) {
+        // 空正文章节不会进入预览：直接给出退化提示，避免目标悬挂。
+        toast.info('已定位到章节', '本章正文还是空的，请直接补充相关内容。')
+        setFocusTarget(null)
+        return
+      }
+      // 用户可能正停在编辑模式；跳转意图是查看位置，先切回预览再定位。
+      setPreview(true)
+      return
+    }
+    if (focusTimerRef.current != null) window.clearTimeout(focusTimerRef.current)
+    const timer = window.setTimeout(() => {
+      focusTimerRef.current = null
+      const root = editorPreviewRef.current
+      const block = root ? findQuoteBlock(root, target.quote) : null
+      if (block) {
+        block.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        block.classList.add('md-focus-flash')
+        window.setTimeout(() => block.classList.remove('md-focus-flash'), 3200)
+      } else {
+        toast.info('已定位到章节', '没有自动匹配到具体段落，请在本章内查找相关内容。')
+      }
+      setFocusTarget(null)
+    }, 140)
+    focusTimerRef.current = timer
+    return () => {
+      if (focusTimerRef.current != null) {
+        window.clearTimeout(focusTimerRef.current)
+        focusTimerRef.current = null
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusTarget, loadedId, preview, body])
 
   const generateImageFor = async (token: string) => {
     if (
@@ -2676,7 +2813,7 @@ export function DraftTab() {
                     <Skeleton width="60%" height={16} />
                   </div>
                 ) : preview ? (
-                  <div className="editor-preview">
+                  <div className="editor-preview" ref={editorPreviewRef}>
                     <MarkdownPreview text={body} />
                   </div>
                 ) : (

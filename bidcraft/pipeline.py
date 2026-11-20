@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
 from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import terms, textqa
+from . import clock, terms, textqa
 from .config import settings
 from .ledger import build_ledger, load_ledger, save_ledger
 from .models import Issue, Project, SourceFile
@@ -216,6 +217,30 @@ def _textqa_results(db: Session, sections: list[dict]) -> list[CheckResult]:
     ]
 
 
+def _issue_anchor(location: str, anchors: list[dict]) -> dict | None:
+    """把核对结果的 location 锚定到大纲节点；匹配不到返回 None（不猜）。
+
+    先精确匹配 heading，再退化为包含匹配；一致性/重复类的 location 是
+    多 heading 拼接（``、`` 或 ``/`` 分隔），取第一个能匹配上的。
+    """
+
+    loc = (location or "").strip()
+    if not loc or not anchors:
+        return None
+    parts = [part.strip() for part in re.split(r"[、/／]", loc) if part.strip()]
+    candidates = [loc, *parts]
+    for candidate in candidates:
+        for anchor in anchors:
+            if anchor["heading"] and anchor["heading"] == candidate:
+                return anchor
+    for candidate in candidates:
+        for anchor in anchors:
+            heading = anchor["heading"]
+            if heading and (heading in candidate or candidate in heading):
+                return anchor
+    return None
+
+
 def check_project(db: Session, project_id: str) -> tuple[list, dict]:
     from .generation.outline import load_outline
 
@@ -230,19 +255,58 @@ def check_project(db: Session, project_id: str) -> tuple[list, dict]:
     all_results.extend(_textqa_results(db, nodes))
     all_results.extend(_profile_results(db, project, nodes))
     results = [result for result in all_results if not result.passed]
+    anchors = [
+        {
+            "heading": str(node.get("heading") or "").strip(),
+            "node_id": node["id"],
+            "section_id": node.get("section_id"),
+            "position": position,
+        }
+        for position, node in enumerate(nodes)
+    ]
+    # 重插前快照人工处置结论：key=(code, location, finding) 命中且 finding
+    # 完全相同时沿用旧状态，否则回到 open。必须在 DELETE 前取值快照，
+    # 删除后 ORM 对象不可再读。
+    previous = {
+        (row.code, row.location, row.finding): (
+            row.status,
+            row.resolved_at,
+            row.resolved_by,
+            row.resolution_note or "",
+        )
+        for row in db.scalars(select(Issue).where(Issue.project_id == project_id))
+    }
+    checked_at = clock.utc_now()
     db.query(Issue).filter(Issue.project_id == project_id).delete()
     for result in results:
+        anchor = _issue_anchor(result.location, anchors)
+        if anchor is not None:
+            result.node_id = anchor["node_id"]
+            result.section_id = anchor["section_id"]
+            result.heading = anchor["heading"]
+            result.position = anchor["position"]
+        finding = result.finding or result.message
+        old = previous.get((result.code, result.location, finding))
+        status, resolved_at, resolved_by, resolution_note = (
+            old if old is not None else ("open", None, None, "")
+        )
         db.add(
             Issue(
                 project_id=project_id,
+                node_id=result.node_id,
+                section_id=result.section_id,
                 code=result.code,
                 level=result.level,
                 category=result.category,
                 location=result.location,
-                finding=result.finding or result.message,
+                finding=finding,
                 recommendation=result.recommendation,
-                status="open",
+                status=status,
                 evidence=result.evidence,
+                checked_at=checked_at,
+                resolved_at=resolved_at,
+                resolved_by=resolved_by,
+                resolution_note=resolution_note,
             )
         )
     project.status = "review"

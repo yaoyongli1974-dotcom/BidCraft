@@ -16,12 +16,13 @@ import {
   ListTree,
   Package as PackageIcon,
   PenLine,
+  ShieldAlert,
   ShieldCheck,
   Users,
   WifiOff,
   type LucideIcon,
 } from 'lucide-react'
-import { getProject, getSources } from '../lib/api'
+import { getProject, getRiskOverview, getSources } from '../lib/api'
 import type { PackageInfo, ProjectDetail, SourceFile } from '../lib/types'
 import {
   className,
@@ -76,6 +77,8 @@ export function WorkspacePage() {
 
   const projectQuery = useQuery(`project:${ref}`, () => getProject(ref))
   const sourcesQuery = useQuery(`sources:${ref}`, () => getSources(ref))
+  // Shared with 风险总览/导出页（同一 key 共享缓存与在途请求），只用于页签徽章。
+  const riskQuery = useQuery(`risk-overview:${ref}`, () => getRiskOverview(ref))
   const project = projectQuery.data
   const setProjectData = projectQuery.setData
   const setSourcesData = sourcesQuery.setData
@@ -185,6 +188,11 @@ export function WorkspacePage() {
   const missingRequired = project.missing_required || []
   const missingCount = stats.missing_required || missingRequired.length
   const outlineTotal = outlineCount(project)
+  const riskBadge = (() => {
+    const tiers = riskQuery.data?.tiers || []
+    const open = (level: string) => tiers.find((tier) => tier.level === level)?.open ?? 0
+    return open('blocking') + open('critical')
+  })()
 
   const tabs: WorkspaceTab[] = [
     {
@@ -222,6 +230,13 @@ export function WorkspacePage() {
       label: '正文',
       icon: PenLine,
       count: stats.written || undefined,
+    },
+    {
+      to: `${basePath}/risk`,
+      label: '风险总览',
+      icon: ShieldAlert,
+      count: riskBadge || undefined,
+      tone: 'danger',
     },
     {
       to: `${basePath}/check`,
@@ -396,7 +411,7 @@ function WorkspaceSkeleton() {
             </div>
           </div>
           <div className="workspace-tabs">
-            {Array.from({ length: 9 }).map((_, index) => (
+            {Array.from({ length: 10 }).map((_, index) => (
               <Skeleton key={index} width={78} height={18} />
             ))}
           </div>

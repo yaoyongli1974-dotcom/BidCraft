@@ -27,6 +27,13 @@ import type {
   BoqVersionDiff,
   BoqVersionDiffChanged,
   BoqVersionDiffEntry,
+  BulkIssueStatusResult,
+  RiskCategorySummary,
+  RiskGate,
+  RiskOverview,
+  RiskTierLevel,
+  RiskTierSummary,
+  IssueStatus,
   ScoreAnalysis,
   ChapterConflict,
   CreditAdjustResult,
@@ -2141,6 +2148,99 @@ export async function getIssues(ref: string): Promise<Issue[]> {
   return asArray<Issue>(data, 'issues')
 }
 
+// ---------------------------------------------------------------- risk overview
+
+function normalizeRiskTier(value: unknown): RiskTierSummary {
+  const raw = value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+  const level = asText(raw.level).toLowerCase() as RiskTierLevel
+  const known: RiskTierLevel[] = ['blocking', 'critical', 'major', 'minor']
+  return {
+    level: known.includes(level) ? level : 'minor',
+    label: asText(raw.label) || level,
+    total: Math.max(0, Math.round(asNumber(raw.total, 0))),
+    open: Math.max(0, Math.round(asNumber(raw.open, 0))),
+    handled: Math.max(0, Math.round(asNumber(raw.handled, 0))),
+    ignored: Math.max(0, Math.round(asNumber(raw.ignored, 0))),
+  }
+}
+
+function normalizeRiskCategory(value: unknown): RiskCategorySummary {
+  const raw = value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+  return {
+    category: asText(raw.category),
+    total: Math.max(0, Math.round(asNumber(raw.total, 0))),
+    open: Math.max(0, Math.round(asNumber(raw.open, 0))),
+    blocking_open: Math.max(0, Math.round(asNumber(raw.blocking_open, 0))),
+  }
+}
+
+/**
+ * 交付前风险总览：四档聚合 + 导出门禁 + 按严重度排序的问题清单。
+ * 字段缺失（旧后端/并行发布窗口）时按空态归一，界面拿到的是安全形状。
+ */
+export async function getRiskOverview(ref: string): Promise<RiskOverview> {
+  const data = await request<unknown>(`/projects/${encodeURIComponent(ref)}/risk-overview`)
+  const raw = data && typeof data === 'object' && !Array.isArray(data)
+    ? (data as Record<string, unknown>)
+    : {}
+  const gateRaw =
+    raw.gate && typeof raw.gate === 'object' && !Array.isArray(raw.gate)
+      ? (raw.gate as Record<string, unknown>)
+      : {}
+  const gate: RiskGate = {
+    blocked: asBool(gateRaw.blocked),
+    blocking_open: Math.max(0, Math.round(asNumber(gateRaw.blocking_open, 0))),
+    reason: asText(gateRaw.reason),
+  }
+  return {
+    project_id: asText(raw.project_id),
+    verdict: asText(raw.verdict, 'unknown') || 'unknown',
+    checked_at: typeof raw.checked_at === 'string' && raw.checked_at.trim() ? raw.checked_at : null,
+    gate,
+    tiers: asArray<unknown>(raw, 'tiers').map(normalizeRiskTier),
+    by_category: asArray<unknown>(raw, 'by_category').map(normalizeRiskCategory),
+    items: asArray<Issue>(raw, 'items'),
+  }
+}
+
+/** 更新单条问题的处置状态。忽略（ignored）必须带原因，服务端会校验。 */
+export async function updateIssueStatus(
+  ref: string,
+  issueId: string,
+  status: IssueStatus,
+  note?: string,
+): Promise<Issue> {
+  const payload: { status: IssueStatus; note?: string } = { status }
+  const trimmed = (note || '').trim()
+  if (trimmed) payload.note = trimmed
+  const data = await request<Issue | { issue?: Issue }>(
+    `/projects/${encodeURIComponent(ref)}/issues/${encodeURIComponent(issueId)}`,
+    { method: 'PATCH', body: JSON.stringify(payload) },
+  )
+  if (data && typeof data === 'object' && 'issue' in data && data.issue) return data.issue
+  return data as Issue
+}
+
+/** 批量更新处置状态；返回被更新的问题列表。 */
+export async function bulkIssueStatus(
+  ref: string,
+  ids: string[],
+  status: IssueStatus,
+  note?: string,
+): Promise<BulkIssueStatusResult> {
+  const payload: { ids: string[]; status: IssueStatus; note?: string } = { ids, status }
+  const trimmed = (note || '').trim()
+  if (trimmed) payload.note = trimmed
+  const data = await request<Partial<BulkIssueStatusResult>>(
+    `/projects/${encodeURIComponent(ref)}/issues/bulk-status`,
+    jsonBody(payload),
+  )
+  return {
+    updated: Math.max(0, Math.round(asNumber(data?.updated, ids.length))),
+    items: Array.isArray(data?.items) ? data.items : [],
+  }
+}
+
 // ---------------------------------------------------------------- export
 
 export function filenameFromDisposition(disposition: string | null): string | null {
@@ -2163,17 +2263,29 @@ export function filenameFromDisposition(disposition: string | null): string | nu
   }
 }
 
+export interface ExportForceOptions {
+  /** 跳过导出门禁；仅 owner/admin 可用。 */
+  force?: boolean
+  /** 强制导出原因；force 时去空白后至少 4 个字符，否则服务端拒绝。 */
+  force_reason?: string
+}
+
 export async function exportProject(
   ref: string,
   format: string,
+  options: ExportForceOptions = {},
 ): Promise<{ blob: Blob; filename: string }> {
+  const payload: Record<string, unknown> = { format }
+  if (options.force) payload.force = true
+  const reason = (options.force_reason || '').trim()
+  if (options.force && reason) payload.force_reason = reason
   let response: Response
   try {
     response = await fetch(`/projects/${encodeURIComponent(ref)}/export`, {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', Accept: '*/*' },
-      body: JSON.stringify({ format }),
+      body: JSON.stringify(payload),
     })
   } catch {
     throw new ApiError(

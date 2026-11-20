@@ -17,6 +17,7 @@ from sqlalchemy import select
 from . import __version__, knowledge, plugins
 from .config import settings
 from .db import init_db, session_scope
+from .export_gate import ExportGateError, enforce_export_gate
 from .generation.outline import load_outline
 from .ledger import ledger_summary, load_ledger, render_ledger
 from .models import Plugin, Project
@@ -64,7 +65,11 @@ TOOL_SPECS: list[dict[str, Any]] = [
     },
     {
         "name": "export_document",
-        "description": "导出投标文件到项目 output 目录，支持 docx、md、xlsx（PDF 请用 API）。",
+        "description": (
+            "导出投标文件到项目 output 目录，支持 docx、md、xlsx（PDF 请用 API）。"
+            "存在未处置的废标/阻断风险时禁止导出 docx/md；确需导出须传 "
+            "force=true 并填写不少于 4 个字的 force_reason。xlsx 不受限制。"
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -77,6 +82,16 @@ TOOL_SPECS: list[dict[str, Any]] = [
                     "enum": ["docx", "md", "xlsx"],
                     "default": "docx",
                     "description": "导出格式，默认 docx",
+                },
+                "force": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "存在未处置废标/阻断风险时强制导出",
+                },
+                "force_reason": {
+                    "type": "string",
+                    "default": "",
+                    "description": "强制导出原因（去空白后不少于 4 个字）",
                 },
             },
             "required": ["ref"],
@@ -227,6 +242,18 @@ def _tool_export_document(db, args: dict[str, Any], readonly: bool) -> dict[str,
         raise ToolError("只读模式：已禁用导出")
     fmt = _resolve_format(args.get("format"))
     project = resolve_project(db, _require_ref(args))
+    # 交付硬门禁与 HTTP/MCP/CLI 共用 export_gate；MCP 无角色上下文，按本地操作者处理。
+    try:
+        enforce_export_gate(
+            db,
+            project.id,
+            fmt,
+            force=bool(args.get("force", False)),
+            force_reason=str(args.get("force_reason") or ""),
+            source="mcp",
+        )
+    except ExportGateError as exc:
+        raise ToolError(str(exc)) from exc
     ledger = load_ledger(db, project.id)
     nodes = load_outline(db, project.id)
     if fmt != "xlsx" and (not nodes or not any(node.get("body") for node in nodes)):

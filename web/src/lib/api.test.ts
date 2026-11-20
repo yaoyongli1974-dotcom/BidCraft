@@ -27,6 +27,8 @@ import {
   duplicateProject,
   errorDetailText,
   exportPluginPackage,
+  exportProject,
+  bulkIssueStatus,
   getBoqVersion,
   getKbDocs,
   getPendingApprovals,
@@ -36,6 +38,7 @@ import {
   getProjectScores,
   getProjectTemplates,
   getQualifications,
+  getRiskOverview,
   getSubAccounts,
   getTerms,
   getTextQa,
@@ -65,6 +68,7 @@ import {
   saveTextQa,
   submitBoqVersion,
   unapproveBoqVersion,
+  updateIssueStatus,
   updatePlugin,
   updateProject,
   updateKbDoc,
@@ -2647,5 +2651,165 @@ describe('score backfill (R39)', () => {
     expect(JSON.parse(String(init.body))).toEqual({
       rows: [{ id: 'a', actual_score: 12, score_note: '扣分' }],
     })
+  })
+})
+
+describe('risk overview & issue status', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  const jsonResponse = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+  it('loads and normalises the risk overview', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({
+        project_id: 'p1',
+        verdict: 'blocked',
+        checked_at: '2026-11-19T08:00:00.000Z',
+        gate: { blocked: true, blocking_open: '2', reason: '存在 2 项未处置的废标/阻断风险' },
+        tiers: [
+          { level: 'blocking', label: '废标/阻断', total: 3, open: 2, handled: 1, ignored: 0 },
+          { level: 'bogus', total: 1 },
+        ],
+        by_category: [{ category: '资格', total: 3, open: 2, blocking_open: 1 }],
+        items: [{ code: 'B-001', level: 'blocking', id: 'i1', status: 'open' }],
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const data = await getRiskOverview('p/1')
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/projects/p%2F1/risk-overview')
+    expect(data.gate.blocked).toBe(true)
+    expect(data.gate.blocking_open).toBe(2)
+    expect(data.tiers[0]).toMatchObject({ level: 'blocking', open: 2, handled: 1 })
+    // 未知档位落回提示档，避免出现第五档。
+    expect(data.tiers[1].level).toBe('minor')
+    expect(data.items).toHaveLength(1)
+    expect(data.by_category[0].blocking_open).toBe(1)
+  })
+
+  it('returns a safe shape when optional fields are missing', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ project_id: 'p2' })))
+    const data = await getRiskOverview('p2')
+    expect(data.verdict).toBe('unknown')
+    expect(data.checked_at).toBeNull()
+    expect(data.gate).toEqual({ blocked: false, blocking_open: 0, reason: '' })
+    expect(data.tiers).toEqual([])
+    expect(data.items).toEqual([])
+  })
+
+  it('patches a single issue status with an optional note', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({ id: 'i/1', code: 'B-001', level: 'blocking', status: 'ignored' }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const updated = await updateIssueStatus('p1', 'i/1', 'ignored', '  模板固定条款  ')
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/projects/p1/issues/i%2F1')
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(String(init.body))).toEqual({
+      status: 'ignored',
+      note: '模板固定条款',
+    })
+    expect(updated.status).toBe('ignored')
+  })
+
+  it('omits an empty note when marking handled', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({ id: 'i1', code: 'B-001', level: 'blocking', status: 'handled' }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await updateIssueStatus('p1', 'i1', 'handled', '   ')
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(JSON.parse(String(init.body))).toEqual({ status: 'handled' })
+  })
+
+  it('posts bulk status updates', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({
+        updated: 2,
+        items: [
+          { id: 'i1', code: 'B-001', level: 'blocking', status: 'handled' },
+          { id: 'i2', code: 'C-001', level: 'critical', status: 'handled' },
+        ],
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await bulkIssueStatus('p1', ['i1', 'i2'], 'handled')
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/projects/p1/issues/bulk-status')
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({ ids: ['i1', 'i2'], status: 'handled' })
+    expect(result.updated).toBe(2)
+    expect(result.items).toHaveLength(2)
+  })
+
+  it('sends force options in the export payload', async () => {
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response('binary', {
+          status: 200,
+          headers: { 'Content-Disposition': 'attachment; filename="bid.docx"' },
+        }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await exportProject('p/1', 'docx', {
+      force: true,
+      force_reason: '  业主临时要求先行提交  ',
+    })
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/projects/p%2F1/export')
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(JSON.parse(String(init.body))).toEqual({
+      format: 'docx',
+      force: true,
+      force_reason: '业主临时要求先行提交',
+    })
+    expect(result.filename).toBe('bid.docx')
+  })
+
+  it('keeps the plain export payload when force is absent', async () => {
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response('binary', { status: 200 }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await exportProject('p1', 'xlsx')
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(JSON.parse(String(init.body))).toEqual({ format: 'xlsx' })
+  })
+
+  it('surfaces the 409 gate detail string on export', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse(
+          { detail: '存在 2 项未处置的废标/阻断风险，请先在风险总览中处置；确需导出请强制导出并填写原因' },
+          409,
+        ),
+      ),
+    )
+
+    try {
+      await exportProject('p1', 'docx')
+      throw new Error('应当被拒绝')
+    } catch (error) {
+      expect(error).toBeInstanceOf(ApiError)
+      expect((error as ApiError).status).toBe(409)
+      expect((error as ApiError).message).toContain('2 项未处置的废标/阻断风险')
+    }
   })
 })

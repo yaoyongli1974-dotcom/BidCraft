@@ -483,6 +483,73 @@ export interface Issue {
   evidence?: unknown
   passed?: boolean
   status?: string
+  /** 锚定信息：问题对应的大纲章节节点 id（用于「跳转修改」）；空表示未定位。 */
+  node_id?: string | null
+  /** 段落/小节锚（服务端细分定位用）；与 node_id 同源时可空。 */
+  section_id?: string | null
+  /** 所在章节标题；无 node_id 时仅作展示，不可跳转。 */
+  heading?: string
+  /** 在章节内的顺序提示（可空）。 */
+  position?: number | null
+  /** 该问题被核对出来的时间（可空）。 */
+  checked_at?: string | null
+  /** 处置完成时间（可空）。 */
+  resolved_at?: string | null
+  /** 处置人（可空）。 */
+  resolved_by?: string | null
+  /** 处置/忽略原因。 */
+  resolution_note?: string
+}
+
+/**
+ * 问题处置状态。新契约取值 open / handled / ignored；
+ * 旧后端的 resolved / closed 仍要兼容（显示层归为「已处理」）。
+ */
+export type IssueStatus = 'open' | 'handled' | 'ignored'
+
+/** 交付前风险总览的四档聚合级别（minor 与 info 合并进「提示」档）。 */
+export type RiskTierLevel = 'blocking' | 'critical' | 'major' | 'minor'
+
+/** `GET /projects/{ref}/risk-overview` 中一档的聚合计数。 */
+export interface RiskTierSummary {
+  level: RiskTierLevel
+  label: string
+  total: number
+  open: number
+  handled: number
+  ignored: number
+}
+
+/** 按类别的风险聚合。 */
+export interface RiskCategorySummary {
+  category: string
+  total: number
+  open: number
+  blocking_open: number
+}
+
+/** 导出门禁状态：有未处置的废标/阻断风险时 blocked。 */
+export interface RiskGate {
+  blocked: boolean
+  blocking_open: number
+  reason: string
+}
+
+/** `GET /projects/{ref}/risk-overview` 的响应（已按严重度 + open 优先排序）。 */
+export interface RiskOverview {
+  project_id: string
+  verdict: 'blocked' | 'warn' | 'pass' | string
+  checked_at: string | null
+  gate: RiskGate
+  tiers: RiskTierSummary[]
+  by_category: RiskCategorySummary[]
+  items: Issue[]
+}
+
+/** `POST /projects/{ref}/issues/bulk-status` 的响应。 */
+export interface BulkIssueStatusResult {
+  updated: number
+  items: Issue[]
 }
 
 export interface CheckResult {

@@ -9,7 +9,7 @@
 | C2 解析与台账 | ✅ | `bidcraft/parsing/`、`bidcraft/ledger.py` | PDF/DOCX/TXT/XLSX；可选扫描 PDF OCR；字段、评分、材料、参数、要求、风险；人工修正与出处 |
 | C3 规则引擎 | ✅ | `bidcraft/rules/` | 章节识别、评分对齐、18 条/包核对；blocking 门禁 |
 | C4 生成链路 | ✅ | `bidcraft/generation/` | 大纲 → 逐章流式/续写 → 事实注入 → 去重 → 数字复核 → 确定性回落 |
-| C5 复核 | ✅ 最小 | `bidcraft/rules/engine.py`、`check` 命令 | 四级问题、位置、证据、修订建议；不自动改写正文 |
+| C5 复核 | ✅ | `bidcraft/rules/engine.py`、`bidcraft/export_gate.py`、`web/src/pages/tabs/RiskTab.tsx` | 四级问题、位置、证据、修订建议；问题锚定章节、处置状态跨核对保留；风险总览四档聚合 + 跳转定位 + 未处置阻断项拦截导出（owner/admin 可强制导出并留痕）；不自动改写正文 |
 | C6 交付 | ✅ 最小 | `bidcraft/export/` | DOCX/PDF（TOC 页码）/Markdown/XLSX |
 | 图片生成与插入 | ✅ | `images.py`、`/projects/{ref}/images`、`web/` | 按章节生成/重生成/上传 PNG·JPEG；提示词、风格、尺寸、章节正文上下文；失败资产保留可重试；图名精确匹配占位符或按光标插入；项目图库跨章节复用；全文配图计划统计各章占位/已匹配/失败/缺失并按字数计算章节预算；按计划后台批量生成缺失/失败配图；一键按预算插入已匹配配图；DOCX 嵌入 |
 | 整篇配图策略与自动排版 | ✅ | `images.py`、`/projects/{ref}/image-policy`、`export/docx.py`、`web/` | 全文上限/默认风格尺寸/图注开关与前缀/版心宽度；计划返回全文预算与超限；按计划插入遵守全文预算；「生成并插入」一键编排；DOCX 跨章连续图注编号与统一宽度 |
@@ -28,7 +28,7 @@
 | C7 可插拔 Agent / API | ✅ | `generation/agent.py`、`bidcraft/api.py`、`bidcraft/mcp.py` | OpenAI 兼容端点；FastAPI + 后台生成任务；MCP stdio 服务 |
 | C8 行业包 | ✅ 8 个行业包 + 通用基包 | `bidcraft/resources/packages/*.yaml` | 弱电（综合布线/安防/BA）+ 消防、安装、土建、暖通、装修；管理员可在 `/admin` 维护 YAML 覆盖包 |
 | 规则包管理 | ✅ | `rules/store.py`、`/admin/rule-packages`、`web/` | 超级管理员创建/修改/隐藏/恢复规则包；新建时可填写名称、唯一包名并选择工程类型；内置包只读，用户覆盖写入 `BIDCRAFT_HOME/packages`；保存前校验继承、字段、大纲与核对表达式 |
-| C9 回归/部署 | ✅ 基本 | `tests/`、`Dockerfile`、`web/` | 723 个测试；Docker 多阶段构建 Web（含 OCR 依赖）；本地/局域网两种部署 |
+| C9 回归/部署 | ✅ 基本 | `tests/`、`Dockerfile`、`web/` | 738 个测试；Docker 多阶段构建 Web（含 OCR 依赖）；本地/局域网两种部署 |
 | SSE 流式进度 | ✅ | `bidcraft/jobs.py`、`/jobs/{id}/events`、`web/` | 章节/逐字事件持久化；Last-Event-ID 断线续传；SSE 失败回退轮询；刷新后重新挂接任务 |
 | Excel 清单双向对齐 | ✅ | `boq.py`、`export/boq_xlsx.py`、`/projects/{ref}/boq`、`web/` | 清单导入与表头识别、材料模糊匹配、缺项/多项/数量·单位·规格差异、差异回写、响应表导出 |
 | 清单报价 | ✅ | `boq.py`、`/projects/{ref}/boq/price`、`export/boq_xlsx.py`、`web/` | 逐行单价录入/清除、按清单数量计算合价、已报价/未报价/缺数量统计、报价汇总与响应表价格列；不自动生成价格 |
@@ -80,3 +80,6 @@
    做回归门禁，按字段命中率与别名缺口扩充 `FIELD_ALIAS_AUGMENT`。
 2. 报价与文档进阶：审批链已支持多级流转、并行会签/或签、金额门槛与包件/币种条件分支，后续可做规则命中条件与真实招标件回归基线扩充。
 3. 插件远程市场：受控的自动安装与升级流程（远程源校验、依赖声明与回滚）。
+4. **实质性条款响应绑定**（下一步）：`★/▲` 标记目前在解析时被折叠成 `mandatory` 布尔，原文标记未保留；
+   计划将其作为一等字段解析，把评分办法中的实质性条款与正文章节逐条绑定，未明确响应即在风险总览
+   以最高优先级标红，并支持人工标注「已响应 / 不适用」与原因留痕。

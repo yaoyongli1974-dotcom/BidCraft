@@ -118,3 +118,8 @@ class CheckResult(BaseModel):
     recommendation: str = ""
     evidence: dict[str, Any] = Field(default_factory=dict)
     passed: bool = False
+    #: 大纲锚定信息（check_project 填充；匹配不到时保持默认，旧调用方不受影响）。
+    node_id: str | None = None
+    section_id: str | None = None
+    heading: str = ""
+    position: int | None = None

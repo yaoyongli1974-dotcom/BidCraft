@@ -267,6 +267,26 @@
   box-shadow: 0 2px 8px -4px rgba(28, 40, 35, 0.2);
 }
 
+/* 风险总览「跳转修改」定位到的段落：临时黄铜色高亮。 */
+.md-focus-flash {
+  border-radius: 4px;
+  animation: mdFocusFlash 2.8s var(--ease) 1 both;
+}
+
+@keyframes mdFocusFlash {
+  0% {
+    background: rgba(156, 115, 40, 0.24);
+    box-shadow: 0 0 0 5px rgba(156, 115, 40, 0.12);
+  }
+  45% {
+    background: rgba(156, 115, 40, 0.16);
+  }
+  100% {
+    background: transparent;
+    box-shadow: 0 0 0 5px transparent;
+  }
+}
+
 .md-image {
   display: inline-flex;
   align-items: center;

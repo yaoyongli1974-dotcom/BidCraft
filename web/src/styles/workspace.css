@@ -3635,6 +3635,455 @@ kbd {
   margin-top: 1px;
 }
 
+/* ------------------------------------------------------------------ risk overview */
+
+.risk-loading {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.risk-loading-tiers {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.risk-verdict {
+  margin-bottom: 14px;
+}
+
+.risk-verdict-gate {
+  color: var(--danger) !important;
+  font-weight: 600;
+}
+
+.risk-viewonly-hint {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--line);
+  color: var(--warn) !important;
+  font-size: 10px !important;
+}
+
+.risk-tiers {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.risk-tier {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 13px 15px 12px;
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink-2);
+  cursor: pointer;
+  overflow: hidden;
+  transition:
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    transform 0.18s ease,
+    background 0.18s ease;
+}
+
+.risk-tier::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--line-strong);
+}
+
+.risk-tier--danger::before {
+  background: var(--danger);
+}
+
+.risk-tier--warn::before {
+  background: var(--warn);
+}
+
+.risk-tier--info::before {
+  background: var(--info);
+}
+
+.risk-tier:hover {
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
+}
+
+.risk-tier.is-active {
+  border-color: var(--jade);
+  box-shadow: 0 0 0 1px var(--jade) inset, var(--shadow-sm);
+  background: var(--jade-wash);
+}
+
+.risk-tier-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.risk-tier-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--ink-2);
+}
+
+.risk-tier-figure {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.risk-tier-figure strong {
+  font-size: 27px;
+  line-height: 1.1;
+  color: var(--ink);
+}
+
+.risk-tier-figure span {
+  font-size: 9.5px;
+  color: var(--faint);
+}
+
+.risk-tier-detail {
+  font-size: 9.5px;
+  color: var(--muted);
+}
+
+.risk-tier-note {
+  margin-top: 3px;
+  font-size: 9px;
+  color: var(--faint);
+  letter-spacing: 0.01em;
+}
+
+.risk-tier--danger .risk-tier-figure strong {
+  color: var(--danger);
+}
+
+.risk-tier--warn .risk-tier-figure strong {
+  color: var(--warn);
+}
+
+.risk-tier--info .risk-tier-figure strong {
+  color: var(--info);
+}
+
+/* 有未处置阻断项时，阻断档必须最醒目。 */
+.risk-tier--alert {
+  background: linear-gradient(135deg, var(--danger-soft), var(--surface) 82%);
+  border-color: rgba(159, 53, 40, 0.38);
+  box-shadow: 0 10px 24px -18px rgba(159, 53, 40, 0.55);
+}
+
+.risk-tier--alert:hover {
+  border-color: var(--danger);
+}
+
+.risk-tier--alert .risk-tier-label {
+  color: var(--vermilion-deep);
+}
+
+.risk-tier--alert .risk-tier-note {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.risk-tier-pulse {
+  position: relative;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+
+.risk-tier-pulse::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 1px solid var(--danger);
+  opacity: 0.4;
+  animation: riskPulse 2.2s ease-out infinite;
+}
+
+@keyframes riskPulse {
+  0% {
+    transform: scale(0.6);
+    opacity: 0.55;
+  }
+  70% {
+    transform: scale(1.5);
+    opacity: 0;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+.risk-panel {
+  overflow: hidden;
+}
+
+.risk-toolbar {
+  row-gap: 8px;
+}
+
+.risk-open-toggle {
+  white-space: nowrap;
+}
+
+.risk-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 18px 16px;
+  background: rgba(244, 241, 233, 0.2);
+}
+
+.risk-group {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  overflow: hidden;
+}
+
+.risk-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 14px;
+  background: rgba(236, 231, 219, 0.35);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-2);
+  cursor: pointer;
+  text-align: left;
+}
+
+.risk-group-head:hover {
+  background: rgba(236, 231, 219, 0.6);
+}
+
+.risk-group-chevron {
+  color: var(--faint);
+  transition: transform 0.18s var(--ease);
+}
+
+.risk-group-chevron.is-collapsed {
+  transform: rotate(-90deg);
+}
+
+.risk-group-label {
+  font-family: var(--font-serif);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.risk-group-count {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--faint);
+}
+
+.risk-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px;
+}
+
+.risk-item {
+  position: relative;
+  padding: 12px 16px 12px 18px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  overflow: hidden;
+  transition: opacity 0.18s ease, background 0.18s ease;
+}
+
+.risk-item .issue-rail {
+  width: 3px;
+}
+
+.risk-item--danger .issue-rail {
+  background: var(--danger);
+}
+
+.risk-item--warn .issue-rail {
+  background: var(--warn);
+}
+
+.risk-item--info .issue-rail {
+  background: var(--info);
+}
+
+/* 已处置项淡化，但仍可展开查看处置人、时间与原因。 */
+.risk-item.is-handled {
+  background: rgba(251, 250, 246, 0.6);
+  opacity: 0.72;
+}
+
+.risk-item.is-handled:hover,
+.risk-item.is-handled:focus-within {
+  opacity: 1;
+}
+
+.risk-item .issue-head {
+  align-items: flex-start;
+}
+
+.risk-anchor {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 46%;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--muted);
+  font-size: 9.5px;
+  line-height: 1.5;
+  cursor: pointer;
+  transition: border-color 0.16s ease, color 0.16s ease, background 0.16s ease;
+}
+
+button.risk-anchor:hover {
+  border-color: var(--jade);
+  color: var(--jade);
+  background: var(--jade-wash);
+}
+
+.risk-anchor--missing {
+  border-style: dashed;
+  background: transparent;
+  color: var(--faint);
+  cursor: default;
+}
+
+.risk-anchor-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.risk-resolution {
+  margin-top: 8px;
+  padding: 7px 10px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 5px;
+  background: rgba(244, 241, 233, 0.4);
+}
+
+.risk-resolution summary {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 9.5px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.risk-resolution summary::-webkit-details-marker {
+  display: none;
+}
+
+.risk-resolution p {
+  margin-top: 6px;
+  color: var(--ink-2);
+  font-size: 10.5px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+.risk-resolution-time {
+  display: block;
+  margin-top: 3px;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
+.risk-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px dashed var(--line);
+}
+
+.risk-actions .btn {
+  --btn-pad: 5px 11px;
+}
+
+.risk-actions .btn--ghost {
+  color: var(--muted);
+}
+
+.risk-ignore-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.risk-ignore-body > p {
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.75;
+}
+
+.risk-ignore-target {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 9px 11px;
+  border-left: 2px solid var(--brass);
+  background: rgba(244, 241, 233, 0.6);
+  border-radius: 0 4px 4px 0;
+  font-size: 11.5px;
+  color: var(--ink-2);
+}
+
+.risk-ignore-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.risk-ignore-field > span {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.risk-ignore-field em {
+  font-style: normal;
+  color: var(--danger);
+  font-size: 9.5px;
+  font-weight: 500;
+}
+
 /* ------------------------------------------------------------------ export */
 
 .export-grid {
@@ -3793,6 +4242,130 @@ kbd {
 .format-availability {
   color: var(--faint);
   font-size: 9px;
+}
+
+.format-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.format-gate-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 7px 9px;
+  border-radius: 5px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 9.5px;
+  line-height: 1.6;
+}
+
+.format-gate-note svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.format-gate-note .text-link {
+  margin-left: 4px;
+  color: var(--vermilion-deep);
+  white-space: nowrap;
+}
+
+.format-card.is-gate-locked {
+  border-color: rgba(159, 53, 40, 0.24);
+}
+
+.export-gate {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 13px 16px;
+  border: 1px solid rgba(159, 53, 40, 0.3);
+  border-left: 3px solid var(--danger);
+  border-radius: 0 7px 7px 0;
+  background: linear-gradient(90deg, var(--danger-soft), var(--surface) 78%);
+}
+
+.export-gate--ok {
+  border-color: rgba(43, 99, 73, 0.28);
+  border-left-color: var(--success);
+  background: linear-gradient(90deg, var(--success-soft), var(--surface) 78%);
+}
+
+.export-gate-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  color: var(--danger);
+}
+
+.export-gate--ok .export-gate-icon {
+  color: var(--success);
+}
+
+.export-gate-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.export-gate-copy strong {
+  display: block;
+  font-size: 12px;
+  color: var(--ink);
+}
+
+.export-gate-copy p {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.65;
+}
+
+.export-gate-hint {
+  color: var(--faint) !important;
+  font-size: 9.5px !important;
+}
+
+.export-gate > .text-link {
+  flex: 0 0 auto;
+  align-self: center;
+  white-space: nowrap;
+}
+
+.export-force-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.export-force-alert {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border-radius: 5px;
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.export-force-alert svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.export-force-alert p {
+  font-size: 10.5px;
+  line-height: 1.7;
+}
+
+.export-force-hint {
+  color: var(--faint);
+  font-size: 9.5px;
+  line-height: 1.6;
 }
 
 .export-error {
