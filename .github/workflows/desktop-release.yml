@@ -1,10 +1,9 @@
 name: desktop-release
 
+# 仅手动触发：服务端版本照常提交/打 tag，不再连带构建客户端产物。
+# 需要发客户端时，在 Actions → desktop-release → Run workflow 选择 release 分支或 tag。
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "v*"
 
 permissions:
   contents: write

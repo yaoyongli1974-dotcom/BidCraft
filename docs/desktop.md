@@ -148,5 +148,7 @@ deb 使用 `dpkg-deb` 直接构建（无 debhelper 依赖），rpm 使用 `nfpm`
 启动时可用 `--server URL` 指定服务器，或设置环境变量 `BIDCRAFT_SERVER`，
 或先执行一次 `bidcraft client login --server URL` 保存地址，之后双击即自动连接。
 
-跨平台构建由 `.github/workflows/desktop-release.yml` 负责：推送 `v*` 标签时在
-Windows / macOS / Ubuntu 三个原生 runner 上构建并把 `.zip`、`.deb`、`.rpm` 附加到 Release。
+跨平台构建由 `.github/workflows/desktop-release.yml` 负责，**仅手动触发**（客户端已暂停更新）：
+在 Actions → desktop-release → Run workflow 选择 release 分支或 tag，才会在 Windows / macOS /
+Ubuntu 三个原生 runner 上构建并把 `.zip`、`.deb`、`.rpm` 附加到 Release。
+服务端提交与打 tag 不再连带构建客户端。
