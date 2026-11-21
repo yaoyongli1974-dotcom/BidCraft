@@ -1,0 +1,178 @@
+"""后台任务与导出路由共享的支撑函数与常量。
+
+从 ``api.py`` 下沉而来；这里只依赖底层模块，不 import ``api.py``，
+因此依赖方向保持单向：``api → services/workers → 底层模块``。
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from .. import billing, jobs, knowledge, material_policy, model_config, user_docs
+from ..config import settings
+from ..db import session_scope
+from ..generation.agent import ModelClient
+from ..models import Job, User
+
+BATCH_STALE_SECONDS = 2 * 3600
+KB_REINDEX_STALE_SECONDS = 2 * 3600
+STARTUP_INTERRUPTED_MESSAGE = "服务重启，任务已中断"
+
+logger = logging.getLogger("bidcraft.api")
+
+
+def _fail_job(db: Session, job: Job, message: str, error: str | None = None) -> None:
+    """Mark a job failed and publish the matching SSE event."""
+
+    detail = error or message
+    job.status = "failed"
+    job.message = message
+    job.result = {"error": detail}
+    jobs.publish_event(job.id, "failed", {**jobs.job_payload(job), "error": detail}, db=db)
+    db.flush()
+
+
+def _cancel_stale_jobs(
+    db: Session,
+    kinds: list[str],
+    timeout_seconds: int,
+    *,
+    project_id: str | None = None,
+    stale_message: str = "任务超时中断，已允许重新执行",
+) -> Job | None:
+    """Return the live job for ``kinds``; auto-fail it once it is stale.
+
+    ``project_id=None`` matches project-less batch jobs.  A ``None`` return means
+    the caller may enqueue a new job.
+    """
+
+    statement = select(Job).where(
+        Job.kind.in_(kinds), Job.status.in_(["queued", "running"])
+    )
+    if project_id is None:
+        statement = statement.where(Job.project_id.is_(None))
+    else:
+        statement = statement.where(Job.project_id == project_id)
+    running = db.scalar(statement.order_by(Job.created_at.desc()))
+    if running is None:
+        return None
+    last = running.updated_at or running.created_at
+    if last is not None and datetime.now(UTC).replace(tzinfo=None) - last < timedelta(
+        seconds=timeout_seconds
+    ):
+        return running
+    _fail_job(
+        db,
+        running,
+        stale_message,
+        (
+            f"任务超过 {timeout_seconds // 3600} 小时无进度，已标记为中断"
+            if timeout_seconds >= 3600
+            else f"任务超过 {max(1, timeout_seconds // 60)} 分钟无进度，已标记为中断"
+        ),
+    )
+    return None
+
+
+def _active_kb_reindex(db: Session, kb_id: str) -> Job | None:
+    """Return a live reindex job for one knowledge base, auto-failing stale ones.
+
+    Reindex jobs are project-less (``project_id=None``), so the generic
+    :func:`_cancel_stale_jobs` cannot scope them per KB; the ``payload.kb_id``
+    filter is applied in Python because SQLite JSON lookups are not portable.
+    """
+
+    rows = list(
+        db.scalars(
+            select(Job)
+            .where(Job.kind == "kb_reindex", Job.status.in_(["queued", "running"]))
+            .order_by(Job.created_at.desc())
+        )
+    )
+    now = datetime.now(UTC).replace(tzinfo=None)
+    for row in rows:
+        if str((row.payload or {}).get("kb_id") or "") != kb_id:
+            continue
+        last = row.updated_at or row.created_at
+        if last is not None and now - last < timedelta(seconds=KB_REINDEX_STALE_SECONDS):
+            return row
+        _fail_job(
+            db,
+            row,
+            "知识库索引任务超时中断，已允许重新提交",
+            f"任务超过 {max(1, KB_REINDEX_STALE_SECONDS // 60)} 分钟无进度，已标记为中断",
+        )
+    return None
+
+
+def _recover_interrupted_jobs() -> int:
+    """Fail every job that was queued/running when the process last stopped."""
+
+    with session_scope() as db:
+        rows = list(
+            db.scalars(select(Job).where(Job.status.in_(["queued", "running"])))
+        )
+        for row in rows:
+            _fail_job(db, row, STARTUP_INTERRUPTED_MESSAGE, STARTUP_INTERRUPTED_MESSAGE)
+        return len(rows)
+
+
+def _report_payload(report) -> dict[str, Any]:
+    return {
+        "written": report.written,
+        "fallback": report.fallback,
+        "failed": report.failed,
+        "suspicious_numbers": report.suspicious,
+        "usage": report.usage,
+    }
+
+
+def _generation_client(db) -> ModelClient:
+    endpoint = model_config.resolve_chat_endpoint(db)
+    return ModelClient(endpoint if endpoint is not None else settings)
+
+
+def _knowledge_provider(db, user_id: str | None = None):
+    """Build the generation retrieval callback for one user.
+
+    Global knowledge bases stay available to everyone; the caller's personal
+    knowledge base is added explicitly (and therefore included even though
+    :func:`knowledge.search` otherwise skips personal bases).
+    """
+
+    kb_ids: list[str] = []
+    if user_id:
+        kb_ids.append(user_docs.personal_kb(db, str(user_id)).id)
+
+    def provide(query: str) -> str:
+        passages = knowledge.search(
+            db,
+            query,
+            kb_ids=kb_ids or None,
+            limit=4,
+            include_personal=bool(kb_ids),
+        )
+        block, _ = material_policy.context_block(db, passages)
+        return block
+
+    return provide
+
+
+def _job_refund(db, job: Job, written: int) -> None:
+    payload = dict(job.payload or {})
+    charged = int(payload.get("charged") or 0)
+    chapters = int(payload.get("chapters") or 0)
+    if not charged or not chapters or payload.get("refunded"):
+        return
+    refund = max(0, chapters - written) * charged // chapters
+    user = db.get(User, payload.get("user_id") or "")
+    if refund > 0 and user is not None:
+        billing.refund_chapters(db, user, refund)
+        payload["refunded"] = True
+        payload["refunded_credits"] = refund
+        job.payload = payload

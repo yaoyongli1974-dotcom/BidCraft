@@ -1,0 +1,192 @@
+"""正文生成后台任务。
+
+业务生成逻辑在 :mod:`bidcraft.generation.writer`；这里只负责 job 行/SSE 编排。
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from typing import Any
+
+from .. import jobs
+from ..db import session_scope
+from ..generation.outline import build_outline, load_outline, save_outline
+from ..generation.writer import generate_document
+from ..ledger import load_ledger
+from ..models import Job, Project
+from ..rules.engine import ledger_gate
+from ..rules.loader import load_package
+from ..services.job_support import (
+    _fail_job,
+    _generation_client,
+    _job_refund,
+    _knowledge_provider,
+    _report_payload,
+)
+
+logger = logging.getLogger("bidcraft.api")
+
+
+def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
+    """Background worker: writes chapters and streams progress into the Job row.
+
+    Progress is persisted twice: the job row remains the fallback/polling view,
+    while ``job_events`` is the resumable SSE feed used by the browser.
+    """
+    try:
+        with session_scope() as db:
+            job = db.get(Job, job_id)
+            if job is None:
+                return
+            job.status = "running"
+            job.message = "正在准备事实台账…"
+            db.flush()
+            jobs.publish_event(job_id, "status", jobs.job_payload(job), db=db)
+            project = db.get(Project, project_id)
+            if project is None:
+                raise ValueError("项目不存在")
+            owner_id = str((job.payload or {}).get("user_id") or project.owner_id or "")
+            ledger = load_ledger(db, project_id)
+            problems = ledger_gate(ledger)
+            if problems:
+                raise ValueError("必填事实缺失：" + "、".join(problems))
+            package = load_package(project.package)
+            if not load_outline(db, project_id):
+                save_outline(db, project_id, build_outline(ledger, package))
+                db.flush()
+
+        with session_scope() as work_db:
+            project = work_db.get(Project, project_id)
+            ledger = load_ledger(work_db, project_id)
+            package = load_package(project.package)
+            current = {"heading": ""}
+            delta = {"text": "", "last": time.monotonic()}
+
+            def flush_delta() -> None:
+                text = delta["text"]
+                if not text:
+                    return
+                delta["text"] = ""
+                delta["last"] = time.monotonic()
+                # Release any pending chapter writes before opening the short
+                # delta session: SQLite allows a single writer at a time.
+                work_db.commit()
+                with session_scope() as delta_db:
+                    jobs.publish_event(
+                        job_id,
+                        "delta",
+                        {"heading": current["heading"], "text": text},
+                        db=delta_db,
+                    )
+
+            def on_chapter_start(info: dict[str, Any]) -> None:
+                # SQLite has a single writer: close the previous chapter's
+                # transaction before writing the job/event rows.
+                work_db.commit()
+                flush_delta()
+                current["heading"] = str(info.get("heading") or "")
+                with session_scope() as start_db:
+                    row = start_db.get(Job, job_id)
+                    if row is None:
+                        return
+                    row.message = f"正在生成：{current['heading']}"
+                    row.payload = {
+                        **(row.payload or {}),
+                        "heading": current["heading"],
+                        "done": max(0, int(info.get("index") or 1) - 1),
+                        "total": int(info.get("total") or 0),
+                    }
+                    jobs.publish_event(
+                        job_id,
+                        "chapter_start",
+                        {
+                            "heading": current["heading"],
+                            "index": int(info.get("index") or 0),
+                            "total": int(info.get("total") or 0),
+                            "target_words": int(info.get("target_words") or 0),
+                        },
+                        db=start_db,
+                    )
+
+            def on_progress(info: dict[str, Any]) -> None:
+                work_db.commit()
+                flush_delta()
+                with session_scope() as progress_db:
+                    row = progress_db.get(Job, job_id)
+                    if row is None:
+                        return
+                    row.progress = int(info.get("progress") or 0)
+                    row.payload = {
+                        **(row.payload or {}),
+                        "heading": info.get("heading", ""),
+                        "done": info.get("done", 0),
+                        "total": info.get("total", 0),
+                    }
+                    prefix = "本章失败" if info.get("failed") else "已完成"
+                    row.message = (
+                        f"{prefix} {info.get('done', 0)}/{info.get('total', 0)} 章"
+                    )
+                    jobs.publish_event(
+                        job_id,
+                        "chapter",
+                        {
+                            "heading": info.get("heading", ""),
+                            "progress": int(info.get("progress") or 0),
+                            "done": int(info.get("done") or 0),
+                            "total": int(info.get("total") or 0),
+                            "words": int(info.get("words") or 0),
+                            "source": info.get("source", ""),
+                            "failed": bool(info.get("failed")),
+                        },
+                        db=progress_db,
+                    )
+
+            def on_delta(chunk: str) -> None:
+                if not chunk:
+                    return
+                delta["text"] += chunk
+                if len(delta["text"]) >= 320 or time.monotonic() - delta["last"] >= 0.25:
+                    flush_delta()
+
+            report = generate_document(
+                work_db,
+                project_id,
+                _generation_client(work_db),
+                ledger,
+                package,
+                stream=True,
+                on_delta=on_delta,
+                on_progress=on_progress,
+                on_chapter_start=on_chapter_start,
+                force=force,
+                knowledge_provider=_knowledge_provider(work_db, owner_id),
+            )
+            flush_delta()
+            project.status = "drafting"
+            work_db.flush()
+
+        with session_scope() as done_db:
+            row = done_db.get(Job, job_id)
+            if row is not None:
+                row.status = "done"
+                row.progress = 100
+                row.message = f"正文完成：{len(report.written)} 章"
+                result = _report_payload(report)
+                row.result = result
+                _job_refund(done_db, row, len(report.written))
+                jobs.publish_event(
+                    job_id,
+                    "done",
+                    {**jobs.job_payload(row), "report": result},
+                    db=done_db,
+                )
+                done_db.flush()
+    except Exception:  # noqa: BLE001 - surfaced to the UI as a stable message
+        logger.exception("生成任务 %s 失败", job_id)
+        failed_message = "生成失败：模型服务不可用或响应异常，详情见服务日志"
+        with session_scope() as db:
+            row = db.get(Job, job_id)
+            if row is not None:
+                _job_refund(db, row, 0)
+                _fail_job(db, row, failed_message)
