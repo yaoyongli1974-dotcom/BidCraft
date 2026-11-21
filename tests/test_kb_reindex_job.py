@@ -153,17 +153,29 @@ def test_reindex_job_unknown_kb_returns_404(db):
 
 
 def test_reindex_job_duplicate_submission_returns_409(db, tmp_path, monkeypatch):
+    import threading
+
     from bidcraft import api
 
-    monkeypatch.setattr(api, "_run_kb_reindex_job", lambda job_id, kb_id: None)
+    # DB 驱动队列：worker 认领后立即执行 runner。用阻塞 runner 让 job 停在 running，
+    # 才有「已有任务在运行」可查；释放事件放在 finally，避免遗留阻塞线程。
+    release = threading.Event()
+
+    def blocking(job_id, kb_id):
+        release.wait(5)
+
+    monkeypatch.setattr(api, "_run_kb_reindex_job", blocking)
     client = _client()
     kb_id = _local_kb(client, tmp_path)
 
-    first = client.post(f"/admin/kbs/{kb_id}/reindex")
-    assert first.status_code == 202, first.text
-    second = client.post(f"/admin/kbs/{kb_id}/reindex")
-    assert second.status_code == 409
-    assert second.json()["detail"] == "该知识库已有重建索引任务在运行"
+    try:
+        first = client.post(f"/admin/kbs/{kb_id}/reindex")
+        assert first.status_code == 202, first.text
+        second = client.post(f"/admin/kbs/{kb_id}/reindex")
+        assert second.status_code == 409
+        assert second.json()["detail"] == "该知识库已有重建索引任务在运行"
+    finally:
+        release.set()
 
 
 def test_reindex_job_worker_failure_is_stable_and_hides_traceback(

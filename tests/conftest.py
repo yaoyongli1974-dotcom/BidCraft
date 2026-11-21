@@ -8,8 +8,10 @@ from bidcraft.db import init_db, reset_engine_for_tests
 
 @pytest.fixture()
 def db(tmp_path, monkeypatch):
-    from bidcraft import cli  # noqa: F401  (ensure imports are wired)
+    from bidcraft import cli, jobqueue  # noqa: F401  (ensure imports are wired)
 
+    # DB 驱动队列：上一测试可能启动了常驻 worker，先停掉，避免它认领本用例的 job。
+    jobqueue._reset()
     monkeypatch.setattr(settings, "home", tmp_path / ".bidcraft")
     settings.model_base_url = ""
     settings.model_name = ""

@@ -111,6 +111,24 @@ class Settings:
     max_concurrent_jobs: int = field(
         default_factory=lambda: int(os.getenv("BIDCRAFT_MAX_JOBS", "2"))
     )
+    # DB 驱动任务队列：全局排队上限与单用户排队配额（背压），0 表示不限制。
+    max_queued_jobs: int = field(
+        default_factory=lambda: int(os.getenv("BIDCRAFT_MAX_QUEUED_JOBS", "100"))
+    )
+    max_user_queued_jobs: int = field(
+        default_factory=lambda: int(os.getenv("BIDCRAFT_MAX_USER_QUEUED_JOBS", "10"))
+    )
+    # 任务租约：认领后 lease_expires_at=now+lease；心跳每 heartbeat 秒续期。
+    job_lease_seconds: int = field(
+        default_factory=lambda: int(os.getenv("BIDCRAFT_JOB_LEASE_SECONDS", "180"))
+    )
+    job_heartbeat_seconds: int = field(
+        default_factory=lambda: int(os.getenv("BIDCRAFT_JOB_HEARTBEAT_SECONDS", "60"))
+    )
+    # 失败/中断后的最大认领次数（含首次），超过则失败。
+    job_max_attempts: int = field(
+        default_factory=lambda: int(os.getenv("BIDCRAFT_JOB_MAX_ATTEMPTS", "3"))
+    )
     ocr_enabled: bool = field(default_factory=lambda: _bool("BIDCRAFT_OCR", True))
     mineru_url: str = field(default_factory=lambda: os.getenv("BIDCRAFT_MINERU_URL", "").strip())
     mineru_enabled: bool = field(default_factory=lambda: _bool("BIDCRAFT_MINERU", True))

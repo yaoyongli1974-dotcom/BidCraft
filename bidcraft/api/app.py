@@ -1470,7 +1470,9 @@ def create_app():
     except Exception:  # noqa: BLE001 - startup must not fail on cleanup
         logger.exception("清理过期会话失败")
     try:
-        _recover_interrupted_jobs()
+        # DB 驱动队列：启动恢复改为「重排队 + 重试上限」，30 分钟任务重启后重跑而非直接判失败；
+        # 同时启动常驻 worker（多进程各自原子认领，不会重复执行同一个 job）。
+        jobqueue.recover_on_startup()
     except Exception:  # noqa: BLE001 - startup must not fail on cleanup
         logger.exception("恢复中断任务失败")
     # 每次 create_app() 都重新读取开关：测试与部署会在构造前改 settings，

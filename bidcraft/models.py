@@ -450,6 +450,14 @@ class Job(Base):
     result: Mapped[dict] = mapped_column(JSON, default=dict)
     #: 排队优先级：数值越小越先执行（VIP 主账号/子账号=0，普通=1）。
     priority: Mapped[int] = mapped_column(Integer, default=1)
+    # DB 驱动队列：Job 行本身就是排队凭据，Worker 用条件 UPDATE 原子认领。
+    # attempts 在每次认领时 +1；租约过期/进程崩溃由 reaper 重新排队，超过 max_attempts 才失败。
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    worker_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 

@@ -838,6 +838,10 @@ def serve(
     from .api import create_app
 
     app = create_app()
+    # 启动常驻任务 worker：DB 认领 + 租约心跳，确保重启后重排队的任务被立即执行。
+    from . import jobqueue
+
+    jobqueue.start_workers()
     web_ready = (Path(__file__).resolve().parent / "web_dist" / "index.html").is_file()
     console.print(f"[green]BidCraft[/green] http://{host}:{port}  API 文档 /docs")
     if web_ready:

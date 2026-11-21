@@ -22,6 +22,7 @@ from ..app import (  # noqa: F401
     audit,
     billing_user,
     date,
+    jobqueue,
     jobs,
     mimetypes,
     personnel,
@@ -45,7 +46,7 @@ def my_docs() -> list[dict[str, Any]]:
 async def upload_my_doc(file: UploadFile = File(...)) -> dict[str, Any]:
     raw_name = (file.filename or "").strip()
     content = await file.read(user_docs.MAX_USER_DOC_BYTES + 1)
-    worker: threading.Thread | None = None
+    dispatch: str | None = None
     with session_scope() as db:
         user = billing_user(db)
         try:
@@ -53,6 +54,9 @@ async def upload_my_doc(file: UploadFile = File(...)) -> dict[str, Any]:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         kb_id = doc.kb_id
+        error = jobqueue.check_backpressure(db, user.id or "")
+        if error:
+            raise HTTPException(status_code=429, detail=error)
         job = _active_kb_reindex(db, kb_id)
         if job is None:
             job = Job(
@@ -69,12 +73,7 @@ async def upload_my_doc(file: UploadFile = File(...)) -> dict[str, Any]:
             db.add(job)
             db.flush()
             jobs.publish_event(job.id, "queued", jobs.job_payload(job), db=db)
-            worker = threading.Thread(
-                target=_core._run_kb_reindex_job,
-                args=(job.id, kb_id),
-                daemon=True,
-                name=f"bidcraft-kb-reindex-{job.id[:8]}",
-            )
+            dispatch = job.id
         job_id = job.id
         payload = user_docs.doc_payload(doc)
         audit(
@@ -83,8 +82,8 @@ async def upload_my_doc(file: UploadFile = File(...)) -> dict[str, Any]:
             "user_doc.upload",
             {"id": doc.id, "filename": doc.filename, "kb_id": kb_id, "job_id": job_id},
         )
-    if worker is not None:
-        worker.start()
+    if dispatch is not None:
+        jobqueue.submit(job_id=dispatch)
     return {"doc": payload, "job_id": job_id}
 
 

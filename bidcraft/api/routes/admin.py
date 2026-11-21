@@ -73,6 +73,7 @@ from ..app import (  # noqa: F401
     func,
     hash_password,
     invoices,
+    jobqueue,
     jobs,
     knowledge,
     list_packages,
@@ -345,6 +346,9 @@ def reindex_kb(kb_id: str, request: Request) -> dict[str, Any]:
             raise HTTPException(status_code=400, detail="只有本地知识库需要建索引")
         if _active_kb_reindex(db, kb_id) is not None:
             raise HTTPException(status_code=409, detail="该知识库已有重建索引任务在运行")
+        error = jobqueue.check_backpressure(db, user.get("id") or "")
+        if error:
+            raise HTTPException(status_code=429, detail=error)
         job = Job(
             project_id=None,
             kind="kb_reindex",
@@ -361,13 +365,9 @@ def reindex_kb(kb_id: str, request: Request) -> dict[str, Any]:
         job_id = job.id
         jobs.publish_event(job_id, "queued", jobs.job_payload(job), db=db)
         audit(db, None, "kb.reindex", {"kb_id": kb_id, "job_id": job_id})
-    worker = threading.Thread(
-        target=_core._run_kb_reindex_job,
-        args=(job_id, kb_id),
-        daemon=True,
-        name=f"bidcraft-kb-reindex-{job_id[:8]}",
-    )
-    worker.start()
+        dispatch = job_id
+    if dispatch is not None:
+        jobqueue.submit(job_id=dispatch)
     return {"job_id": job_id}
 
 

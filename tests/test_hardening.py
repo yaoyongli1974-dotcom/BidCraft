@@ -147,40 +147,38 @@ def test_failed_parse_removes_copied_source(db):
 # ------------------------------------------------------- orphan job recovery
 
 
-def test_startup_fails_queued_and_running_jobs(db):
-    from sqlalchemy import select
+def test_startup_requeues_running_jobs_and_keeps_queued(db):
+    """DB 驱动队列：启动恢复把孤儿 running 重排队，queued 保持不变，done 不动。"""
 
     from bidcraft.api import create_app
     from bidcraft.db import session_scope
-    from bidcraft.models import Job, JobEvent
+    from bidcraft.models import Job
 
     with session_scope() as session:
         queued = Job(kind="generate", status="queued", message="排队中")
-        running = Job(kind="images", status="running", message="运行中")
-        batch_check = Job(kind="batch_check", status="running")
+        running = Job(kind="images", status="running", message="运行中", attempts=1)
+        batch_check = Job(kind="batch_check", status="running", attempts=1)
         batch_export = Job(kind="batch_export", status="queued")
         done = Job(kind="generate", status="done", message="完成")
         session.add_all([queued, running, batch_check, batch_export, done])
         session.flush()
-        ids = [job.id for job in (queued, running, batch_check, batch_export)]
+        queued_id, running_id = queued.id, running.id
+        batch_check_id, batch_export_id = batch_check.id, batch_export.id
         done_id = done.id
 
+    # create_app() 触发 recover_on_startup()；启动不在此处起 worker（避免测试里跑任务）。
     create_app()
 
     with session_scope() as session:
-        for job_id in ids:
+        # queued 保持
+        assert session.get(Job, queued_id).status == "queued"
+        assert session.get(Job, batch_export_id).status == "queued"
+        # running（孤儿）重排队，租约字段清空（attempts 在下次认领时才 +1）
+        for job_id in (running_id, batch_check_id):
             row = session.get(Job, job_id)
-            assert row.status == "failed"
-            assert row.message == "服务重启，任务已中断"
-            assert row.result["error"] == "服务重启，任务已中断"
-            events = list(
-                session.scalars(
-                    select(JobEvent)
-                    .where(JobEvent.job_id == job_id)
-                    .order_by(JobEvent.id)
-                )
-            )
-            assert [event.kind for event in events] == ["failed"]
+            assert row.status == "queued"
+            assert row.claimed_at is None and row.lease_expires_at is None
+            assert "重新排队" in row.message
         assert session.get(Job, done_id).status == "done"
 
 

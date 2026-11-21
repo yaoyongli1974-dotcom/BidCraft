@@ -166,6 +166,14 @@ from ..app import (  # noqa: F401
 router = APIRouter()
 
 
+def _enqueue_or_429(db, owner_id: str) -> None:
+    """队列背压：全局排队上限与单用户配额，超限 429。"""
+
+    error = jobqueue.check_backpressure(db, owner_id)
+    if error:
+        raise HTTPException(status_code=429, detail=error)
+
+
 @router.get("/projects")
 def projects(limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
     capped, start = _page_bounds(limit, offset)
@@ -250,6 +258,7 @@ def batch_check(payload: BatchIdsRequest) -> dict[str, Any]:
             stale_message="批量核对任务超时中断，已允许重新提交",
         ) is not None:
             raise HTTPException(status_code=409, detail="已有批量核对任务在运行")
+        _enqueue_or_429(db, user.get("id") or "")
         job = Job(
             project_id=None,
             kind="batch_check",
@@ -308,6 +317,7 @@ def batch_export(payload: BatchExportRequest) -> dict[str, Any]:
             stale_message="批量导出任务超时中断，已允许重新提交",
         ) is not None:
             raise HTTPException(status_code=409, detail="已有批量导出任务在运行")
+        _enqueue_or_429(db, user.get("id") or "")
         job = Job(
             project_id=None,
             kind="batch_export",
@@ -872,6 +882,7 @@ def generate_missing_images(
             stale_message="配图任务超时中断，已允许重新生成",
         ) is not None:
             raise HTTPException(status_code=409, detail="该项目已有配图任务在运行")
+        _enqueue_or_429(db, (current_user() or {}).get("id") or "")
         job = Job(
             project_id=project.id,
             kind="images",
@@ -885,6 +896,8 @@ def generate_missing_images(
                 "skipped": 0,
                 "include_failed": include_failed,
                 "labels": [target["label"] for target in targets],
+                # DB 驱动派发：worker 从 payload 重建 targets（含 node_id/asset_id 等）。
+                "targets": targets,
             },
         )
         db.add(job)
@@ -1520,6 +1533,7 @@ def generate_all(ref: str, payload: GenerateRequest | None = None) -> dict[str, 
         ) is not None:
             raise HTTPException(status_code=409, detail="该项目已有生成任务在运行")
         user = billing_user(db)
+        _enqueue_or_429(db, user.id or "")
         client = _generation_client(db)
         count = _pending_chapters(db, project.id, force=force)
         if count <= 0:
@@ -1545,6 +1559,8 @@ def generate_all(ref: str, payload: GenerateRequest | None = None) -> dict[str, 
                 "chapters": count,
                 "user_id": user.id,
                 "cost_per": charged // count if count else 0,
+                # DB 驱动派发：worker 从 payload 重建 force 参数。
+                "force": bool(force),
             },
         )
         db.add(job)
