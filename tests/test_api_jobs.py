@@ -101,7 +101,7 @@ def test_sse_rejects_other_users_job(db):
     other = TestClient(create_app())
     registered = other.post(
         "/auth/register",
-        json={"username": "sse-viewer", "password": "viewer-pass", "display_name": "只读"},
+        json={"username": "sse-viewer", "password": "viewer-pass", "display_name": "只读", "accept_terms": True},
     )
     assert registered.status_code == 201, registered.text
     assert other.get(f"/jobs/{job_id}").status_code == 404

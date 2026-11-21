@@ -218,6 +218,7 @@ def test_registration_still_logs_in(db):
             "username": "fresh-register",
             "password": "register-pass-1",
             "display_name": "新用户",
+            "accept_terms": True,
         },
     )
     assert response.status_code == 201, response.text

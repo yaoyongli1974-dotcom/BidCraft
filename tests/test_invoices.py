@@ -30,7 +30,7 @@ def _admin(client: TestClient) -> None:
 
 
 def _register(client: TestClient, name: str = "buyer1", **extra):
-    payload = {"username": name, "password": "Passw0rd!123", "display_name": name}
+    payload = {"username": name, "password": "Passw0rd!123", "display_name": name, "accept_terms": True}
     payload.update(extra)
     return client.post("/auth/register", json=payload)
 

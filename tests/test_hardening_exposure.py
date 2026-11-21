@@ -72,7 +72,7 @@ def test_admin_health_requires_super_admin(db, monkeypatch):
     assert (
         member.post(
             "/auth/register",
-            json={"username": "health-member", "password": "Passw0rd!123"},
+            json={"username": "health-member", "password": "Passw0rd!123", "accept_terms": True},
         ).status_code
         == 201
     )

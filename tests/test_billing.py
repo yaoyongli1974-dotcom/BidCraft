@@ -24,7 +24,7 @@ def _admin(client):
 def _register(client, username: str = "buyer1", password: str = "buyer-pass-1"):
     return client.post(
         "/auth/register",
-        json={"username": username, "password": password, "display_name": "外部投标人"},
+        json={"username": username, "password": password, "display_name": "外部投标人", "accept_terms": True},
     )
 
 
@@ -39,7 +39,7 @@ def test_registration_credits_and_project_isolation(db, monkeypatch, tender_path
     assert body["role"] == "manager"
     assert body["is_external"] is True
     assert body["credits"] == 5
-    assert buyer.post("/auth/register", json={"username": "buyer1", "password": "12345678"}).status_code == 400
+    assert buyer.post("/auth/register", json={"username": "buyer1", "password": "12345678", "accept_terms": True}).status_code == 400
 
     created = buyer.post(
         "/projects", json={"name": "外部用户项目", "package": "weakcurrent-cabling"}

@@ -182,14 +182,23 @@ def test_desktop_requires_server(tmp_path, monkeypatch):
     assert "未指定服务器" in result.output
 
 
-def test_register_creates_session(live_server, tmp_path):
+def test_register_requires_explicit_consent(live_server, tmp_path):
+    """冻结客户端的 register() 不提交 accept_terms，注册必须被服务端拒绝。
+
+    注册同意默认值的 P1 改造要求：缺省/False 一律拒绝，旧客户端不得靠默认同意兼容。
+    桌面客户端已冻结（不再更新、不发安装包），不会补传 accept_terms，因此它注册失败
+    是有意结果，而不是要改客户端来绕过。
+    """
+    from bidcraft.client import ClientError
+
     home = tmp_path / "client-home-reg"
     client = _client(live_server, home)
     try:
-        user = client.register("reg-user", "Passw0rd!123", "注册测试")
-        assert user["username"] == "reg-user"
-        assert client.me()["username"] == "reg-user"
-        assert client.projects() == []
+        with pytest.raises(ClientError, match="请先阅读并同意服务条款与隐私政策"):
+            client.register("reg-user", "Passw0rd!123", "注册测试")
+        # 被拒后不应建立会话：me() 仍是未登录。
+        with pytest.raises(ClientError, match="未登录"):
+            client.me()
     finally:
         client.close()
 

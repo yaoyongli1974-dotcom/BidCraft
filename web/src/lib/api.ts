@@ -1099,7 +1099,7 @@ export const register = (
   username: string,
   password: string,
   displayName = '',
-  acceptTerms = true,
+  acceptTerms = false,
 ) =>
   request<{ user: User }>(
     '/auth/register',

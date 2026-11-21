@@ -18,7 +18,7 @@ def _client(username: str = "compuser"):
     client = TestClient(create_app())
     response = client.post(
         "/auth/register",
-        json={"username": username, "password": "comp-pass-1", "display_name": username},
+        json={"username": username, "password": "comp-pass-1", "display_name": username, "accept_terms": True},
     )
     assert response.status_code == 201, response.text
     return client, response.json()["user"]

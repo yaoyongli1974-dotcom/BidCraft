@@ -24,7 +24,7 @@ def _admin(client):
 def _register(client, username, password="buyer-pass-1"):
     response = client.post(
         "/auth/register",
-        json={"username": username, "password": password, "display_name": "主账号"},
+        json={"username": username, "password": password, "display_name": "主账号", "accept_terms": True},
     )
     assert response.status_code == 201, response.text
     return response.json()["user"]

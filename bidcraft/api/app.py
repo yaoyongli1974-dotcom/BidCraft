@@ -399,8 +399,8 @@ class RegisterRequest(BaseModel):
     username: str = Field(min_length=3, max_length=40)
     password: str = Field(min_length=8, max_length=200)
     display_name: str = ""
-    #: 勾选同意《服务条款》《隐私政策》（默认 True 以兼容旧客户端）。
-    accept_terms: bool = True
+    #: 必须显式勾选同意《服务条款》《隐私政策》；缺省一律拒绝，不替旧客户端默认同意。
+    accept_terms: bool = False
     terms_version: str = ""
 
 
