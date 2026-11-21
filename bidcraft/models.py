@@ -458,6 +458,9 @@ class Job(Base):
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     worker_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    # fencing token：每次认领刷新。worker 的关键写操作必须校验当前令牌，
+    # 租约过期/被回收后旧 worker 令牌失效，写操作与心跳都会被拒（至少一次执行）。
+    claim_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 

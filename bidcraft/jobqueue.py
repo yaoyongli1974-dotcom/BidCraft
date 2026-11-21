@@ -23,11 +23,13 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, select, update
 
 from .clock import utc_now
 from .config import settings
@@ -35,6 +37,47 @@ from .db import session_scope
 from .models import Job
 
 logger = logging.getLogger("bidcraft.jobs")
+
+# Fencing token: every claim gets a fresh token.  A worker may only write job
+# state while it still holds that token (a reaper reclaim changes it), so a
+# slow worker whose lease expired cannot clobber the new worker's run.
+# ContextVar is thread-local: the worker thread sets it for the runner; the
+# heartbeat thread gets the token passed explicitly (it does not inherit it).
+_claim_token: ContextVar[str] = ContextVar("bidcraft_claim_token", default="")
+
+
+@contextmanager
+def claim_context(token: str) -> Iterator[None]:
+    """Bind ``token`` for the current thread and reset it on exit."""
+
+    reset = _claim_token.set(token)
+    try:
+        yield
+    finally:
+        _claim_token.reset(reset)
+
+
+def current_claim_token() -> str:
+    return _claim_token.get()
+
+
+def fenced_job(db, job_id: str) -> Job | None:
+    """Return the job only if this worker still owns the current claim.
+
+    Used at every worker write point in place of ``db.get(Job, job_id)``.  When
+    the lease was reclaimed the token differs (or is cleared), so the stale
+    worker gets ``None`` and skips the write entirely.  Returns ``None`` too
+    when called outside a claim context (e.g. directly from a test).
+    """
+
+    token = _claim_token.get()
+    if not token:
+        return None
+    job = db.get(Job, job_id)
+    if job is None or (job.claim_token or "") != token:
+        return None
+    return job
+
 
 _lock = threading.Condition()
 _workers_started = False
@@ -207,6 +250,9 @@ def claim_next() -> Job | None:
 
     now = utc_now()
     lease_until = now + timedelta(seconds=_lease_seconds())
+    # Fresh token on every claim: after a reaper reclaim the old worker's token
+    # no longer matches, so all of its subsequent writes are fenced out.
+    token = uuid.uuid4().hex
     statement = (
         update(Job)
         .where(
@@ -224,6 +270,7 @@ def claim_next() -> Job | None:
             lease_expires_at=lease_until,
             heartbeat_at=now,
             worker_id=_worker_id,
+            claim_token=token,
             attempts=Job.attempts + 1,
         )
         .returning(Job.id)
@@ -239,7 +286,14 @@ def claim_next() -> Job | None:
         return claimed
 
 
-def _heartbeat(job_id: str, stop: threading.Event) -> None:
+def _heartbeat(job_id: str, stop: threading.Event, token: str) -> None:
+    """Renew the lease only while our claim token is still current.
+
+    ``token`` is passed explicitly because ContextVar does not propagate into
+    this thread.  A zero-row update means the lease was reclaimed; stop renewing
+    so the new owner's heartbeat is the only one extending it.
+    """
+
     interval = _heartbeat_seconds()
     while not stop.wait(interval):
         now = utc_now()
@@ -247,19 +301,20 @@ def _heartbeat(job_id: str, stop: threading.Event) -> None:
         try:
             with session_scope() as db:
                 result = db.execute(
-                    text(
-                        "UPDATE jobs SET heartbeat_at=:now, lease_expires_at=:lease "
-                        "WHERE id=:id AND status='running' AND worker_id=:worker"
-                    ),
-                    {
-                        "now": now,
-                        "lease": lease_until,
-                        "id": job_id,
-                        "worker": _worker_id,
-                    },
+                    update(Job)
+                    .where(
+                        Job.id == job_id,
+                        Job.status == "running",
+                        Job.worker_id == _worker_id,
+                        Job.claim_token == token,
+                    )
+                    .values(heartbeat_at=now, lease_expires_at=lease_until)
                 )
                 if result.rowcount:
                     db.commit()
+                else:
+                    # Lease no longer ours — stop renewing (the new owner took over).
+                    return
         except Exception:  # noqa: BLE001 - heartbeat must never kill the worker
             logger.debug("心跳更新失败 job=%s", job_id, exc_info=True)
 
@@ -270,6 +325,7 @@ def _set_failed(db, job: Job, message: str) -> None:
     job.status = "failed"
     job.message = message
     job.result = {"error": message}
+    job.claim_token = None
     jobs.publish_event(
         job.id, "failed", {**jobs.job_payload(job), "error": message}, db=db
     )
@@ -290,6 +346,7 @@ def _requeue(db, job: Job, message: str) -> bool:
     job.lease_expires_at = None
     job.heartbeat_at = None
     job.worker_id = None
+    job.claim_token = None
     jobs.publish_event(job.id, "queued", jobs.job_payload(job), db=db)
     return True
 
@@ -321,19 +378,29 @@ def reap_expired() -> tuple[int, int]:
 
 
 def recover_on_startup() -> tuple[int, int]:
-    """Startup hook: queued rows stay queued; orphaned running rows are re-queued.
+    """Startup: requeue only running rows whose lease already expired.
 
-    Replaces the old "fail every queued/running job" behaviour.  On startup this
-    process has no workers running any job, so every ``running`` row is orphaned
-    and re-queued regardless of lease (the previous process died).  Workers are
-    then started so re-queued rows are picked up immediately.
+    A multi-worker deployment starts a new process while other workers may be
+    actively executing a job.  Requeueing every ``running`` row here would hand
+    a live job to a second worker and run it twice (duplicate generation /
+    export / charges).  An unexpired lease means another worker still owns the
+    job, so we leave it alone and let the reaper reclaim it only if it truly
+    dies.  Rows with no lease (legacy) are treated as expired.
     """
 
+    now = utc_now()
     requeued = failed = 0
     with session_scope() as db:
-        rows = list(db.scalars(select(Job).where(Job.status == "running")))
+        rows = list(
+            db.scalars(
+                select(Job).where(
+                    Job.status == "running",
+                    (Job.lease_expires_at.is_(None)) | (Job.lease_expires_at < now),
+                )
+            )
+        )
         for row in rows:
-            if _requeue(db, row, "服务重启，任务重新排队"):
+            if _requeue(db, row, "服务重启且租约已过期，任务重新排队"):
                 requeued += 1
             else:
                 failed += 1
@@ -360,7 +427,7 @@ def _finalize_after_run(job_id: str) -> None:
     """
 
     with session_scope() as db:
-        job = db.get(Job, job_id)
+        job = fenced_job(db, job_id)
         if job is None or job.status != "running":
             return
         cap = min(_max_attempts(), job.max_attempts or _max_attempts())
@@ -371,30 +438,41 @@ def _finalize_after_run(job_id: str) -> None:
 
 
 def _execute(job: Job) -> None:
-    runner = _runner_for(job.kind)
-    if runner is None:
-        logger.error("未知任务类型 %s (job=%s)", job.kind, job.id)
-        with session_scope() as db:
-            row = db.get(Job, job.id)
-            if row is not None:
-                _set_failed(db, row, f"未知任务类型：{job.kind}")
-        return
+    # Bind the claimed token for this worker thread so every runner write is
+    # fenced.  If the lease was reclaimed mid-run, fenced_job() returns None
+    # and the stale worker skips its writes (business work may already be in
+    # flight — this is at-least-once, not exactly-once, execution).
+    token = job.claim_token or ""
+    with claim_context(token):
+        runner = _runner_for(job.kind)
+        if runner is None:
+            logger.error("未知任务类型 %s (job=%s)", job.kind, job.id)
+            with session_scope() as db:
+                row = fenced_job(db, job.id)
+                if row is not None:
+                    _set_failed(db, row, f"未知任务类型：{job.kind}")
+            return
 
-    args = _rebuild_args(job)
-    stop = threading.Event()
-    hb = threading.Thread(target=_heartbeat, args=(job.id, stop), daemon=True, name="bidcraft-hb")
-    hb.start()
-    try:
-        runner(*args)
-    except Exception:  # noqa: BLE001 - runner owns its error status; fallback only
-        logger.exception("任务执行异常 job=%s kind=%s", job.id, job.kind)
-        with session_scope() as db:
-            row = db.get(Job, job.id)
-            if row is not None and row.status not in {"done", "failed", "cancelled"}:
-                _set_failed(db, row, "任务执行异常")
-    finally:
-        stop.set()
-    _finalize_after_run(job.id)
+        args = _rebuild_args(job)
+        stop = threading.Event()
+        hb = threading.Thread(
+            target=_heartbeat,
+            args=(job.id, stop, token),
+            daemon=True,
+            name="bidcraft-hb",
+        )
+        hb.start()
+        try:
+            runner(*args)
+        except Exception:  # noqa: BLE001 - runner owns its error status; fallback only
+            logger.exception("任务执行异常 job=%s kind=%s", job.id, job.kind)
+            with session_scope() as db:
+                row = fenced_job(db, job.id)
+                if row is not None and row.status not in {"done", "failed", "cancelled"}:
+                    _set_failed(db, row, "任务执行异常")
+        finally:
+            stop.set()
+        _finalize_after_run(job.id)
 
 
 def _rebuild_args(job: Job) -> tuple:

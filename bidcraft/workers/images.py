@@ -12,7 +12,8 @@ from sqlalchemy import select
 
 from .. import images, jobs
 from ..db import session_scope
-from ..models import ImageAsset, Job, Project
+from ..jobqueue import fenced_job
+from ..models import ImageAsset, Project
 from ..services.job_support import _fail_job
 
 logger = logging.getLogger("bidcraft.api")
@@ -34,7 +35,7 @@ def _run_image_batch_job(job_id: str, project_id: str, targets: list[dict[str, A
     policy: dict = dict(images.DEFAULT_POLICY)
     try:
         with session_scope() as db:
-            job = db.get(Job, job_id)
+            job = fenced_job(db, job_id)
             if job is None:
                 return
             project = db.get(Project, project_id)
@@ -100,7 +101,7 @@ def _run_image_batch_job(job_id: str, project_id: str, targets: list[dict[str, A
                 status = "failed"
                 failed_labels.append(label)
                 with session_scope() as db:
-                    job = db.get(Job, job_id)
+                    job = fenced_job(db, job_id)
                     if job is not None:
                         job.message = f"配图失败：{label}（{exc}）"
                         db.flush()
@@ -115,7 +116,7 @@ def _run_image_batch_job(job_id: str, project_id: str, targets: list[dict[str, A
                     failed_labels.append(label)
 
             with session_scope() as db:
-                job = db.get(Job, job_id)
+                job = fenced_job(db, job_id)
                 if job is None:
                     return
                 progress = int(index * 100 / total) if total else 100
@@ -152,7 +153,7 @@ def _run_image_batch_job(job_id: str, project_id: str, targets: list[dict[str, A
                 db.flush()
 
         with session_scope() as db:
-            job = db.get(Job, job_id)
+            job = fenced_job(db, job_id)
             if job is not None:
                 job.status = "done"
                 job.progress = 100
@@ -177,6 +178,6 @@ def _run_image_batch_job(job_id: str, project_id: str, targets: list[dict[str, A
         logger.exception("配图任务 %s 失败", job_id)
         failed_message = "配图任务失败：图片服务不可用或响应异常，详情见服务日志"
         with session_scope() as db:
-            job = db.get(Job, job_id)
+            job = fenced_job(db, job_id)
             if job is not None:
                 _fail_job(db, job, failed_message)

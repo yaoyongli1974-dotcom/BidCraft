@@ -17,8 +17,9 @@ from ..db import session_scope
 from ..export.docx import export_docx, export_markdown
 from ..export_gate import ExportGateError, enforce_export_gate
 from ..generation.outline import load_outline
+from ..jobqueue import fenced_job
 from ..ledger import load_ledger
-from ..models import Job, Project
+from ..models import Project
 from ..services.job_support import _fail_job
 
 logger = logging.getLogger("bidcraft.api")
@@ -41,7 +42,7 @@ def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None
     blocked = 0
     try:
         with session_scope() as db:
-            job = db.get(Job, job_id)
+            job = fenced_job(db, job_id)
             if job is None:
                 return
             job.status = "running"
@@ -108,7 +109,7 @@ def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None
                     {"project_id": project_id, "name": name, "error": str(exc)}
                 )
             with session_scope() as db:
-                job = db.get(Job, job_id)
+                job = fenced_job(db, job_id)
                 if job is None:
                     return
                 progress = int(index * 100 / total) if total else 100
@@ -144,7 +145,7 @@ def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None
                 bundle.write(path, arcname=arcname)
 
         with session_scope() as db:
-            job = db.get(Job, job_id)
+            job = fenced_job(db, job_id)
             if job is not None:
                 job.status = "done"
                 job.progress = 100
@@ -169,6 +170,6 @@ def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None
         logger.exception("批量导出任务 %s 失败", job_id)
         failed_message = "批量导出失败：服务内部错误，详情见服务日志"
         with session_scope() as db:
-            job = db.get(Job, job_id)
+            job = fenced_job(db, job_id)
             if job is not None:
                 _fail_job(db, job, failed_message)

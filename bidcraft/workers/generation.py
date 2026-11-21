@@ -13,8 +13,9 @@ from .. import jobs
 from ..db import session_scope
 from ..generation.outline import build_outline, load_outline, save_outline
 from ..generation.writer import generate_document
+from ..jobqueue import fenced_job
 from ..ledger import load_ledger
-from ..models import Job, Project
+from ..models import Project
 from ..rules.engine import ledger_gate
 from ..rules.loader import load_package
 from ..services.job_support import (
@@ -36,7 +37,7 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
     """
     try:
         with session_scope() as db:
-            job = db.get(Job, job_id)
+            job = fenced_job(db, job_id)
             if job is None:
                 return
             job.status = "running"
@@ -87,7 +88,7 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
                 flush_delta()
                 current["heading"] = str(info.get("heading") or "")
                 with session_scope() as start_db:
-                    row = start_db.get(Job, job_id)
+                    row = fenced_job(start_db, job_id)
                     if row is None:
                         return
                     row.message = f"正在生成：{current['heading']}"
@@ -113,7 +114,7 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
                 work_db.commit()
                 flush_delta()
                 with session_scope() as progress_db:
-                    row = progress_db.get(Job, job_id)
+                    row = fenced_job(progress_db, job_id)
                     if row is None:
                         return
                     row.progress = int(info.get("progress") or 0)
@@ -167,7 +168,7 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
             work_db.flush()
 
         with session_scope() as done_db:
-            row = done_db.get(Job, job_id)
+            row = fenced_job(done_db, job_id)
             if row is not None:
                 row.status = "done"
                 row.progress = 100
@@ -186,7 +187,7 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
         logger.exception("生成任务 %s 失败", job_id)
         failed_message = "生成失败：模型服务不可用或响应异常，详情见服务日志"
         with session_scope() as db:
-            row = db.get(Job, job_id)
+            row = fenced_job(db, job_id)
             if row is not None:
                 _job_refund(db, row, 0)
                 _fail_job(db, row, failed_message)

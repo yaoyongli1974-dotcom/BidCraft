@@ -10,7 +10,8 @@ from typing import Any
 
 from .. import jobs
 from ..db import session_scope
-from ..models import Job, Project
+from ..jobqueue import fenced_job
+from ..models import Project
 from ..pipeline import check_project
 from ..services.job_support import _fail_job
 
@@ -30,7 +31,7 @@ def _run_batch_check_job(job_id: str, project_ids: list[str]) -> None:
     failed_count = 0
     try:
         with session_scope() as db:
-            job = db.get(Job, job_id)
+            job = fenced_job(db, job_id)
             if job is None:
                 return
             job.status = "running"
@@ -67,7 +68,7 @@ def _run_batch_check_job(job_id: str, project_ids: list[str]) -> None:
                 failed_count += 1
             results.append(item)
             with session_scope() as db:
-                job = db.get(Job, job_id)
+                job = fenced_job(db, job_id)
                 if job is None:
                     return
                 progress = int(index * 100 / total) if total else 100
@@ -97,7 +98,7 @@ def _run_batch_check_job(job_id: str, project_ids: list[str]) -> None:
                 )
 
         with session_scope() as db:
-            job = db.get(Job, job_id)
+            job = fenced_job(db, job_id)
             if job is not None:
                 job.status = "done"
                 job.progress = 100
@@ -118,6 +119,6 @@ def _run_batch_check_job(job_id: str, project_ids: list[str]) -> None:
         logger.exception("批量核对任务 %s 失败", job_id)
         failed_message = "批量核对失败：服务内部错误，详情见服务日志"
         with session_scope() as db:
-            job = db.get(Job, job_id)
+            job = fenced_job(db, job_id)
             if job is not None:
                 _fail_job(db, job, failed_message)

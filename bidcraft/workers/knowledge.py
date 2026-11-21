@@ -11,7 +11,7 @@ from typing import Any
 from .. import jobs, knowledge, model_config
 from ..config import settings
 from ..db import session_scope
-from ..models import Job
+from ..jobqueue import fenced_job
 from ..services.job_support import _fail_job
 
 logger = logging.getLogger("bidcraft.api")
@@ -30,7 +30,7 @@ def _run_kb_reindex_job(job_id: str, kb_id: str) -> None:
 
     try:
         with session_scope() as db:
-            job = db.get(Job, job_id)
+            job = fenced_job(db, job_id)
             if job is None:
                 return
             job.status = "running"
@@ -46,7 +46,7 @@ def _run_kb_reindex_job(job_id: str, kb_id: str) -> None:
             indexed = knowledge.index_local(db, kb)
             db.flush()
             kb_data = knowledge.kb_payload(kb, db)
-            job = db.get(Job, job_id)
+            job = fenced_job(db, job_id)
             if job is not None:
                 job.progress = 60
                 job.message = f"文本索引完成：{indexed} 个文本块"
@@ -64,7 +64,7 @@ def _run_kb_reindex_job(job_id: str, kb_id: str) -> None:
                 if kb is None:
                     raise knowledge.KnowledgeError("知识库不存在")
                 if model_config.resolve_embedding_endpoint(db) is not None:
-                    job = db.get(Job, job_id)
+                    job = fenced_job(db, job_id)
                     if job is not None:
                         job.progress = 70
                         job.message = "正在重建向量索引…"
@@ -74,7 +74,7 @@ def _run_kb_reindex_job(job_id: str, kb_id: str) -> None:
                     vector = knowledge.build_vectors(db, kb)
                     db.flush()
                     kb_data = knowledge.kb_payload(kb, db)
-                    job = db.get(Job, job_id)
+                    job = fenced_job(db, job_id)
                     if job is not None:
                         job.progress = 95
                         job.message = "向量索引完成"
@@ -90,7 +90,7 @@ def _run_kb_reindex_job(job_id: str, kb_id: str) -> None:
                         )
 
         with session_scope() as db:
-            job = db.get(Job, job_id)
+            job = fenced_job(db, job_id)
             if job is not None:
                 job.status = "done"
                 job.progress = 100
@@ -109,6 +109,6 @@ def _run_kb_reindex_job(job_id: str, kb_id: str) -> None:
         else:
             failed_message = "知识库索引失败：服务内部错误，详情见服务日志"
         with session_scope() as db:
-            job = db.get(Job, job_id)
+            job = fenced_job(db, job_id)
             if job is not None:
                 _fail_job(db, job, failed_message)

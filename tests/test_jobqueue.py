@@ -100,17 +100,162 @@ def test_retry_cap_fails_after_max_attempts(db, monkeypatch):
         assert session.get(Job, job_id).status == "failed"
 
 
-def test_recover_on_startup_requeues_running_keeps_queued(db):
+def test_recover_on_startup_requeues_only_expired_running(db):
+    with session_scope() as session:
+        expired = _seed(session, status="running", attempts=1)
+        expired.lease_expires_at = utc_now() - timedelta(seconds=1)
+        no_lease = _seed(session, status="running", attempts=1)  # legacy row
+        queued = _seed(session, status="queued")
+        expired_id, no_lease_id, queued_id = expired.id, no_lease.id, queued.id
+    requeued, failed = jobqueue.recover_on_startup()
+    assert (requeued, failed) == (2, 0)
+    with session_scope() as session:
+        assert session.get(Job, expired_id).status == "queued"
+        assert session.get(Job, no_lease_id).status == "queued"
+        assert session.get(Job, queued_id).status == "queued"
+
+
+def test_recover_on_startup_leaves_unexpired_running_alone(db):
+    """P0-1: a live worker's job must not be handed to a second worker."""
+
     with session_scope() as session:
         running = _seed(session, status="running", attempts=1)
-        running.lease_expires_at = utc_now() + timedelta(seconds=100)  # not expired
-        queued = _seed(session, status="queued")
-        running_id, queued_id = running.id, queued.id
+        running.lease_expires_at = utc_now() + timedelta(seconds=100)
+        running.claim_token = "live-worker-token"
+        running_id = running.id
     requeued, failed = jobqueue.recover_on_startup()
-    assert (requeued, failed) == (1, 0)
+    assert (requeued, failed) == (0, 0)
     with session_scope() as session:
-        assert session.get(Job, running_id).status == "queued"
-        assert session.get(Job, queued_id).status == "queued"
+        row = session.get(Job, running_id)
+        assert row.status == "running"
+        assert row.claim_token == "live-worker-token"
+
+
+def test_claim_next_refreshes_claim_token(db):
+    """P0-2: each claim gets a fresh token; a reclaim invalidates the old one."""
+
+    with session_scope() as session:
+        job = _seed(session, attempts=0)
+        job_id = job.id
+    first = jobqueue.claim_next()
+    assert first is not None and first.claim_token
+    first_token = first.claim_token
+    with session_scope() as session:
+        row = session.get(Job, job_id)
+        assert row.claim_token == first_token
+        # simulate the reaper reclaiming the expired lease
+        row.lease_expires_at = utc_now() - timedelta(seconds=1)
+    assert jobqueue.reap_expired() == (1, 0)
+    with session_scope() as session:
+        row = session.get(Job, job_id)
+        assert row.claim_token is None  # requeue clears the token
+    second = jobqueue.claim_next()
+    assert second is not None and second.claim_token
+    assert second.claim_token != first_token
+
+
+def test_fenced_job_rejects_stale_worker(db):
+    """Only the worker holding the current token may write job state."""
+
+    with session_scope() as session:
+        job = _seed(session, status="running", attempts=1)
+        job.claim_token = "token-A"
+        job_id = job.id
+    with jobqueue.claim_context("token-A"), session_scope() as session:
+        assert jobqueue.fenced_job(session, job_id) is not None
+    # A reclaimed lease gives a new owner a different token.
+    with jobqueue.claim_context("token-B"), session_scope() as session:
+        assert jobqueue.fenced_job(session, job_id) is None
+    # No claim context (e.g. direct call) is never allowed to write.
+    with session_scope() as session:
+        assert jobqueue.fenced_job(session, job_id) is None
+
+
+def test_requeue_and_fail_clear_claim_token(db):
+    with session_scope() as session:
+        job = _seed(session, status="running", attempts=1)
+        job.claim_token = "old-token"
+        job_id = job.id
+        jobqueue._set_failed(session, job, "boom")
+        assert job.claim_token is None
+    with session_scope() as session:
+        assert session.get(Job, job_id).status == "failed"
+
+
+def test_finalize_after_run_is_fenced_after_reclaim(db):
+    """A stale worker's safety-net finalize must not touch the new owner's job."""
+
+    with session_scope() as session:
+        job = _seed(session, attempts=0)
+        job_id = job.id
+    claimed = jobqueue.claim_next()
+    assert claimed is not None and claimed.id == job_id
+    token = claimed.claim_token
+    with session_scope() as session:  # reaper reclaims, new owner takes over
+        session.get(Job, job_id).claim_token = "new-owner-token"
+    with jobqueue.claim_context(token):
+        jobqueue._finalize_after_run(job_id)
+    with session_scope() as session:
+        row = session.get(Job, job_id)
+        assert row.status == "running"
+        assert row.claim_token == "new-owner-token"
+
+
+def test_execute_binds_claim_token_for_runner(db):
+    """The runner sees its own claim token and can write while it is valid."""
+
+    seen: dict[str, str] = {}
+
+    def runner(job_id: str) -> None:
+        seen["token"] = jobqueue.current_claim_token()
+        with session_scope() as session:
+            row = jobqueue.fenced_job(session, job_id)
+            assert row is not None  # fenced write path is usable by the runner
+            row.status = "done"
+
+    jobqueue._register("test_fence", runner)
+    try:
+        with session_scope() as session:
+            job = _seed(session, kind="test_fence")
+            job_id = job.id
+        claimed = jobqueue.claim_next()
+        assert claimed is not None and claimed.id == job_id
+        jobqueue._execute(claimed)
+        assert seen["token"] == claimed.claim_token
+        with session_scope() as session:
+            assert session.get(Job, job_id).status == "done"
+    finally:
+        jobqueue._RUNNERS.pop("test_fence", None)
+
+
+def test_heartbeat_stops_when_token_changes(db, monkeypatch):
+    """P0-2: once the lease is reclaimed, the old worker stops renewing it."""
+
+    import threading
+    import time
+
+    monkeypatch.setattr(jobqueue, "_heartbeat_seconds", lambda: 1)
+    with session_scope() as session:
+        job = _seed(session, status="running", attempts=1)
+        job.claim_token = "old-token"
+        job.lease_expires_at = utc_now() + timedelta(seconds=180)
+        job_id = job.id
+    stop = threading.Event()
+    thread = threading.Thread(
+        target=jobqueue._heartbeat, args=(job_id, stop, "old-token"), daemon=True
+    )
+    thread.start()
+    try:
+        time.sleep(1.5)  # let it renew at least once while still the owner
+        with session_scope() as session:
+            assert session.get(Job, job_id).claim_token == "old-token"
+        with session_scope() as session:  # simulate reclaim: new owner's token
+            session.get(Job, job_id).claim_token = "new-token"
+        thread.join(timeout=4)
+        assert not thread.is_alive()
+    finally:
+        stop.set()
+        thread.join(timeout=2)
 
 
 def test_rebuild_args_by_kind(db):
