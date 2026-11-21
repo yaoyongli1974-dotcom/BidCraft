@@ -76,6 +76,7 @@
 |---|---|---|
 | 客户端 | React 18 + TypeScript + Vite | 项目列表与类型分组/标段筛选/批量核对导出、上传、台账校订、清单对齐与报价、大纲、章节编辑、章节配图、项目图库与配图计划、整篇配图策略、规则包管理、协作成员与审计、核对、导出 |
 | 前端分层 | `web/src/api/`（14 域）+ `lib/http.ts` + `hooks/watchJob.ts` + `lib/permissions.ts` | API 请求按业务域拆分、传输与错误口径统一；任务进度统一走 SSE 事件流 + 断线轮询兜底（终态只结算一次）；权限能力（负责人/编辑/只读/旧后端兼容）集中判断；章节 409 乐观锁冲突解析与弹窗提示统一在 `lib/http.ts`；无 Redux、页面结构不变 |
+| API 分层 | `bidcraft/api/app.py`（门面/组装）+ `schemas.py`（71 请求模型）+ `shared.py`（helper/常量/重导出）+ `routes/`（12 域） | 依赖单向：routes → schemas/shared；app 仅兼容 `from bidcraft.api import ...` 与 monkeypatch，runner/helper 与 workers/services 对象同一；`jobqueue` 经 sys.modules 运行期查找保持不变 |
 
 | HTTP 层 | FastAPI + uvicorn | REST、静态资源托管、SPA 深链接回退、后台任务；另有 `bidcraft mcp` stdio JSON-RPC 服务供外部 Agent 接入 |
 | 统一授权入口 | `bidcraft/authorization.py` | 项目/任务/节点/批量项目的可见性与动作判定收口为单一模块，HTTP/CLI/MCP 共用；HTTP 层薄封装委托并映射领域异常 404/403，不 import FastAPI |

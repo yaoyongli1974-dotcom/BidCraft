@@ -6,7 +6,7 @@ from fastapi import APIRouter
 
 _core = sys.modules['bidcraft.api.app']  # 运行期查找，保持 monkeypatch 生效
 
-from ..app import (  # noqa: F401
+from ..shared import (  # noqa: F401
     BATCH_STALE_SECONDS,
     BOQ_UPLOAD_SUFFIXES,
     ISSUE_BULK_LIMIT,

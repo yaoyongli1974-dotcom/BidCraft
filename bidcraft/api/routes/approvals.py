@@ -6,7 +6,7 @@ from fastapi import APIRouter
 
 _core = sys.modules['bidcraft.api.app']  # 运行期查找，保持 monkeypatch 生效
 
-from ..app import Any, boq, current_user, session_scope  # noqa: F401
+from ..shared import Any, boq, current_user, session_scope  # noqa: F401
 
 router = APIRouter()
 
