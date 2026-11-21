@@ -129,6 +129,12 @@ class Settings:
     job_max_attempts: int = field(
         default_factory=lambda: int(os.getenv("BIDCRAFT_JOB_MAX_ATTEMPTS", "3"))
     )
+    # 是否在提交任务时于本进程拉起 worker。单进程（bidcraft serve）保持 True；
+    # API/Worker 分离部署时设 BIDCRAFT_EMBEDDED_WORKERS=0，API 进程只入队不执行，
+    # 由独立的 `bidcraft worker` 进程认领任务。
+    embedded_workers: bool = field(
+        default_factory=lambda: _bool("BIDCRAFT_EMBEDDED_WORKERS", True)
+    )
     ocr_enabled: bool = field(default_factory=lambda: _bool("BIDCRAFT_OCR", True))
     mineru_url: str = field(default_factory=lambda: os.getenv("BIDCRAFT_MINERU_URL", "").strip())
     mineru_enabled: bool = field(default_factory=lambda: _bool("BIDCRAFT_MINERU", True))

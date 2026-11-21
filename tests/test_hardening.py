@@ -150,7 +150,6 @@ def test_failed_parse_removes_copied_source(db):
 def test_startup_requeues_running_jobs_and_keeps_queued(db):
     """DB 驱动队列：启动恢复把孤儿 running 重排队，queued 保持不变，done 不动。"""
 
-    from bidcraft.api import create_app
     from bidcraft.db import session_scope
     from bidcraft.models import Job
 
@@ -166,8 +165,11 @@ def test_startup_requeues_running_jobs_and_keeps_queued(db):
         batch_check_id, batch_export_id = batch_check.id, batch_export.id
         done_id = done.id
 
-    # create_app() 触发 recover_on_startup()；启动不在此处起 worker（避免测试里跑任务）。
-    create_app()
+    # 恢复不再由 create_app() 触发（避免 ASGI 多实例各自恢复）：
+    # 由 worker 进程入口显式调用。这里只验证恢复本身，不起 worker。
+    from bidcraft import jobqueue
+
+    jobqueue.recover_on_startup()
 
     with session_scope() as session:
         # queued 保持
@@ -493,3 +495,30 @@ def test_knowledge_error_body_is_not_exposed(db, monkeypatch):
     assert payload["ok"] is False
     assert "upstream-secret-body" not in payload["message"]
     assert "HTTP 500" in payload["message"]
+
+
+def test_create_app_does_not_recover_jobs(db):
+    """create_app() 是纯工厂：ASGI 多实例各自调用它，不能触发任务恢复。"""
+
+    from datetime import timedelta
+
+    from bidcraft.api import create_app
+    from bidcraft.db import session_scope
+    from bidcraft.models import Job, utcnow
+
+    with session_scope() as session:
+        stale = Job(
+            kind="generate",
+            status="running",
+            attempts=1,
+            claimed_at=utcnow() - timedelta(minutes=2),
+            lease_expires_at=utcnow() - timedelta(seconds=1),
+        )
+        session.add(stale)
+        session.flush()
+        stale_id = stale.id
+
+    create_app()
+    with session_scope() as session:
+        # 恢复由 worker 进程入口显式执行，create_app() 不动任务状态
+        assert session.get(Job, stale_id).status == "running"

@@ -21,7 +21,6 @@ from __future__ import annotations
 import logging
 import sys
 import threading
-import time
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -169,9 +168,16 @@ def submit(
     job_id: str = "",
 ) -> None:
     """Wake the worker pool.  ``target``/``args`` are kept for call-site
-    compatibility but ignored — the job row is the source of truth."""
+    compatibility but ignored — the job row is the source of truth.
 
-    _ensure_workers()
+    In single-process mode (``bidcraft serve``) the API process also executes
+    jobs, so submitting lazily starts local workers.  In a separated deployment
+    (``BIDCRAFT_EMBEDDED_WORKERS=0``) the API only enqueues; a standalone
+    ``bidcraft worker`` process owns the worker threads and reaper.
+    """
+
+    if settings.embedded_workers:
+        _ensure_workers()
     with _lock:
         _lock.notify_all()
 
@@ -495,26 +501,48 @@ def _rebuild_args(job: Job) -> tuple:
 
 
 def _worker() -> None:
-    last_reap = time.monotonic()
     while not _stop.is_set():
         job = claim_next()
         if job is None:
             with _lock:
                 _lock.wait(_IDLE_WAIT)
-            if _stop.is_set():
-                break
-            now_mono = time.monotonic()
-            if now_mono - last_reap >= _REAP_INTERVAL:
-                last_reap = now_mono
-                try:
-                    reap_expired()
-                except Exception:  # noqa: BLE001
-                    logger.debug("reaper 异常", exc_info=True)
             continue
         try:
             _execute(job)
         except Exception:  # noqa: BLE001 - keep the worker alive no matter what
             logger.exception("worker 处理任务失败 job=%s", job.id)
+
+
+_reaper_started = False
+
+
+def _reaper_loop() -> None:
+    """Dedicated reaper thread: fixed cadence, independent of worker activity.
+
+    Reaping used to live in the worker's idle branch (``claim_next() is None``).
+    A steadily busy queue — or workers all stuck in long-running jobs — could
+    starve it forever, leaving expired leases unclaimed.  This loop runs on its
+    own schedule whether or not any worker is idle.
+    """
+
+    while True:
+        try:
+            reap_expired()
+        except Exception:  # noqa: BLE001 - a DB hiccup must not kill the reaper
+            logger.debug("reaper 异常", exc_info=True)
+        if _stop.wait(_REAP_INTERVAL):
+            break
+
+
+def _start_reaper() -> None:
+    """Start the single reaper thread (idempotent)."""
+
+    global _reaper_started
+    with _lock:
+        if _reaper_started:
+            return
+        _reaper_started = True
+    threading.Thread(target=_reaper_loop, daemon=True, name="bidcraft-reaper").start()
 
 
 def _ensure_workers() -> None:
@@ -524,6 +552,7 @@ def _ensure_workers() -> None:
             return
         _stop.clear()
         _workers_started = True
+        _start_reaper()
         for _ in range(_max_workers()):
             threading.Thread(target=_worker, daemon=True, name="bidcraft-job").start()
 
@@ -536,8 +565,9 @@ def _reset() -> None:
     jobs, otherwise a worker from a previous test could claim them.
     """
 
-    global _workers_started
+    global _workers_started, _reaper_started
     _stop.set()
     with _lock:
         _workers_started = False
+        _reaper_started = False
         _lock.notify_all()

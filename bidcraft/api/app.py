@@ -1469,12 +1469,9 @@ def create_app():
             auth.purge_expired_sessions(db)
     except Exception:  # noqa: BLE001 - startup must not fail on cleanup
         logger.exception("清理过期会话失败")
-    try:
-        # DB 驱动队列：启动恢复改为「重排队 + 重试上限」，30 分钟任务重启后重跑而非直接判失败；
-        # 同时启动常驻 worker（多进程各自原子认领，不会重复执行同一个 job）。
-        jobqueue.recover_on_startup()
-    except Exception:  # noqa: BLE001 - startup must not fail on cleanup
-        logger.exception("恢复中断任务失败")
+    # 启动恢复不在这里做：create_app() 会被每个 ASGI worker 进程调用，
+    # 多实例同时恢复会互相影响。恢复改由 worker 进程入口显式执行
+    # （`bidcraft serve` / `bidcraft worker` 都会调用 recover_on_startup()）。
     # 每次 create_app() 都重新读取开关：测试与部署会在构造前改 settings，
     # 若在模块加载时缓存，后续 create_app() 会拿到过期值。
     docs_on = settings.docs_enabled

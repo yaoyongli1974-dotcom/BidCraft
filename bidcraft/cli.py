@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 import typer
@@ -838,9 +839,11 @@ def serve(
     from .api import create_app
 
     app = create_app()
-    # 启动常驻任务 worker：DB 认领 + 租约心跳，确保重启后重排队的任务被立即执行。
+    # 单进程模式：API 与 worker 同进程。恢复旧租约 + 启动常驻 worker（DB 认领 + 租约心跳）。
+    # 分离部署请改用 `bidcraft worker`，并设置 BIDCRAFT_EMBEDDED_WORKERS=0 让 API 只入队。
     from . import jobqueue
 
+    jobqueue.recover_on_startup()
     jobqueue.start_workers()
     web_ready = (Path(__file__).resolve().parent / "web_dist" / "index.html").is_file()
     console.print(f"[green]BidCraft[/green] http://{host}:{port}  API 文档 /docs")
@@ -865,6 +868,34 @@ def serve(
         url = f"http://{host if host not in {'0.0.0.0', '::'} else '127.0.0.1'}:{port}/"
         threading.Timer(1.0, webbrowser.open, args=(url,)).start()
     uvicorn.run(app, host=host, port=port, log_level="info")
+
+
+@app.command("worker")
+def worker() -> None:
+    """独立任务 Worker：认领并执行 Job（与 API 进程分离部署）。
+
+    启动流程：初始化库 → 恢复已过期的中断任务 → 拉起认领 worker 与独立 reaper。
+    进程常驻，Ctrl-C / SIGTERM 退出；运行中的任务靠租约超时由下一个 worker 回收。
+
+    典型分离部署：
+        # API（可多实例，BIDCRAFT_EMBEDDED_WORKERS=0 时不拉起本地 worker、不执行恢复）
+        BIDCRAFT_EMBEDDED_WORKERS=0 uvicorn bidcraft.api:app --host 0.0.0.0 --port 8000 --workers 4
+        # Worker（1..N 个进程，各自原子认领；只有一个需要跑恢复，多跑也只动已过期租约）
+        bidcraft worker
+    """
+    init_db()
+    from . import jobqueue
+
+    requeued, failed = jobqueue.recover_on_startup()
+    jobqueue.start_workers()
+    console.print(
+        f"[green]BidCraft Worker[/green] 已启动（恢复 {requeued} 项，失败 {failed} 项），等待任务…"
+    )
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:  # pragma: no cover - 交互式退出
+        console.print("[yellow]Worker 已停止[/yellow]")
 
 
 @app.command("reset-password")
