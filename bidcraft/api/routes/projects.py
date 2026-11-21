@@ -1,0 +1,2385 @@
+"""API routes: /projects (从 app.py 迁移，URL 与响应格式不变)。"""
+
+import sys
+
+from fastapi import APIRouter
+
+_core = sys.modules['bidcraft.api.app']  # 运行期查找，保持 monkeypatch 生效
+
+from ..app import (  # noqa: F401
+    BATCH_STALE_SECONDS,
+    BOQ_UPLOAD_SUFFIXES,
+    ISSUE_BULK_LIMIT,
+    MEMBER_ROLES,
+    SEVERITY_ORDER,
+    TENDER_SOURCE_ROLES,
+    TENDER_UPLOAD_SUFFIXES,
+    Any,
+    AuditLog,
+    BatchExportRequest,
+    BatchIdsRequest,
+    BidPackage,
+    BoqAdjustRequest,
+    BoqApplyRequest,
+    BoqPriceRequest,
+    BoqQuotaFillRequest,
+    BoqSnapshot,
+    BoqVersionCreate,
+    BoqVersionReview,
+    BoqVersionSubmit,
+    ChapterReview,
+    ChapterSave,
+    Delivery,
+    ExportGateError,
+    ExportRequest,
+    ExportTemplateUpdate,
+    Fact,
+    FactUpdate,
+    File,
+    FileResponse,
+    Form,
+    GenerateRequest,
+    HTTPException,
+    ImageAsset,
+    ImageBatchRequest,
+    ImageCreate,
+    ImagePolicyUpdate,
+    Issue,
+    IssueBulkStatusUpdate,
+    IssueStatusUpdate,
+    Job,
+    JobEvent,
+    JSONResponse,
+    Material,
+    MemberCreate,
+    MemberUpdate,
+    OutlineNode,
+    OutlineRequest,
+    OutlineSave,
+    PackageCreate,
+    PackageUpdate,
+    Parameter,
+    Path,
+    PricePolicyUpdate,
+    Project,
+    ProjectCreate,
+    ProjectDuplicate,
+    ProjectInstantiate,
+    ProjectMember,
+    ProjectUpdate,
+    Requirement,
+    RequirementResponseUpdate,
+    Risk,
+    ScoresUpdate,
+    ScoringItem,
+    Section,
+    SourceFile,
+    UploadFile,
+    User,
+    _apply_issue_status,
+    _apply_requirement_status,
+    _audit_item,
+    _batch_projects,
+    _bid_package,
+    _bid_package_payload,
+    _bid_packages,
+    _boq_package_ids,
+    _cancel_stale_jobs,
+    _chapter_payload,
+    _clamp_limit,
+    _credit_guard,
+    _discard_source,
+    _generation_client,
+    _http_error,
+    _image_http_error,
+    _iso,
+    _issue_node_map,
+    _issue_payload,
+    _knowledge_provider,
+    _member,
+    _member_payload,
+    _node,
+    _outline_payload,
+    _page_bounds,
+    _pending_chapters,
+    _profile_keys,
+    _project,
+    _project_payload,
+    _project_stats,
+    _report_payload,
+    _require_owner,
+    _require_write,
+    _requirement_payload,
+    _resolve_boq_package,
+    _risk_overview_payload,
+    _run_batch_check_job,
+    _run_batch_export_job,
+    _run_generation_job,
+    _run_image_batch_job,
+    _safe_filename,
+    _save_upload,
+    _source_payload,
+    _validate_issue_note,
+    _validate_requirement_note,
+    add_source,
+    audit,
+    auth,
+    billing,
+    billing_user,
+    boq,
+    build_outline,
+    check_project,
+    clock,
+    count_words,
+    create_project,
+    current_user,
+    datetime,
+    delete,
+    duplicate_project,
+    enforce_export_gate,
+    export_docx,
+    export_markdown,
+    generate_document,
+    images,
+    jobqueue,
+    jobs,
+    ledger_gate,
+    ledger_summary,
+    load_ledger,
+    load_outline,
+    load_package,
+    math,
+    parse_project,
+    profile,
+    provenance,
+    re,
+    save_outline,
+    scoring,
+    select,
+    session_scope,
+    settings,
+    shutil,
+    tempfile,
+    update_fact,
+)
+
+router = APIRouter()
+
+
+@router.get("/projects")
+def projects(limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
+    capped, start = _page_bounds(limit, offset)
+    with session_scope() as db:
+        user = current_user() or {}
+        if user.get("role") == auth.ROLE_SUPER_ADMIN:
+            rows = list(
+                db.scalars(
+                    select(Project)
+                    .order_by(Project.updated_at.desc())
+                    .limit(capped)
+                    .offset(start)
+                )
+            )
+            return [
+                _project_payload(item, _project_stats(db, item.id), "admin")
+                for item in rows
+            ]
+        memberships = {
+            row.project_id: row.role
+            for row in db.scalars(
+                select(ProjectMember).where(ProjectMember.user_id == user.get("id"))
+            )
+        }
+        visible: dict[str, tuple[Project, str]] = {
+            item.id: (item, "owner")
+            for item in db.scalars(
+                select(Project).where(Project.owner_id == user.get("id"))
+            )
+        }
+        if memberships:
+            for item in db.scalars(
+                select(Project).where(Project.id.in_(list(memberships)))
+            ):
+                visible.setdefault(item.id, (item, memberships[item.id]))
+        ordered = sorted(
+            visible.values(),
+            key=lambda pair: pair[0].updated_at or datetime.min,
+            reverse=True,
+        )
+        return [
+            _project_payload(item, _project_stats(db, item.id), role)
+            for item, role in ordered[start : start + capped]
+        ]
+
+
+@router.post("/projects", status_code=201)
+def new_project(payload: ProjectCreate) -> dict[str, Any]:
+    bid_section = payload.bid_section.strip()
+    if len(bid_section) > 60:
+        raise HTTPException(status_code=400, detail="标段/包件不超过 60 个字符")
+    with session_scope() as db:
+        try:
+            project = create_project(db, payload.name, payload.package)
+            project.owner_id = (current_user() or {}).get("id")
+            project.meta = {**(project.meta or {}), "bid_section": bid_section}
+            db.flush()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        audit(db, project.id, "project.create", {"name": project.name})
+        _, my_role = _project(db, project.id)
+        return _project_payload(project, _project_stats(db, project.id), my_role)
+
+
+@router.post("/projects/batch-check", status_code=202)
+def batch_check(payload: BatchIdsRequest) -> dict[str, Any]:
+    """Queue a background check over up to 50 accessible projects."""
+
+    if len(payload.ids) > 50:
+        raise HTTPException(status_code=400, detail="一次最多批量核对 50 个项目")
+    with session_scope() as db:
+        projects = _batch_projects(db, payload.ids)
+        if not projects:
+            raise HTTPException(status_code=400, detail="没有可操作的项目")
+        user = current_user() or {}
+        project_ids = [project.id for project in projects]
+        if _cancel_stale_jobs(
+            db,
+            ["batch_check"],
+            BATCH_STALE_SECONDS,
+            project_id=None,
+            stale_message="批量核对任务超时中断，已允许重新提交",
+        ) is not None:
+            raise HTTPException(status_code=409, detail="已有批量核对任务在运行")
+        job = Job(
+            project_id=None,
+            kind="batch_check",
+            status="queued",
+            message=f"批量核对排队中（{len(project_ids)} 个项目）…",
+            payload={
+                "owner_id": user.get("id") or "",
+                "total": len(project_ids),
+                "done": 0,
+                "ids": project_ids,
+                "results": [],
+            },
+        )
+        db.add(job)
+        db.flush()
+        job_id = job.id
+        owner_row = db.get(User, user.get("id") or "")
+        job.priority = billing.queue_priority(db, owner_row) if owner_row else 1
+        priority = job.priority
+        jobs.publish_event(job_id, "queued", jobs.job_payload(job), db=db)
+        audit(db, None, "project.batch_check", {"count": len(project_ids)})
+    jobqueue.submit(
+        _run_batch_check_job,
+        (job_id, project_ids),
+        priority=priority,
+        job_id=job_id,
+    )
+    return {"job_id": job_id}
+
+
+@router.post("/projects/batch-export", status_code=202)
+def batch_export(payload: BatchExportRequest) -> dict[str, Any]:
+    """Queue a background export and return the job whose zip can be downloaded.
+
+    交付硬门禁：存在未处置废标/阻断风险的项目会被跳过（不进入 zip），
+    原因见任务结果 ``failed`` 列表中的 ``error``；其余项目照常导出。
+    批量后台任务不提供 force 通道（fail-closed）。
+    """
+
+    fmt = (payload.format or "docx").strip().lower()
+    if fmt not in {"docx", "md", "xlsx"}:
+        raise HTTPException(status_code=400, detail="format 只能是 docx/md/xlsx")
+    if len(payload.ids) > 50:
+        raise HTTPException(status_code=400, detail="一次最多批量导出 50 个项目")
+    with session_scope() as db:
+        projects = _batch_projects(db, payload.ids)
+        if not projects:
+            raise HTTPException(status_code=400, detail="没有可操作的项目")
+        user = current_user() or {}
+        project_ids = [project.id for project in projects]
+        if _cancel_stale_jobs(
+            db,
+            ["batch_export"],
+            BATCH_STALE_SECONDS,
+            project_id=None,
+            stale_message="批量导出任务超时中断，已允许重新提交",
+        ) is not None:
+            raise HTTPException(status_code=409, detail="已有批量导出任务在运行")
+        job = Job(
+            project_id=None,
+            kind="batch_export",
+            status="queued",
+            message=f"批量导出排队中（{len(project_ids)} 个项目）…",
+            payload={
+                "owner_id": user.get("id") or "",
+                "total": len(project_ids),
+                "done": 0,
+                "format": fmt,
+                "ids": project_ids,
+            },
+        )
+        db.add(job)
+        db.flush()
+        job_id = job.id
+        owner_row = db.get(User, user.get("id") or "")
+        job.priority = billing.queue_priority(db, owner_row) if owner_row else 1
+        priority = job.priority
+        jobs.publish_event(job_id, "queued", jobs.job_payload(job), db=db)
+        audit(db, None, "project.batch_export", {"count": len(project_ids), "format": fmt})
+    jobqueue.submit(
+        _run_batch_export_job,
+        (job_id, project_ids, fmt),
+        priority=priority,
+        job_id=job_id,
+    )
+    return {"job_id": job_id}
+
+
+@router.get("/projects/templates")
+def project_templates() -> list[dict[str, Any]]:
+    """模板列表：登录即可浏览（含 viewer），仅模板、updated_at 降序上限 200。"""
+
+    with session_scope() as db:
+        rows = list(
+            db.scalars(
+                select(Project)
+                .where(Project.is_template.is_(True))
+                .order_by(Project.updated_at.desc())
+                .limit(200)
+            )
+        )
+        owner_ids = {item.owner_id for item in rows if item.owner_id}
+        owners = (
+            {
+                user.id: user
+                for user in db.scalars(select(User).where(User.id.in_(list(owner_ids))))
+            }
+            if owner_ids
+            else {}
+        )
+        items: list[dict[str, Any]] = []
+        for item in rows:
+            owner = owners.get(item.owner_id) if item.owner_id else None
+            items.append(
+                {
+                    "id": item.id,
+                    "name": item.name,
+                    "package": item.package,
+                    "is_template": True,
+                    "updated_at": _iso(item.updated_at),
+                    "owner_name": (owner.display_name or owner.username)
+                    if owner is not None
+                    else None,
+                }
+            )
+        return items
+
+
+@router.post("/projects/templates/{template_id}/instantiate", status_code=201)
+def instantiate_template(
+    template_id: str, payload: ProjectInstantiate
+) -> dict[str, Any]:
+    """R23 从模板创建：登录即可（无需成员关系），创建者成为新项目 owner。
+
+    复用 R22 深拷贝：台账/大纲/正文始终复制，BOQ 与配图可选；报价版本、
+    问题、任务、成员授权、审计不复制。新项目不是模板。失败时清理新目录。
+    """
+
+    with session_scope() as db:
+        template = db.get(Project, template_id)
+        if template is None or not template.is_template:
+            raise LookupError("模板不存在")
+        try:
+            new = duplicate_project(
+                db,
+                template,
+                name=payload.name,
+                owner_id=(current_user() or {}).get("id"),
+                include_boq=payload.include_boq,
+                include_images=payload.include_images,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            new_id = getattr(exc, "duplicate_project_id", "")
+            if new_id:
+                shutil.rmtree(settings.home / "projects" / new_id, ignore_errors=True)
+            raise
+        audit(
+            db,
+            new.id,
+            "project.instantiate",
+            {
+                "template_id": template.id,
+                "name": new.name,
+                "include_boq": payload.include_boq,
+                "include_images": payload.include_images,
+            },
+        )
+        return _project_payload(new, _project_stats(db, new.id), "owner")
+
+
+@router.get("/projects/{ref}")
+def project_detail(ref: str) -> dict[str, Any]:
+    with session_scope() as db:
+        project, my_role = _project(db, ref)
+        ledger = load_ledger(db, project.id)
+        sources = list(
+            db.scalars(
+                select(SourceFile)
+                .where(
+                    SourceFile.project_id == project.id,
+                    SourceFile.role.in_(TENDER_SOURCE_ROLES),
+                )
+                .order_by(SourceFile.created_at)
+            )
+        )
+        return {
+            **_project_payload(project, _project_stats(db, project.id), my_role),
+            "ledger_summary": ledger_summary(ledger),
+            "missing_required": [item.key for item in ledger.missing_required()],
+            "outline": len(load_outline(db, project.id)),
+            "checks_total": len(load_package(project.package).checks),
+            "sources": [_source_payload(source) for source in sources],
+        }
+
+
+@router.patch("/projects/{ref}")
+def update_project(ref: str, payload: ProjectUpdate) -> dict[str, Any]:
+    """Rename a project, set its bid section (标段/包件), approval chain or template flag.
+
+    ``approval_chain`` 双格式（R19，仅 owner/admin）：① R18 扁平用户 id
+    列表 → 每 id 一个单审批人 all 阶段；② v2 阶段列表
+    [{approvers: [用户id], mode?: "all"|"any", min_amount?: 数值,
+    packages?: [包件id], currencies?: [币种]}]。校验：阶段 ≤5、级内 1–5 人
+    去重保序、users 存在性、mode ∈ all|any（默认 all）、可选 min_amount 为
+    0–1e12 的数值（R21 金额门槛，布尔/字符串拒绝）、可选 packages /
+    currencies 为 ≤20 项、每项非空且 ≤40 字符的字符串列表（R25 条件，
+    去重保序，非法→400「条件无效」）。写入 meta 时统一存 v2 阶段快照
+    （name=display_name||username，合法条件原样保留），此后用户改名不追更；
+    空列表清空审批链，回到单级负责人审批。
+    """
+
+    updates = payload.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="没有需要更新的字段")
+    with session_scope() as db:
+        project, my_role = _project(db, ref)
+        _require_write(my_role)
+        keys: list[str] = []
+        meta = dict(project.meta or {})
+        if "name" in updates:
+            name = str(updates["name"] or "").strip()
+            if not name or len(name) > 80:
+                raise HTTPException(status_code=400, detail="项目名称需为 1–80 个字符")
+            project.name = name
+            keys.append("name")
+        if "bid_section" in updates:
+            section = str(updates["bid_section"] or "").strip()
+            if len(section) > 60:
+                raise HTTPException(status_code=400, detail="标段/包件不超过 60 个字符")
+            meta["bid_section"] = section
+            project.meta = meta
+            keys.append("bid_section")
+        if "approval_chain" in updates:
+            _require_owner(my_role)
+            raw_chain = updates["approval_chain"] or []
+            # R19 双格式：v2 阶段列表原样解析；R18 扁平用户 id 列表先整链
+            # 去重保序，再每 id 一个单审批人 all 阶段（语义同 R18）。
+            if raw_chain and isinstance(raw_chain[0], dict):
+                raw_stages: list[Any] = list(raw_chain)
+            else:
+                flat_seen: set[str] = set()
+                flat_ordered: list[str] = []
+                for raw_id in raw_chain:
+                    user_id = str(raw_id or "").strip()
+                    if user_id and user_id not in flat_seen:
+                        flat_seen.add(user_id)
+                        flat_ordered.append(user_id)
+                raw_stages = [{"approvers": [uid]} for uid in flat_ordered]
+            if len(raw_stages) > 5:
+                raise HTTPException(status_code=400, detail="审批链最多 5 级")
+            chain: list[dict[str, Any]] = []
+            for raw_stage in raw_stages:
+                if not isinstance(raw_stage, dict):
+                    raise HTTPException(
+                        status_code=400, detail="审批阶段需为 {approvers, mode} 对象"
+                    )
+                mode = raw_stage.get("mode", "all")
+                if mode not in ("all", "any"):
+                    raise HTTPException(
+                        status_code=400, detail="审批模式只能是 all（会签）或 any（或签）"
+                    )
+                if "min_amount" in raw_stage:
+                    threshold = raw_stage["min_amount"]
+                    if (
+                        isinstance(threshold, bool)
+                        or not isinstance(threshold, (int, float))
+                        or not math.isfinite(threshold)
+                        or threshold < 0
+                        or threshold > 1e12
+                    ):
+                        raise HTTPException(status_code=400, detail="金额门槛无效")
+                conditions: dict[str, list[str]] = {}
+                for condition_key in ("packages", "currencies"):
+                    if condition_key not in raw_stage:
+                        continue
+                    raw_values = raw_stage[condition_key]
+                    if (
+                        not isinstance(raw_values, list)
+                        or len(raw_values) > boq.STAGE_CONDITION_MAX_ITEMS
+                    ):
+                        raise HTTPException(status_code=400, detail="条件无效")
+                    seen_values: set[str] = set()
+                    ordered_values: list[str] = []
+                    for raw_value in raw_values:
+                        if not isinstance(raw_value, str):
+                            raise HTTPException(status_code=400, detail="条件无效")
+                        text = raw_value.strip()
+                        if (
+                            not text
+                            or len(text) > boq.STAGE_CONDITION_ITEM_MAX
+                        ):
+                            raise HTTPException(status_code=400, detail="条件无效")
+                        if text not in seen_values:
+                            seen_values.add(text)
+                            ordered_values.append(text)
+                    conditions[condition_key] = ordered_values
+                raw_approvers = raw_stage.get("approvers")
+                if not isinstance(raw_approvers, list):
+                    raise HTTPException(
+                        status_code=400, detail="每级审批人需为 1–5 个用户 id"
+                    )
+                seen: set[str] = set()
+                ordered: list[str] = []
+                for raw_id in raw_approvers:
+                    user_id = str(raw_id or "").strip()
+                    if user_id and user_id not in seen:
+                        seen.add(user_id)
+                        ordered.append(user_id)
+                if not ordered or len(ordered) > 5:
+                    raise HTTPException(status_code=400, detail="每级审批人需为 1–5 个")
+                approvers: list[dict[str, str]] = []
+                for user_id in ordered:
+                    approver = db.get(User, user_id)
+                    if approver is None:
+                        raise HTTPException(
+                            status_code=400, detail=f"审批人不存在: {user_id}"
+                        )
+                    approvers.append(
+                        {
+                            "id": user_id,
+                            "name": approver.display_name or approver.username,
+                        }
+                    )
+                stage_snapshot: dict[str, Any] = {"approvers": approvers, "mode": mode}
+                if "min_amount" in raw_stage:
+                    stage_snapshot["min_amount"] = raw_stage["min_amount"]
+                for condition_key, condition_values in conditions.items():
+                    stage_snapshot[condition_key] = condition_values
+                chain.append(stage_snapshot)
+            meta["approval_chain"] = chain
+            project.meta = meta
+            keys.append("approval_chain")
+        if "is_template" in updates:
+            _require_owner(my_role)
+            project.is_template = bool(updates["is_template"])
+            keys.append("is_template")
+        audit(db, project.id, "project.update", {"keys": keys})
+        return _project_payload(project, _project_stats(db, project.id), my_role)
+
+
+@router.get("/projects/{ref}/profile")
+def get_project_profile(ref: str) -> dict[str, Any]:
+    """Return the project's global facts and their canonical anchors."""
+
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        stored = profile.load(project)
+        return {
+            "profile": stored,
+            "anchors": profile.anchors(stored),
+            "facts_block": profile.facts_block(stored),
+        }
+
+
+@router.get("/projects/{ref}/scores")
+def project_scores(ref: str) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        return scoring.analysis(db, project)
+
+
+@router.put("/projects/{ref}/scores")
+def project_scores_update(ref: str, payload: ScoresUpdate) -> dict[str, Any]:
+    with session_scope() as db:
+        project, role = _project(db, ref)
+        _require_write(role)
+        try:
+            updated = scoring.record_scores(
+                db, project, [row.model_dump() for row in payload.rows]
+            )
+        except scoring.ScoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        db.flush()
+        audit(db, project.id, "project.scores", {"rows": updated})
+        return scoring.analysis(db, project)
+
+
+@router.put("/projects/{ref}/profile")
+def save_project_profile(ref: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Replace the project's global facts (used by generation and checks)."""
+
+    with session_scope() as db:
+        project, my_role = _project(db, ref)
+        _require_write(my_role)
+        try:
+            stored = profile.save(project, payload.get("profile", payload))
+        except profile.ProfileError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        audit(db, project.id, "project.profile", {"keys": _profile_keys(stored)})
+        return {
+            "profile": stored,
+            "anchors": profile.anchors(stored),
+            "facts_block": profile.facts_block(stored),
+        }
+
+
+@router.delete("/projects/{ref}")
+def delete_project(ref: str) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_owner(_role)
+        project_id = project.id
+        project_name = project.name
+        node_ids = list(
+            db.scalars(select(OutlineNode.id).where(OutlineNode.project_id == project.id))
+        )
+        if node_ids:
+            db.execute(delete(Section).where(Section.node_id.in_(node_ids)))
+        job_ids = list(
+            db.scalars(select(Job.id).where(Job.project_id == project.id))
+        )
+        if job_ids:
+            db.execute(delete(JobEvent).where(JobEvent.job_id.in_(job_ids)))
+        for model in (
+            OutlineNode,
+            Issue,
+            Delivery,
+            Job,
+            Fact,
+            Material,
+            Parameter,
+            ScoringItem,
+            Requirement,
+            Risk,
+            SourceFile,
+            ImageAsset,
+            BoqSnapshot,
+        ):
+            db.execute(delete(model).where(model.project_id == project.id))
+        db.execute(delete(ProjectMember).where(ProjectMember.project_id == project_id))
+        db.execute(delete(AuditLog).where(AuditLog.project_id == project_id))
+        project_dir = settings.project_dir(project.id)
+        db.delete(project)
+        db.flush()
+        audit(db, None, "project.delete", {"name": project_name, "project_id": project_id})
+    shutil.rmtree(project_dir, ignore_errors=True)
+    return {"deleted": True, "id": project_id}
+
+
+@router.post("/projects/{ref}/duplicate", status_code=201)
+def duplicate_project_route(ref: str, payload: ProjectDuplicate) -> dict[str, Any]:
+    """R22 项目复制（模板复用）：台账/大纲/正文始终复制，BOQ 与配图可选。
+
+    报价版本与审批记录、核对问题、任务、交付、成员授权、审计日志不复制；
+    复制者成为新项目 owner。复制失败时清理已创建的新项目目录。
+    """
+
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        try:
+            new = duplicate_project(
+                db,
+                project,
+                name=payload.name,
+                owner_id=(current_user() or {}).get("id"),
+                include_boq=payload.include_boq,
+                include_images=payload.include_images,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            new_id = getattr(exc, "duplicate_project_id", "")
+            if new_id:
+                shutil.rmtree(settings.home / "projects" / new_id, ignore_errors=True)
+            raise
+        audit(
+            db,
+            new.id,
+            "project.duplicate",
+            {
+                "source_id": project.id,
+                "name": new.name,
+                "include_boq": payload.include_boq,
+                "include_images": payload.include_images,
+            },
+        )
+        _, my_role = _project(db, new.id)
+        return _project_payload(new, _project_stats(db, new.id), my_role)
+
+
+@router.get("/projects/{ref}/members")
+def project_members(
+    ref: str, limit: int = 500, offset: int = 0
+) -> list[dict[str, Any]]:
+    capped, start = _page_bounds(limit, offset)
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        items: list[dict[str, Any]] = []
+        owner = db.get(User, project.owner_id) if project.owner_id else None
+        if owner is not None:
+            items.append(
+                {
+                    "user_id": owner.id,
+                    "username": owner.username,
+                    "display_name": owner.display_name or owner.username,
+                    "role": "owner",
+                    "created_at": _iso(project.created_at),
+                }
+            )
+        rows = db.execute(
+            select(ProjectMember, User)
+            .join(User, User.id == ProjectMember.user_id)
+            .where(ProjectMember.project_id == project.id)
+            .order_by(ProjectMember.created_at)
+        ).all()
+        items.extend(_member_payload(member, user) for member, user in rows)
+        return items[start : start + capped]
+
+
+@router.post("/projects/{ref}/members", status_code=201)
+def add_project_member(ref: str, payload: MemberCreate) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_owner(_role)
+        if payload.role not in MEMBER_ROLES:
+            raise HTTPException(status_code=400, detail="role 只能是 editor 或 viewer")
+        user = db.scalar(select(User).where(User.username == payload.username.strip()))
+        if user is None:
+            raise LookupError("用户不存在")
+        if project.owner_id == user.id:
+            raise HTTPException(status_code=409, detail="该用户已是项目负责人")
+        existing = db.scalar(
+            select(ProjectMember).where(
+                ProjectMember.project_id == project.id,
+                ProjectMember.user_id == user.id,
+            )
+        )
+        if existing is not None:
+            raise HTTPException(status_code=409, detail="该用户已是项目成员")
+        member = ProjectMember(
+            project_id=project.id, user_id=user.id, role=payload.role
+        )
+        db.add(member)
+        db.flush()
+        audit(
+            db,
+            project.id,
+            "member.add",
+            {"username": user.username, "role": payload.role},
+        )
+        return _member_payload(member, user)
+
+
+@router.patch("/projects/{ref}/members/{user_id}")
+def update_project_member(
+    ref: str, user_id: str, payload: MemberUpdate
+) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_owner(_role)
+        if payload.role not in MEMBER_ROLES:
+            raise HTTPException(status_code=400, detail="role 只能是 editor 或 viewer")
+        if project.owner_id == user_id:
+            raise HTTPException(status_code=400, detail="项目负责人角色不可修改")
+        member = _member(db, project.id, user_id)
+        member.role = payload.role
+        db.flush()
+        user = db.get(User, user_id)
+        audit(
+            db,
+            project.id,
+            "member.update",
+            {"username": user.username if user is not None else "", "role": payload.role},
+        )
+        return _member_payload(member, user)
+
+
+@router.delete("/projects/{ref}/members/{user_id}")
+def remove_project_member(ref: str, user_id: str) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_owner(_role)
+        if project.owner_id == user_id:
+            raise HTTPException(status_code=400, detail="项目负责人不可移除")
+        member = _member(db, project.id, user_id)
+        user = db.get(User, user_id)
+        username = user.username if user is not None else ""
+        db.delete(member)
+        db.flush()
+        audit(db, project.id, "member.remove", {"username": username})
+        return {"deleted": True}
+
+
+@router.get("/projects/{ref}/audit")
+def project_audit(
+    ref: str, limit: int = 50, before: int | None = None
+) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        statement = (
+            select(AuditLog)
+            .where(AuditLog.project_id == project.id)
+            .order_by(AuditLog.id.desc())
+            .limit(_clamp_limit(limit))
+        )
+        if before is not None:
+            statement = statement.where(AuditLog.id < before)
+        rows = list(db.scalars(statement))
+        return {
+            "items": [_audit_item(row) for row in rows],
+            "next_before": rows[-1].id if len(rows) == _clamp_limit(limit) else None,
+        }
+
+
+@router.get("/projects/{ref}/images")
+def project_images(
+    ref: str, node_id: str = "", limit: int = 500, offset: int = 0
+) -> list[dict[str, Any]]:
+    capped, start = _page_bounds(limit, offset)
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        assets = images.list_assets(db, project.id, node_id=node_id or None)
+        return [
+            images.asset_payload(asset) for asset in assets[start : start + capped]
+        ]
+
+
+@router.post("/projects/{ref}/images/generate-missing", status_code=202)
+def generate_missing_images(
+    ref: str, payload: ImageBatchRequest | None = None
+) -> dict[str, Any]:
+    include_failed = bool(payload.include_failed) if payload else False
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        plan = images.image_plan(db, project)
+        targets = images.image_batch_targets(plan, include_failed=include_failed)
+        if not targets:
+            raise HTTPException(status_code=409, detail="没有需要生成的配图")
+        if _cancel_stale_jobs(
+            db,
+            ["images"],
+            2 * 3600,
+            project_id=project.id,
+            stale_message="配图任务超时中断，已允许重新生成",
+        ) is not None:
+            raise HTTPException(status_code=409, detail="该项目已有配图任务在运行")
+        job = Job(
+            project_id=project.id,
+            kind="images",
+            status="queued",
+            message=f"配图任务排队中（{len(targets)} 个图名）…",
+            payload={
+                "total": len(targets),
+                "done": 0,
+                "succeeded": 0,
+                "failed": 0,
+                "skipped": 0,
+                "include_failed": include_failed,
+                "labels": [target["label"] for target in targets],
+            },
+        )
+        db.add(job)
+        db.flush()
+        job_id = job.id
+        owner_row = db.get(User, project.owner_id or "")
+        job.priority = billing.queue_priority(db, owner_row) if owner_row else 1
+        priority = job.priority
+        jobs.publish_event(job_id, "queued", jobs.job_payload(job), db=db)
+        audit(db, project.id, "image.batch", {"count": len(targets)})
+    jobqueue.submit(
+        _run_image_batch_job,
+        (job_id, project.id, targets),
+        priority=priority,
+        job_id=job_id,
+    )
+    return {"job_id": job_id}
+
+
+@router.post("/projects/{ref}/images", status_code=201)
+def create_image(ref: str, payload: ImageCreate) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        label = payload.label.strip()
+        if not label:
+            raise HTTPException(status_code=400, detail="图片描述不能为空")
+        try:
+            asset = images.generate_image(
+                db,
+                project,
+                label=label,
+                node_id=payload.node_id,
+                heading=payload.heading,
+                prompt=payload.prompt,
+                style=payload.style,
+                size=payload.size,
+            )
+        except images.ImageError as exc:
+            raise _image_http_error(exc) from exc
+        audit(db, project.id, "image.generate", {"label": label})
+        return images.asset_payload(asset)
+
+
+@router.post("/projects/{ref}/images/{image_id}/regenerate", status_code=201)
+def regenerate_image(ref: str, image_id: str) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        source = images.get_asset(db, project.id, image_id)
+        if source is None:
+            raise LookupError(f"图片不存在：{image_id}")
+        try:
+            asset = images.regenerate_image(db, project, source)
+        except images.ImageError as exc:
+            raise _image_http_error(exc) from exc
+        audit(db, project.id, "image.regenerate", {"id": image_id})
+        return images.asset_payload(asset)
+
+
+@router.post("/projects/{ref}/images/upload", status_code=201)
+async def upload_image(
+    ref: str,
+    file: UploadFile = File(...),
+    label: str = Form(""),
+    node_id: str = Form(""),
+) -> dict[str, Any]:
+    content = await file.read(images.MAX_UPLOAD_BYTES + 1)
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        try:
+            asset = images.upload_image(
+                db,
+                project,
+                label=label,
+                filename=_safe_filename(file.filename, "image.png"),
+                content=content,
+                node_id=node_id,
+            )
+        except images.ImageError as exc:
+            raise _image_http_error(exc) from exc
+        audit(db, project.id, "image.upload", {"filename": file.filename or ""})
+        return images.asset_payload(asset)
+
+
+@router.get("/projects/{ref}/image-policy")
+def get_image_policy(ref: str) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        return images.get_policy(project)
+
+
+@router.put("/projects/{ref}/image-policy")
+def update_image_policy(
+    ref: str, payload: ImagePolicyUpdate | None = None
+) -> dict[str, Any]:
+    body = payload.model_dump(exclude_unset=True) if payload is not None else {}
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        policy = images.set_policy(db, project, body)
+        keys = [key for key in images.POLICY_KEYS if key in body]
+        audit(
+            db,
+            project.id,
+            "image.policy",
+            {"keys": keys, "values": {key: policy[key] for key in keys}},
+        )
+        return policy
+
+
+@router.get("/projects/{ref}/images/plan")
+def image_plan(ref: str) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        return images.image_plan(db, project)
+
+
+@router.post("/projects/{ref}/images/apply-plan")
+def apply_image_plan(ref: str) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        plan = images.image_plan(db, project)
+        if not plan["chapters"]:
+            raise HTTPException(status_code=409, detail="没有可插入的配图占位")
+        if not plan["summary"]["ready"]:
+            raise HTTPException(status_code=409, detail="没有已生成的配图可插入")
+        result = images.apply_image_plan(db, project)
+        audit(db, project.id, "image.apply_plan", {"count": len(plan["chapters"])})
+        return result
+
+
+@router.get("/projects/{ref}/images/{image_or_file}")
+def image_detail_or_file(ref: str, image_or_file: str):
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        suffix = Path(image_or_file).suffix.lower()
+        if suffix in {".png", ".jpg", ".jpeg"}:
+            path = images.resolve_image_path(project.id, image_or_file)
+            if path is None:
+                raise LookupError(f"图片不存在：{image_or_file}")
+            media = images.media_type_for(image_or_file)
+            return FileResponse(path, media_type=media, filename=image_or_file)
+        asset = images.get_asset(db, project.id, image_or_file)
+        if asset is None:
+            raise LookupError(f"图片不存在：{image_or_file}")
+        return images.asset_payload(asset)
+
+
+@router.delete("/projects/{ref}/images/{image_id}")
+def delete_image(ref: str, image_id: str) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        if not images.delete_asset(db, project.id, image_id):
+            raise LookupError(f"图片不存在：{image_id}")
+        audit(db, project.id, "image.delete", {"id": image_id})
+        return {"deleted": True, "id": image_id}
+
+
+@router.get("/projects/{ref}/sources")
+def sources(
+    ref: str, limit: int = 500, offset: int = 0
+) -> list[dict[str, Any]]:
+    capped, start = _page_bounds(limit, offset)
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        rows = list(
+            db.scalars(
+                select(SourceFile)
+                .where(
+                    SourceFile.project_id == project.id,
+                    SourceFile.role.in_(TENDER_SOURCE_ROLES),
+                )
+                .order_by(SourceFile.created_at)
+            )
+        )
+        return [_source_payload(source) for source in rows[start : start + capped]]
+
+
+@router.post("/projects/{ref}/sources")
+async def upload(ref: str, file: UploadFile = File(...)) -> dict[str, Any]:
+    raw_name = (file.filename or "").strip()
+    if raw_name and raw_name not in {"/", "\\"}:
+        suffix = Path(raw_name).suffix.lower()
+        if suffix not in TENDER_UPLOAD_SUFFIXES:
+            raise HTTPException(
+                status_code=400,
+                detail="招标文件仅支持 PDF/DOCX/TXT/MD/XLSX/XLSM 格式",
+            )
+    filename = _safe_filename(raw_name, "upload.bin")
+    with tempfile.TemporaryDirectory(prefix="bidcraft-api-") as tmp:
+        target = Path(tmp) / filename
+        await _save_upload(
+            file,
+            target,
+            max_bytes=_core.MAX_TENDER_UPLOAD_BYTES,
+            detail="招标文件不能超过 50MB",
+        )
+        with session_scope() as db:
+            project, _role = _project(db, ref)
+            _require_write(_role)
+            source = add_source(db, project, target)
+            try:
+                ledger, info = parse_project(db, project.id)
+            except Exception as exc:
+                _discard_source(db, source)
+                if isinstance(exc, ValueError):
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                raise
+            audit(db, project.id, "source.upload", {"filename": filename})
+            return {
+                "project": _project_payload(project, _project_stats(db, project.id)),
+                "ledger_summary": ledger_summary(ledger),
+                "notes": info["notes"],
+                "missing_required": [item.key for item in ledger.missing_required()],
+            }
+
+
+@router.get("/projects/{ref}/sources/{source_id}/file")
+def source_file(ref: str, source_id: str) -> FileResponse:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        source = db.get(SourceFile, source_id)
+        if source is None or source.project_id != project.id:
+            raise LookupError(f"文件不存在: {source_id}")
+        root = (settings.project_dir(project.id) / "sources").resolve()
+        path = Path(source.stored_path).resolve()
+        if root not in path.parents or not path.is_file():
+            raise LookupError(f"原件不存在: {source.filename}")
+        return FileResponse(path, filename=source.filename)
+
+
+@router.post("/projects/{ref}/parse")
+def reparse(ref: str) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        try:
+            ledger, info = parse_project(db, project.id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        audit(db, project.id, "parse.run", {"notes": len(info["notes"])})
+        return {
+            "project": _project_payload(project, _project_stats(db, project.id)),
+            "ledger_summary": ledger_summary(ledger),
+            "notes": info["notes"],
+            "missing_required": [item.key for item in ledger.missing_required()],
+        }
+
+
+@router.get("/projects/{ref}/ledger")
+def ledger(ref: str) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        data = load_ledger(db, project.id)
+        return {**data.model_dump(), "summary": ledger_summary(data)}
+
+
+@router.patch("/projects/{ref}/facts/{key}")
+def set_fact(ref: str, key: str, payload: FactUpdate) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        try:
+            row = update_fact(db, project.id, key, value=payload.value, status=payload.status)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        affected = provenance.affected_by_change(db, project.id, row.key, row.value or "")
+        audit(
+            db,
+            project.id,
+            "fact.update",
+            {"key": row.key, "status": row.status, "stale_citations": len(affected)},
+        )
+        return {
+            "key": row.key,
+            "label": row.label,
+            "value": row.value,
+            "status": row.status,
+            "required": row.required,
+            "stale_sections": affected,
+        }
+
+
+@router.get("/projects/{ref}/outline")
+def outline(ref: str) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        return {"chapters": _outline_payload(db, project.id)}
+
+
+@router.post("/projects/{ref}/outline")
+def make_outline(ref: str, payload: OutlineRequest) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        ledger = load_ledger(db, project.id)
+        package = load_package(project.package)
+        spec = build_outline(ledger, package, mode=payload.mode, total_words=payload.words)
+        nodes = save_outline(db, project.id, spec)
+        audit(
+            db,
+            project.id,
+            "outline.save",
+            {"mode": spec.mode, "count": len(nodes)},
+        )
+        return {
+            "mode": spec.mode,
+            "chapters": [
+                {"id": node.id, "heading": node.heading, "target_words": node.target_words}
+                for node in nodes
+            ],
+        }
+
+
+@router.put("/projects/{ref}/outline")
+def save_outline_edits(ref: str, payload: OutlineSave) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        existing = {
+            node.id: node
+            for node in db.scalars(
+                select(OutlineNode).where(OutlineNode.project_id == project.id)
+            )
+        }
+        keep: set[str] = set()
+        for position, item in enumerate(payload.chapters):
+            node = existing.get(item.id) if item.id else None
+            if node is None:
+                node = OutlineNode(project_id=project.id, heading=item.heading)
+                db.add(node)
+                db.flush()
+                db.add(Section(node_id=node.id, body="", status="pending", words=0))
+            node.position = position
+            node.heading = item.heading.strip()
+            node.intent = item.intent
+            node.target_words = max(100, min(50000, item.target_words))
+            keep.add(node.id)
+        removed = [node_id for node_id in existing if node_id not in keep]
+        if removed:
+            db.execute(delete(Section).where(Section.node_id.in_(removed)))
+            db.execute(delete(OutlineNode).where(OutlineNode.id.in_(removed)))
+        db.flush()
+        audit(db, project.id, "outline.save", {"count": len(payload.chapters)})
+        return {"chapters": _outline_payload(db, project.id)}
+
+
+@router.get("/projects/{ref}/chapters/{node_id}")
+def chapter(ref: str, node_id: str) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        return _chapter_payload(db, _node(db, project.id, node_id))
+
+
+@router.get("/projects/{ref}/chapters/{node_id}/citations")
+def chapter_citations(ref: str, node_id: str) -> dict[str, Any]:
+    """本章正文里出现的台账取值，逐条给出字段、当前值与原件出处。"""
+
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        node = _node(db, project.id, node_id)
+        items = provenance.node_citations(db, project.id, node.id)
+        return {
+            "node_id": node.id,
+            "heading": node.heading,
+            "citations": items,
+            "stale": sum(1 for item in items if item["stale"]),
+        }
+
+
+@router.get("/projects/{ref}/citations")
+def project_citations(ref: str) -> dict[str, Any]:
+    """全书来源追溯：哪些章节引用了台账哪个字段、哪些已与台账不一致。"""
+
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        return {"project_id": project.id, **provenance.report(db, project.id)}
+
+
+@router.put("/projects/{ref}/chapters/{node_id}")
+def save_chapter(ref: str, node_id: str, payload: ChapterSave) -> Any:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        node = _node(db, project.id, node_id)
+        section = db.scalar(select(Section).where(Section.node_id == node.id))
+        current_revision = (section.revision or 0) if section is not None else 0
+        if payload.base_revision is not None and payload.base_revision != current_revision:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": "章节已被他人修改，请载入最新或强制覆盖",
+                    "current_revision": current_revision,
+                    "current_body": section.body if section is not None else "",
+                    "current_words": section.words if section is not None else 0,
+                },
+            )
+        review_before = (section.review_status if section is not None else "draft") or "draft"
+        if review_before in {"confirmed", "locked"}:
+            raise _http_error(
+                409,
+                "本章已确认，不能再直接修改；如需改动请先撤回为草稿",
+            )
+        if section is None:
+            section = Section(node_id=node.id)
+            db.add(section)
+        section.body = payload.body
+        section.words = count_words(payload.body)
+        section.status = "edited"
+        section.revision = current_revision + 1
+        node.status = "edited"
+        # 待复核的正文一旦被改写，复核对象已变，自动退回草稿（不可绕过检查点）。
+        if review_before == "review":
+            section.review_status = "draft"
+            section.review_requested_at = None
+            section.review_requested_by = None
+        db.flush()
+        provenance.refresh_node(db, project.id, node.id, payload.body)
+        detail = {"heading": node.heading}
+        if review_before == "review":
+            detail["review_reverted"] = True
+        audit(db, project.id, "chapter.save", detail)
+        return _chapter_payload(db, node)
+
+
+@router.post("/projects/{ref}/chapters/{node_id}/review")
+def review_chapter(ref: str, node_id: str, payload: ChapterReview) -> dict[str, Any]:
+    """章节复核流转，写入审计。
+
+    草稿 --提交--> 待复核 --负责人确认--> 已确认 --负责人锁定--> 已锁定。
+    已确认/已锁定的正文不可编辑、不可重生成；导出只读取已确认（含已锁定）的章节。
+    """
+
+    with session_scope() as db:
+        project, role = _project(db, ref)
+        node = _node(db, project.id, node_id)
+        section = db.scalar(select(Section).where(Section.node_id == node.id))
+        if section is None:
+            section = Section(node_id=node.id)
+            db.add(section)
+            db.flush()
+        current = (section.review_status or "draft")
+        action = payload.action
+        note = (payload.note or "").strip()
+        username = str((current_user() or {}).get("username") or "")
+
+        def need_note(message: str) -> None:
+            if len(note) < 4:
+                raise _http_error(400, message)
+
+        if action == "submit":
+            _require_write(role)
+            if current != "draft":
+                raise _http_error(409, "只有草稿可以提交复核")
+            if not (section.body or "").strip():
+                raise _http_error(409, "本章还没有正文，无法提交复核")
+            section.review_status = "review"
+            section.review_requested_at = clock.utc_now()
+            section.review_requested_by = username
+            section.review_note = note
+        elif action == "confirm":
+            _require_owner(role)
+            if current != "review":
+                raise _http_error(409, "只有待复核的章节可以确认")
+            section.review_status = "confirmed"
+            section.confirmed_at = clock.utc_now()
+            section.confirmed_by = username
+            section.review_note = note
+        elif action == "lock":
+            _require_owner(role)
+            if current != "confirmed":
+                raise _http_error(409, "只有已确认的章节可以锁定")
+            section.review_status = "locked"
+            section.locked_at = clock.utc_now()
+            section.locked_by = username
+        elif action == "unlock":
+            _require_owner(role)
+            if current != "locked":
+                raise _http_error(409, "只有已锁定的章节可以解锁")
+            need_note("解锁章节必须说明原因（至少 4 个字）")
+            section.review_status = "confirmed"
+            section.locked_at = None
+            section.locked_by = None
+            section.review_note = note
+        else:  # revert
+            if current in {"confirmed", "locked"}:
+                _require_owner(role)
+                need_note("撤回已确认的章节必须说明原因（至少 4 个字）")
+            else:
+                _require_write(role)
+            if current == "draft":
+                raise _http_error(409, "本章已经是草稿")
+            section.review_status = "draft"
+            section.review_requested_at = None
+            section.review_requested_by = None
+            section.confirmed_at = None
+            section.confirmed_by = None
+            section.locked_at = None
+            section.locked_by = None
+            section.review_note = note
+        db.flush()
+        audit(
+            db,
+            project.id,
+            "chapter.review",
+            {
+                "heading": node.heading,
+                "action": action,
+                "from": current,
+                "to": section.review_status,
+                "note": note,
+            },
+        )
+        return _chapter_payload(db, node)
+
+
+@router.post("/projects/{ref}/chapters/{node_id}/generate")
+def generate_chapter(ref: str, node_id: str) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        node = _node(db, project.id, node_id)
+        existing = db.scalar(select(Section).where(Section.node_id == node.id))
+        if existing is not None and (existing.review_status or "draft") in {
+            "confirmed",
+            "locked",
+        }:
+            raise _http_error(
+                409, "本章已确认，不能再重新生成；如需重写请先撤回为草稿"
+            )
+        ledger = load_ledger(db, project.id)
+        problems = ledger_gate(ledger)
+        if problems:
+            raise HTTPException(status_code=409, detail={"missing_required": problems})
+        package = load_package(project.package)
+        user = billing_user(db)
+        client = _generation_client(db)
+        _credit_guard(db, user, billing.billing_settings(db)["chapter_cost"])
+        if user.is_external and not client.available:
+            raise HTTPException(
+                status_code=409, detail="尚未配置可用的对话模型，请联系超级管理员"
+            )
+        try:
+            charged = billing.charge_chapters(
+                db, user, 1, project_id=project.id, note=f"生成本章：{node.heading}"
+            )
+        except billing.InsufficientCredits as exc:
+            raise HTTPException(status_code=402, detail=str(exc)) from exc
+        report = generate_document(
+            db,
+            project.id,
+            client,
+            ledger,
+            package,
+            only_node=node.id,
+            knowledge_provider=_knowledge_provider(db, user.id),
+        )
+        if charged and not report.written:
+            billing.refund_chapters(db, user, charged, project_id=project.id)
+        project.status = "drafting"
+        db.flush()
+        provenance.refresh_node(db, project.id, node.id)
+        audit(db, project.id, "chapter.generate", {"heading": node.heading})
+        return _report_payload(report)
+
+
+@router.post("/projects/{ref}/write")
+def write(ref: str) -> dict[str, Any]:
+    """Synchronous generation kept for CLI parity and small integrations."""
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        ledger = load_ledger(db, project.id)
+        problems = ledger_gate(ledger)
+        if problems:
+            raise HTTPException(status_code=409, detail={"missing_required": problems})
+        package = load_package(project.package)
+        if not load_outline(db, project.id):
+            save_outline(db, project.id, build_outline(ledger, package))
+            db.flush()
+        user = billing_user(db)
+        client = _generation_client(db)
+        count = _pending_chapters(db, project.id)
+        _credit_guard(db, user, billing.billing_settings(db)["chapter_cost"] * max(0, count))
+        if user.is_external and not client.available:
+            raise HTTPException(
+                status_code=409, detail="尚未配置可用的对话模型，请联系超级管理员"
+            )
+        try:
+            charged = billing.charge_chapters(
+                db, user, count, project_id=project.id, note="同步生成全书正文"
+            )
+        except billing.InsufficientCredits as exc:
+            raise HTTPException(status_code=402, detail=str(exc)) from exc
+        report = generate_document(
+            db,
+            project.id,
+            client,
+            ledger,
+            package,
+            knowledge_provider=_knowledge_provider(db, user.id),
+        )
+        if charged and count > len(report.written):
+            unit = charged // count if count else 0
+            billing.refund_chapters(
+                db, user, unit * (count - len(report.written)), project_id=project.id
+            )
+        project.status = "drafting"
+        db.flush()
+        return _report_payload(report)
+
+
+@router.post("/projects/{ref}/generate", status_code=202)
+def generate_all(ref: str, payload: GenerateRequest | None = None) -> dict[str, Any]:
+    force = bool(payload.force) if payload else False
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        ledger = load_ledger(db, project.id)
+        problems = ledger_gate(ledger)
+        if problems:
+            raise HTTPException(status_code=409, detail={"missing_required": problems})
+        if _cancel_stale_jobs(
+            db,
+            ["generate"],
+            30 * 60,
+            project_id=project.id,
+            stale_message="生成任务超时中断，已允许重新生成",
+        ) is not None:
+            raise HTTPException(status_code=409, detail="该项目已有生成任务在运行")
+        user = billing_user(db)
+        client = _generation_client(db)
+        count = _pending_chapters(db, project.id, force=force)
+        if count <= 0:
+            raise HTTPException(status_code=409, detail="没有待生成的章节")
+        _credit_guard(db, user, billing.billing_settings(db)["chapter_cost"] * max(0, count))
+        if user.is_external and not client.available:
+            raise HTTPException(
+                status_code=409, detail="尚未配置可用的对话模型，请联系超级管理员"
+            )
+        try:
+            charged = billing.charge_chapters(
+                db, user, count, project_id=project.id, note="生成全书正文"
+            )
+        except billing.InsufficientCredits as exc:
+            raise HTTPException(status_code=402, detail=str(exc)) from exc
+        job = Job(
+            project_id=project.id,
+            kind="generate",
+            status="queued",
+            message="排队中…",
+            payload={
+                "charged": charged,
+                "chapters": count,
+                "user_id": user.id,
+                "cost_per": charged // count if count else 0,
+            },
+        )
+        db.add(job)
+        db.flush()
+        job_id = job.id
+        job.priority = billing.queue_priority(db, user)
+        priority = job.priority
+        jobs.publish_event(job_id, "queued", jobs.job_payload(job), db=db)
+        audit(db, project.id, "project.generate", {"chapters": count})
+    jobqueue.submit(
+        _run_generation_job,
+        (job_id, project.id, force),
+        priority=priority,
+        job_id=job_id,
+    )
+    return {"job_id": job_id}
+
+
+@router.get("/projects/{ref}/jobs")
+def project_jobs(ref: str, kind: str = "") -> list[dict[str, Any]]:
+    """Recent jobs of one kind, used to re-attach after a page refresh."""
+
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        rows = list(
+            db.scalars(
+                select(Job)
+                .where(
+                    Job.project_id == project.id,
+                    Job.kind == (kind.strip() or "generate"),
+                )
+                .order_by(Job.created_at.desc())
+                .limit(20)
+            )
+        )
+        return [jobs.job_payload(job) for job in rows]
+
+
+@router.post("/projects/{ref}/check")
+def check(ref: str) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        results, summary = check_project(db, project.id)
+        audit(db, project.id, "check.run", {"total": summary["total"]})
+        return {
+            "verdict": summary["verdict"],
+            "summary": summary,
+            "issues": [result.model_dump() for result in results if not result.passed],
+        }
+
+
+@router.get("/projects/{ref}/issues")
+def issues(ref: str, limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
+    capped, start = _page_bounds(limit, offset)
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        rows = list(
+            db.scalars(select(Issue).where(Issue.project_id == project.id))
+        )
+        rows.sort(key=lambda row: SEVERITY_ORDER.get(row.level, 9))
+        page = rows[start : start + capped]
+        node_map = _issue_node_map(db, page)
+        return [_issue_payload(row, node_map) for row in page]
+
+
+@router.get("/projects/{ref}/risk-overview")
+def risk_overview(ref: str) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        rows = list(db.scalars(select(Issue).where(Issue.project_id == project.id)))
+        return _risk_overview_payload(db, project.id, rows)
+
+
+@router.get("/projects/{ref}/requirements")
+def requirements(ref: str) -> list[dict[str, Any]]:
+    """实质性条款及其正文响应状态；只读成员也能看（交付风险需要被看见）。"""
+
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        rows = list(
+            db.scalars(
+                select(Requirement)
+                .where(Requirement.project_id == project.id)
+                .order_by(Requirement.marker.desc(), Requirement.text)
+            )
+        )
+        return [_requirement_payload(db, row) for row in rows]
+
+
+@router.patch("/projects/{ref}/requirements/{req_id}")
+def requirement_response_update(
+    ref: str, req_id: str, payload: RequirementResponseUpdate
+) -> dict[str, Any]:
+    with session_scope() as db:
+        project, role = _project(db, ref)
+        _require_write(role)
+        requirement = db.get(Requirement, req_id)
+        if requirement is None or requirement.project_id != project.id:
+            raise LookupError(f"条款不存在: {req_id}")
+        note = _validate_requirement_note(payload.response_status, payload.note)
+        username = str((current_user() or {}).get("username") or "")
+        _apply_requirement_status(requirement, payload.response_status, note, username)
+        audit(
+            db,
+            project.id,
+            "requirement.response",
+            {
+                "requirement_id": requirement.id,
+                "status": payload.response_status,
+                "note": note,
+            },
+        )
+        db.flush()
+        return _requirement_payload(db, requirement)
+
+
+@router.patch("/projects/{ref}/issues/{issue_id}")
+def issue_status_update(
+    ref: str, issue_id: str, payload: IssueStatusUpdate
+) -> dict[str, Any]:
+    with session_scope() as db:
+        project, role = _project(db, ref)
+        _require_write(role)
+        issue = db.get(Issue, issue_id)
+        if issue is None or issue.project_id != project.id:
+            raise LookupError(f"风险不存在: {issue_id}")
+        note = _validate_issue_note(payload.status, payload.note)
+        previous = issue.status
+        username = str((current_user() or {}).get("username") or "")
+        _apply_issue_status(issue, payload.status, note, username)
+        audit(
+            db,
+            project.id,
+            "issue.status",
+            {
+                "issue_id": issue.id,
+                "code": issue.code,
+                "level": issue.level,
+                "from": previous,
+                "to": payload.status,
+                "note": note,
+            },
+        )
+        db.flush()
+        return _issue_payload(issue, _issue_node_map(db, [issue]))
+
+
+@router.post("/projects/{ref}/issues/bulk-status")
+def issue_bulk_status(ref: str, payload: IssueBulkStatusUpdate) -> dict[str, Any]:
+    with session_scope() as db:
+        project, role = _project(db, ref)
+        _require_write(role)
+        ids = list(dict.fromkeys(payload.ids))
+        if len(ids) > ISSUE_BULK_LIMIT:
+            raise _http_error(400, f"一次最多批量处置 {ISSUE_BULK_LIMIT} 项风险")
+        note = _validate_issue_note(payload.status, payload.note)
+        rows = (
+            {
+                row.id: row
+                for row in db.scalars(
+                    select(Issue).where(
+                        Issue.project_id == project.id, Issue.id.in_(ids)
+                    )
+                )
+            }
+            if ids
+            else {}
+        )
+        username = str((current_user() or {}).get("username") or "")
+        updated: list[Issue] = []
+        for issue_id in ids:
+            issue = rows.get(issue_id)
+            if issue is None:
+                continue  # 不属于该项目的 id 直接忽略
+            _apply_issue_status(issue, payload.status, note, username)
+            updated.append(issue)
+        audit(
+            db,
+            project.id,
+            "issue.bulk_status",
+            {
+                "ids": len(ids),
+                "updated": len(updated),
+                "status": payload.status,
+                "note": note,
+            },
+        )
+        db.flush()
+        node_map = _issue_node_map(db, updated)
+        return {
+            "updated": len(updated),
+            "items": [_issue_payload(row, node_map) for row in updated],
+        }
+
+
+@router.get("/projects/{ref}/export-templates")
+def export_templates_list(ref: str) -> dict[str, Any]:
+    from ...export import templates as export_templates
+
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        return {
+            "presets": export_templates.preset_list(),
+            "current": export_templates.load(project),
+        }
+
+
+@router.put("/projects/{ref}/export-template")
+def export_template_set(ref: str, payload: ExportTemplateUpdate) -> dict[str, Any]:
+    from ...export import templates as export_templates
+
+    with session_scope() as db:
+        project, role = _project(db, ref)
+        _require_write(role)
+        try:
+            chosen = export_templates.save(project, payload.id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        audit(db, project.id, "project.export_template", {"id": payload.id})
+        db.flush()
+        return {"current": chosen, "presets": export_templates.preset_list()}
+
+
+@router.post("/projects/{ref}/export")
+def export(ref: str, payload: ExportRequest) -> FileResponse:
+    fmt = payload.format.lower()
+    with session_scope() as db:
+        project, role = _project(db, ref)
+        _require_write(role)
+        # 交付硬门禁：未处置的废标/阻断风险禁止导出正文类格式；
+        # 强制覆盖仅限 owner/admin，且必须留痕（export.force 审计）。
+        # 统计/校验/审计与 MCP、CLI 共用 export_gate，保证口径与文案一致。
+        try:
+            enforce_export_gate(
+                db,
+                project.id,
+                fmt,
+                force=payload.force,
+                force_reason=payload.force_reason,
+                authorize_force=lambda: _require_owner(role),
+            )
+        except ExportGateError as exc:
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+        ledger = load_ledger(db, project.id)
+        nodes = load_outline(db, project.id)
+        if fmt != "xlsx" and (not nodes or not any(node.get("body") for node in nodes)):
+            raise HTTPException(status_code=409, detail="还没有正文，请先生成或编写章节")
+        output_dir = settings.project_dir(project.id) / "output"
+        audit(db, project.id, "export.run", {"format": fmt})
+        if fmt == "docx":
+            from ...export import templates as export_templates
+
+            path = export_docx(
+                output_dir / "bid.docx",
+                ledger,
+                nodes,
+                image_resolver=images.url_resolver(project.id),
+                image_policy=images.get_policy(project),
+                template=export_templates.load(project),
+            )
+        elif fmt in {"md", "markdown"}:
+            path = export_markdown(output_dir / "bid.md", ledger, nodes)
+        elif fmt == "xlsx":
+            from ...export.xlsx import export_xlsx
+
+            path = export_xlsx(output_dir / "bid.xlsx", ledger)
+        elif fmt == "pdf":
+            from ...export.pdf import PdfExportError, export_pdf
+
+            docx_path = export_docx(
+                output_dir / "bid.docx",
+                ledger,
+                nodes,
+                image_resolver=images.url_resolver(project.id),
+                image_policy=images.get_policy(project),
+            )
+            try:
+                path = export_pdf(docx_path)
+            except PdfExportError as exc:
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+        else:
+            raise HTTPException(status_code=400, detail="format 只能是 docx/md/pdf/xlsx")
+        safe = re.sub(r'[\\/:*?"<>|]', "", project.name).strip() or "BidCraft"
+        label = {
+            "docx": "投标文件",
+            "pdf": "投标文件",
+            "md": "投标文件",
+            "xlsx": "事实台账",
+        }[fmt if fmt != "markdown" else "md"]
+        return FileResponse(path, filename=f"{safe[:60]}-{label}{path.suffix}")
+
+
+@router.get("/projects/{ref}/packages")
+def package_list(
+    ref: str, limit: int = 500, offset: int = 0
+) -> list[dict[str, Any]]:
+    capped, start = _page_bounds(limit, offset)
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        rows = _bid_packages(db, project.id)
+        counts = _boq_package_ids(db, project.id, [row.id for row in rows])
+        return [
+            _bid_package_payload(row, row.id in counts)
+            for row in rows[start : start + capped]
+        ]
+
+
+@router.post("/projects/{ref}/packages", status_code=201)
+def package_create(ref: str, payload: PackageCreate) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="包件名称不能为空")
+        existing = _bid_packages(db, project.id)
+        if any(item.name == name for item in existing):
+            raise HTTPException(status_code=409, detail=f"包件名称已存在：{name}")
+        package = BidPackage(
+            project_id=project.id,
+            name=name,
+            number=(payload.number or "").strip(),
+            position=max((item.position or 0 for item in existing), default=-1) + 1,
+        )
+        db.add(package)
+        db.flush()
+        adopted = 0
+        if not existing:
+            # First package adopts the legacy project-wide (NULL) snapshot.
+            for snapshot in db.scalars(
+                select(BoqSnapshot).where(
+                    BoqSnapshot.project_id == project.id,
+                    BoqSnapshot.package_id.is_(None),
+                )
+            ):
+                snapshot.package_id = package.id
+                adopted += 1
+            db.flush()
+        audit(
+            db,
+            project.id,
+            "project.package_create",
+            {"package_id": package.id, "name": name, "adopted_snapshots": adopted},
+        )
+        has_boq = boq.get_snapshot(db, project.id, package.id) is not None
+        return _bid_package_payload(package, has_boq)
+
+
+@router.patch("/projects/{ref}/packages/{package_id}")
+def package_update(
+    ref: str, package_id: str, payload: PackageUpdate
+) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        package = _bid_package(db, project, package_id)
+        changed: dict[str, Any] = {}
+        if payload.name is not None:
+            name = payload.name.strip()
+            if not name:
+                raise HTTPException(status_code=400, detail="包件名称不能为空")
+            duplicate = db.scalar(
+                select(BidPackage).where(
+                    BidPackage.project_id == project.id,
+                    BidPackage.name == name,
+                    BidPackage.id != package.id,
+                )
+            )
+            if duplicate is not None:
+                raise HTTPException(status_code=409, detail=f"包件名称已存在：{name}")
+            if name != package.name:
+                package.name = name
+                changed["name"] = name
+        if payload.number is not None:
+            number = payload.number.strip()
+            if number != (package.number or ""):
+                package.number = number
+                changed["number"] = number
+        db.flush()
+        audit(
+            db,
+            project.id,
+            "project.package_update",
+            {"package_id": package.id, **changed},
+        )
+        has_boq = boq.get_snapshot(db, project.id, package.id) is not None
+        return _bid_package_payload(package, has_boq)
+
+
+@router.delete("/projects/{ref}/packages/{package_id}")
+def package_delete(ref: str, package_id: str) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        package = _bid_package(db, project, package_id)
+        boq.remove_snapshot(db, project, package_id=package.id)
+        audit(
+            db,
+            project.id,
+            "project.package_delete",
+            {"package_id": package.id, "name": package.name},
+        )
+        db.delete(package)
+        db.flush()
+        return {"deleted": True, "id": package.id}
+
+
+@router.get("/projects/{ref}/boq")
+def boq_alignment(ref: str, package_id: str | None = None) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        package = _resolve_boq_package(db, project, package_id)
+        return boq.build_payload(
+            db, project.id, package_id=package.id if package else None
+        )
+
+
+@router.post("/projects/{ref}/boq")
+async def boq_upload(
+    ref: str,
+    file: UploadFile = File(...),
+    sheet: str = Form(""),
+    package_id: str = Form(""),
+) -> dict[str, Any]:
+    raw_name = (file.filename or "").strip()
+    if raw_name and raw_name not in {"/", "\\"}:
+        suffix = Path(raw_name).suffix.lower()
+        if suffix not in BOQ_UPLOAD_SUFFIXES:
+            raise HTTPException(
+                status_code=400,
+                detail="工程量清单仅支持 .xlsx / .xlsm 文件",
+            )
+    filename = _safe_filename(raw_name, "boq.xlsx")
+    with tempfile.TemporaryDirectory(prefix="bidcraft-boq-") as tmp:
+        target = Path(tmp) / filename
+        await _save_upload(
+            file,
+            target,
+            max_bytes=_core.MAX_BOQ_UPLOAD_BYTES,
+            detail="工程量清单不能超过 20MB",
+        )
+        with session_scope() as db:
+            project, _role = _project(db, ref)
+            _require_write(_role)
+            package = _resolve_boq_package(db, project, package_id)
+            resolved = package.id if package else None
+            try:
+                boq.import_boq(
+                    db, project, target, sheet=sheet or None, package_id=resolved
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            audit(
+                db,
+                project.id,
+                "boq.upload",
+                {"filename": filename, "package_id": resolved},
+            )
+            return boq.build_payload(db, project.id, package_id=resolved)
+
+
+@router.post("/projects/{ref}/boq/apply")
+def boq_apply(ref: str, payload: BoqApplyRequest) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        try:
+            package = boq.resolve_package(db, project, payload.package_id)
+            resolved = package.id if package else None
+            result = boq.apply_action(
+                db, project, payload.boq_row, payload.action, package_id=resolved
+            )
+        except boq.BoqConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        audit(
+            db,
+            project.id,
+            "boq.apply",
+            {"row": payload.boq_row, "action": payload.action, "package_id": resolved},
+        )
+        return result
+
+
+@router.post("/projects/{ref}/boq/price")
+def boq_price(ref: str, payload: BoqPriceRequest) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        try:
+            package = boq.resolve_package(db, project, payload.package_id)
+            resolved = package.id if package else None
+            result = boq.set_unit_price(
+                db, project, payload.boq_row, payload.unit_price, package_id=resolved
+            )
+        except boq.BoqConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        audit(
+            db,
+            project.id,
+            "boq.price",
+            {
+                "row": payload.boq_row,
+                "unit_price": payload.unit_price,
+                "package_id": resolved,
+            },
+        )
+        return result
+
+
+@router.get("/projects/{ref}/boq/versions")
+def boq_version_list(
+    ref: str, package_id: str | None = None
+) -> list[dict[str, Any]]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        try:
+            return boq.list_versions(db, project, package_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/projects/{ref}/boq/versions", status_code=201)
+def boq_version_create(ref: str, payload: BoqVersionCreate) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        try:
+            version = boq.save_version(
+                db,
+                project,
+                payload.name,
+                payload.note,
+                package_id=payload.package_id,
+            )
+        except boq.BoqConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        audit(
+            db,
+            project.id,
+            "boq.version_save",
+            {
+                "version_id": version["id"],
+                "name": version["name"],
+                "package_id": version["package_id"],
+            },
+        )
+        return version
+
+
+@router.get("/projects/{ref}/boq/versions/{version_id}")
+def boq_version_detail(ref: str, version_id: str) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        version = boq.get_version(db, project.id, version_id)
+        if version is None:
+            raise LookupError("版本不存在")
+        return boq.version_payload(version, include_prices=True, project=project)
+
+
+@router.get("/projects/{ref}/boq/versions/{version_id}/diff")
+def boq_version_diff(
+    ref: str, version_id: str, other: str | None = None
+) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        try:
+            return boq.diff_version(db, project, version_id, other)
+        except boq.BoqConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/projects/{ref}/boq/versions/{version_id}/restore")
+def boq_version_restore(ref: str, version_id: str) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        try:
+            result = boq.restore_version(db, project, version_id)
+        except boq.BoqConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        snapshot = result.get("snapshot") or {}
+        audit(
+            db,
+            project.id,
+            "boq.version_restore",
+            {"version_id": version_id, "package_id": snapshot.get("package_id")},
+        )
+        return result
+
+
+@router.post("/projects/{ref}/boq/versions/{version_id}/submit")
+def boq_version_submit(
+    ref: str, version_id: str, payload: BoqVersionSubmit | None = None
+) -> dict[str, Any]:
+    data = payload or BoqVersionSubmit()
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        user = current_user() or {}
+        actor = user.get("display_name") or user.get("username") or ""
+        try:
+            result = boq.submit_version(
+                db, project, version_id, actor=actor, note=data.note
+            )
+        except boq.BoqConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        audit(
+            db,
+            project.id,
+            "quote.submit",
+            {
+                "version_id": result["id"],
+                "name": result["name"],
+                "package_id": result["package_id"],
+                "note": result["submit_note"],
+            },
+        )
+        return result
+
+
+@router.post("/projects/{ref}/boq/versions/{version_id}/review")
+def boq_version_review(
+    ref: str, version_id: str, payload: BoqVersionReview
+) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        user = current_user() or {}
+        actor = user.get("display_name") or user.get("username") or ""
+        try:
+            # R19：授权下沉到 boq.review_version——空链仅 owner/超管，
+            # 非空链按当前级审批人（或超管）放行，会签/或签按阶段模式推进。
+            result = boq.review_version(
+                db,
+                project,
+                version_id,
+                actor=actor,
+                decision=payload.decision,
+                note=payload.note,
+                actor_id=str(user.get("id") or ""),
+                role=_role,
+                is_super=user.get("role") == auth.ROLE_SUPER_ADMIN,
+            )
+        except boq.BoqForbiddenError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except boq.BoqConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        audit(
+            db,
+            project.id,
+            "quote.approve" if payload.decision == "approve" else "quote.reject",
+            {
+                "version_id": result["id"],
+                "name": result["name"],
+                "package_id": result["package_id"],
+                "note": payload.note,
+                "status": result["status"],
+                "stage": len(result["approvals"]),
+            },
+        )
+        return result
+
+
+@router.post("/projects/{ref}/boq/versions/{version_id}/unapprove")
+def boq_version_unapprove(ref: str, version_id: str) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        try:
+            result = boq.unapprove_version(db, project, version_id)
+        except boq.BoqConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        audit(
+            db,
+            project.id,
+            "quote.unapprove",
+            {
+                "version_id": result["id"],
+                "name": result["name"],
+                "package_id": result["package_id"],
+            },
+        )
+        return result
+
+
+@router.delete("/projects/{ref}/boq/versions/{version_id}")
+def boq_version_delete(ref: str, version_id: str) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        boq.delete_version(db, project, version_id)
+        audit(db, project.id, "boq.version_delete", {"version_id": version_id})
+        return {"deleted": True, "id": version_id}
+
+
+@router.get("/projects/{ref}/price-policy")
+def price_policy_get(ref: str) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        return boq.get_price_policy(project)
+
+
+@router.put("/projects/{ref}/price-policy")
+def price_policy_put(ref: str, payload: PricePolicyUpdate) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        policy = boq.set_price_policy(db, project, payload.model_dump())
+        audit(db, project.id, "price.policy", policy)
+        return policy
+
+
+@router.post("/projects/{ref}/boq/quota-fill")
+def boq_quota_fill(
+    ref: str, payload: BoqQuotaFillRequest | None = None
+) -> dict[str, Any]:
+    data = payload or BoqQuotaFillRequest()
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        try:
+            package = boq.resolve_package(db, project, data.package_id)
+            resolved = package.id if package else None
+            result = boq.quota_fill(
+                db,
+                project,
+                package_id=resolved,
+                only_missing=data.only_missing,
+                dry_run=data.dry_run,
+            )
+        except boq.BoqConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not data.dry_run:
+            audit(
+                db,
+                project.id,
+                "boq.quota_fill",
+                {
+                    "applied": result["applied"],
+                    "only_missing": data.only_missing,
+                },
+            )
+        return result
+
+
+@router.post("/projects/{ref}/boq/adjust")
+def boq_adjust(ref: str, payload: BoqAdjustRequest | None = None) -> dict[str, Any]:
+    data = payload or BoqAdjustRequest()
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        try:
+            package = boq.resolve_package(db, project, data.package_id)
+            resolved = package.id if package else None
+            result = boq.adjust_prices(db, project, package_id=resolved)
+        except boq.BoqConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        audit(
+            db,
+            project.id,
+            "boq.adjust",
+            {"factor": result["factor"], "rows": result["rows"]},
+        )
+        return result["payload"]
+
+
+@router.delete("/projects/{ref}/boq")
+def boq_delete(ref: str, package_id: str | None = None) -> dict[str, Any]:
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        package = _resolve_boq_package(db, project, package_id)
+        resolved = package.id if package else None
+        boq.remove_snapshot(db, project, package_id=resolved)
+        audit(db, project.id, "boq.delete", {"package_id": resolved})
+        return {"deleted": True}
+
+
+@router.post("/projects/{ref}/boq/export")
+def boq_export(ref: str, package_id: str | None = None) -> FileResponse:
+    from ...export.boq_xlsx import export_boq_xlsx
+
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        _require_write(_role)
+        package = _resolve_boq_package(db, project, package_id)
+        resolved = package.id if package else None
+        payload = boq.build_payload(db, project.id, package_id=resolved)
+        if payload["snapshot"] is None:
+            raise HTTPException(status_code=409, detail="尚未上传工程量清单，无法导出响应表")
+        path = export_boq_xlsx(
+            settings.project_dir(project.id) / "output" / "boq-response.xlsx", payload
+        )
+        safe = re.sub(r'[\\/:*?"<>|]', "", project.name).strip() or "BidCraft"
+        if package is None:
+            filename = f"{safe[:60]}-清单响应表.xlsx"
+        else:
+            section = re.sub(r'[\\/:*?"<>|]', "", package.name).strip() or "包件"
+            filename = f"{safe[:60]}-{section[:40]}-清单响应表.xlsx"
+        return FileResponse(path, filename=filename)
+
+

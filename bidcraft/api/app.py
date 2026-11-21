@@ -6,102 +6,59 @@ cookie sessions and role-based access control; there is no telemetry. Bind to
 controls when serving a team.
 """
 
-import io
 import logging
 import math
-import mimetypes
-import re
-import shutil
-import tempfile
-import threading
-import time
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote
 
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import (
     __version__,
-    accounts,
     auth,
     billing,
     boq,
     clock,
-    compliance,
     images,
-    invoices,
-    jobqueue,
-    jobs,
-    knowledge,
-    material_policy,
-    model_config,
-    personnel,
-    plugin_pack,
     plugins,
-    profile,
     provenance,
-    qualifications,
-    scoring,
-    terms,
     textqa,
-    user_docs,
     wechat,
-    wechatpay,
 )
 from ..audit import record_audit
 from ..config import settings, validate_startup
 from ..context import current_user, set_current_user
 from ..db import init_db, session_scope
-from ..duplicate import duplicate_project
-from ..export.docx import export_docx, export_markdown
 from ..export_gate import (
     EXPORT_GATE_FORMATS,  # noqa: F401 - 保留 from bidcraft.api import 的既有导出面
     ISSUE_RESOLVED_STATUSES,  # noqa: F401 - 同上，定义迁至 export_gate
-    ExportGateError,
-    enforce_export_gate,
     issue_is_open,
 )
-from ..generation.outline import build_outline, load_outline, save_outline
-from ..generation.writer import count_words, generate_document
-from ..ledger import ledger_summary, load_ledger, update_fact
+from ..generation.outline import load_outline
 from ..models import (
     AuditLog,
     BidPackage,
     BoqSnapshot,
-    Delivery,
     Fact,
-    ImageAsset,
     Issue,
     Job,
-    JobEvent,
-    Material,
     OutlineNode,
-    Parameter,
-    Plugin,
     Project,
     ProjectMember,
-    QuotaItem,
     RechargeOrder,
-    RedeemCode,
     Requirement,
-    Risk,
-    ScoringItem,
     Section,
     SourceFile,
-    TermItem,
     User,
 )
-from ..pipeline import add_source, check_project, create_project, parse_project, resolve_project
+from ..pipeline import resolve_project
 from ..rules import store as package_store
-from ..rules.engine import ledger_gate
 from ..rules.loader import (
-    document_package_name,
     list_packages,
-    load_package,
     validate_package_text,
 )
 from ..services.job_support import (  # noqa: F401 - 保留 api 名字空间，路由闭包按原名解析
@@ -1110,6 +1067,70 @@ def _pending_chapters(db, project_id: str, force: bool = False) -> int:
 
 
 
+def _profile_keys(profile_values: dict[str, Any]) -> list[str]:
+    """List the non-empty profile fields for the audit detail."""
+
+    return [key for key, value in profile_values.items() if value not in ("", [], None)]
+
+
+# 路由模块（api/routes/*）从本模块导入的公共名字。ruff 看不到跨模块引用，统一 noqa。
+import io  # noqa: F401,E402
+import mimetypes  # noqa: F401,E402
+import re  # noqa: F401,E402
+import shutil  # noqa: F401,E402
+import tempfile  # noqa: F401,E402
+import threading  # noqa: F401,E402
+import time  # noqa: F401,E402
+from datetime import date, timedelta  # noqa: F401,E402
+
+from fastapi import File, Form, HTTPException, Request, Response, UploadFile  # noqa: F401,E402
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse  # noqa: F401,E402
+from sqlalchemy import delete  # noqa: F401,E402
+
+from .. import (  # noqa: F401,E402
+    accounts,
+    compliance,
+    invoices,
+    jobqueue,
+    jobs,
+    knowledge,
+    material_policy,
+    model_config,
+    personnel,
+    plugin_pack,
+    profile,
+    qualifications,
+    scoring,
+    terms,
+    user_docs,
+    wechatpay,
+)
+from ..duplicate import duplicate_project  # noqa: F401,E402
+from ..export.docx import export_docx, export_markdown  # noqa: F401,E402
+from ..export_gate import ExportGateError, enforce_export_gate  # noqa: F401,E402
+from ..generation.outline import build_outline, save_outline  # noqa: F401,E402
+from ..generation.writer import count_words, generate_document  # noqa: F401,E402
+from ..ledger import ledger_summary, load_ledger, update_fact  # noqa: F401,E402
+from ..models import (  # noqa: F401,E402
+    AuthSession,
+    Delivery,
+    ImageAsset,
+    JobEvent,
+    KbChunk,
+    Material,
+    Parameter,
+    Plugin,
+    QuotaItem,
+    RedeemCode,
+    Risk,
+    ScoringItem,
+    TermItem,
+)
+from ..pipeline import add_source, check_project, create_project, parse_project  # noqa: F401,E402
+from ..rules.engine import ledger_gate  # noqa: F401,E402
+from ..rules.loader import document_package_name, load_package  # noqa: F401,E402
+from ..security import encrypt_secret, hash_password, verify_password  # noqa: F401,E402
+
 # FastAPI 类型原先只在 create_app 内 import，提升的 helper 需要模块级可见。
 # create_app 内保留同名局部 import（optional extra 缺失时在那里抛 RuntimeError）。
 try:
@@ -1122,10 +1143,7 @@ except ImportError:  # pragma: no cover - optional extra 缺失时 create_app �
 # 以下 helper / 模型原先定义在 create_app 内部，提升到模块级供 api/routes/* 复用。
 # ---------------------------------------------------------------------------
 
-from ..models import AuthSession, KbChunk, KnowledgeBase, ModelConfig
-from ..security import encrypt_secret, hash_password, verify_password
-
-docs_on = settings.docs_enabled
+from ..models import KnowledgeBase, ModelConfig
 
 
 def set_session_cookie(response: Response, token: str) -> None:
@@ -1140,7 +1158,7 @@ def set_session_cookie(response: Response, token: str) -> None:
     )
 
 
-def _wechat_login(profile: dict, response: Response, next_path: str) -> RedirectResponse:
+def _wechat_login(profile: dict, response: Response, next_path: str) -> RedirectResponse:  # noqa: F811 - 参数名与模块名同形
     with session_scope() as db:
         try:
             user = wechat.login_or_register(db, profile)
@@ -1481,13 +1499,8 @@ dist = Path(__file__).resolve().parent.parent / "web_dist"
 
 def create_app():
     try:
-        from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
-        from fastapi.responses import (
-            FileResponse,
-            JSONResponse,
-            RedirectResponse,
-            StreamingResponse,
-        )
+        from fastapi import FastAPI, HTTPException, Request
+        from fastapi.responses import FileResponse, JSONResponse
         from fastapi.staticfiles import StaticFiles
     except ImportError as exc:  # pragma: no cover - optional extra
         raise RuntimeError("HTTP API 需要安装可选依赖：pip install -e '.[api]'") from exc
@@ -1506,6 +1519,9 @@ def create_app():
         _recover_interrupted_jobs()
     except Exception:  # noqa: BLE001 - startup must not fail on cleanup
         logger.exception("恢复中断任务失败")
+    # 每次 create_app() 都重新读取开关：测试与部署会在构造前改 settings，
+    # 若在模块加载时缓存，后续 create_app() 会拿到过期值。
+    docs_on = settings.docs_enabled
     app = FastAPI(
         title="BidCraft",
         version=__version__,
@@ -1600,327 +1616,82 @@ def create_app():
     async def not_found(_request, exc: LookupError):
         return JSONResponse(status_code=404, content={"detail": str(exc)})
 
-    @app.post("/auth/login")
-    def login(payload: LoginRequest, request: Request, response: Response) -> dict[str, Any]:
-        with session_scope() as db:
-            try:
-                user, token = auth.login(
-                    db,
-                    payload.username,
-                    payload.password,
-                    user_agent=request.headers.get("user-agent", ""),
-                    ip=request.client.host if request.client else "",
-                )
-                auth.purge_expired_sessions(db)
-            except PermissionError as exc:
-                status = 429 if "次数过多" in str(exc) else 401
-                raise HTTPException(status_code=status, detail=str(exc)) from exc
-            response.set_cookie(
-                auth.SESSION_COOKIE,
-                token,
-                max_age=settings.session_days * 86400,
-                httponly=True,
-                samesite="lax",
-                secure=settings.secure_cookie,
-                path="/",
-            )
-            return {"user": auth.user_payload(user)}
+    # 路由按业务域拆分到 api/routes/*，按首次出现顺序注册以保持路径匹配语义。
+    from .routes import (
+        account as _routes_account,
+    )
+    from .routes import (
+        admin as _routes_admin,
+    )
+    from .routes import (
+        approvals as _routes_approvals,
+    )
+    from .routes import (
+        auth as _routes_auth,
+    )
+    from .routes import (
+        batch_jobs as _routes_batch_jobs,
+    )
+    from .routes import (
+        billing as _routes_billing,
+    )
+    from .routes import (
+        health as _routes_health,
+    )
+    from .routes import (
+        jobs as _routes_jobs,
+    )
+    from .routes import (
+        legal as _routes_legal,
+    )
+    from .routes import (
+        my as _routes_my,
+    )
+    from .routes import (
+        packages as _routes_packages,
+    )
+    from .routes import (
+        projects as _routes_projects,
+    )
+    app.include_router(_routes_auth.router)
+    app.include_router(_routes_billing.router)
+    app.include_router(_routes_account.router)
+    app.include_router(_routes_admin.router)
+    app.include_router(_routes_health.router)
+    app.include_router(_routes_packages.router)
+    app.include_router(_routes_projects.router)
+    app.include_router(_routes_my.router)
+    app.include_router(_routes_jobs.router)
+    app.include_router(_routes_batch_jobs.router)
+    app.include_router(_routes_legal.router)
+    app.include_router(_routes_approvals.router)
 
 
-    @app.post("/auth/register", status_code=201)
-    def register(payload: RegisterRequest, request: Request, response: Response) -> dict[str, Any]:
-        with session_scope() as db:
-            try:
-                if not payload.accept_terms:
-                    raise ValueError("请先阅读并同意服务条款与隐私政策")
-                user = auth.register_user(
-                    db,
-                    username=payload.username,
-                    password=payload.password,
-                    display_name=payload.display_name,
-                )
-                compliance.record_consent(user, payload.terms_version)
-                # Commit the new account before auth.login opens its own session
-                # for the persistent login-throttle counter (SQLite single writer).
-                db.commit()
-                user, token = auth.login(
-                    db,
-                    user.username,
-                    payload.password,
-                    user_agent=request.headers.get("user-agent", ""),
-                    ip=request.client.host if request.client else "",
-                )
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            set_session_cookie(response, token)
-            return {"user": auth.user_payload(user)}
-
-    @app.get("/auth/wechat/start")
-    def wechat_start(next: str = "/") -> RedirectResponse:
-        if not wechat.available():
-            raise HTTPException(status_code=503, detail="微信登录未配置")
-        return RedirectResponse(wechat.authorize_url(next))
 
 
-    @app.get("/auth/wechat/callback")
-    def wechat_callback(
-        request: Request, response: Response, code: str = "", state: str = ""
-    ) -> RedirectResponse:
-        try:
-            next_path = wechat.verify_state_token(state)
-        except wechat.WeChatError as exc:
-            return RedirectResponse(
-                f"/login?reason=wechat&message={quote(str(exc))}", status_code=302
-            )
-        if not code:
-            return RedirectResponse(
-                f"/login?reason=wechat&message={quote('未获得微信授权码')}", status_code=302
-            )
-        try:
-            profile = wechat.exchange_code(code)
-        except wechat.WeChatError as exc:
-            return RedirectResponse(
-                f"/login?reason=wechat&message={quote(str(exc))}", status_code=302
-            )
-        return _wechat_login(profile, response, next_path)
 
-    @app.get("/auth/wechat/mock")
-    def wechat_mock_login(
-        response: Response, next: str = "/", openid: str = "mock-openid"
-    ) -> RedirectResponse:
-        if not settings.wechat_mock:
-            raise HTTPException(status_code=404, detail="未开启微信模拟登录")
-        return _wechat_login(wechat.mock_profile(openid), response, next)
 
-    @app.post("/auth/logout")
-    def logout(request: Request, response: Response) -> dict[str, Any]:
-        with session_scope() as db:
-            auth.revoke_session(db, request.cookies.get(auth.SESSION_COOKIE))
-        response.delete_cookie(auth.SESSION_COOKIE, path="/")
-        return {"logged_out": True}
 
-    @app.get("/auth/me")
-    def me(request: Request) -> dict[str, Any]:
-        return {"user": request.state.user}
 
-    @app.post("/auth/password")
-    def change_password(payload: PasswordChange, request: Request, response: Response):
-        with session_scope() as db:
-            user = db.get(User, request.state.user["id"])
-            if user is None or not verify_password(payload.current_password, user.password_hash):
-                raise HTTPException(status_code=400, detail="当前密码不正确")
-            user.password_hash = hash_password(payload.new_password)
-            auth.revoke_user_sessions(db, user.id)
-        response.delete_cookie(auth.SESSION_COOKIE, path="/")
-        return {"changed": True, "relogin": True}
+
+
 
     # --------------------------------------------------------------- billing
 
 
-    @app.get("/billing/summary")
-    def billing_summary() -> dict[str, Any]:
-        with session_scope() as db:
-            user = billing_user(db)
-            account = billing.billing_account(db, user)
-            return {
-                "user": auth.user_payload(user),
-                "summary": billing.summary(db, user),
-                "transactions": billing.transactions(db, account.id),
-                "orders": billing.orders(db, account.id),
-                "wechat_login": wechat.available(),
-                "wechat_mock": settings.wechat_mock,
-                "wechat_pay": wechatpay.available(),
-                "wechat_pay_mock": settings.wechat_pay_mock,
-            }
 
 
-    @app.post("/billing/orders", status_code=201)
-    def create_order(payload: OrderCreate) -> dict[str, Any]:
-        with session_scope() as db:
-            user = billing_user(db)
-            _reject_sub_billing(user)
-            package = billing.find_package(db, payload.package_id)
-            if package is None:
-                raise HTTPException(status_code=400, detail="充值套餐不存在")
-            order = billing.create_order(db, user.id, package)
-            if settings.wechat_pay_mock:
-                order.provider = "mock"
-                db.flush()
-            elif wechatpay.available():
-                try:
-                    order.code_url = wechatpay.create_native(order)
-                except wechatpay.PaymentError:
-                    logger.exception("微信支付下单失败（订单 %s）", order.out_trade_no)
-                    order.status = "closed"
-                    db.flush()
-                    raise HTTPException(
-                        status_code=502, detail="微信支付下单失败，详情见服务日志"
-                    ) from None
-            else:
-                raise HTTPException(status_code=503, detail="微信支付未配置")
-            return billing.order_payload(order)
 
-    @app.post("/billing/vip/orders", status_code=201)
-    def create_vip_order_route(payload: OrderCreate) -> dict[str, Any]:
-        with session_scope() as db:
-            user = billing_user(db)
-            _reject_sub_billing(user)
-            package = billing.find_vip_package(db, payload.package_id)
-            if package is None:
-                raise HTTPException(status_code=400, detail="VIP 套餐不存在")
-            order = billing.create_vip_order(db, user.id, package)
-            if settings.wechat_pay_mock:
-                order.provider = "mock"
-                db.flush()
-            elif wechatpay.available():
-                try:
-                    order.code_url = wechatpay.create_native(order)
-                except wechatpay.PaymentError:
-                    logger.exception("微信支付下单失败（VIP 订单 %s）", order.out_trade_no)
-                    order.status = "closed"
-                    db.flush()
-                    raise HTTPException(
-                        status_code=502, detail="微信支付下单失败，详情见服务日志"
-                    ) from None
-            else:
-                raise HTTPException(status_code=503, detail="微信支付未配置")
-            return billing.order_payload(order)
 
-    @app.get("/billing/orders/{order_id}")
-    def get_order(order_id: str) -> dict[str, Any]:
-        with session_scope() as db:
-            return billing.order_payload(require_own_order(db, order_id))
 
-    @app.post("/billing/orders/{order_id}/mock-pay")
-    def mock_pay(order_id: str) -> dict[str, Any]:
-        if not settings.wechat_pay_mock:
-            raise HTTPException(status_code=404, detail="未开启支付模拟")
-        with session_scope() as db:
-            order = require_own_order(db, order_id)
-            billing.mark_paid(db, order, transaction_id=f"MOCK-{order.out_trade_no}", provider="mock")
-            user = billing_user(db)
-            return {
-                "order": billing.order_payload(order),
-                "user": auth.user_payload(user),
-                "summary": billing.summary(db, user),
-            }
 
-    @app.get("/billing/orders/{order_id}/qr")
-    def order_qr(order_id: str):
-        with session_scope() as db:
-            order = require_own_order(db, order_id)
-            code_url = order.code_url
-        if not code_url:
-            raise HTTPException(status_code=404, detail="该订单没有支付二维码")
-        try:
-            import qrcode
-        except ImportError as exc:  # pragma: no cover
-            raise HTTPException(status_code=503, detail="缺少 qrcode 依赖") from exc
-        image = qrcode.make(code_url)
-        buffer = io.BytesIO()
-        image.save(buffer, format="PNG")
-        return StreamingResponse(
-            io.BytesIO(buffer.getvalue()),
-            media_type="image/png",
-            headers={"Cache-Control": "no-store"},
-        )
 
-    @app.post("/billing/redeem")
-    def redeem(payload: RedeemRequest) -> dict[str, Any]:
-        with session_scope() as db:
-            user = billing_user(db)
-            _reject_sub_billing(user)
-            try:
-                billing.redeem(db, user, payload.code)
-            except billing.BillingError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return {
-                "user": auth.user_payload(user),
-                "summary": billing.summary(db, user),
-                "transactions": billing.transactions(db, user.id),
-            }
 
     # ---------------------------------------------------------- sub-accounts
-    @app.get("/account/sub-accounts")
-    def list_sub_accounts_route() -> list[dict[str, Any]]:
-        with session_scope() as db:
-            user = billing_user(db)
-            return accounts.list_sub_accounts(db, user)
 
-    @app.post("/account/sub-accounts", status_code=201)
-    def create_sub_account_route(payload: SubAccountCreate) -> dict[str, Any]:
-        with session_scope() as db:
-            user = billing_user(db)
-            try:
-                sub = accounts.create_sub_account(
-                    db,
-                    user,
-                    username=payload.username,
-                    password=payload.password,
-                    display_name=payload.display_name,
-                )
-            except accounts.AccountError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(db, None, "account.sub_create", {"sub_id": sub.id, "username": sub.username})
-            return accounts.sub_payload(sub)
 
-    @app.patch("/account/sub-accounts/{sub_id}")
-    def update_sub_account_route(sub_id: str, payload: SubAccountUpdate) -> dict[str, Any]:
-        with session_scope() as db:
-            user = billing_user(db)
-            changes = payload.model_dump(exclude_unset=True)
-            try:
-                sub = accounts.update_sub_account(db, user, sub_id, changes)
-            except accounts.AccountError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            except LookupError as exc:
-                raise HTTPException(status_code=404, detail=str(exc)) from exc
-            audit(db, None, "account.sub_update", {"sub_id": sub.id, "keys": list(changes)})
-            return accounts.sub_payload(sub)
 
-    @app.delete("/account/sub-accounts/{sub_id}")
-    def delete_sub_account_route(sub_id: str) -> dict[str, Any]:
-        with session_scope() as db:
-            user = billing_user(db)
-            try:
-                accounts.delete_sub_account(db, user, sub_id)
-            except LookupError as exc:
-                raise HTTPException(status_code=404, detail=str(exc)) from exc
-            audit(db, None, "account.sub_delete", {"sub_id": sub_id})
-            return {"deleted": True, "id": sub_id}
 
-    @app.post("/billing/wechat/notify")
-    async def wechat_notify(request: Request):
-        body = await request.body()
-        try:
-            data = wechatpay.parse_notification(dict(request.headers), body)
-        except wechatpay.PaymentError as exc:
-            return JSONResponse(
-                status_code=400, content={"code": "FAIL", "message": str(exc)}
-            )
-        with session_scope() as db:
-            order = db.scalar(
-                select(RechargeOrder).where(
-                    RechargeOrder.out_trade_no == data["out_trade_no"]
-                )
-            )
-            if order is None:
-                return JSONResponse(
-                    status_code=404, content={"code": "FAIL", "message": "订单不存在"}
-                )
-            amount = (data.get("amount") or {}).get("total")
-            if amount is not None and int(amount) != order.amount_cents:
-                return JSONResponse(
-                    status_code=400, content={"code": "FAIL", "message": "金额不一致"}
-                )
-            if data.get("trade_state") == "SUCCESS":
-                billing.mark_paid(
-                    db,
-                    order,
-                    transaction_id=data.get("transaction_id", ""),
-                    provider="wechat",
-                )
-        return {"code": "SUCCESS", "message": "成功"}
 
     # ---------------------------------------------------------------- admin
 
@@ -1929,346 +1700,20 @@ def create_app():
 
 
 
-    @app.get("/admin/models")
-    def list_models(request: Request, limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
-        require_super(request)
-        capped, start = _page_bounds(limit, offset)
-        with session_scope() as db:
-            rows = list(
-                db.scalars(
-                    select(ModelConfig)
-                    .order_by(ModelConfig.kind, ModelConfig.name)
-                    .limit(capped)
-                    .offset(start)
-                )
-            )
-            return [model_config.model_payload(row) for row in rows]
 
-    @app.post("/admin/models", status_code=201)
-    def create_model(payload: ModelCreate, request: Request) -> dict[str, Any]:
-        require_super(request)
-        validate_kind(payload.kind, payload.provider)
-        if payload.is_default and not payload.enabled:
-            raise HTTPException(status_code=400, detail="默认模型必须启用")
-        with session_scope() as db:
-            if db.scalar(select(ModelConfig).where(ModelConfig.name == payload.name)):
-                raise HTTPException(status_code=400, detail="模型名称已存在")
-            if payload.is_default:
-                unset_default_model(db, payload.kind)
-            row = ModelConfig(
-                name=payload.name,
-                kind=payload.kind,
-                provider=payload.provider,
-                base_url=payload.base_url,
-                model=payload.model,
-                api_key_enc=encrypt_secret(payload.api_key),
-                temperature=payload.temperature,
-                max_tokens=payload.max_tokens,
-                options=payload.options,
-                enabled=payload.enabled,
-                is_default=payload.is_default,
-            )
-            db.add(row)
-            db.flush()
-            return model_config.model_payload(row)
 
-    @app.patch("/admin/models/{model_id}")
-    def update_model(model_id: str, payload: ModelUpdate, request: Request) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            row = db.get(ModelConfig, model_id)
-            if row is None:
-                raise HTTPException(status_code=404, detail="模型不存在")
-            data = payload.model_dump(exclude_unset=True)
-            clear_key = data.pop("clear_api_key", False)
-            api_key = data.pop("api_key", None)
-            if "kind" in data or "provider" in data:
-                validate_kind(data.get("kind", row.kind), data.get("provider", row.provider))
-            if (
-                "name" in data
-                and data["name"] != row.name
-                and db.scalar(select(ModelConfig).where(ModelConfig.name == data["name"]))
-            ):
-                raise HTTPException(status_code=400, detail="模型名称已存在")
-            if data.get("is_default") and not data.get("enabled", row.enabled):
-                raise HTTPException(status_code=400, detail="默认模型必须启用")
-            if data.get("is_default"):
-                unset_default_model(db, data.get("kind", row.kind))
-            if clear_key:
-                row.api_key_enc = ""
-            elif api_key is not None and api_key != "":
-                row.api_key_enc = encrypt_secret(api_key)
-            for key, value in data.items():
-                setattr(row, key, value)
-            if row.is_default:
-                unset_default_model(db, row.kind)
-                row.is_default = True
-            db.flush()
-            return model_config.model_payload(row)
 
-    @app.delete("/admin/models/{model_id}")
-    def delete_model(model_id: str, request: Request) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            row = db.get(ModelConfig, model_id)
-            if row is None:
-                raise HTTPException(status_code=404, detail="模型不存在")
-            db.delete(row)
-            return {"deleted": True, "id": model_id}
 
-    @app.post("/admin/models/{model_id}/test")
-    def test_model(model_id: str, request: Request) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            row = db.get(ModelConfig, model_id)
-            if row is None:
-                raise HTTPException(status_code=404, detail="模型不存在")
-            ok, message, latency = model_config.test_model(row)
-            row.last_test_at = datetime.now(UTC).replace(tzinfo=None)
-            row.last_test_ok = ok
-            row.last_test_message = message[:1000]
-            return {"ok": ok, "message": message, "latency_ms": latency}
 
-    @app.get("/admin/kbs")
-    def list_kbs(request: Request, limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
-        require_super(request)
-        capped, start = _page_bounds(limit, offset)
-        with session_scope() as db:
-            rows = list(
-                db.scalars(
-                    select(KnowledgeBase)
-                    .order_by(KnowledgeBase.name)
-                    .limit(capped)
-                    .offset(start)
-                )
-            )
-            return [knowledge.kb_payload(row, db) for row in rows]
 
-    @app.post("/admin/kbs", status_code=201)
-    def create_kb(payload: KbCreate, request: Request) -> dict[str, Any]:
-        require_super(request)
-        validate_kb(payload.kind, payload.provider)
-        if payload.is_default and not payload.enabled:
-            raise HTTPException(status_code=400, detail="默认知识库必须启用")
-        with session_scope() as db:
-            if db.scalar(select(KnowledgeBase).where(KnowledgeBase.name == payload.name)):
-                raise HTTPException(status_code=400, detail="知识库名称已存在")
-            if payload.is_default:
-                unset_default_kb(db)
-            row = KnowledgeBase(
-                name=payload.name,
-                kind=payload.kind,
-                provider=payload.provider,
-                location=payload.location,
-                api_key_enc=encrypt_secret(payload.api_key),
-                dataset_id=payload.dataset_id,
-                options=payload.options,
-                enabled=payload.enabled,
-                is_default=payload.is_default,
-            )
-            db.add(row)
-            db.flush()
-            return knowledge.kb_payload(row, db)
 
-    @app.patch("/admin/kbs/{kb_id}")
-    def update_kb(kb_id: str, payload: KbUpdate, request: Request) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            row = db.get(KnowledgeBase, kb_id)
-            if row is None:
-                raise HTTPException(status_code=404, detail="知识库不存在")
-            data = payload.model_dump(exclude_unset=True)
-            clear_key = data.pop("clear_api_key", False)
-            api_key = data.pop("api_key", None)
-            if "kind" in data or "provider" in data:
-                validate_kb(data.get("kind", row.kind), data.get("provider", row.provider))
-            if data.get("kind") == "api" and row.kind == "local":
-                db.execute(delete(KbChunk).where(KbChunk.kb_id == row.id))
-                row.chunk_count = 0
-                row.indexed_at = None
-            if (
-                "location" in data
-                and data["location"] != row.location
-                and row.kind == "local"
-            ):
-                db.execute(delete(KbChunk).where(KbChunk.kb_id == row.id))
-                row.chunk_count = 0
-                row.indexed_at = None
-            if data.get("is_default") and not data.get("enabled", row.enabled):
-                raise HTTPException(status_code=400, detail="默认知识库必须启用")
-            if data.get("is_default"):
-                unset_default_kb(db)
-            if clear_key:
-                row.api_key_enc = ""
-            elif api_key is not None and api_key != "":
-                row.api_key_enc = encrypt_secret(api_key)
-            for key, value in data.items():
-                setattr(row, key, value)
-            if row.is_default:
-                unset_default_kb(db)
-                row.is_default = True
-            db.flush()
-            return knowledge.kb_payload(row, db)
 
-    @app.delete("/admin/kbs/{kb_id}")
-    def delete_kb(kb_id: str, request: Request) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            row = db.get(KnowledgeBase, kb_id)
-            if row is None:
-                raise HTTPException(status_code=404, detail="知识库不存在")
-            db.execute(delete(KbChunk).where(KbChunk.kb_id == kb_id))
-            db.delete(row)
-            return {"deleted": True, "id": kb_id}
 
-    @app.post("/admin/kbs/{kb_id}/test")
-    def test_kb(kb_id: str, request: Request) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            row = db.get(KnowledgeBase, kb_id)
-            if row is None:
-                raise HTTPException(status_code=404, detail="知识库不存在")
-            ok, message, latency = knowledge.test_kb(db, row)
-            row.last_test_at = datetime.now(UTC).replace(tzinfo=None)
-            row.last_test_ok = ok
-            row.last_test_message = message[:1000]
-            return {"ok": ok, "message": message, "latency_ms": latency}
 
-    @app.post("/admin/kbs/{kb_id}/reindex", status_code=202)
-    def reindex_kb(kb_id: str, request: Request) -> dict[str, Any]:
-        """Queue a background rebuild of a local KB index and its vectors."""
 
-        require_super(request)
-        user = current_user() or {}
-        with session_scope() as db:
-            row = db.get(KnowledgeBase, kb_id)
-            if row is None:
-                raise HTTPException(status_code=404, detail="知识库不存在")
-            if row.kind != "local":
-                raise HTTPException(status_code=400, detail="只有本地知识库需要建索引")
-            if _active_kb_reindex(db, kb_id) is not None:
-                raise HTTPException(status_code=409, detail="该知识库已有重建索引任务在运行")
-            job = Job(
-                project_id=None,
-                kind="kb_reindex",
-                status="queued",
-                message="知识库重建索引排队中…",
-                payload={
-                    "owner_id": user.get("id") or "",
-                    "kb_id": kb_id,
-                    "name": row.name,
-                },
-            )
-            db.add(job)
-            db.flush()
-            job_id = job.id
-            jobs.publish_event(job_id, "queued", jobs.job_payload(job), db=db)
-            audit(db, None, "kb.reindex", {"kb_id": kb_id, "job_id": job_id})
-        worker = threading.Thread(
-            target=_run_kb_reindex_job,
-            args=(job_id, kb_id),
-            daemon=True,
-            name=f"bidcraft-kb-reindex-{job_id[:8]}",
-        )
-        worker.start()
-        return {"job_id": job_id}
 
-    @app.post("/admin/kbs/{kb_id}/embed")
-    def embed_kb(kb_id: str, request: Request) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            row = db.get(KnowledgeBase, kb_id)
-            if row is None:
-                raise HTTPException(status_code=404, detail="知识库不存在")
-            if row.kind != "local":
-                raise HTTPException(status_code=400, detail="仅本地知识库支持向量索引")
-            if not row.chunk_count:
-                raise HTTPException(status_code=400, detail="请先重建索引")
-            if model_config.resolve_embedding_endpoint(db) is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="未配置可用的向量模型；请在模型配置中添加 embedding 模型",
-                )
-            result = knowledge.build_vectors(db, row)
-            return {**result, "kb": knowledge.kb_payload(row, db)}
 
-    @app.get("/admin/kbs/{kb_id}/docs")
-    def kb_docs(kb_id: str, request: Request) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            row = db.get(KnowledgeBase, kb_id)
-            if row is None:
-                raise HTTPException(status_code=404, detail="知识库不存在")
-            docs = material_policy.doc_map(row)
-            items = []
-            for source, meta in sorted(docs.items()):
-                record = dict(meta or {})
-                kind = str(record.get("kind") or "")
-                fields = {key: value for key, value in record.items() if key != "kind"}
-                verdict = material_policy.assess(record)
-                items.append(
-                    {
-                        "source": source,
-                        "kind": kind,
-                        "fields": fields,
-                        "ok": verdict.ok,
-                        "reason": verdict.reason,
-                    }
-                )
-            counts = db.execute(
-                select(KbChunk.source, func.count(KbChunk.id))
-                .where(KbChunk.kb_id == kb_id)
-                .group_by(KbChunk.source)
-            ).all()
-            sources = [
-                {"source": str(source), "chunks": int(count)}
-                for source, count in sorted(counts, key=lambda entry: str(entry[0] or ""))
-                if str(source or "").strip()
-            ]
-            return {
-                "policy": material_policy.load_policy(),
-                "items": items,
-                "sources": sources,
-                "kinds": material_policy.kinds(),
-            }
 
-    @app.put("/admin/kbs/{kb_id}/docs")
-    def kb_docs_upsert(kb_id: str, request: Request, payload: KbDocMeta) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            row = db.get(KnowledgeBase, kb_id)
-            if row is None:
-                raise HTTPException(status_code=404, detail="知识库不存在")
-            try:
-                meta = payload.model_dump()
-                extra = meta.pop("fields", None) or {}
-                if isinstance(extra, dict):
-                    for key, value in extra.items():
-                        if key in meta and meta.get(key) in ("", None):
-                            meta[key] = "" if value is None else str(value)
-                record = material_policy.set_meta(db, row, payload.source, meta)
-            except knowledge.KnowledgeError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(db, None, "kb.doc_meta", {"kb_id": kb_id, "source": payload.source})
-            verdict = material_policy.assess(record)
-            return {"source": payload.source, **record, "ok": verdict.ok, "reason": verdict.reason}
-
-    @app.delete("/admin/kbs/{kb_id}/docs")
-    def kb_docs_delete(kb_id: str, request: Request, source: str) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            row = db.get(KnowledgeBase, kb_id)
-            if row is None:
-                raise HTTPException(status_code=404, detail="知识库不存在")
-            options = dict(row.options or {})
-            docs = dict(material_policy.doc_map(row))
-            if source not in docs:
-                raise HTTPException(status_code=404, detail="素材未登记")
-            docs.pop(source)
-            options["docs"] = docs
-            row.options = options
-            audit(db, None, "kb.doc_meta", {"kb_id": kb_id, "source": source, "deleted": True})
-            return {"deleted": True, "source": source}
 
     # --------------------------------------------------------------- plugins
 
@@ -2276,3674 +1721,213 @@ def create_app():
 
 
 
-    @app.get("/admin/plugins/catalog")
-    def plugin_catalog(request: Request) -> list[dict[str, Any]]:
-        require_super(request)
-        return [dict(item) for item in plugins.PLUGIN_CATALOG]
 
-    @app.get("/admin/plugins")
-    def list_plugins(
-        request: Request, limit: int = 500, offset: int = 0
-    ) -> list[dict[str, Any]]:
-        require_super(request)
-        capped, start = _page_bounds(limit, offset)
-        with session_scope() as db:
-            rows = list(
-                db.scalars(
-                    select(Plugin).order_by(Plugin.name).limit(capped).offset(start)
-                )
-            )
-            return [plugins.plugin_payload(row) for row in rows]
 
-    @app.post("/admin/plugins", status_code=201)
-    def create_plugin(payload: PluginCreate, request: Request) -> dict[str, Any]:
-        require_super(request)
-        name = plugin_name(payload.name)
-        transport = plugin_transport(payload.transport)
-        command = (payload.command or "").strip()[:500]
-        url = (payload.url or "").strip()[:500]
-        plugin_validate(transport, command, url)
-        args = plugin_items(payload.args, field="args")
-        env = plugin_env(payload.env)
-        allowlist = plugin_items(payload.tool_allowlist, field="tool_allowlist", limits=200)
-        with session_scope() as db:
-            if db.scalar(select(Plugin).where(Plugin.name == name)):
-                raise HTTPException(status_code=409, detail="插件名称已存在")
-            row = Plugin(
-                name=name,
-                transport=transport,
-                command=command,
-                args=args,
-                env=env,
-                url=url,
-                enabled=bool(payload.enabled),
-                tool_allowlist=allowlist,
-                mem_limit_mb=plugins.clamp_mem_limit(payload.mem_limit_mb),
-                cpu_seconds=plugins.clamp_cpu_seconds(payload.cpu_seconds),
-            )
-            db.add(row)
-            db.flush()
-            audit(
-                db,
-                None,
-                "plugin.create",
-                {"plugin_id": row.id, "name": name, "transport": transport},
-            )
-            return plugins.plugin_payload(row)
 
-    @app.patch("/admin/plugins/{plugin_id}")
-    def update_plugin(
-        plugin_id: str, payload: PluginUpdate, request: Request
-    ) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            row = db.get(Plugin, plugin_id)
-            if row is None:
-                raise HTTPException(status_code=404, detail="插件不存在")
-            data = payload.model_dump(exclude_unset=True)
-            changed: list[str] = []
-            if data.get("name") is not None:
-                name = plugin_name(data["name"])
-                if name != row.name and db.scalar(select(Plugin).where(Plugin.name == name)):
-                    raise HTTPException(status_code=409, detail="插件名称已存在")
-                row.name = name
-                changed.append("name")
-            if data.get("transport") is not None:
-                row.transport = plugin_transport(data["transport"])
-                changed.append("transport")
-            if data.get("command") is not None:
-                row.command = str(data["command"]).strip()[:500]
-                changed.append("command")
-            if data.get("url") is not None:
-                row.url = str(data["url"]).strip()[:500]
-                changed.append("url")
-            if "args" in data:
-                row.args = plugin_items(data["args"], field="args")
-                changed.append("args")
-            if "env" in data:
-                row.env = plugin_env(data["env"])
-                changed.append("env")
-            if "tool_allowlist" in data:
-                row.tool_allowlist = plugin_items(
-                    data["tool_allowlist"], field="tool_allowlist", limits=200
-                )
-                changed.append("tool_allowlist")
-            if data.get("enabled") is not None:
-                row.enabled = bool(data["enabled"])
-                changed.append("enabled")
-                if row.enabled:
-                    plugins.reset_guard(db, row)
-            if data.get("mem_limit_mb") is not None:
-                row.mem_limit_mb = plugins.clamp_mem_limit(data["mem_limit_mb"])
-                changed.append("mem_limit_mb")
-            if data.get("cpu_seconds") is not None:
-                row.cpu_seconds = plugins.clamp_cpu_seconds(data["cpu_seconds"])
-                changed.append("cpu_seconds")
-            plugin_validate(row.transport, row.command or "", row.url or "")
-            db.flush()
-            audit(
-                db,
-                None,
-                "plugin.update",
-                {"plugin_id": row.id, "name": row.name, "changed": sorted(changed)},
-            )
-            return plugins.plugin_payload(row)
 
-    @app.delete("/admin/plugins/{plugin_id}")
-    def delete_plugin(plugin_id: str, request: Request) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            row = db.get(Plugin, plugin_id)
-            if row is None:
-                raise HTTPException(status_code=404, detail="插件不存在")
-            audit(db, None, "plugin.delete", {"plugin_id": row.id, "name": row.name})
-            db.delete(row)
-            db.flush()
-            return {"deleted": True, "id": plugin_id}
 
-    @app.post("/admin/plugins/{plugin_id}/test")
-    def test_plugin(plugin_id: str, request: Request) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            row = db.get(Plugin, plugin_id)
-            if row is None:
-                raise HTTPException(status_code=404, detail="插件不存在")
-            ref = plugins.snapshot(row)
-            name = row.name
-        ok, message, tools = plugins.test_plugin(ref)
-        with session_scope() as db:
-            row = db.get(Plugin, plugin_id)
-            if row is not None:
-                row.last_test_at = datetime.now(UTC).replace(tzinfo=None)
-                row.last_test_ok = ok
-                row.last_test_message = message[:1000]
-                plugins.record_outcome(db, row, ok)
-                audit(
-                    db,
-                    None,
-                    "plugin.test",
-                    {
-                        "plugin_id": plugin_id,
-                        "name": name,
-                        "ok": ok,
-                        "tool_count": len(tools),
-                    },
-                )
-        return {"ok": ok, "message": message, "tools": tools}
 
-    @app.get("/admin/plugins/{plugin_id}/package")
-    def export_plugin_package(plugin_id: str, request: Request) -> Response:
-        """导出 .bidplugin 插件包（zip 附件下载）。"""
-        require_super(request)
-        with session_scope() as db:
-            row = db.get(Plugin, plugin_id)
-            if row is None:
-                raise HTTPException(status_code=404, detail="插件不存在")
-            data = plugin_pack.export_package(row)
-            name = row.name
-        filename = f"{name}.bidplugin.zip"
-        # HTTP 头只能放 ASCII：非 ASCII 名走 RFC 5987 的 filename*。
-        ascii_name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._-") or "plugin"
-        disposition = (
-            f'attachment; filename="{ascii_name}.bidplugin.zip"; '
-            f"filename*=UTF-8''{quote(filename, safe='')}"
-        )
-        return Response(
-            content=data,
-            media_type="application/zip",
-            headers={"Content-Disposition": disposition},
-        )
 
-    @app.post("/admin/plugins/import")
-    async def import_plugin_package(
-        request: Request,
-        response: Response,
-        file: UploadFile = File(...),
-        on_conflict: str = "replace",
-    ) -> dict[str, Any]:
-        """导入插件包：新建 201，同名升级 200，skip 冲突 409。"""
-        require_super(request)
-        if on_conflict not in {"replace", "skip"}:
-            raise HTTPException(status_code=400, detail="on_conflict 只能是 replace/skip")
-        data = await file.read()
-        await file.close()
-        if len(data) > plugin_pack.MAX_PACKAGE_BYTES:
-            raise HTTPException(status_code=400, detail="插件包过大（超过 5MB）")
-        try:
-            manifest = plugin_pack.parse_package(data)
-            with session_scope() as db:
-                row, created = plugin_pack.apply_manifest(
-                    db, manifest, on_conflict=on_conflict
-                )
-                payload = plugins.plugin_payload(row)
-                audit(
-                    db,
-                    None,
-                    "plugin.import",
-                    {
-                        "plugin_id": row.id,
-                        "name": row.name,
-                        "transport": row.transport,
-                        "created": created,
-                        "updated": not created,
-                    },
-                )
-        except plugin_pack.PluginPackConflict as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        response.status_code = 201 if created else 200
-        return payload
 
-    @app.get("/admin/billing")
-    def admin_billing(request: Request, limit: int = 50) -> dict[str, Any]:
-        require_super(request)
-        capped = max(1, min(200, int(limit)))
-        with session_scope() as db:
-            settings_payload = billing.billing_settings(db)
-            orders = list(
-                db.scalars(
-                    select(RechargeOrder)
-                    .order_by(RechargeOrder.created_at.desc())
-                    .limit(capped)
-                )
-            )
-            codes = list(
-                db.scalars(
-                    select(RedeemCode).order_by(RedeemCode.created_at.desc()).limit(capped)
-                )
-            )
-            return {
-                "settings": settings_payload,
-                "stats": billing.admin_stats(db),
-                "orders": [billing.order_payload(order) for order in orders],
-                "codes": [
-                    {
-                        "id": code.id,
-                        "code": code.code,
-                        "credits": code.credits,
-                        "amount_cents": code.amount_cents,
-                        "status": code.status,
-                        "batch": code.batch,
-                        "used_by": code.used_by,
-                        "used_at": _iso(code.used_at),
-                        "expires_at": _iso(code.expires_at),
-                        "created_at": _iso(code.created_at),
-                    }
-                    for code in codes
-                ],
-            }
 
-    @app.put("/admin/billing")
-    def save_admin_billing(payload: BillingSettingsPayload, request: Request) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            try:
-                saved = billing.save_billing_settings(db, payload.model_dump(exclude_unset=True))
-            except billing.BillingError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return {"settings": saved, "stats": billing.admin_stats(db)}
 
-    @app.post("/admin/redeem-codes", status_code=201)
-    def generate_codes(payload: RedeemGenerate, request: Request) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            try:
-                codes = billing.generate_redeem_codes(
-                    db,
-                    count=payload.count,
-                    credits=payload.credits,
-                    amount_cents=payload.amount_cents,
-                    days=payload.days,
-                    created_by=request.state.user["id"],
-                )
-            except billing.BillingError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return {"codes": codes}
 
-    @app.post("/admin/users/{user_id}/credits")
-    def adjust_credits(user_id: str, payload: CreditAdjust, request: Request) -> dict[str, Any]:
-        require_super(request)
-        if payload.amount == 0:
-            raise HTTPException(status_code=400, detail="调整数量不能为 0")
-        with session_scope() as db:
-            user = db.get(User, user_id)
-            if user is None:
-                raise HTTPException(status_code=404, detail="用户不存在")
-            try:
-                billing.add_credits(
-                    db,
-                    user.id,
-                    payload.amount,
-                    kind="admin",
-                    note=payload.note or f"管理员调整 {payload.amount:+d}",
-                    ref_type="admin",
-                    ref_id=request.state.user["id"],
-                )
-            except billing.InsufficientCredits as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return {
-                "user": auth.user_payload(user),
-                "transactions": billing.transactions(db, user.id),
-            }
 
-    @app.post("/admin/users/{user_id}/vip")
-    def grant_vip(user_id: str, payload: VipGrant, request: Request) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            user = db.get(User, user_id)
-            if user is None:
-                raise HTTPException(status_code=404, detail="用户不存在")
-            if user.parent_id:
-                raise HTTPException(status_code=400, detail="子账号继承主账号 VIP，不能单独设置")
-            now = datetime.now(UTC).replace(tzinfo=None)
-            if payload.days == 0:
-                user.vip_expires_at = None
-            else:
-                base = user.vip_expires_at if (user.vip_expires_at and user.vip_expires_at > now) else now
-                user.vip_expires_at = base + timedelta(days=payload.days)
-            db.flush()
-            audit(
-                db,
-                None,
-                "user.vip",
-                {"user_id": user.id, "days": payload.days, "note": payload.note},
-            )
-            return {"user": auth.user_payload(user)}
 
-    @app.get("/admin/users")
-    def list_users(
-        request: Request, limit: int = 500, offset: int = 0
-    ) -> list[dict[str, Any]]:
-        require_super(request)
-        capped, start = _page_bounds(limit, offset)
-        with session_scope() as db:
-            rows = list(
-                db.scalars(
-                    select(User)
-                    .order_by(User.created_at)
-                    .limit(capped)
-                    .offset(start)
-                )
-            )
-            return [auth.user_payload(row) for row in rows]
 
-    @app.post("/admin/users", status_code=201)
-    def create_user(payload: UserCreate, request: Request) -> dict[str, Any]:
-        require_super(request)
-        if payload.role not in auth.ROLES:
-            raise HTTPException(status_code=400, detail="角色不合法")
-        with session_scope() as db:
-            if db.scalar(select(User).where(User.username == payload.username)):
-                raise HTTPException(status_code=400, detail="用户名已存在")
-            row = User(
-                username=payload.username,
-                display_name=payload.display_name or payload.username,
-                password_hash=hash_password(payload.password),
-                role=payload.role,
-                active=True,
-            )
-            db.add(row)
-            db.flush()
-            return auth.user_payload(row)
 
-    @app.patch("/admin/users/{user_id}")
-    def update_user(user_id: str, payload: UserUpdate, request: Request) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            row = db.get(User, user_id)
-            if row is None:
-                raise HTTPException(status_code=404, detail="用户不存在")
-            data = payload.model_dump(exclude_unset=True)
-            password = data.pop("password", None)
-            if data.get("role") is not None and data["role"] not in auth.ROLES:
-                raise HTTPException(status_code=400, detail="角色不合法")
-            if user_id == request.state.user["id"]:
-                if data.get("active") is False:
-                    raise HTTPException(status_code=400, detail="不能停用当前登录账号")
-                if data.get("role") and data["role"] != auth.ROLE_SUPER_ADMIN:
-                    raise HTTPException(status_code=400, detail="不能降低当前账号权限")
-            if row.role == auth.ROLE_SUPER_ADMIN and (
-                data.get("role") not in {None, auth.ROLE_SUPER_ADMIN}
-                or data.get("active") is False
-            ):
-                others = db.scalar(
-                    select(func.count())
-                    .select_from(User)
-                    .where(
-                        User.role == auth.ROLE_SUPER_ADMIN,
-                        User.active.is_(True),
-                        User.id != row.id,
-                    )
-                )
-                if not others:
-                    raise HTTPException(status_code=400, detail="至少保留一个启用的超级管理员")
-            if password:
-                row.password_hash = hash_password(password)
-                auth.revoke_user_sessions(db, row.id)
-            for key, value in data.items():
-                setattr(row, key, value)
-            db.flush()
-            return auth.user_payload(row)
 
-    @app.delete("/admin/users/{user_id}")
-    def delete_user(user_id: str, request: Request) -> dict[str, Any]:
-        require_super(request)
-        if user_id == request.state.user["id"]:
-            raise HTTPException(status_code=400, detail="不能删除当前登录账号")
-        with session_scope() as db:
-            row = db.get(User, user_id)
-            if row is None:
-                raise HTTPException(status_code=404, detail="用户不存在")
-            if row.role == auth.ROLE_SUPER_ADMIN:
-                others = db.scalar(
-                    select(func.count())
-                    .select_from(User)
-                    .where(
-                        User.role == auth.ROLE_SUPER_ADMIN,
-                        User.active.is_(True),
-                        User.id != row.id,
-                    )
-                )
-                if not others:
-                    raise HTTPException(status_code=400, detail="至少保留一个启用的超级管理员")
-            db.execute(delete(AuthSession).where(AuthSession.user_id == row.id))
-            db.delete(row)
-            return {"deleted": True, "id": user_id}
 
     # -------------------------------------------------------- rule packages
 
 
 
-    @app.get("/admin/rule-packages")
-    def admin_list_rule_packages(
-        request: Request, include_hidden: bool = False
-    ) -> list[dict[str, Any]]:
-        require_super(request)
-        with session_scope() as db:
-            usage = _package_usage(db)
-        return [
-            {**item, "usage": usage.get(str(item["name"]), 0)}
-            for item in list_packages(include_hidden=include_hidden)
-        ]
 
-    @app.post("/admin/rule-packages/validate")
-    def admin_validate_rule_package(
-        payload: RulePackageValidateRequest, request: Request
-    ) -> dict[str, Any]:
-        require_super(request)
-        return validate_package_text(payload.document, payload.name)
 
-    @app.get("/admin/rule-packages/{name}")
-    def admin_get_rule_package(name: str, request: Request) -> dict[str, Any]:
-        require_super(request)
-        name = check_package_name(name)
-        if not package_store.package_exists(name):
-            raise HTTPException(status_code=404, detail="规则包不存在")
-        try:
-            document = package_store.read_document(name)
-        except package_store.StoreError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return rule_package_record(name, document)
 
-    @app.post("/admin/rule-packages", status_code=201)
-    def admin_create_rule_package(
-        payload: RulePackageDocument, request: Request
-    ) -> dict[str, Any]:
-        require_super(request)
-        name = document_package_name(payload.document)
-        if not name:
-            check_package_document(payload.document)
-            raise HTTPException(status_code=400, detail="YAML 缺少 package 字段")
-        name = check_package_name(name)
-        if package_store.package_exists(name):
-            raise HTTPException(status_code=409, detail=f"规则包已存在: {name}")
-        check_package_document(payload.document, name)
-        package_store.save_user_package(name, payload.document)
-        package_store.unhide_package(name)
-        package_audit("package.create", name)
-        return rule_package_record(name, payload.document)
 
-    @app.put("/admin/rule-packages/{name}")
-    def admin_update_rule_package(
-        name: str, payload: RulePackageDocument, request: Request
-    ) -> dict[str, Any]:
-        require_super(request)
-        name = check_package_name(name)
-        if not package_store.package_exists(name):
-            raise HTTPException(status_code=404, detail="规则包不存在")
-        check_package_document(payload.document, name)
-        package_store.save_user_package(name, payload.document)
-        package_store.unhide_package(name)
-        package_audit("package.update", name)
-        return rule_package_record(name, payload.document)
 
-    @app.delete("/admin/rule-packages/{name}")
-    def admin_delete_rule_package(name: str, request: Request) -> dict[str, Any]:
-        require_super(request)
-        name = check_package_name(name)
-        if not package_store.package_exists(name):
-            raise HTTPException(status_code=404, detail="规则包不存在")
-        with session_scope() as db:
-            usage = _package_usage(db).get(name, 0)
-        if usage:
-            raise HTTPException(
-                status_code=409, detail=f"仍有 {usage} 个项目使用该规则包"
-            )
-        package_store.hide_package(name)
-        package_audit("package.delete", name)
-        return {"name": name, "hidden": True}
 
-    @app.post("/admin/rule-packages/{name}/restore")
-    def admin_restore_rule_package(
-        name: str, request: Request, reset_override: bool = False
-    ) -> dict[str, Any]:
-        require_super(request)
-        name = check_package_name(name)
-        if not package_store.package_exists(name):
-            raise HTTPException(status_code=404, detail="规则包不存在")
-        if reset_override and not package_store.is_builtin(name):
-            raise HTTPException(status_code=400, detail="仅内置规则包可恢复内置原文")
-        if reset_override:
-            package_store.remove_user_package(name)
-        package_store.unhide_package(name)
-        try:
-            document = package_store.read_document(name)
-        except package_store.StoreError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        package_audit("package.restore", name)
-        return rule_package_record(name, document)
 
     # ---------------------------------------------------------------- quotas
 
 
-    @app.get("/admin/quotas")
-    def list_quotas(
-        request: Request, search: str = "", limit: int = 100, offset: int = 0
-    ) -> list[dict[str, Any]]:
-        require_super(request)
-        term = (search or "").strip()
-        with session_scope() as db:
-            statement = select(QuotaItem)
-            if term:
-                pattern = f"%{term}%"
-                statement = statement.where(
-                    QuotaItem.name.ilike(pattern)
-                    | QuotaItem.spec.ilike(pattern)
-                    | QuotaItem.category.ilike(pattern)
-                )
-            capped = max(1, min(int(limit), 500))
-            start = max(0, int(offset))
-            rows = list(
-                db.scalars(
-                    statement.order_by(QuotaItem.name, QuotaItem.id)
-                    .limit(capped)
-                    .offset(start)
-                )
-            )
-            return [boq.quota_payload(row) for row in rows]
 
-    @app.get("/admin/quotas/match")
-    def match_quota_candidates(
-        request: Request, name: str = "", spec: str = ""
-    ) -> list[dict[str, Any]]:
-        require_super(request)
-        with session_scope() as db:
-            quotas = list(
-                db.scalars(select(QuotaItem).order_by(QuotaItem.name, QuotaItem.id))
-            )
-            item = {"name": name, "spec": spec}
-            return [
-                {
-                    "id": quota.id,
-                    "name": quota.name,
-                    "spec": quota.spec or "",
-                    "unit": quota.unit or "",
-                    "unit_price": round(float(quota.unit_price or 0.0), 4),
-                    "score": round(float(score), 4),
-                }
-                for score, quota in boq.match_quotas(item, quotas, limit=5)
-            ]
 
-    @app.post("/admin/quotas", status_code=201)
-    def create_quota(payload: QuotaCreate, request: Request) -> dict[str, Any]:
-        require_super(request)
-        name = quota_name(payload.name)
-        price = quota_price(payload.unit_price)
-        with session_scope() as db:
-            quota = QuotaItem(
-                name=name,
-                spec=(payload.spec or "").strip()[:200],
-                unit=(payload.unit or "").strip()[:20],
-                unit_price=price,
-                category=(payload.category or "").strip()[:40],
-                note=(payload.note or "").strip()[:200],
-            )
-            db.add(quota)
-            db.flush()
-            audit(db, None, "quota.create", {"quota_id": quota.id, "name": name})
-            return boq.quota_payload(quota)
 
-    @app.patch("/admin/quotas/{quota_id}")
-    def update_quota(
-        quota_id: str, payload: QuotaUpdate, request: Request
-    ) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            quota = db.get(QuotaItem, quota_id)
-            if quota is None:
-                raise LookupError(f"定额不存在：{quota_id}")
-            changed: dict[str, Any] = {}
-            if payload.name is not None:
-                quota.name = quota_name(payload.name)
-                changed["name"] = quota.name
-            if payload.unit_price is not None:
-                quota.unit_price = quota_price(payload.unit_price)
-                changed["unit_price"] = quota.unit_price
-            for field, limit in (
-                ("spec", 200),
-                ("unit", 20),
-                ("category", 40),
-                ("note", 200),
-            ):
-                value = getattr(payload, field)
-                if value is not None:
-                    setattr(quota, field, value.strip()[:limit])
-                    changed[field] = getattr(quota, field)
-            db.flush()
-            audit(
-                db,
-                None,
-                "quota.update",
-                {"quota_id": quota.id, "name": quota.name, "changed": sorted(changed)},
-            )
-            return boq.quota_payload(quota)
 
-    @app.delete("/admin/quotas/{quota_id}")
-    def delete_quota(quota_id: str, request: Request) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            quota = db.get(QuotaItem, quota_id)
-            if quota is None:
-                raise LookupError(f"定额不存在：{quota_id}")
-            audit(db, None, "quota.delete", {"quota_id": quota.id, "name": quota.name})
-            db.delete(quota)
-            db.flush()
-            return {"deleted": True, "id": quota_id}
 
     # ----------------------------------------------------------------- terms
-    @app.get("/admin/terms")
-    def list_terms(
-        request: Request,
-        search: str = "",
-        kind: str = "",
-        limit: int = 200,
-        offset: int = 0,
-    ) -> list[dict[str, Any]]:
-        require_super(request)
-        capped, start = _page_bounds(limit, offset)
-        with session_scope() as db:
-            try:
-                rows = terms.list_terms(
-                    db, search=search, kind=kind, limit=capped, offset=start
-                )
-            except terms.TermError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return [terms.term_payload(row) for row in rows]
 
-    @app.post("/admin/terms", status_code=201)
-    def create_term(payload: TermCreate, request: Request) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            try:
-                row = terms.create_term(
-                    db,
-                    kind=payload.kind,
-                    source=payload.source,
-                    target=payload.target,
-                    note=payload.note,
-                    enabled=payload.enabled,
-                )
-            except terms.TermExists as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
-            except terms.TermError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(
-                db,
-                None,
-                "term.create",
-                {"term_id": row.id, "kind": row.kind, "source": row.source},
-            )
-            return terms.term_payload(row)
 
-    @app.patch("/admin/terms/{term_id}")
-    def update_term(term_id: str, payload: TermUpdate, request: Request) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            row = db.get(TermItem, term_id)
-            if row is None:
-                raise LookupError(f"术语不存在：{term_id}")
-            changes = {
-                field: getattr(payload, field)
-                for field in ("kind", "source", "target", "note", "enabled")
-                if getattr(payload, field) is not None
-            }
-            try:
-                terms.update_term(db, row, **changes)
-            except terms.TermExists as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
-            except terms.TermError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(
-                db,
-                None,
-                "term.update",
-                {
-                    "term_id": row.id,
-                    "kind": row.kind,
-                    "source": row.source,
-                    "changed": sorted(changes),
-                },
-            )
-            return terms.term_payload(row)
 
-    @app.delete("/admin/terms/{term_id}")
-    def delete_term(term_id: str, request: Request) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            row = db.get(TermItem, term_id)
-            if row is None:
-                raise LookupError(f"术语不存在：{term_id}")
-            audit(
-                db,
-                None,
-                "term.delete",
-                {"term_id": row.id, "kind": row.kind, "source": row.source},
-            )
-            terms.delete_term(db, row)
-            return {"deleted": True, "id": term_id}
 
     # ------------------------------------------------------ textqa config
 
 
-    @app.get("/admin/textqa")
-    def get_textqa(request: Request) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            return textqa_payload(db)
 
-    @app.put("/admin/textqa")
-    def put_textqa(payload: TextQaUpdate, request: Request) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            try:
-                saved = textqa.save_custom(db, payload.typos)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(db, None, "textqa.config", {"count": len(saved)})
-            return textqa_payload(db)
 
     # ------------------------------------------------------ wechat config
 
 
-    @app.get("/admin/wechat")
-    def admin_get_wechat(request: Request) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            return wechat_config_payload(db)
 
-    @app.put("/admin/wechat")
-    def admin_update_wechat(payload: WechatConfigUpdate, request: Request) -> dict[str, Any]:
-        require_super(request)
-        from ..models import WechatConfig
-        from ..security import encrypt_secret
 
-        with session_scope() as db:
-            row = db.get(WechatConfig, "default")
-            if row is None:
-                row = WechatConfig(id="default")
-                db.add(row)
-            changed: list[str] = []
-            if payload.app_id is not None:
-                row.app_id = payload.app_id.strip()[:120]
-                changed.append("app_id")
-            if payload.clear_secret:
-                row.app_secret_enc = ""
-                changed.append("clear_secret")
-            elif payload.app_secret:
-                row.app_secret_enc = encrypt_secret(payload.app_secret)
-                changed.append("app_secret")
-            if payload.redirect_uri is not None:
-                row.redirect_uri = payload.redirect_uri.strip()[:500]
-                changed.append("redirect_uri")
-            if payload.enabled is not None:
-                row.enabled = bool(payload.enabled)
-                changed.append("enabled")
-            if payload.mock is not None:
-                row.mock = bool(payload.mock)
-                changed.append("mock")
-            if not changed:
-                raise HTTPException(status_code=400, detail="没有需要更新的字段")
-            db.flush()
-            audit(db, None, "wechat.config", {"keys": changed})
-            return wechat_config_payload(db)
-
-    @app.post("/admin/wechat/test")
-    def admin_test_wechat(request: Request) -> dict[str, Any]:
-        require_super(request)
-        import httpx
-
-        with session_scope() as db:
-            cfg = wechat.effective(db)
-        if cfg["mock"]:
-            return {"ok": True, "message": "模拟模式可用：登录会生成本地测试账号，不访问微信服务器"}
-        if not (cfg["app_id"] and cfg["app_secret"] and cfg["redirect_uri"]):
-            return {"ok": False, "message": "未配置完整的 AppID / AppSecret / 回调地址"}
-        try:
-            response = httpx.get(
-                wechat.AUTHORIZE_URL,
-                params={"appid": cfg["app_id"], "redirect_uri": cfg["redirect_uri"]},
-                timeout=wechat.TIMEOUT,
-            )
-        except httpx.HTTPError:
-            logger.exception("微信开放平台连通性测试失败")
-            return {"ok": False, "message": "无法连接微信开放平台，请检查网络或稍后重试"}
-        if response.status_code >= 500:
-            return {"ok": False, "message": f"微信开放平台返回 {response.status_code}，请稍后重试"}
-        return {"ok": True, "message": "配置完整，微信开放平台可达；请用真实扫码验证回调"}
 
     # ---------------------------------------------------------------- meta
-    @app.get("/health")
-    def health() -> dict[str, Any]:
-        with session_scope() as db:
-            endpoint = model_config.resolve_chat_endpoint(db)
-            embedding = model_config.resolve_embedding_endpoint(db)
-            models = db.scalar(select(func.count()).select_from(ModelConfig)) or 0
-            kbs = db.scalar(select(func.count()).select_from(KnowledgeBase)) or 0
-        if settings.health_public:
-            # 公网探活只返回前端必需的最少字段，不泄露版本、路径与库内计数
-            return {
-                "status": "ok",
-                "offline": settings.offline,
-                "model_configured": bool(endpoint),
-                "embedding_configured": bool(embedding),
-                "auth_required": True,
-                "registration": True,
-                "wechat_login": wechat.available(),
-                "wechat_mock": settings.wechat_mock,
-                "wechat_pay": wechatpay.available(),
-                "wechat_pay_mock": settings.wechat_pay_mock,
-            }
-        return {
-            "version": __version__,
-            "model_configured": bool(endpoint),
-            "model_label": endpoint.label if endpoint else "",
-            "embedding_configured": bool(embedding),
-            "embedding_model": embedding.model_name if embedding else "",
-            "offline": settings.offline,
-            "models": models,
-            "knowledge_bases": kbs,
-            "auth_required": True,
-            "registration": True,
-            "wechat_login": wechat.available(),
-            "wechat_mock": settings.wechat_mock,
-            "wechat_pay": wechatpay.available(),
-            "wechat_pay_mock": settings.wechat_pay_mock,
-            "home": str(settings.home),
-            "web_ready": (Path(__file__).resolve().parent.parent / "web_dist" / "index.html").is_file(),
-        }
 
-    @app.get("/admin/health")
-    def admin_health(request: Request) -> dict[str, Any]:
-        """完整运行状态，仅超级管理员可见（公开 /health 保持最小化）。"""
-        import platform as platform_module
 
-        require_super(request)
-        with session_scope() as db:
-            endpoint = model_config.resolve_chat_endpoint(db)
-            embedding = model_config.resolve_embedding_endpoint(db)
-            models = db.scalar(select(func.count()).select_from(ModelConfig)) or 0
-            kbs = db.scalar(select(func.count()).select_from(KnowledgeBase)) or 0
-            users = db.scalar(select(func.count()).select_from(User)) or 0
-        started = getattr(app.state, "started_at", None)
-        db_path = settings.home / "bidcraft.db"
-        db_size = db_path.stat().st_size if db_path.is_file() else 0
-        try:
-            disk_free = shutil.disk_usage(settings.home).free
-        except OSError:  # pragma: no cover - 极少数文件系统不支持
-            disk_free = 0
-        uptime = int((datetime.now(UTC) - started).total_seconds()) if started else 0
-        return {
-            "status": "ok",
-            "version": __version__,
-            "started_at": started.isoformat() if started else None,
-            "uptime_seconds": max(0, uptime),
-            "python": platform_module.python_version(),
-            "platform": platform_module.platform(),
-            "home": str(settings.home),
-            "db_size_bytes": db_size,
-            "disk_free_bytes": disk_free,
-            "web_ready": (Path(__file__).resolve().parent.parent / "web_dist" / "index.html").is_file(),
-            "offline": settings.offline,
-            "docs_enabled": settings.docs_enabled,
-            "health_public": settings.health_public,
-            "secure_cookie": settings.secure_cookie,
-            "model_configured": bool(endpoint),
-            "model_label": endpoint.label if endpoint else "",
-            "embedding_configured": bool(embedding),
-            "embedding_model": embedding.model_name if embedding else "",
-            "models": models,
-            "knowledge_bases": kbs,
-            "users": users,
-            "auth_required": True,
-            "registration": True,
-            "wechat_login": wechat.available(),
-            "wechat_pay": wechatpay.available(),
-        }
-
-    @app.get("/packages")
-    def packages(limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
-        """Selectable industry packages (the abstract base package is hidden)."""
-        capped, start = _page_bounds(limit, offset)
-        return [item for item in list_packages() if not item.get("abstract")][
-            start : start + capped
-        ]
 
     # ------------------------------------------------------------ projects
-    @app.get("/projects")
-    def projects(limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
-        capped, start = _page_bounds(limit, offset)
-        with session_scope() as db:
-            user = current_user() or {}
-            if user.get("role") == auth.ROLE_SUPER_ADMIN:
-                rows = list(
-                    db.scalars(
-                        select(Project)
-                        .order_by(Project.updated_at.desc())
-                        .limit(capped)
-                        .offset(start)
-                    )
-                )
-                return [
-                    _project_payload(item, _project_stats(db, item.id), "admin")
-                    for item in rows
-                ]
-            memberships = {
-                row.project_id: row.role
-                for row in db.scalars(
-                    select(ProjectMember).where(ProjectMember.user_id == user.get("id"))
-                )
-            }
-            visible: dict[str, tuple[Project, str]] = {
-                item.id: (item, "owner")
-                for item in db.scalars(
-                    select(Project).where(Project.owner_id == user.get("id"))
-                )
-            }
-            if memberships:
-                for item in db.scalars(
-                    select(Project).where(Project.id.in_(list(memberships)))
-                ):
-                    visible.setdefault(item.id, (item, memberships[item.id]))
-            ordered = sorted(
-                visible.values(),
-                key=lambda pair: pair[0].updated_at or datetime.min,
-                reverse=True,
-            )
-            return [
-                _project_payload(item, _project_stats(db, item.id), role)
-                for item, role in ordered[start : start + capped]
-            ]
 
-    @app.post("/projects", status_code=201)
-    def new_project(payload: ProjectCreate) -> dict[str, Any]:
-        bid_section = payload.bid_section.strip()
-        if len(bid_section) > 60:
-            raise HTTPException(status_code=400, detail="标段/包件不超过 60 个字符")
-        with session_scope() as db:
-            try:
-                project = create_project(db, payload.name, payload.package)
-                project.owner_id = (current_user() or {}).get("id")
-                project.meta = {**(project.meta or {}), "bid_section": bid_section}
-                db.flush()
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(db, project.id, "project.create", {"name": project.name})
-            _, my_role = _project(db, project.id)
-            return _project_payload(project, _project_stats(db, project.id), my_role)
 
-    @app.post("/projects/batch-check", status_code=202)
-    def batch_check(payload: BatchIdsRequest) -> dict[str, Any]:
-        """Queue a background check over up to 50 accessible projects."""
 
-        if len(payload.ids) > 50:
-            raise HTTPException(status_code=400, detail="一次最多批量核对 50 个项目")
-        with session_scope() as db:
-            projects = _batch_projects(db, payload.ids)
-            if not projects:
-                raise HTTPException(status_code=400, detail="没有可操作的项目")
-            user = current_user() or {}
-            project_ids = [project.id for project in projects]
-            if _cancel_stale_jobs(
-                db,
-                ["batch_check"],
-                BATCH_STALE_SECONDS,
-                project_id=None,
-                stale_message="批量核对任务超时中断，已允许重新提交",
-            ) is not None:
-                raise HTTPException(status_code=409, detail="已有批量核对任务在运行")
-            job = Job(
-                project_id=None,
-                kind="batch_check",
-                status="queued",
-                message=f"批量核对排队中（{len(project_ids)} 个项目）…",
-                payload={
-                    "owner_id": user.get("id") or "",
-                    "total": len(project_ids),
-                    "done": 0,
-                    "ids": project_ids,
-                    "results": [],
-                },
-            )
-            db.add(job)
-            db.flush()
-            job_id = job.id
-            owner_row = db.get(User, user.get("id") or "")
-            job.priority = billing.queue_priority(db, owner_row) if owner_row else 1
-            priority = job.priority
-            jobs.publish_event(job_id, "queued", jobs.job_payload(job), db=db)
-            audit(db, None, "project.batch_check", {"count": len(project_ids)})
-        jobqueue.submit(
-            _run_batch_check_job,
-            (job_id, project_ids),
-            priority=priority,
-            job_id=job_id,
-        )
-        return {"job_id": job_id}
-
-    @app.post("/projects/batch-export", status_code=202)
-    def batch_export(payload: BatchExportRequest) -> dict[str, Any]:
-        """Queue a background export and return the job whose zip can be downloaded.
-
-        交付硬门禁：存在未处置废标/阻断风险的项目会被跳过（不进入 zip），
-        原因见任务结果 ``failed`` 列表中的 ``error``；其余项目照常导出。
-        批量后台任务不提供 force 通道（fail-closed）。
-        """
-
-        fmt = (payload.format or "docx").strip().lower()
-        if fmt not in {"docx", "md", "xlsx"}:
-            raise HTTPException(status_code=400, detail="format 只能是 docx/md/xlsx")
-        if len(payload.ids) > 50:
-            raise HTTPException(status_code=400, detail="一次最多批量导出 50 个项目")
-        with session_scope() as db:
-            projects = _batch_projects(db, payload.ids)
-            if not projects:
-                raise HTTPException(status_code=400, detail="没有可操作的项目")
-            user = current_user() or {}
-            project_ids = [project.id for project in projects]
-            if _cancel_stale_jobs(
-                db,
-                ["batch_export"],
-                BATCH_STALE_SECONDS,
-                project_id=None,
-                stale_message="批量导出任务超时中断，已允许重新提交",
-            ) is not None:
-                raise HTTPException(status_code=409, detail="已有批量导出任务在运行")
-            job = Job(
-                project_id=None,
-                kind="batch_export",
-                status="queued",
-                message=f"批量导出排队中（{len(project_ids)} 个项目）…",
-                payload={
-                    "owner_id": user.get("id") or "",
-                    "total": len(project_ids),
-                    "done": 0,
-                    "format": fmt,
-                    "ids": project_ids,
-                },
-            )
-            db.add(job)
-            db.flush()
-            job_id = job.id
-            owner_row = db.get(User, user.get("id") or "")
-            job.priority = billing.queue_priority(db, owner_row) if owner_row else 1
-            priority = job.priority
-            jobs.publish_event(job_id, "queued", jobs.job_payload(job), db=db)
-            audit(db, None, "project.batch_export", {"count": len(project_ids), "format": fmt})
-        jobqueue.submit(
-            _run_batch_export_job,
-            (job_id, project_ids, fmt),
-            priority=priority,
-            job_id=job_id,
-        )
-        return {"job_id": job_id}
 
     # R23 模板库：静态 "templates" 段必须先于 /projects/{ref} 等动态路由注册，
     # 否则 "templates" 会被当作项目 ref。
-    @app.get("/projects/templates")
-    def project_templates() -> list[dict[str, Any]]:
-        """模板列表：登录即可浏览（含 viewer），仅模板、updated_at 降序上限 200。"""
 
-        with session_scope() as db:
-            rows = list(
-                db.scalars(
-                    select(Project)
-                    .where(Project.is_template.is_(True))
-                    .order_by(Project.updated_at.desc())
-                    .limit(200)
-                )
-            )
-            owner_ids = {item.owner_id for item in rows if item.owner_id}
-            owners = (
-                {
-                    user.id: user
-                    for user in db.scalars(select(User).where(User.id.in_(list(owner_ids))))
-                }
-                if owner_ids
-                else {}
-            )
-            items: list[dict[str, Any]] = []
-            for item in rows:
-                owner = owners.get(item.owner_id) if item.owner_id else None
-                items.append(
-                    {
-                        "id": item.id,
-                        "name": item.name,
-                        "package": item.package,
-                        "is_template": True,
-                        "updated_at": _iso(item.updated_at),
-                        "owner_name": (owner.display_name or owner.username)
-                        if owner is not None
-                        else None,
-                    }
-                )
-            return items
 
-    @app.post("/projects/templates/{template_id}/instantiate", status_code=201)
-    def instantiate_template(
-        template_id: str, payload: ProjectInstantiate
-    ) -> dict[str, Any]:
-        """R23 从模板创建：登录即可（无需成员关系），创建者成为新项目 owner。
 
-        复用 R22 深拷贝：台账/大纲/正文始终复制，BOQ 与配图可选；报价版本、
-        问题、任务、成员授权、审计不复制。新项目不是模板。失败时清理新目录。
-        """
 
-        with session_scope() as db:
-            template = db.get(Project, template_id)
-            if template is None or not template.is_template:
-                raise LookupError("模板不存在")
-            try:
-                new = duplicate_project(
-                    db,
-                    template,
-                    name=payload.name,
-                    owner_id=(current_user() or {}).get("id"),
-                    include_boq=payload.include_boq,
-                    include_images=payload.include_images,
-                )
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            except Exception as exc:
-                new_id = getattr(exc, "duplicate_project_id", "")
-                if new_id:
-                    shutil.rmtree(settings.home / "projects" / new_id, ignore_errors=True)
-                raise
-            audit(
-                db,
-                new.id,
-                "project.instantiate",
-                {
-                    "template_id": template.id,
-                    "name": new.name,
-                    "include_boq": payload.include_boq,
-                    "include_images": payload.include_images,
-                },
-            )
-            return _project_payload(new, _project_stats(db, new.id), "owner")
 
-    @app.get("/projects/{ref}")
-    def project_detail(ref: str) -> dict[str, Any]:
-        with session_scope() as db:
-            project, my_role = _project(db, ref)
-            ledger = load_ledger(db, project.id)
-            sources = list(
-                db.scalars(
-                    select(SourceFile)
-                    .where(
-                        SourceFile.project_id == project.id,
-                        SourceFile.role.in_(TENDER_SOURCE_ROLES),
-                    )
-                    .order_by(SourceFile.created_at)
-                )
-            )
-            return {
-                **_project_payload(project, _project_stats(db, project.id), my_role),
-                "ledger_summary": ledger_summary(ledger),
-                "missing_required": [item.key for item in ledger.missing_required()],
-                "outline": len(load_outline(db, project.id)),
-                "checks_total": len(load_package(project.package).checks),
-                "sources": [_source_payload(source) for source in sources],
-            }
 
-    @app.patch("/projects/{ref}")
-    def update_project(ref: str, payload: ProjectUpdate) -> dict[str, Any]:
-        """Rename a project, set its bid section (标段/包件), approval chain or template flag.
 
-        ``approval_chain`` 双格式（R19，仅 owner/admin）：① R18 扁平用户 id
-        列表 → 每 id 一个单审批人 all 阶段；② v2 阶段列表
-        [{approvers: [用户id], mode?: "all"|"any", min_amount?: 数值,
-        packages?: [包件id], currencies?: [币种]}]。校验：阶段 ≤5、级内 1–5 人
-        去重保序、users 存在性、mode ∈ all|any（默认 all）、可选 min_amount 为
-        0–1e12 的数值（R21 金额门槛，布尔/字符串拒绝）、可选 packages /
-        currencies 为 ≤20 项、每项非空且 ≤40 字符的字符串列表（R25 条件，
-        去重保序，非法→400「条件无效」）。写入 meta 时统一存 v2 阶段快照
-        （name=display_name||username，合法条件原样保留），此后用户改名不追更；
-        空列表清空审批链，回到单级负责人审批。
-        """
 
-        updates = payload.model_dump(exclude_unset=True)
-        if not updates:
-            raise HTTPException(status_code=400, detail="没有需要更新的字段")
-        with session_scope() as db:
-            project, my_role = _project(db, ref)
-            _require_write(my_role)
-            keys: list[str] = []
-            meta = dict(project.meta or {})
-            if "name" in updates:
-                name = str(updates["name"] or "").strip()
-                if not name or len(name) > 80:
-                    raise HTTPException(status_code=400, detail="项目名称需为 1–80 个字符")
-                project.name = name
-                keys.append("name")
-            if "bid_section" in updates:
-                section = str(updates["bid_section"] or "").strip()
-                if len(section) > 60:
-                    raise HTTPException(status_code=400, detail="标段/包件不超过 60 个字符")
-                meta["bid_section"] = section
-                project.meta = meta
-                keys.append("bid_section")
-            if "approval_chain" in updates:
-                _require_owner(my_role)
-                raw_chain = updates["approval_chain"] or []
-                # R19 双格式：v2 阶段列表原样解析；R18 扁平用户 id 列表先整链
-                # 去重保序，再每 id 一个单审批人 all 阶段（语义同 R18）。
-                if raw_chain and isinstance(raw_chain[0], dict):
-                    raw_stages: list[Any] = list(raw_chain)
-                else:
-                    flat_seen: set[str] = set()
-                    flat_ordered: list[str] = []
-                    for raw_id in raw_chain:
-                        user_id = str(raw_id or "").strip()
-                        if user_id and user_id not in flat_seen:
-                            flat_seen.add(user_id)
-                            flat_ordered.append(user_id)
-                    raw_stages = [{"approvers": [uid]} for uid in flat_ordered]
-                if len(raw_stages) > 5:
-                    raise HTTPException(status_code=400, detail="审批链最多 5 级")
-                chain: list[dict[str, Any]] = []
-                for raw_stage in raw_stages:
-                    if not isinstance(raw_stage, dict):
-                        raise HTTPException(
-                            status_code=400, detail="审批阶段需为 {approvers, mode} 对象"
-                        )
-                    mode = raw_stage.get("mode", "all")
-                    if mode not in ("all", "any"):
-                        raise HTTPException(
-                            status_code=400, detail="审批模式只能是 all（会签）或 any（或签）"
-                        )
-                    if "min_amount" in raw_stage:
-                        threshold = raw_stage["min_amount"]
-                        if (
-                            isinstance(threshold, bool)
-                            or not isinstance(threshold, (int, float))
-                            or not math.isfinite(threshold)
-                            or threshold < 0
-                            or threshold > 1e12
-                        ):
-                            raise HTTPException(status_code=400, detail="金额门槛无效")
-                    conditions: dict[str, list[str]] = {}
-                    for condition_key in ("packages", "currencies"):
-                        if condition_key not in raw_stage:
-                            continue
-                        raw_values = raw_stage[condition_key]
-                        if (
-                            not isinstance(raw_values, list)
-                            or len(raw_values) > boq.STAGE_CONDITION_MAX_ITEMS
-                        ):
-                            raise HTTPException(status_code=400, detail="条件无效")
-                        seen_values: set[str] = set()
-                        ordered_values: list[str] = []
-                        for raw_value in raw_values:
-                            if not isinstance(raw_value, str):
-                                raise HTTPException(status_code=400, detail="条件无效")
-                            text = raw_value.strip()
-                            if (
-                                not text
-                                or len(text) > boq.STAGE_CONDITION_ITEM_MAX
-                            ):
-                                raise HTTPException(status_code=400, detail="条件无效")
-                            if text not in seen_values:
-                                seen_values.add(text)
-                                ordered_values.append(text)
-                        conditions[condition_key] = ordered_values
-                    raw_approvers = raw_stage.get("approvers")
-                    if not isinstance(raw_approvers, list):
-                        raise HTTPException(
-                            status_code=400, detail="每级审批人需为 1–5 个用户 id"
-                        )
-                    seen: set[str] = set()
-                    ordered: list[str] = []
-                    for raw_id in raw_approvers:
-                        user_id = str(raw_id or "").strip()
-                        if user_id and user_id not in seen:
-                            seen.add(user_id)
-                            ordered.append(user_id)
-                    if not ordered or len(ordered) > 5:
-                        raise HTTPException(status_code=400, detail="每级审批人需为 1–5 个")
-                    approvers: list[dict[str, str]] = []
-                    for user_id in ordered:
-                        approver = db.get(User, user_id)
-                        if approver is None:
-                            raise HTTPException(
-                                status_code=400, detail=f"审批人不存在: {user_id}"
-                            )
-                        approvers.append(
-                            {
-                                "id": user_id,
-                                "name": approver.display_name or approver.username,
-                            }
-                        )
-                    stage_snapshot: dict[str, Any] = {"approvers": approvers, "mode": mode}
-                    if "min_amount" in raw_stage:
-                        stage_snapshot["min_amount"] = raw_stage["min_amount"]
-                    for condition_key, condition_values in conditions.items():
-                        stage_snapshot[condition_key] = condition_values
-                    chain.append(stage_snapshot)
-                meta["approval_chain"] = chain
-                project.meta = meta
-                keys.append("approval_chain")
-            if "is_template" in updates:
-                _require_owner(my_role)
-                project.is_template = bool(updates["is_template"])
-                keys.append("is_template")
-            audit(db, project.id, "project.update", {"keys": keys})
-            return _project_payload(project, _project_stats(db, project.id), my_role)
 
-    @app.get("/projects/{ref}/profile")
-    def get_project_profile(ref: str) -> dict[str, Any]:
-        """Return the project's global facts and their canonical anchors."""
-
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            stored = profile.load(project)
-            return {
-                "profile": stored,
-                "anchors": profile.anchors(stored),
-                "facts_block": profile.facts_block(stored),
-            }
-
-    @app.get("/projects/{ref}/scores")
-    def project_scores(ref: str) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            return scoring.analysis(db, project)
-
-    @app.put("/projects/{ref}/scores")
-    def project_scores_update(ref: str, payload: ScoresUpdate) -> dict[str, Any]:
-        with session_scope() as db:
-            project, role = _project(db, ref)
-            _require_write(role)
-            try:
-                updated = scoring.record_scores(
-                    db, project, [row.model_dump() for row in payload.rows]
-                )
-            except scoring.ScoreError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            db.flush()
-            audit(db, project.id, "project.scores", {"rows": updated})
-            return scoring.analysis(db, project)
-
-    @app.put("/projects/{ref}/profile")
-    def save_project_profile(ref: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """Replace the project's global facts (used by generation and checks)."""
-
-        with session_scope() as db:
-            project, my_role = _project(db, ref)
-            _require_write(my_role)
-            try:
-                stored = profile.save(project, payload.get("profile", payload))
-            except profile.ProfileError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(db, project.id, "project.profile", {"keys": _profile_keys(stored)})
-            return {
-                "profile": stored,
-                "anchors": profile.anchors(stored),
-                "facts_block": profile.facts_block(stored),
-            }
-
-    @app.delete("/projects/{ref}")
-    def delete_project(ref: str) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_owner(_role)
-            project_id = project.id
-            project_name = project.name
-            node_ids = list(
-                db.scalars(select(OutlineNode.id).where(OutlineNode.project_id == project.id))
-            )
-            if node_ids:
-                db.execute(delete(Section).where(Section.node_id.in_(node_ids)))
-            job_ids = list(
-                db.scalars(select(Job.id).where(Job.project_id == project.id))
-            )
-            if job_ids:
-                db.execute(delete(JobEvent).where(JobEvent.job_id.in_(job_ids)))
-            for model in (
-                OutlineNode,
-                Issue,
-                Delivery,
-                Job,
-                Fact,
-                Material,
-                Parameter,
-                ScoringItem,
-                Requirement,
-                Risk,
-                SourceFile,
-                ImageAsset,
-                BoqSnapshot,
-            ):
-                db.execute(delete(model).where(model.project_id == project.id))
-            db.execute(delete(ProjectMember).where(ProjectMember.project_id == project_id))
-            db.execute(delete(AuditLog).where(AuditLog.project_id == project_id))
-            project_dir = settings.project_dir(project.id)
-            db.delete(project)
-            db.flush()
-            audit(db, None, "project.delete", {"name": project_name, "project_id": project_id})
-        shutil.rmtree(project_dir, ignore_errors=True)
-        return {"deleted": True, "id": project_id}
-
-    @app.post("/projects/{ref}/duplicate", status_code=201)
-    def duplicate_project_route(ref: str, payload: ProjectDuplicate) -> dict[str, Any]:
-        """R22 项目复制（模板复用）：台账/大纲/正文始终复制，BOQ 与配图可选。
-
-        报价版本与审批记录、核对问题、任务、交付、成员授权、审计日志不复制；
-        复制者成为新项目 owner。复制失败时清理已创建的新项目目录。
-        """
-
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            try:
-                new = duplicate_project(
-                    db,
-                    project,
-                    name=payload.name,
-                    owner_id=(current_user() or {}).get("id"),
-                    include_boq=payload.include_boq,
-                    include_images=payload.include_images,
-                )
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            except Exception as exc:
-                new_id = getattr(exc, "duplicate_project_id", "")
-                if new_id:
-                    shutil.rmtree(settings.home / "projects" / new_id, ignore_errors=True)
-                raise
-            audit(
-                db,
-                new.id,
-                "project.duplicate",
-                {
-                    "source_id": project.id,
-                    "name": new.name,
-                    "include_boq": payload.include_boq,
-                    "include_images": payload.include_images,
-                },
-            )
-            _, my_role = _project(db, new.id)
-            return _project_payload(new, _project_stats(db, new.id), my_role)
 
     # ------------------------------------------------------------- members
 
 
-    @app.get("/projects/{ref}/members")
-    def project_members(
-        ref: str, limit: int = 500, offset: int = 0
-    ) -> list[dict[str, Any]]:
-        capped, start = _page_bounds(limit, offset)
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            items: list[dict[str, Any]] = []
-            owner = db.get(User, project.owner_id) if project.owner_id else None
-            if owner is not None:
-                items.append(
-                    {
-                        "user_id": owner.id,
-                        "username": owner.username,
-                        "display_name": owner.display_name or owner.username,
-                        "role": "owner",
-                        "created_at": _iso(project.created_at),
-                    }
-                )
-            rows = db.execute(
-                select(ProjectMember, User)
-                .join(User, User.id == ProjectMember.user_id)
-                .where(ProjectMember.project_id == project.id)
-                .order_by(ProjectMember.created_at)
-            ).all()
-            items.extend(_member_payload(member, user) for member, user in rows)
-            return items[start : start + capped]
 
-    @app.post("/projects/{ref}/members", status_code=201)
-    def add_project_member(ref: str, payload: MemberCreate) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_owner(_role)
-            if payload.role not in MEMBER_ROLES:
-                raise HTTPException(status_code=400, detail="role 只能是 editor 或 viewer")
-            user = db.scalar(select(User).where(User.username == payload.username.strip()))
-            if user is None:
-                raise LookupError("用户不存在")
-            if project.owner_id == user.id:
-                raise HTTPException(status_code=409, detail="该用户已是项目负责人")
-            existing = db.scalar(
-                select(ProjectMember).where(
-                    ProjectMember.project_id == project.id,
-                    ProjectMember.user_id == user.id,
-                )
-            )
-            if existing is not None:
-                raise HTTPException(status_code=409, detail="该用户已是项目成员")
-            member = ProjectMember(
-                project_id=project.id, user_id=user.id, role=payload.role
-            )
-            db.add(member)
-            db.flush()
-            audit(
-                db,
-                project.id,
-                "member.add",
-                {"username": user.username, "role": payload.role},
-            )
-            return _member_payload(member, user)
 
-    @app.patch("/projects/{ref}/members/{user_id}")
-    def update_project_member(
-        ref: str, user_id: str, payload: MemberUpdate
-    ) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_owner(_role)
-            if payload.role not in MEMBER_ROLES:
-                raise HTTPException(status_code=400, detail="role 只能是 editor 或 viewer")
-            if project.owner_id == user_id:
-                raise HTTPException(status_code=400, detail="项目负责人角色不可修改")
-            member = _member(db, project.id, user_id)
-            member.role = payload.role
-            db.flush()
-            user = db.get(User, user_id)
-            audit(
-                db,
-                project.id,
-                "member.update",
-                {"username": user.username if user is not None else "", "role": payload.role},
-            )
-            return _member_payload(member, user)
 
-    @app.delete("/projects/{ref}/members/{user_id}")
-    def remove_project_member(ref: str, user_id: str) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_owner(_role)
-            if project.owner_id == user_id:
-                raise HTTPException(status_code=400, detail="项目负责人不可移除")
-            member = _member(db, project.id, user_id)
-            user = db.get(User, user_id)
-            username = user.username if user is not None else ""
-            db.delete(member)
-            db.flush()
-            audit(db, project.id, "member.remove", {"username": username})
-            return {"deleted": True}
 
     # -------------------------------------------------------------- audit
 
 
-    @app.get("/projects/{ref}/audit")
-    def project_audit(
-        ref: str, limit: int = 50, before: int | None = None
-    ) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            statement = (
-                select(AuditLog)
-                .where(AuditLog.project_id == project.id)
-                .order_by(AuditLog.id.desc())
-                .limit(_clamp_limit(limit))
-            )
-            if before is not None:
-                statement = statement.where(AuditLog.id < before)
-            rows = list(db.scalars(statement))
-            return {
-                "items": [_audit_item(row) for row in rows],
-                "next_before": rows[-1].id if len(rows) == _clamp_limit(limit) else None,
-            }
 
-    @app.get("/admin/audit")
-    def admin_audit(
-        request: Request,
-        limit: int = 50,
-        before: int | None = None,
-        project_id: str = "",
-    ) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            statement = (
-                select(AuditLog)
-                .order_by(AuditLog.id.desc())
-                .limit(_clamp_limit(limit))
-            )
-            if before is not None:
-                statement = statement.where(AuditLog.id < before)
-            if project_id:
-                statement = statement.where(AuditLog.project_id == project_id)
-            rows = list(db.scalars(statement))
-            ids = {row.project_id for row in rows if row.project_id}
-            names = (
-                {
-                    item.id: item.name
-                    for item in db.scalars(select(Project).where(Project.id.in_(ids)))
-                }
-                if ids
-                else {}
-            )
-            return {
-                "items": [_audit_item(row, names) for row in rows],
-                "next_before": rows[-1].id if len(rows) == _clamp_limit(limit) else None,
-            }
 
     # -------------------------------------------------------------- images
 
-    @app.get("/projects/{ref}/images")
-    def project_images(
-        ref: str, node_id: str = "", limit: int = 500, offset: int = 0
-    ) -> list[dict[str, Any]]:
-        capped, start = _page_bounds(limit, offset)
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            assets = images.list_assets(db, project.id, node_id=node_id or None)
-            return [
-                images.asset_payload(asset) for asset in assets[start : start + capped]
-            ]
 
-    @app.post("/projects/{ref}/images/generate-missing", status_code=202)
-    def generate_missing_images(
-        ref: str, payload: ImageBatchRequest | None = None
-    ) -> dict[str, Any]:
-        include_failed = bool(payload.include_failed) if payload else False
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            plan = images.image_plan(db, project)
-            targets = images.image_batch_targets(plan, include_failed=include_failed)
-            if not targets:
-                raise HTTPException(status_code=409, detail="没有需要生成的配图")
-            if _cancel_stale_jobs(
-                db,
-                ["images"],
-                2 * 3600,
-                project_id=project.id,
-                stale_message="配图任务超时中断，已允许重新生成",
-            ) is not None:
-                raise HTTPException(status_code=409, detail="该项目已有配图任务在运行")
-            job = Job(
-                project_id=project.id,
-                kind="images",
-                status="queued",
-                message=f"配图任务排队中（{len(targets)} 个图名）…",
-                payload={
-                    "total": len(targets),
-                    "done": 0,
-                    "succeeded": 0,
-                    "failed": 0,
-                    "skipped": 0,
-                    "include_failed": include_failed,
-                    "labels": [target["label"] for target in targets],
-                },
-            )
-            db.add(job)
-            db.flush()
-            job_id = job.id
-            owner_row = db.get(User, project.owner_id or "")
-            job.priority = billing.queue_priority(db, owner_row) if owner_row else 1
-            priority = job.priority
-            jobs.publish_event(job_id, "queued", jobs.job_payload(job), db=db)
-            audit(db, project.id, "image.batch", {"count": len(targets)})
-        jobqueue.submit(
-            _run_image_batch_job,
-            (job_id, project.id, targets),
-            priority=priority,
-            job_id=job_id,
-        )
-        return {"job_id": job_id}
 
-    @app.post("/projects/{ref}/images", status_code=201)
-    def create_image(ref: str, payload: ImageCreate) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            label = payload.label.strip()
-            if not label:
-                raise HTTPException(status_code=400, detail="图片描述不能为空")
-            try:
-                asset = images.generate_image(
-                    db,
-                    project,
-                    label=label,
-                    node_id=payload.node_id,
-                    heading=payload.heading,
-                    prompt=payload.prompt,
-                    style=payload.style,
-                    size=payload.size,
-                )
-            except images.ImageError as exc:
-                raise _image_http_error(exc) from exc
-            audit(db, project.id, "image.generate", {"label": label})
-            return images.asset_payload(asset)
 
-    @app.post("/projects/{ref}/images/{image_id}/regenerate", status_code=201)
-    def regenerate_image(ref: str, image_id: str) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            source = images.get_asset(db, project.id, image_id)
-            if source is None:
-                raise LookupError(f"图片不存在：{image_id}")
-            try:
-                asset = images.regenerate_image(db, project, source)
-            except images.ImageError as exc:
-                raise _image_http_error(exc) from exc
-            audit(db, project.id, "image.regenerate", {"id": image_id})
-            return images.asset_payload(asset)
 
-    @app.post("/projects/{ref}/images/upload", status_code=201)
-    async def upload_image(
-        ref: str,
-        file: UploadFile = File(...),
-        label: str = Form(""),
-        node_id: str = Form(""),
-    ) -> dict[str, Any]:
-        content = await file.read(images.MAX_UPLOAD_BYTES + 1)
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            try:
-                asset = images.upload_image(
-                    db,
-                    project,
-                    label=label,
-                    filename=_safe_filename(file.filename, "image.png"),
-                    content=content,
-                    node_id=node_id,
-                )
-            except images.ImageError as exc:
-                raise _image_http_error(exc) from exc
-            audit(db, project.id, "image.upload", {"filename": file.filename or ""})
-            return images.asset_payload(asset)
 
-    @app.get("/projects/{ref}/image-policy")
-    def get_image_policy(ref: str) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            return images.get_policy(project)
 
-    @app.put("/projects/{ref}/image-policy")
-    def update_image_policy(
-        ref: str, payload: ImagePolicyUpdate | None = None
-    ) -> dict[str, Any]:
-        body = payload.model_dump(exclude_unset=True) if payload is not None else {}
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            policy = images.set_policy(db, project, body)
-            keys = [key for key in images.POLICY_KEYS if key in body]
-            audit(
-                db,
-                project.id,
-                "image.policy",
-                {"keys": keys, "values": {key: policy[key] for key in keys}},
-            )
-            return policy
 
-    @app.get("/projects/{ref}/images/plan")
-    def image_plan(ref: str) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            return images.image_plan(db, project)
 
-    @app.post("/projects/{ref}/images/apply-plan")
-    def apply_image_plan(ref: str) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            plan = images.image_plan(db, project)
-            if not plan["chapters"]:
-                raise HTTPException(status_code=409, detail="没有可插入的配图占位")
-            if not plan["summary"]["ready"]:
-                raise HTTPException(status_code=409, detail="没有已生成的配图可插入")
-            result = images.apply_image_plan(db, project)
-            audit(db, project.id, "image.apply_plan", {"count": len(plan["chapters"])})
-            return result
 
-    @app.get("/projects/{ref}/images/{image_or_file}")
-    def image_detail_or_file(ref: str, image_or_file: str):
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            suffix = Path(image_or_file).suffix.lower()
-            if suffix in {".png", ".jpg", ".jpeg"}:
-                path = images.resolve_image_path(project.id, image_or_file)
-                if path is None:
-                    raise LookupError(f"图片不存在：{image_or_file}")
-                media = images.media_type_for(image_or_file)
-                return FileResponse(path, media_type=media, filename=image_or_file)
-            asset = images.get_asset(db, project.id, image_or_file)
-            if asset is None:
-                raise LookupError(f"图片不存在：{image_or_file}")
-            return images.asset_payload(asset)
 
-    @app.delete("/projects/{ref}/images/{image_id}")
-    def delete_image(ref: str, image_id: str) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            if not images.delete_asset(db, project.id, image_id):
-                raise LookupError(f"图片不存在：{image_id}")
-            audit(db, project.id, "image.delete", {"id": image_id})
-            return {"deleted": True, "id": image_id}
 
     # ------------------------------------------------------------ user docs
-    @app.get("/my/docs")
-    def my_docs() -> list[dict[str, Any]]:
-        with session_scope() as db:
-            user = billing_user(db)
-            return [user_docs.doc_payload(row) for row in user_docs.list_docs(db, user.id)]
 
-    @app.post("/my/docs", status_code=202)
-    async def upload_my_doc(file: UploadFile = File(...)) -> dict[str, Any]:
-        raw_name = (file.filename or "").strip()
-        content = await file.read(user_docs.MAX_USER_DOC_BYTES + 1)
-        worker: threading.Thread | None = None
-        with session_scope() as db:
-            user = billing_user(db)
-            try:
-                doc = user_docs.save_upload(db, user, raw_name, content)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            kb_id = doc.kb_id
-            job = _active_kb_reindex(db, kb_id)
-            if job is None:
-                job = Job(
-                    project_id=None,
-                    kind="kb_reindex",
-                    status="queued",
-                    message="知识库重建索引排队中…",
-                    payload={
-                        "owner_id": user.id,
-                        "kb_id": kb_id,
-                        "name": "个人知识库",
-                    },
-                )
-                db.add(job)
-                db.flush()
-                jobs.publish_event(job.id, "queued", jobs.job_payload(job), db=db)
-                worker = threading.Thread(
-                    target=_run_kb_reindex_job,
-                    args=(job.id, kb_id),
-                    daemon=True,
-                    name=f"bidcraft-kb-reindex-{job.id[:8]}",
-                )
-            job_id = job.id
-            payload = user_docs.doc_payload(doc)
-            audit(
-                db,
-                None,
-                "user_doc.upload",
-                {"id": doc.id, "filename": doc.filename, "kb_id": kb_id, "job_id": job_id},
-            )
-        if worker is not None:
-            worker.start()
-        return {"doc": payload, "job_id": job_id}
 
-    @app.delete("/my/docs/{doc_id}")
-    def delete_my_doc(doc_id: str) -> dict[str, Any]:
-        with session_scope() as db:
-            user = billing_user(db)
-            row = user_docs.delete_doc(db, user, doc_id)
-            audit(db, None, "user_doc.delete", {"id": row.id, "filename": row.filename})
-            return {"deleted": True, "id": row.id}
 
-    @app.get("/my/docs/{doc_id}/file")
-    def my_doc_file(doc_id: str) -> FileResponse:
-        with session_scope() as db:
-            user = billing_user(db)
-            row = user_docs.get_doc(db, user.id, doc_id)
-            root = user_docs.user_dir(user.id).resolve()
-            path = Path(row.stored_path).resolve()
-            if root not in path.parents or not path.is_file():
-                raise LookupError(f"文件不存在：{row.filename}")
-            return FileResponse(path, media_type=row.mime or None, filename=row.filename)
 
     # ------------------------------------------------------- qualifications
-    @app.get("/my/qualifications")
-    def my_qualifications(kind: str = "", status: str = "") -> list[dict[str, Any]]:
-        with session_scope() as db:
-            user = billing_user(db)
-            try:
-                rows = qualifications.list_qualifications(
-                    db, user, kind=kind, status=status
-                )
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return [qualifications.qualification_payload(row) for row in rows]
 
-    @app.get("/my/preflight")
-    def my_preflight(deadline: str = "") -> dict[str, Any]:
-        raw = (deadline or "").strip()
-        due: date | None = None
-        if raw:
-            try:
-                due = date.fromisoformat(raw[:10])
-            except ValueError as exc:
-                raise HTTPException(
-                    status_code=400, detail="日期格式无效，应为 YYYY-MM-DD"
-                ) from exc
-        with session_scope() as db:
-            user = billing_user(db)
-            return qualifications.preflight(db, user, deadline=due)
 
-    @app.post("/my/qualifications", status_code=201)
-    def create_my_qualification(payload: QualificationCreate) -> dict[str, Any]:
-        with session_scope() as db:
-            user = billing_user(db)
-            try:
-                row = qualifications.create_qualification(
-                    db, user, payload.model_dump()
-                )
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(
-                db,
-                None,
-                "qualification.create",
-                {"id": row.id, "kind": row.kind, "name": row.name},
-            )
-            return qualifications.qualification_payload(row)
 
-    @app.patch("/my/qualifications/{qualification_id}")
-    def update_my_qualification(
-        qualification_id: str, payload: QualificationUpdate
-    ) -> dict[str, Any]:
-        with session_scope() as db:
-            user = billing_user(db)
-            try:
-                row = qualifications.update_qualification(
-                    db,
-                    user,
-                    qualification_id,
-                    payload.model_dump(exclude_unset=True),
-                )
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(
-                db,
-                None,
-                "qualification.update",
-                {"id": row.id, "keys": sorted(payload.model_fields_set)},
-            )
-            return qualifications.qualification_payload(row)
 
-    @app.delete("/my/qualifications/{qualification_id}")
-    def delete_my_qualification(qualification_id: str) -> dict[str, Any]:
-        with session_scope() as db:
-            user = billing_user(db)
-            row = qualifications.delete_qualification(db, user, qualification_id)
-            audit(
-                db,
-                None,
-                "qualification.delete",
-                {"id": row.id, "name": row.name},
-            )
-            return {"deleted": True, "id": row.id}
 
-    @app.post("/my/qualifications/{qualification_id}/evidence", status_code=201)
-    async def upload_my_qualification_evidence(
-        qualification_id: str, file: UploadFile = File(...)
-    ) -> dict[str, Any]:
-        raw_name = (file.filename or "").strip()
-        content = await file.read(qualifications.MAX_EVIDENCE_BYTES + 1)
-        with session_scope() as db:
-            user = billing_user(db)
-            row = qualifications.get_qualification(db, user, qualification_id)
-            try:
-                entry = qualifications.add_evidence(db, row, raw_name, content)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(
-                db,
-                None,
-                "qualification.evidence",
-                {"id": row.id, "filename": entry["filename"]},
-            )
-            return qualifications.qualification_payload(row)
 
-    @app.get("/my/qualifications/{qualification_id}/evidence/{filename}")
-    def my_qualification_evidence(
-        qualification_id: str, filename: str
-    ) -> FileResponse:
-        with session_scope() as db:
-            user = billing_user(db)
-            row = qualifications.get_qualification(db, user, qualification_id)
-            path = qualifications.evidence_path(db, row, filename)
-            media = mimetypes.guess_type(path.name)[0]
-            return FileResponse(path, media_type=media, filename=path.name)
 
-    @app.delete("/my/qualifications/{qualification_id}/evidence/{filename}")
-    def delete_my_qualification_evidence(
-        qualification_id: str, filename: str
-    ) -> dict[str, Any]:
-        with session_scope() as db:
-            user = billing_user(db)
-            row = qualifications.get_qualification(db, user, qualification_id)
-            name = qualifications.delete_evidence(db, row, filename)
-            audit(
-                db,
-                None,
-                "qualification.evidence",
-                {"id": row.id, "filename": name, "action": "delete"},
-            )
-            return {"deleted": True, "filename": name}
 
     # ----------------------------------------------------------- personnel
-    @app.get("/my/personnel")
-    def my_personnel() -> list[dict[str, Any]]:
-        with session_scope() as db:
-            user = billing_user(db)
-            rows = personnel.list_personnel(db, user)
-            return [personnel.person_payload(row) for row in rows]
 
-    @app.post("/my/personnel", status_code=201)
-    def create_my_personnel(payload: PersonnelCreate) -> dict[str, Any]:
-        with session_scope() as db:
-            user = billing_user(db)
-            try:
-                row = personnel.create_personnel(db, user, payload.model_dump())
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(
-                db,
-                None,
-                "personnel.create",
-                {"id": row.id, "name": row.name},
-            )
-            return personnel.person_payload(row)
 
-    @app.patch("/my/personnel/{person_id}")
-    def update_my_personnel(
-        person_id: str, payload: PersonnelUpdate
-    ) -> dict[str, Any]:
-        with session_scope() as db:
-            user = billing_user(db)
-            try:
-                row = personnel.update_personnel(
-                    db, user, person_id, payload.model_dump(exclude_unset=True)
-                )
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(
-                db,
-                None,
-                "personnel.update",
-                {"id": row.id, "keys": sorted(payload.model_fields_set)},
-            )
-            return personnel.person_payload(row)
 
-    @app.delete("/my/personnel/{person_id}")
-    def delete_my_personnel(person_id: str) -> dict[str, Any]:
-        with session_scope() as db:
-            user = billing_user(db)
-            row = personnel.delete_personnel(db, user, person_id)
-            audit(
-                db,
-                None,
-                "personnel.delete",
-                {"id": row.id, "name": row.name},
-            )
-            return {"deleted": True, "id": row.id}
 
     # ------------------------------------------------------------- sources
-    @app.get("/projects/{ref}/sources")
-    def sources(
-        ref: str, limit: int = 500, offset: int = 0
-    ) -> list[dict[str, Any]]:
-        capped, start = _page_bounds(limit, offset)
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            rows = list(
-                db.scalars(
-                    select(SourceFile)
-                    .where(
-                        SourceFile.project_id == project.id,
-                        SourceFile.role.in_(TENDER_SOURCE_ROLES),
-                    )
-                    .order_by(SourceFile.created_at)
-                )
-            )
-            return [_source_payload(source) for source in rows[start : start + capped]]
 
-    @app.post("/projects/{ref}/sources")
-    async def upload(ref: str, file: UploadFile = File(...)) -> dict[str, Any]:
-        raw_name = (file.filename or "").strip()
-        if raw_name and raw_name not in {"/", "\\"}:
-            suffix = Path(raw_name).suffix.lower()
-            if suffix not in TENDER_UPLOAD_SUFFIXES:
-                raise HTTPException(
-                    status_code=400,
-                    detail="招标文件仅支持 PDF/DOCX/TXT/MD/XLSX/XLSM 格式",
-                )
-        filename = _safe_filename(raw_name, "upload.bin")
-        with tempfile.TemporaryDirectory(prefix="bidcraft-api-") as tmp:
-            target = Path(tmp) / filename
-            await _save_upload(
-                file,
-                target,
-                max_bytes=MAX_TENDER_UPLOAD_BYTES,
-                detail="招标文件不能超过 50MB",
-            )
-            with session_scope() as db:
-                project, _role = _project(db, ref)
-                _require_write(_role)
-                source = add_source(db, project, target)
-                try:
-                    ledger, info = parse_project(db, project.id)
-                except Exception as exc:
-                    _discard_source(db, source)
-                    if isinstance(exc, ValueError):
-                        raise HTTPException(status_code=400, detail=str(exc)) from exc
-                    raise
-                audit(db, project.id, "source.upload", {"filename": filename})
-                return {
-                    "project": _project_payload(project, _project_stats(db, project.id)),
-                    "ledger_summary": ledger_summary(ledger),
-                    "notes": info["notes"],
-                    "missing_required": [item.key for item in ledger.missing_required()],
-                }
 
-    @app.get("/projects/{ref}/sources/{source_id}/file")
-    def source_file(ref: str, source_id: str) -> FileResponse:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            source = db.get(SourceFile, source_id)
-            if source is None or source.project_id != project.id:
-                raise LookupError(f"文件不存在: {source_id}")
-            root = (settings.project_dir(project.id) / "sources").resolve()
-            path = Path(source.stored_path).resolve()
-            if root not in path.parents or not path.is_file():
-                raise LookupError(f"原件不存在: {source.filename}")
-            return FileResponse(path, filename=source.filename)
 
-    @app.post("/projects/{ref}/parse")
-    def reparse(ref: str) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            try:
-                ledger, info = parse_project(db, project.id)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(db, project.id, "parse.run", {"notes": len(info["notes"])})
-            return {
-                "project": _project_payload(project, _project_stats(db, project.id)),
-                "ledger_summary": ledger_summary(ledger),
-                "notes": info["notes"],
-                "missing_required": [item.key for item in ledger.missing_required()],
-            }
 
     # -------------------------------------------------------------- ledger
-    @app.get("/projects/{ref}/ledger")
-    def ledger(ref: str) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            data = load_ledger(db, project.id)
-            return {**data.model_dump(), "summary": ledger_summary(data)}
 
-    @app.patch("/projects/{ref}/facts/{key}")
-    def set_fact(ref: str, key: str, payload: FactUpdate) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            try:
-                row = update_fact(db, project.id, key, value=payload.value, status=payload.status)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            affected = provenance.affected_by_change(db, project.id, row.key, row.value or "")
-            audit(
-                db,
-                project.id,
-                "fact.update",
-                {"key": row.key, "status": row.status, "stale_citations": len(affected)},
-            )
-            return {
-                "key": row.key,
-                "label": row.label,
-                "value": row.value,
-                "status": row.status,
-                "required": row.required,
-                "stale_sections": affected,
-            }
 
     # ------------------------------------------------------------- outline
-    @app.get("/projects/{ref}/outline")
-    def outline(ref: str) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            return {"chapters": _outline_payload(db, project.id)}
 
-    @app.post("/projects/{ref}/outline")
-    def make_outline(ref: str, payload: OutlineRequest) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            ledger = load_ledger(db, project.id)
-            package = load_package(project.package)
-            spec = build_outline(ledger, package, mode=payload.mode, total_words=payload.words)
-            nodes = save_outline(db, project.id, spec)
-            audit(
-                db,
-                project.id,
-                "outline.save",
-                {"mode": spec.mode, "count": len(nodes)},
-            )
-            return {
-                "mode": spec.mode,
-                "chapters": [
-                    {"id": node.id, "heading": node.heading, "target_words": node.target_words}
-                    for node in nodes
-                ],
-            }
 
-    @app.put("/projects/{ref}/outline")
-    def save_outline_edits(ref: str, payload: OutlineSave) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            existing = {
-                node.id: node
-                for node in db.scalars(
-                    select(OutlineNode).where(OutlineNode.project_id == project.id)
-                )
-            }
-            keep: set[str] = set()
-            for position, item in enumerate(payload.chapters):
-                node = existing.get(item.id) if item.id else None
-                if node is None:
-                    node = OutlineNode(project_id=project.id, heading=item.heading)
-                    db.add(node)
-                    db.flush()
-                    db.add(Section(node_id=node.id, body="", status="pending", words=0))
-                node.position = position
-                node.heading = item.heading.strip()
-                node.intent = item.intent
-                node.target_words = max(100, min(50000, item.target_words))
-                keep.add(node.id)
-            removed = [node_id for node_id in existing if node_id not in keep]
-            if removed:
-                db.execute(delete(Section).where(Section.node_id.in_(removed)))
-                db.execute(delete(OutlineNode).where(OutlineNode.id.in_(removed)))
-            db.flush()
-            audit(db, project.id, "outline.save", {"count": len(payload.chapters)})
-            return {"chapters": _outline_payload(db, project.id)}
 
     # ------------------------------------------------------------- chapters
 
 
-    @app.get("/projects/{ref}/chapters/{node_id}")
-    def chapter(ref: str, node_id: str) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            return _chapter_payload(db, _node(db, project.id, node_id))
 
-    @app.get("/projects/{ref}/chapters/{node_id}/citations")
-    def chapter_citations(ref: str, node_id: str) -> dict[str, Any]:
-        """本章正文里出现的台账取值，逐条给出字段、当前值与原件出处。"""
 
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            node = _node(db, project.id, node_id)
-            items = provenance.node_citations(db, project.id, node.id)
-            return {
-                "node_id": node.id,
-                "heading": node.heading,
-                "citations": items,
-                "stale": sum(1 for item in items if item["stale"]),
-            }
 
-    @app.get("/projects/{ref}/citations")
-    def project_citations(ref: str) -> dict[str, Any]:
-        """全书来源追溯：哪些章节引用了台账哪个字段、哪些已与台账不一致。"""
 
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            return {"project_id": project.id, **provenance.report(db, project.id)}
 
-    @app.put("/projects/{ref}/chapters/{node_id}")
-    def save_chapter(ref: str, node_id: str, payload: ChapterSave) -> Any:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            node = _node(db, project.id, node_id)
-            section = db.scalar(select(Section).where(Section.node_id == node.id))
-            current_revision = (section.revision or 0) if section is not None else 0
-            if payload.base_revision is not None and payload.base_revision != current_revision:
-                return JSONResponse(
-                    status_code=409,
-                    content={
-                        "detail": "章节已被他人修改，请载入最新或强制覆盖",
-                        "current_revision": current_revision,
-                        "current_body": section.body if section is not None else "",
-                        "current_words": section.words if section is not None else 0,
-                    },
-                )
-            review_before = (section.review_status if section is not None else "draft") or "draft"
-            if review_before in {"confirmed", "locked"}:
-                raise _http_error(
-                    409,
-                    "本章已确认，不能再直接修改；如需改动请先撤回为草稿",
-                )
-            if section is None:
-                section = Section(node_id=node.id)
-                db.add(section)
-            section.body = payload.body
-            section.words = count_words(payload.body)
-            section.status = "edited"
-            section.revision = current_revision + 1
-            node.status = "edited"
-            # 待复核的正文一旦被改写，复核对象已变，自动退回草稿（不可绕过检查点）。
-            if review_before == "review":
-                section.review_status = "draft"
-                section.review_requested_at = None
-                section.review_requested_by = None
-            db.flush()
-            provenance.refresh_node(db, project.id, node.id, payload.body)
-            detail = {"heading": node.heading}
-            if review_before == "review":
-                detail["review_reverted"] = True
-            audit(db, project.id, "chapter.save", detail)
-            return _chapter_payload(db, node)
-
-    @app.post("/projects/{ref}/chapters/{node_id}/review")
-    def review_chapter(ref: str, node_id: str, payload: ChapterReview) -> dict[str, Any]:
-        """章节复核流转，写入审计。
-
-        草稿 --提交--> 待复核 --负责人确认--> 已确认 --负责人锁定--> 已锁定。
-        已确认/已锁定的正文不可编辑、不可重生成；导出只读取已确认（含已锁定）的章节。
-        """
-
-        with session_scope() as db:
-            project, role = _project(db, ref)
-            node = _node(db, project.id, node_id)
-            section = db.scalar(select(Section).where(Section.node_id == node.id))
-            if section is None:
-                section = Section(node_id=node.id)
-                db.add(section)
-                db.flush()
-            current = (section.review_status or "draft")
-            action = payload.action
-            note = (payload.note or "").strip()
-            username = str((current_user() or {}).get("username") or "")
-
-            def need_note(message: str) -> None:
-                if len(note) < 4:
-                    raise _http_error(400, message)
-
-            if action == "submit":
-                _require_write(role)
-                if current != "draft":
-                    raise _http_error(409, "只有草稿可以提交复核")
-                if not (section.body or "").strip():
-                    raise _http_error(409, "本章还没有正文，无法提交复核")
-                section.review_status = "review"
-                section.review_requested_at = clock.utc_now()
-                section.review_requested_by = username
-                section.review_note = note
-            elif action == "confirm":
-                _require_owner(role)
-                if current != "review":
-                    raise _http_error(409, "只有待复核的章节可以确认")
-                section.review_status = "confirmed"
-                section.confirmed_at = clock.utc_now()
-                section.confirmed_by = username
-                section.review_note = note
-            elif action == "lock":
-                _require_owner(role)
-                if current != "confirmed":
-                    raise _http_error(409, "只有已确认的章节可以锁定")
-                section.review_status = "locked"
-                section.locked_at = clock.utc_now()
-                section.locked_by = username
-            elif action == "unlock":
-                _require_owner(role)
-                if current != "locked":
-                    raise _http_error(409, "只有已锁定的章节可以解锁")
-                need_note("解锁章节必须说明原因（至少 4 个字）")
-                section.review_status = "confirmed"
-                section.locked_at = None
-                section.locked_by = None
-                section.review_note = note
-            else:  # revert
-                if current in {"confirmed", "locked"}:
-                    _require_owner(role)
-                    need_note("撤回已确认的章节必须说明原因（至少 4 个字）")
-                else:
-                    _require_write(role)
-                if current == "draft":
-                    raise _http_error(409, "本章已经是草稿")
-                section.review_status = "draft"
-                section.review_requested_at = None
-                section.review_requested_by = None
-                section.confirmed_at = None
-                section.confirmed_by = None
-                section.locked_at = None
-                section.locked_by = None
-                section.review_note = note
-            db.flush()
-            audit(
-                db,
-                project.id,
-                "chapter.review",
-                {
-                    "heading": node.heading,
-                    "action": action,
-                    "from": current,
-                    "to": section.review_status,
-                    "note": note,
-                },
-            )
-            return _chapter_payload(db, node)
-
-    @app.post("/projects/{ref}/chapters/{node_id}/generate")
-    def generate_chapter(ref: str, node_id: str) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            node = _node(db, project.id, node_id)
-            existing = db.scalar(select(Section).where(Section.node_id == node.id))
-            if existing is not None and (existing.review_status or "draft") in {
-                "confirmed",
-                "locked",
-            }:
-                raise _http_error(
-                    409, "本章已确认，不能再重新生成；如需重写请先撤回为草稿"
-                )
-            ledger = load_ledger(db, project.id)
-            problems = ledger_gate(ledger)
-            if problems:
-                raise HTTPException(status_code=409, detail={"missing_required": problems})
-            package = load_package(project.package)
-            user = billing_user(db)
-            client = _generation_client(db)
-            _credit_guard(db, user, billing.billing_settings(db)["chapter_cost"])
-            if user.is_external and not client.available:
-                raise HTTPException(
-                    status_code=409, detail="尚未配置可用的对话模型，请联系超级管理员"
-                )
-            try:
-                charged = billing.charge_chapters(
-                    db, user, 1, project_id=project.id, note=f"生成本章：{node.heading}"
-                )
-            except billing.InsufficientCredits as exc:
-                raise HTTPException(status_code=402, detail=str(exc)) from exc
-            report = generate_document(
-                db,
-                project.id,
-                client,
-                ledger,
-                package,
-                only_node=node.id,
-                knowledge_provider=_knowledge_provider(db, user.id),
-            )
-            if charged and not report.written:
-                billing.refund_chapters(db, user, charged, project_id=project.id)
-            project.status = "drafting"
-            db.flush()
-            provenance.refresh_node(db, project.id, node.id)
-            audit(db, project.id, "chapter.generate", {"heading": node.heading})
-            return _report_payload(report)
 
     # ---------------------------------------------------------- generation
-    @app.post("/projects/{ref}/write")
-    def write(ref: str) -> dict[str, Any]:
-        """Synchronous generation kept for CLI parity and small integrations."""
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            ledger = load_ledger(db, project.id)
-            problems = ledger_gate(ledger)
-            if problems:
-                raise HTTPException(status_code=409, detail={"missing_required": problems})
-            package = load_package(project.package)
-            if not load_outline(db, project.id):
-                save_outline(db, project.id, build_outline(ledger, package))
-                db.flush()
-            user = billing_user(db)
-            client = _generation_client(db)
-            count = _pending_chapters(db, project.id)
-            _credit_guard(db, user, billing.billing_settings(db)["chapter_cost"] * max(0, count))
-            if user.is_external and not client.available:
-                raise HTTPException(
-                    status_code=409, detail="尚未配置可用的对话模型，请联系超级管理员"
-                )
-            try:
-                charged = billing.charge_chapters(
-                    db, user, count, project_id=project.id, note="同步生成全书正文"
-                )
-            except billing.InsufficientCredits as exc:
-                raise HTTPException(status_code=402, detail=str(exc)) from exc
-            report = generate_document(
-                db,
-                project.id,
-                client,
-                ledger,
-                package,
-                knowledge_provider=_knowledge_provider(db, user.id),
-            )
-            if charged and count > len(report.written):
-                unit = charged // count if count else 0
-                billing.refund_chapters(
-                    db, user, unit * (count - len(report.written)), project_id=project.id
-                )
-            project.status = "drafting"
-            db.flush()
-            return _report_payload(report)
 
-    @app.post("/projects/{ref}/generate", status_code=202)
-    def generate_all(ref: str, payload: GenerateRequest | None = None) -> dict[str, Any]:
-        force = bool(payload.force) if payload else False
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            ledger = load_ledger(db, project.id)
-            problems = ledger_gate(ledger)
-            if problems:
-                raise HTTPException(status_code=409, detail={"missing_required": problems})
-            if _cancel_stale_jobs(
-                db,
-                ["generate"],
-                30 * 60,
-                project_id=project.id,
-                stale_message="生成任务超时中断，已允许重新生成",
-            ) is not None:
-                raise HTTPException(status_code=409, detail="该项目已有生成任务在运行")
-            user = billing_user(db)
-            client = _generation_client(db)
-            count = _pending_chapters(db, project.id, force=force)
-            if count <= 0:
-                raise HTTPException(status_code=409, detail="没有待生成的章节")
-            _credit_guard(db, user, billing.billing_settings(db)["chapter_cost"] * max(0, count))
-            if user.is_external and not client.available:
-                raise HTTPException(
-                    status_code=409, detail="尚未配置可用的对话模型，请联系超级管理员"
-                )
-            try:
-                charged = billing.charge_chapters(
-                    db, user, count, project_id=project.id, note="生成全书正文"
-                )
-            except billing.InsufficientCredits as exc:
-                raise HTTPException(status_code=402, detail=str(exc)) from exc
-            job = Job(
-                project_id=project.id,
-                kind="generate",
-                status="queued",
-                message="排队中…",
-                payload={
-                    "charged": charged,
-                    "chapters": count,
-                    "user_id": user.id,
-                    "cost_per": charged // count if count else 0,
-                },
-            )
-            db.add(job)
-            db.flush()
-            job_id = job.id
-            job.priority = billing.queue_priority(db, user)
-            priority = job.priority
-            jobs.publish_event(job_id, "queued", jobs.job_payload(job), db=db)
-            audit(db, project.id, "project.generate", {"chapters": count})
-        jobqueue.submit(
-            _run_generation_job,
-            (job_id, project.id, force),
-            priority=priority,
-            job_id=job_id,
-        )
-        return {"job_id": job_id}
 
-    @app.get("/projects/{ref}/jobs")
-    def project_jobs(ref: str, kind: str = "") -> list[dict[str, Any]]:
-        """Recent jobs of one kind, used to re-attach after a page refresh."""
 
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            rows = list(
-                db.scalars(
-                    select(Job)
-                    .where(
-                        Job.project_id == project.id,
-                        Job.kind == (kind.strip() or "generate"),
-                    )
-                    .order_by(Job.created_at.desc())
-                    .limit(20)
-                )
-            )
-            return [jobs.job_payload(job) for job in rows]
 
-    @app.get("/jobs/{job_id}")
-    def job_status(job_id: str) -> dict[str, Any]:
-        with session_scope() as db:
-            return jobs.job_payload(_job(db, job_id))
-
-    @app.get("/jobs/{job_id}/events")
-    def job_events(job_id: str, request: Request, after: int = 0) -> StreamingResponse:
-        """Resumable Server-Sent Events for one generation job.
-
-        The browser sends ``Last-Event-ID`` automatically when EventSource
-        reconnects; ``?after=`` is available for non-EventSource clients.
-        """
-
-        header = request.headers.get("last-event-id") or ""
-        try:
-            last_id = max(int(header), int(after or 0))
-        except ValueError:
-            last_id = max(0, int(after or 0))
-        with session_scope() as db:
-            job = _job(db, job_id)
-            snapshot = jobs.job_payload(job)
-
-        def event_stream():
-            cursor = last_id
-            last_ping = time.monotonic()
-            terminal = False
-            yield "retry: 3000\n\n"
-            yield jobs.sse_frame(None, "snapshot", snapshot)
-            while True:
-                rows = jobs.events_since(job_id, cursor, limit=200)
-                with session_scope() as db:
-                    current = db.get(Job, job_id)
-                if current is None:
-                    break
-                for row in rows:
-                    cursor = int(row.id)
-                    yield jobs.sse_frame(cursor, row.kind, row.data or {})
-                    if row.kind in {"done", "failed"}:
-                        terminal = True
-                if terminal or (current.status in jobs.TERMINAL_STATUSES and not rows):
-                    break
-                if not rows:
-                    if time.monotonic() - last_ping >= 15:
-                        yield ": ping\n\n"
-                        last_ping = time.monotonic()
-                    time.sleep(0.25)
-
-        return StreamingResponse(
-            event_stream(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
 
     # ------------------------------------------------------------- batch jobs
-    @app.get("/batch-jobs/{job_id}/download")
-    def download_batch_zip(job_id: str) -> FileResponse:
-        """Download the zip produced by a finished batch export."""
-
-        with session_scope() as db:
-            job = db.get(Job, job_id)
-            if job is None or job.kind != "batch_export" or job.status != "done":
-                raise LookupError("任务不存在")
-            user = current_user() or {}
-            owner_id = str((job.payload or {}).get("owner_id") or "")
-            if user.get("role") != auth.ROLE_SUPER_ADMIN and owner_id != str(
-                user.get("id") or ""
-            ):
-                raise LookupError("任务不存在")
-            zip_path = str((job.result or {}).get("zip_path") or "")
-            root = (settings.home / "output").resolve()
-            path = Path(zip_path).resolve() if zip_path else None
-            if path is None or root not in path.parents or not path.is_file():
-                raise LookupError("导出包不存在")
-        return FileResponse(path, filename=path.name)
 
     # --------------------------------------------------------------- check
-    @app.post("/projects/{ref}/check")
-    def check(ref: str) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            results, summary = check_project(db, project.id)
-            audit(db, project.id, "check.run", {"total": summary["total"]})
-            return {
-                "verdict": summary["verdict"],
-                "summary": summary,
-                "issues": [result.model_dump() for result in results if not result.passed],
-            }
 
-    @app.get("/projects/{ref}/issues")
-    def issues(ref: str, limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
-        capped, start = _page_bounds(limit, offset)
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            rows = list(
-                db.scalars(select(Issue).where(Issue.project_id == project.id))
-            )
-            rows.sort(key=lambda row: SEVERITY_ORDER.get(row.level, 9))
-            page = rows[start : start + capped]
-            node_map = _issue_node_map(db, page)
-            return [_issue_payload(row, node_map) for row in page]
 
-    @app.get("/projects/{ref}/risk-overview")
-    def risk_overview(ref: str) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            rows = list(db.scalars(select(Issue).where(Issue.project_id == project.id)))
-            return _risk_overview_payload(db, project.id, rows)
 
-    @app.get("/projects/{ref}/requirements")
-    def requirements(ref: str) -> list[dict[str, Any]]:
-        """实质性条款及其正文响应状态；只读成员也能看（交付风险需要被看见）。"""
 
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            rows = list(
-                db.scalars(
-                    select(Requirement)
-                    .where(Requirement.project_id == project.id)
-                    .order_by(Requirement.marker.desc(), Requirement.text)
-                )
-            )
-            return [_requirement_payload(db, row) for row in rows]
 
-    @app.patch("/projects/{ref}/requirements/{req_id}")
-    def requirement_response_update(
-        ref: str, req_id: str, payload: RequirementResponseUpdate
-    ) -> dict[str, Any]:
-        with session_scope() as db:
-            project, role = _project(db, ref)
-            _require_write(role)
-            requirement = db.get(Requirement, req_id)
-            if requirement is None or requirement.project_id != project.id:
-                raise LookupError(f"条款不存在: {req_id}")
-            note = _validate_requirement_note(payload.response_status, payload.note)
-            username = str((current_user() or {}).get("username") or "")
-            _apply_requirement_status(requirement, payload.response_status, note, username)
-            audit(
-                db,
-                project.id,
-                "requirement.response",
-                {
-                    "requirement_id": requirement.id,
-                    "status": payload.response_status,
-                    "note": note,
-                },
-            )
-            db.flush()
-            return _requirement_payload(db, requirement)
 
-    @app.patch("/projects/{ref}/issues/{issue_id}")
-    def issue_status_update(
-        ref: str, issue_id: str, payload: IssueStatusUpdate
-    ) -> dict[str, Any]:
-        with session_scope() as db:
-            project, role = _project(db, ref)
-            _require_write(role)
-            issue = db.get(Issue, issue_id)
-            if issue is None or issue.project_id != project.id:
-                raise LookupError(f"风险不存在: {issue_id}")
-            note = _validate_issue_note(payload.status, payload.note)
-            previous = issue.status
-            username = str((current_user() or {}).get("username") or "")
-            _apply_issue_status(issue, payload.status, note, username)
-            audit(
-                db,
-                project.id,
-                "issue.status",
-                {
-                    "issue_id": issue.id,
-                    "code": issue.code,
-                    "level": issue.level,
-                    "from": previous,
-                    "to": payload.status,
-                    "note": note,
-                },
-            )
-            db.flush()
-            return _issue_payload(issue, _issue_node_map(db, [issue]))
-
-    @app.post("/projects/{ref}/issues/bulk-status")
-    def issue_bulk_status(ref: str, payload: IssueBulkStatusUpdate) -> dict[str, Any]:
-        with session_scope() as db:
-            project, role = _project(db, ref)
-            _require_write(role)
-            ids = list(dict.fromkeys(payload.ids))
-            if len(ids) > ISSUE_BULK_LIMIT:
-                raise _http_error(400, f"一次最多批量处置 {ISSUE_BULK_LIMIT} 项风险")
-            note = _validate_issue_note(payload.status, payload.note)
-            rows = (
-                {
-                    row.id: row
-                    for row in db.scalars(
-                        select(Issue).where(
-                            Issue.project_id == project.id, Issue.id.in_(ids)
-                        )
-                    )
-                }
-                if ids
-                else {}
-            )
-            username = str((current_user() or {}).get("username") or "")
-            updated: list[Issue] = []
-            for issue_id in ids:
-                issue = rows.get(issue_id)
-                if issue is None:
-                    continue  # 不属于该项目的 id 直接忽略
-                _apply_issue_status(issue, payload.status, note, username)
-                updated.append(issue)
-            audit(
-                db,
-                project.id,
-                "issue.bulk_status",
-                {
-                    "ids": len(ids),
-                    "updated": len(updated),
-                    "status": payload.status,
-                    "note": note,
-                },
-            )
-            db.flush()
-            node_map = _issue_node_map(db, updated)
-            return {
-                "updated": len(updated),
-                "items": [_issue_payload(row, node_map) for row in updated],
-            }
 
     # -------------------------------------------------------------- export
 
 
 
-    @app.get("/legal/versions")
-    def legal_versions() -> dict[str, str]:
-        return {"version": compliance.LEGAL_VERSION, "terms": "terms", "privacy": "privacy"}
 
-    @app.get("/billing/invoices")
-    def billing_invoices() -> list[dict[str, Any]]:
-        with session_scope() as db:
-            user = billing_user(db)
-            return [invoices.invoice_payload(row) for row in invoices.list_requests(db, user.id)]
 
-    @app.post("/billing/invoices", status_code=201)
-    def billing_invoice_create(payload: InvoiceCreate) -> dict[str, Any]:
-        with session_scope() as db:
-            user = billing_user(db)
-            try:
-                row = invoices.create_request(
-                    db,
-                    user,
-                    title=payload.title,
-                    amount_cents=payload.amount_cents,
-                    tax_no=payload.tax_no,
-                    email=payload.email,
-                    note=payload.note,
-                )
-            except invoices.InvoiceError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(db, None, "invoice.request", {"invoice_id": row.id, "amount_cents": row.amount_cents})
-            return invoices.invoice_payload(row)
 
-    @app.get("/billing/invoices/{invoice_id}/file")
-    def billing_invoice_file(invoice_id: str) -> FileResponse:
-        with session_scope() as db:
-            user = billing_user(db)
-            try:
-                path = invoices.invoice_file(db, invoice_id, user.id)
-            except LookupError as exc:
-                raise HTTPException(status_code=404, detail=str(exc)) from exc
-            return FileResponse(path, filename=path.name)
 
-    @app.get("/admin/invoices")
-    def admin_invoices(request: Request, status: str = "") -> list[dict[str, Any]]:
-        require_super(request)
-        with session_scope() as db:
-            try:
-                rows = invoices.list_all(db, status=status)
-            except invoices.InvoiceError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            ids = {row.user_id for row in rows}
-            names = {
-                user.id: (user.display_name or user.username)
-                for user in db.scalars(select(User).where(User.id.in_(ids))).all()
-            } if ids else {}
-            return [invoices.invoice_payload(row, username=names.get(row.user_id, "")) for row in rows]
 
-    @app.post("/admin/invoices/{invoice_id}/issue")
-    async def admin_invoice_issue(
-        invoice_id: str,
-        request: Request,
-        invoice_no: str = Form(...),
-        file: UploadFile = File(...),
-    ) -> dict[str, Any]:
-        require_super(request)
-        content = await file.read()
-        if len(content) > invoices.MAX_INVOICE_BYTES:
-            raise HTTPException(status_code=400, detail="发票文件不能超过 10MB")
-        with session_scope() as db:
-            try:
-                row = invoices.issue_request(
-                    db,
-                    invoice_id,
-                    invoice_no=invoice_no,
-                    filename=file.filename or "",
-                    content=content,
-                )
-            except LookupError as exc:
-                raise HTTPException(status_code=404, detail=str(exc)) from exc
-            except invoices.InvoiceError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(db, None, "invoice.issue", {"invoice_id": row.id, "invoice_no": row.invoice_no})
-            return invoices.invoice_payload(row)
 
-    @app.post("/admin/invoices/{invoice_id}/reject")
-    def admin_invoice_reject(
-        invoice_id: str, payload: InvoiceReject, request: Request
-    ) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            try:
-                row = invoices.reject_request(db, invoice_id, payload.reason)
-            except LookupError as exc:
-                raise HTTPException(status_code=404, detail=str(exc)) from exc
-            except invoices.InvoiceError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(db, None, "invoice.reject", {"invoice_id": row.id})
-            return invoices.invoice_payload(row)
 
-    @app.get("/legal/{name}")
-    def legal_document(name: str) -> dict[str, str]:
-        try:
-            text = compliance.legal_doc(name)
-        except LookupError as exc:
-            raise HTTPException(status_code=404, detail="文档不存在") from exc
-        return {"name": name, "text": text}
 
-    @app.get("/account/deletion")
-    def account_deletion() -> dict[str, Any]:
-        with session_scope() as db:
-            user = billing_user(db)
-            return compliance.deletion_payload(user)
 
-    @app.post("/account/delete")
-    def account_delete(payload: AccountDelete) -> dict[str, Any]:
-        with session_scope() as db:
-            user = billing_user(db)
-            if payload.confirm.strip() != compliance.DELETE_CONFIRM:
-                raise HTTPException(status_code=400, detail="请输入「注销」以确认")
-            try:
-                state = compliance.request_deletion(db, user, payload.password)
-            except compliance.ComplianceError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(
-                db,
-                None,
-                "account.delete_request",
-                {"user_id": user.id, "username": user.username, "due_at": state["due_at"]},
-            )
-            db.flush()
-            return {"deleted": False, **state}
 
-    @app.post("/account/delete/cancel")
-    def account_delete_cancel() -> dict[str, Any]:
-        with session_scope() as db:
-            user = billing_user(db)
-            try:
-                state = compliance.cancel_deletion(db, user)
-            except compliance.ComplianceError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(db, None, "account.delete_cancel", {"user_id": user.id})
-            db.flush()
-            return {"deleted": False, **state}
 
-    @app.post("/admin/accounts/purge")
-    def admin_purge_accounts(request: Request, dry_run: bool = False) -> dict[str, Any]:
-        require_super(request)
-        with session_scope() as db:
-            result = compliance.purge_due_accounts(db, dry_run=dry_run)
-            audit(db, None, "account.purge_batch", {"purged": len(result["purged"]), "dry_run": dry_run})
-            db.flush()
-            return result
 
-    @app.get("/account/export")
-    def account_export() -> FileResponse:
-        with session_scope() as db:
-            user = billing_user(db)
-            try:
-                path = compliance.export_account(db, user, settings.home)
-            except Exception as exc:  # noqa: BLE001 - 导出失败需可读
-                raise HTTPException(status_code=500, detail=f"导出失败：{exc}") from exc
-            audit(db, None, "account.export", {"user_id": user.id})
-            db.flush()
-            return FileResponse(
-                path,
-                media_type="application/zip",
-                filename=Path(path).name,
-            )
 
-    @app.get("/account/billing-profile")
-    def billing_profile_get() -> dict[str, Any]:
-        with session_scope() as db:
-            user = billing_user(db)
-            return compliance.billing_profile(db, user.id)
 
-    @app.put("/account/billing-profile")
-    def billing_profile_put(payload: BillingProfilePayload) -> dict[str, Any]:
-        with session_scope() as db:
-            user = billing_user(db)
-            data = compliance.save_billing_profile(db, user.id, payload.model_dump())
-            audit(db, None, "account.billing_profile", {})
-            return data
 
-    @app.get("/billing/statement")
-    def billing_statement(start: str = "", end: str = "") -> Response:
-        with session_scope() as db:
-            user = billing_user(db)
-            body = compliance.statement_csv(db, user.id, start=start, end=end)
-        return Response(
-            content=body.encode("utf-8-sig"),
-            media_type="text/csv; charset=utf-8",
-            headers={
-                "Content-Disposition": 'attachment; filename="bidcraft-statement.csv"'
-            },
-        )
 
-    @app.get("/projects/{ref}/export-templates")
-    def export_templates_list(ref: str) -> dict[str, Any]:
-        from ..export import templates as export_templates
 
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            return {
-                "presets": export_templates.preset_list(),
-                "current": export_templates.load(project),
-            }
 
-    @app.put("/projects/{ref}/export-template")
-    def export_template_set(ref: str, payload: ExportTemplateUpdate) -> dict[str, Any]:
-        from ..export import templates as export_templates
-
-        with session_scope() as db:
-            project, role = _project(db, ref)
-            _require_write(role)
-            try:
-                chosen = export_templates.save(project, payload.id)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(db, project.id, "project.export_template", {"id": payload.id})
-            db.flush()
-            return {"current": chosen, "presets": export_templates.preset_list()}
-
-    @app.post("/projects/{ref}/export")
-    def export(ref: str, payload: ExportRequest) -> FileResponse:
-        fmt = payload.format.lower()
-        with session_scope() as db:
-            project, role = _project(db, ref)
-            _require_write(role)
-            # 交付硬门禁：未处置的废标/阻断风险禁止导出正文类格式；
-            # 强制覆盖仅限 owner/admin，且必须留痕（export.force 审计）。
-            # 统计/校验/审计与 MCP、CLI 共用 export_gate，保证口径与文案一致。
-            try:
-                enforce_export_gate(
-                    db,
-                    project.id,
-                    fmt,
-                    force=payload.force,
-                    force_reason=payload.force_reason,
-                    authorize_force=lambda: _require_owner(role),
-                )
-            except ExportGateError as exc:
-                raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
-            ledger = load_ledger(db, project.id)
-            nodes = load_outline(db, project.id)
-            if fmt != "xlsx" and (not nodes or not any(node.get("body") for node in nodes)):
-                raise HTTPException(status_code=409, detail="还没有正文，请先生成或编写章节")
-            output_dir = settings.project_dir(project.id) / "output"
-            audit(db, project.id, "export.run", {"format": fmt})
-            if fmt == "docx":
-                from ..export import templates as export_templates
-
-                path = export_docx(
-                    output_dir / "bid.docx",
-                    ledger,
-                    nodes,
-                    image_resolver=images.url_resolver(project.id),
-                    image_policy=images.get_policy(project),
-                    template=export_templates.load(project),
-                )
-            elif fmt in {"md", "markdown"}:
-                path = export_markdown(output_dir / "bid.md", ledger, nodes)
-            elif fmt == "xlsx":
-                from ..export.xlsx import export_xlsx
-
-                path = export_xlsx(output_dir / "bid.xlsx", ledger)
-            elif fmt == "pdf":
-                from ..export.pdf import PdfExportError, export_pdf
-
-                docx_path = export_docx(
-                    output_dir / "bid.docx",
-                    ledger,
-                    nodes,
-                    image_resolver=images.url_resolver(project.id),
-                    image_policy=images.get_policy(project),
-                )
-                try:
-                    path = export_pdf(docx_path)
-                except PdfExportError as exc:
-                    raise HTTPException(status_code=500, detail=str(exc)) from exc
-            else:
-                raise HTTPException(status_code=400, detail="format 只能是 docx/md/pdf/xlsx")
-            safe = re.sub(r'[\\/:*?"<>|]', "", project.name).strip() or "BidCraft"
-            label = {
-                "docx": "投标文件",
-                "pdf": "投标文件",
-                "md": "投标文件",
-                "xlsx": "事实台账",
-            }[fmt if fmt != "markdown" else "md"]
-            return FileResponse(path, filename=f"{safe[:60]}-{label}{path.suffix}")
 
     # -------------------------------------------------------------- packages
 
 
 
 
-    @app.get("/projects/{ref}/packages")
-    def package_list(
-        ref: str, limit: int = 500, offset: int = 0
-    ) -> list[dict[str, Any]]:
-        capped, start = _page_bounds(limit, offset)
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            rows = _bid_packages(db, project.id)
-            counts = _boq_package_ids(db, project.id, [row.id for row in rows])
-            return [
-                _bid_package_payload(row, row.id in counts)
-                for row in rows[start : start + capped]
-            ]
 
-    @app.post("/projects/{ref}/packages", status_code=201)
-    def package_create(ref: str, payload: PackageCreate) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            name = payload.name.strip()
-            if not name:
-                raise HTTPException(status_code=400, detail="包件名称不能为空")
-            existing = _bid_packages(db, project.id)
-            if any(item.name == name for item in existing):
-                raise HTTPException(status_code=409, detail=f"包件名称已存在：{name}")
-            package = BidPackage(
-                project_id=project.id,
-                name=name,
-                number=(payload.number or "").strip(),
-                position=max((item.position or 0 for item in existing), default=-1) + 1,
-            )
-            db.add(package)
-            db.flush()
-            adopted = 0
-            if not existing:
-                # First package adopts the legacy project-wide (NULL) snapshot.
-                for snapshot in db.scalars(
-                    select(BoqSnapshot).where(
-                        BoqSnapshot.project_id == project.id,
-                        BoqSnapshot.package_id.is_(None),
-                    )
-                ):
-                    snapshot.package_id = package.id
-                    adopted += 1
-                db.flush()
-            audit(
-                db,
-                project.id,
-                "project.package_create",
-                {"package_id": package.id, "name": name, "adopted_snapshots": adopted},
-            )
-            has_boq = boq.get_snapshot(db, project.id, package.id) is not None
-            return _bid_package_payload(package, has_boq)
 
-    @app.patch("/projects/{ref}/packages/{package_id}")
-    def package_update(
-        ref: str, package_id: str, payload: PackageUpdate
-    ) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            package = _bid_package(db, project, package_id)
-            changed: dict[str, Any] = {}
-            if payload.name is not None:
-                name = payload.name.strip()
-                if not name:
-                    raise HTTPException(status_code=400, detail="包件名称不能为空")
-                duplicate = db.scalar(
-                    select(BidPackage).where(
-                        BidPackage.project_id == project.id,
-                        BidPackage.name == name,
-                        BidPackage.id != package.id,
-                    )
-                )
-                if duplicate is not None:
-                    raise HTTPException(status_code=409, detail=f"包件名称已存在：{name}")
-                if name != package.name:
-                    package.name = name
-                    changed["name"] = name
-            if payload.number is not None:
-                number = payload.number.strip()
-                if number != (package.number or ""):
-                    package.number = number
-                    changed["number"] = number
-            db.flush()
-            audit(
-                db,
-                project.id,
-                "project.package_update",
-                {"package_id": package.id, **changed},
-            )
-            has_boq = boq.get_snapshot(db, project.id, package.id) is not None
-            return _bid_package_payload(package, has_boq)
 
-    @app.delete("/projects/{ref}/packages/{package_id}")
-    def package_delete(ref: str, package_id: str) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            package = _bid_package(db, project, package_id)
-            boq.remove_snapshot(db, project, package_id=package.id)
-            audit(
-                db,
-                project.id,
-                "project.package_delete",
-                {"package_id": package.id, "name": package.name},
-            )
-            db.delete(package)
-            db.flush()
-            return {"deleted": True, "id": package.id}
 
     # ------------------------------------------------------------------ boq
-    @app.get("/projects/{ref}/boq")
-    def boq_alignment(ref: str, package_id: str | None = None) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            package = _resolve_boq_package(db, project, package_id)
-            return boq.build_payload(
-                db, project.id, package_id=package.id if package else None
-            )
 
-    @app.post("/projects/{ref}/boq")
-    async def boq_upload(
-        ref: str,
-        file: UploadFile = File(...),
-        sheet: str = Form(""),
-        package_id: str = Form(""),
-    ) -> dict[str, Any]:
-        raw_name = (file.filename or "").strip()
-        if raw_name and raw_name not in {"/", "\\"}:
-            suffix = Path(raw_name).suffix.lower()
-            if suffix not in BOQ_UPLOAD_SUFFIXES:
-                raise HTTPException(
-                    status_code=400,
-                    detail="工程量清单仅支持 .xlsx / .xlsm 文件",
-                )
-        filename = _safe_filename(raw_name, "boq.xlsx")
-        with tempfile.TemporaryDirectory(prefix="bidcraft-boq-") as tmp:
-            target = Path(tmp) / filename
-            await _save_upload(
-                file,
-                target,
-                max_bytes=MAX_BOQ_UPLOAD_BYTES,
-                detail="工程量清单不能超过 20MB",
-            )
-            with session_scope() as db:
-                project, _role = _project(db, ref)
-                _require_write(_role)
-                package = _resolve_boq_package(db, project, package_id)
-                resolved = package.id if package else None
-                try:
-                    boq.import_boq(
-                        db, project, target, sheet=sheet or None, package_id=resolved
-                    )
-                except ValueError as exc:
-                    raise HTTPException(status_code=400, detail=str(exc)) from exc
-                audit(
-                    db,
-                    project.id,
-                    "boq.upload",
-                    {"filename": filename, "package_id": resolved},
-                )
-                return boq.build_payload(db, project.id, package_id=resolved)
 
-    @app.post("/projects/{ref}/boq/apply")
-    def boq_apply(ref: str, payload: BoqApplyRequest) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            try:
-                package = boq.resolve_package(db, project, payload.package_id)
-                resolved = package.id if package else None
-                result = boq.apply_action(
-                    db, project, payload.boq_row, payload.action, package_id=resolved
-                )
-            except boq.BoqConflictError as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(
-                db,
-                project.id,
-                "boq.apply",
-                {"row": payload.boq_row, "action": payload.action, "package_id": resolved},
-            )
-            return result
 
-    @app.post("/projects/{ref}/boq/price")
-    def boq_price(ref: str, payload: BoqPriceRequest) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            try:
-                package = boq.resolve_package(db, project, payload.package_id)
-                resolved = package.id if package else None
-                result = boq.set_unit_price(
-                    db, project, payload.boq_row, payload.unit_price, package_id=resolved
-                )
-            except boq.BoqConflictError as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(
-                db,
-                project.id,
-                "boq.price",
-                {
-                    "row": payload.boq_row,
-                    "unit_price": payload.unit_price,
-                    "package_id": resolved,
-                },
-            )
-            return result
 
-    @app.get("/projects/{ref}/boq/versions")
-    def boq_version_list(
-        ref: str, package_id: str | None = None
-    ) -> list[dict[str, Any]]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            try:
-                return boq.list_versions(db, project, package_id)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post("/projects/{ref}/boq/versions", status_code=201)
-    def boq_version_create(ref: str, payload: BoqVersionCreate) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            try:
-                version = boq.save_version(
-                    db,
-                    project,
-                    payload.name,
-                    payload.note,
-                    package_id=payload.package_id,
-                )
-            except boq.BoqConflictError as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(
-                db,
-                project.id,
-                "boq.version_save",
-                {
-                    "version_id": version["id"],
-                    "name": version["name"],
-                    "package_id": version["package_id"],
-                },
-            )
-            return version
 
-    @app.get("/projects/{ref}/boq/versions/{version_id}")
-    def boq_version_detail(ref: str, version_id: str) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            version = boq.get_version(db, project.id, version_id)
-            if version is None:
-                raise LookupError("版本不存在")
-            return boq.version_payload(version, include_prices=True, project=project)
 
-    @app.get("/projects/{ref}/boq/versions/{version_id}/diff")
-    def boq_version_diff(
-        ref: str, version_id: str, other: str | None = None
-    ) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            try:
-                return boq.diff_version(db, project, version_id, other)
-            except boq.BoqConflictError as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    @app.post("/projects/{ref}/boq/versions/{version_id}/restore")
-    def boq_version_restore(ref: str, version_id: str) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            try:
-                result = boq.restore_version(db, project, version_id)
-            except boq.BoqConflictError as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            snapshot = result.get("snapshot") or {}
-            audit(
-                db,
-                project.id,
-                "boq.version_restore",
-                {"version_id": version_id, "package_id": snapshot.get("package_id")},
-            )
-            return result
 
-    @app.post("/projects/{ref}/boq/versions/{version_id}/submit")
-    def boq_version_submit(
-        ref: str, version_id: str, payload: BoqVersionSubmit | None = None
-    ) -> dict[str, Any]:
-        data = payload or BoqVersionSubmit()
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            user = current_user() or {}
-            actor = user.get("display_name") or user.get("username") or ""
-            try:
-                result = boq.submit_version(
-                    db, project, version_id, actor=actor, note=data.note
-                )
-            except boq.BoqConflictError as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(
-                db,
-                project.id,
-                "quote.submit",
-                {
-                    "version_id": result["id"],
-                    "name": result["name"],
-                    "package_id": result["package_id"],
-                    "note": result["submit_note"],
-                },
-            )
-            return result
 
-    @app.post("/projects/{ref}/boq/versions/{version_id}/review")
-    def boq_version_review(
-        ref: str, version_id: str, payload: BoqVersionReview
-    ) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            user = current_user() or {}
-            actor = user.get("display_name") or user.get("username") or ""
-            try:
-                # R19：授权下沉到 boq.review_version——空链仅 owner/超管，
-                # 非空链按当前级审批人（或超管）放行，会签/或签按阶段模式推进。
-                result = boq.review_version(
-                    db,
-                    project,
-                    version_id,
-                    actor=actor,
-                    decision=payload.decision,
-                    note=payload.note,
-                    actor_id=str(user.get("id") or ""),
-                    role=_role,
-                    is_super=user.get("role") == auth.ROLE_SUPER_ADMIN,
-                )
-            except boq.BoqForbiddenError as exc:
-                raise HTTPException(status_code=403, detail=str(exc)) from exc
-            except boq.BoqConflictError as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(
-                db,
-                project.id,
-                "quote.approve" if payload.decision == "approve" else "quote.reject",
-                {
-                    "version_id": result["id"],
-                    "name": result["name"],
-                    "package_id": result["package_id"],
-                    "note": payload.note,
-                    "status": result["status"],
-                    "stage": len(result["approvals"]),
-                },
-            )
-            return result
 
-    @app.post("/projects/{ref}/boq/versions/{version_id}/unapprove")
-    def boq_version_unapprove(ref: str, version_id: str) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            try:
-                result = boq.unapprove_version(db, project, version_id)
-            except boq.BoqConflictError as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(
-                db,
-                project.id,
-                "quote.unapprove",
-                {
-                    "version_id": result["id"],
-                    "name": result["name"],
-                    "package_id": result["package_id"],
-                },
-            )
-            return result
 
-    @app.delete("/projects/{ref}/boq/versions/{version_id}")
-    def boq_version_delete(ref: str, version_id: str) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            boq.delete_version(db, project, version_id)
-            audit(db, project.id, "boq.version_delete", {"version_id": version_id})
-            return {"deleted": True, "id": version_id}
 
-    @app.get("/projects/{ref}/price-policy")
-    def price_policy_get(ref: str) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            return boq.get_price_policy(project)
 
-    @app.put("/projects/{ref}/price-policy")
-    def price_policy_put(ref: str, payload: PricePolicyUpdate) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            policy = boq.set_price_policy(db, project, payload.model_dump())
-            audit(db, project.id, "price.policy", policy)
-            return policy
 
-    @app.post("/projects/{ref}/boq/quota-fill")
-    def boq_quota_fill(
-        ref: str, payload: BoqQuotaFillRequest | None = None
-    ) -> dict[str, Any]:
-        data = payload or BoqQuotaFillRequest()
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            try:
-                package = boq.resolve_package(db, project, data.package_id)
-                resolved = package.id if package else None
-                result = boq.quota_fill(
-                    db,
-                    project,
-                    package_id=resolved,
-                    only_missing=data.only_missing,
-                    dry_run=data.dry_run,
-                )
-            except boq.BoqConflictError as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            if not data.dry_run:
-                audit(
-                    db,
-                    project.id,
-                    "boq.quota_fill",
-                    {
-                        "applied": result["applied"],
-                        "only_missing": data.only_missing,
-                    },
-                )
-            return result
 
-    @app.post("/projects/{ref}/boq/adjust")
-    def boq_adjust(ref: str, payload: BoqAdjustRequest | None = None) -> dict[str, Any]:
-        data = payload or BoqAdjustRequest()
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            try:
-                package = boq.resolve_package(db, project, data.package_id)
-                resolved = package.id if package else None
-                result = boq.adjust_prices(db, project, package_id=resolved)
-            except boq.BoqConflictError as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            audit(
-                db,
-                project.id,
-                "boq.adjust",
-                {"factor": result["factor"], "rows": result["rows"]},
-            )
-            return result["payload"]
 
-    @app.delete("/projects/{ref}/boq")
-    def boq_delete(ref: str, package_id: str | None = None) -> dict[str, Any]:
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            package = _resolve_boq_package(db, project, package_id)
-            resolved = package.id if package else None
-            boq.remove_snapshot(db, project, package_id=resolved)
-            audit(db, project.id, "boq.delete", {"package_id": resolved})
-            return {"deleted": True}
 
-    @app.post("/projects/{ref}/boq/export")
-    def boq_export(ref: str, package_id: str | None = None) -> FileResponse:
-        from ..export.boq_xlsx import export_boq_xlsx
-
-        with session_scope() as db:
-            project, _role = _project(db, ref)
-            _require_write(_role)
-            package = _resolve_boq_package(db, project, package_id)
-            resolved = package.id if package else None
-            payload = boq.build_payload(db, project.id, package_id=resolved)
-            if payload["snapshot"] is None:
-                raise HTTPException(status_code=409, detail="尚未上传工程量清单，无法导出响应表")
-            path = export_boq_xlsx(
-                settings.project_dir(project.id) / "output" / "boq-response.xlsx", payload
-            )
-            safe = re.sub(r'[\\/:*?"<>|]', "", project.name).strip() or "BidCraft"
-            if package is None:
-                filename = f"{safe[:60]}-清单响应表.xlsx"
-            else:
-                section = re.sub(r'[\\/:*?"<>|]', "", package.name).strip() or "包件"
-                filename = f"{safe[:60]}-{section[:40]}-清单响应表.xlsx"
-            return FileResponse(path, filename=filename)
 
     # -------------------------------------------------------------- approvals
-    @app.get("/approvals/pending")
-    def approvals_pending() -> list[dict[str, Any]]:
-        """R20 待我审批：跨项目聚合当前用户待审的报价版本（平铺数组）。"""
-        with session_scope() as db:
-            return boq.pending_for_user(db, current_user() or {})
 
     # ------------------------------------------------------------------ web
     if (dist / "index.html").is_file():
@@ -5975,9 +1959,3 @@ try:  # keep importing bidcraft.api cheap when the optional extra is absent
     app = create_app()
 except RuntimeError:  # pragma: no cover
     app = None
-
-
-def _profile_keys(profile_values: dict[str, Any]) -> list[str]:
-    """List the non-empty profile fields for the audit detail."""
-
-    return [key for key, value in profile_values.items() if value not in ("", [], None)]
