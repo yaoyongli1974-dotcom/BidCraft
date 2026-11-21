@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from . import (
+from .. import (
     __version__,
     accounts,
     auth,
@@ -52,23 +52,23 @@ from . import (
     wechat,
     wechatpay,
 )
-from .audit import record_audit
-from .config import settings, validate_startup
-from .context import current_user, set_current_user
-from .db import init_db, session_scope
-from .duplicate import duplicate_project
-from .export.docx import export_docx, export_markdown
-from .export_gate import (
+from ..audit import record_audit
+from ..config import settings, validate_startup
+from ..context import current_user, set_current_user
+from ..db import init_db, session_scope
+from ..duplicate import duplicate_project
+from ..export.docx import export_docx, export_markdown
+from ..export_gate import (
     EXPORT_GATE_FORMATS,  # noqa: F401 - 保留 from bidcraft.api import 的既有导出面
     ISSUE_RESOLVED_STATUSES,  # noqa: F401 - 同上，定义迁至 export_gate
     ExportGateError,
     enforce_export_gate,
     issue_is_open,
 )
-from .generation.outline import build_outline, load_outline, save_outline
-from .generation.writer import count_words, generate_document
-from .ledger import ledger_summary, load_ledger, update_fact
-from .models import (
+from ..generation.outline import build_outline, load_outline, save_outline
+from ..generation.writer import count_words, generate_document
+from ..ledger import ledger_summary, load_ledger, update_fact
+from ..models import (
     AuditLog,
     BidPackage,
     BoqSnapshot,
@@ -95,16 +95,16 @@ from .models import (
     TermItem,
     User,
 )
-from .pipeline import add_source, check_project, create_project, parse_project, resolve_project
-from .rules import store as package_store
-from .rules.engine import ledger_gate
-from .rules.loader import (
+from ..pipeline import add_source, check_project, create_project, parse_project, resolve_project
+from ..rules import store as package_store
+from ..rules.engine import ledger_gate
+from ..rules.loader import (
     document_package_name,
     list_packages,
     load_package,
     validate_package_text,
 )
-from .services.job_support import (  # noqa: F401 - 保留 api 名字空间，路由闭包按原名解析
+from ..services.job_support import (  # noqa: F401 - 保留 api 名字空间，路由闭包按原名解析
     BATCH_STALE_SECONDS,
     KB_REINDEX_STALE_SECONDS,
     STARTUP_INTERRUPTED_MESSAGE,
@@ -117,7 +117,7 @@ from .services.job_support import (  # noqa: F401 - 保留 api 名字空间，�
     _recover_interrupted_jobs,
     _report_payload,
 )
-from .workers import (  # noqa: F401 - 同上；测试也 monkeypatch 这些名字
+from ..workers import (  # noqa: F401 - 同上；测试也 monkeypatch 这些名字
     _run_batch_check_job,
     _run_batch_export_job,
     _run_generation_job,
@@ -1109,6 +1109,376 @@ def _pending_chapters(db, project_id: str, force: bool = False) -> int:
     return len([node for node in nodes if force or not node.get("body")])
 
 
+
+# FastAPI 类型原先只在 create_app 内 import，提升的 helper 需要模块级可见。
+# create_app 内保留同名局部 import（optional extra 缺失时在那里抛 RuntimeError）。
+try:
+    from fastapi import HTTPException, Request, Response
+    from fastapi.responses import RedirectResponse
+except ImportError:  # pragma: no cover - optional extra 缺失时 create_app 会抛 RuntimeError
+    HTTPException = Request = Response = RedirectResponse = None  # type: ignore
+
+# ---------------------------------------------------------------------------
+# 以下 helper / 模型原先定义在 create_app 内部，提升到模块级供 api/routes/* 复用。
+# ---------------------------------------------------------------------------
+
+from ..models import AuthSession, KbChunk, KnowledgeBase, ModelConfig
+from ..security import encrypt_secret, hash_password, verify_password
+
+docs_on = settings.docs_enabled
+
+
+def set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        auth.SESSION_COOKIE,
+        token,
+        max_age=settings.session_days * 86400,
+        httponly=True,
+        samesite="lax",
+        secure=settings.secure_cookie,
+        path="/",
+    )
+
+
+def _wechat_login(profile: dict, response: Response, next_path: str) -> RedirectResponse:
+    with session_scope() as db:
+        try:
+            user = wechat.login_or_register(db, profile)
+            token = auth.create_session(db, user)
+            auth.purge_expired_sessions(db)
+        except (ValueError, wechat.WeChatError) as exc:
+            return RedirectResponse(
+                f"/login?reason=wechat&message={quote(str(exc))}", status_code=302
+            )
+    target = next_path if next_path.startswith("/") and not next_path.startswith("//") else "/"
+    redirect = RedirectResponse(target, status_code=302)
+    set_session_cookie(redirect, token)
+    return redirect
+
+
+def billing_user(db) -> User:
+    user_id = (current_user() or {}).get("id")
+    user = db.get(User, user_id) if user_id else None
+    if user is None:
+        raise HTTPException(status_code=401, detail="请先登录")
+    return user
+
+
+def require_own_order(db, order_id: str) -> RechargeOrder:
+    order = db.get(RechargeOrder, order_id)
+    user = current_user() or {}
+    if order is None or (
+        order.user_id != user.get("id") and user.get("role") != auth.ROLE_SUPER_ADMIN
+    ):
+        raise HTTPException(status_code=404, detail="订单不存在")
+    return order
+
+
+def _reject_sub_billing(user: User) -> None:
+    if user.parent_id:
+        raise HTTPException(status_code=403, detail="子账号费用由主账号承担，无需单独充值")
+
+
+def require_super(request: Request) -> None:
+    if request.state.user.get("role") != auth.ROLE_SUPER_ADMIN:
+        raise HTTPException(status_code=403, detail="仅超级管理员可访问")
+
+
+def package_audit(action: str, name: str) -> None:
+    with session_scope() as db:
+        audit(db, None, action, {"name": name})
+
+
+def validate_kind(kind: str, provider: str) -> None:
+    if kind not in {"chat", "image", "embedding"}:
+        raise HTTPException(status_code=400, detail="kind 只能是 chat/image/embedding")
+    if provider not in {"openai", "ollama", "custom"}:
+        raise HTTPException(status_code=400, detail="provider 只能是 openai/ollama/custom")
+    if provider == "ollama" and kind != "chat":
+        raise HTTPException(status_code=400, detail="Ollama 目前仅支持对话模型")
+
+
+def validate_kb(kind: str, provider: str) -> None:
+    if kind not in {"local", "api"}:
+        raise HTTPException(status_code=400, detail="kind 只能是 local/api")
+    allowed = {"local"} if kind == "local" else {"generic", "dify", "ragflow"}
+    if provider not in allowed:
+        raise HTTPException(status_code=400, detail=f"{kind} 知识库 provider 不合法")
+
+
+def unset_default_model(db, kind: str) -> None:
+    for row in db.scalars(select(ModelConfig).where(ModelConfig.kind == kind)):
+        row.is_default = False
+
+
+def unset_default_kb(db) -> None:
+    for row in db.scalars(select(KnowledgeBase)):
+        row.is_default = False
+
+
+def plugin_name(value: str | None) -> str:
+    try:
+        return plugins.plugin_name(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def plugin_transport(value: str | None, *, default: str = "stdio") -> str:
+    try:
+        return plugins.plugin_transport(value, default=default)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def plugin_validate(transport: str, command: str, url: str) -> None:
+    try:
+        plugins.plugin_validate(transport, command, url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def plugin_items(value, *, field: str, limits: int = 64) -> list[str]:
+    """接受数组、JSON 文本或逗号分隔字符串，去空去重后返回。"""
+    try:
+        return plugins.plugin_items(value, field=field, limits=limits)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def plugin_env(value, *, field: str = "env") -> dict[str, str]:
+    try:
+        return plugins.plugin_env(value, field=field)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def rule_package_record(name: str, document: str | None = None) -> dict[str, Any]:
+    with session_scope() as db:
+        usage = _package_usage(db)
+    payload = _rule_package_admin_payload(name, usage, document)
+    if payload is None:  # pragma: no cover - defensive
+        raise HTTPException(status_code=404, detail="规则包不存在")
+    return payload
+
+
+def check_package_name(name: str) -> str:
+    try:
+        return package_store.validate_name(name)
+    except package_store.StoreError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def check_package_document(document: str, name: str = "") -> None:
+    result = validate_package_text(document, name)
+    if not result["ok"]:
+        detail = "；".join(str(problem) for problem in result["problems"])
+        raise HTTPException(status_code=400, detail=detail or "规则包校验失败")
+
+
+def quota_name(value: str | None) -> str:
+    name = (value or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="定额名称不能为空")
+    if len(name) > 120:
+        raise HTTPException(status_code=400, detail="定额名称不能超过 120 个字符")
+    return name
+
+
+def quota_price(value: float | None) -> float:
+    try:
+        price = float(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="定额单价必须是数字") from exc
+    if not math.isfinite(price) or price < 0:
+        raise HTTPException(status_code=400, detail="定额单价必须是非负有限数字")
+    return round(price, 4)
+
+
+class TextQaUpdate(BaseModel):
+    typos: Any = None
+
+
+def textqa_payload(db) -> dict[str, Any]:
+    typos = textqa.load_custom(db)
+    return {
+        "typos": typos,
+        "count": len(typos),
+        "builtin_count": len(textqa.TYPO_RULES),
+    }
+
+
+class WechatConfigUpdate(BaseModel):
+    app_id: str | None = None
+    app_secret: str | None = None
+    clear_secret: bool = False
+    redirect_uri: str | None = None
+    enabled: bool | None = None
+    mock: bool | None = None
+
+
+def wechat_config_payload(db) -> dict[str, Any]:
+    from ..models import WechatConfig
+
+    row = db.get(WechatConfig, "default")
+    cfg = wechat.effective(db)
+    return {
+        "app_id": (row.app_id if row else settings.wechat_app_id) or "",
+        "has_secret": bool(row.app_secret_enc) if row else bool(settings.wechat_app_secret),
+        "redirect_uri": (row.redirect_uri if row else settings.wechat_redirect_uri) or "",
+        "enabled": bool(row.enabled) if row else False,
+        "mock": bool(cfg["mock"]),
+        "available": wechat.available(db),
+        "source": cfg["source"],
+    }
+
+
+def _member_payload(member: ProjectMember, user: User | None) -> dict[str, Any]:
+    return {
+        "user_id": member.user_id,
+        "username": user.username if user is not None else "",
+        "display_name": (user.display_name or user.username)
+        if user is not None
+        else "",
+        "role": member.role,
+        "created_at": _iso(member.created_at),
+    }
+
+
+def _member(db, project_id: str, user_id: str) -> ProjectMember:
+    member = db.scalar(
+        select(ProjectMember).where(
+            ProjectMember.project_id == project_id,
+            ProjectMember.user_id == user_id,
+        )
+    )
+    if member is None:
+        raise LookupError("成员不存在")
+    return member
+
+
+def _audit_item(row: AuditLog, project_name: dict[str, str] | None = None) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "id": row.id,
+        "action": row.action,
+        "username": row.username,
+        "display_name": row.display_name,
+        "detail": row.detail or {},
+        "created_at": _iso(row.created_at),
+    }
+    if project_name is not None:
+        item["project_id"] = row.project_id
+        item["project_name"] = (
+            project_name.get(row.project_id) if row.project_id else None
+        )
+    return item
+
+
+def _clamp_limit(limit: int) -> int:
+    return max(1, min(200, limit))
+
+
+def _image_http_error(exc: images.ImageError) -> HTTPException:
+    if isinstance(exc, images.ImageConfigError):
+        status = 503
+    elif isinstance(exc, images.ImageTooLarge):
+        status = 413
+    else:
+        status = 400
+    return HTTPException(status_code=status, detail=str(exc))
+
+
+def _node(db, project_id: str, node_id: str) -> OutlineNode:
+    node = db.get(OutlineNode, node_id)
+    if node is None or node.project_id != project_id:
+        raise LookupError(f"章节不存在: {node_id}")
+    return node
+
+
+def _chapter_payload(db, node: OutlineNode) -> dict[str, Any]:
+    section = db.scalar(select(Section).where(Section.node_id == node.id))
+    citations = provenance.node_citations(db, node.project_id, node.id)
+    return {
+        "id": node.id,
+        "heading": node.heading,
+        "intent": node.intent,
+        "target_words": node.target_words,
+        "needs": node.needs or [],
+        "body": section.body if section else "",
+        "words": section.words if section else 0,
+        "status": section.status if section else node.status,
+        "revision": (section.revision or 0) if section else 0,
+        "citations": len(citations),
+        "citations_stale": sum(1 for item in citations if item["stale"]),
+        "review_status": (section.review_status if section else "draft") or "draft",
+        "review_note": section.review_note if section else "",
+        "review_requested_at": clock.iso_beijing(section.review_requested_at)
+        if section
+        else None,
+        "review_requested_by": (section.review_requested_by or "") if section else "",
+        "confirmed_at": clock.iso_beijing(section.confirmed_at) if section else None,
+        "confirmed_by": (section.confirmed_by or "") if section else "",
+        "locked_at": clock.iso_beijing(section.locked_at) if section else None,
+        "locked_by": (section.locked_by or "") if section else "",
+    }
+
+
+class AccountDelete(BaseModel):
+    password: str
+    confirm: str
+
+
+class BillingProfilePayload(BaseModel):
+    title: str = ""
+    tax_no: str = ""
+    email: str = ""
+
+
+class ExportTemplateUpdate(BaseModel):
+    id: str
+
+
+def _bid_packages(db, project_id: str) -> list[BidPackage]:
+    return list(
+        db.scalars(
+            select(BidPackage)
+            .where(BidPackage.project_id == project_id)
+            .order_by(BidPackage.position, BidPackage.created_at, BidPackage.id)
+        )
+    )
+
+
+def _bid_package(db, project: Project, package_id: str) -> BidPackage:
+    package = db.get(BidPackage, package_id)
+    if package is None or package.project_id != project.id:
+        raise LookupError(f"包件不存在：{package_id}")
+    return package
+
+
+def _boq_package_ids(db, project_id: str, ids: list[str]) -> set[str]:
+    if not ids:
+        return set()
+    return set(
+        db.scalars(
+            select(BoqSnapshot.package_id).where(
+                BoqSnapshot.project_id == project_id,
+                BoqSnapshot.package_id.in_(ids),
+            )
+        )
+    )
+
+
+def _resolve_boq_package(db, project: Project, package_id: str | None):
+    """Map boq.resolve_package's 400 semantics onto the HTTP layer."""
+    try:
+        return boq.resolve_package(db, project, package_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+dist = Path(__file__).resolve().parent.parent / "web_dist"
+
+
+
 def create_app():
     try:
         from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
@@ -1122,8 +1492,6 @@ def create_app():
     except ImportError as exc:  # pragma: no cover - optional extra
         raise RuntimeError("HTTP API 需要安装可选依赖：pip install -e '.[api]'") from exc
 
-    from .models import AuthSession, KbChunk, KnowledgeBase, ModelConfig
-    from .security import encrypt_secret, hash_password, verify_password
 
     # 启动即校验配置：dev/test 只记 warning，prod 关键项缺失直接阻断（不会拖到业务阶段）。
     validate_startup()
@@ -1138,7 +1506,6 @@ def create_app():
         _recover_interrupted_jobs()
     except Exception:  # noqa: BLE001 - startup must not fail on cleanup
         logger.exception("恢复中断任务失败")
-    docs_on = settings.docs_enabled
     app = FastAPI(
         title="BidCraft",
         version=__version__,
@@ -1259,16 +1626,6 @@ def create_app():
             )
             return {"user": auth.user_payload(user)}
 
-    def set_session_cookie(response: Response, token: str) -> None:
-        response.set_cookie(
-            auth.SESSION_COOKIE,
-            token,
-            max_age=settings.session_days * 86400,
-            httponly=True,
-            samesite="lax",
-            secure=settings.secure_cookie,
-            path="/",
-        )
 
     @app.post("/auth/register", status_code=201)
     def register(payload: RegisterRequest, request: Request, response: Response) -> dict[str, Any]:
@@ -1304,20 +1661,6 @@ def create_app():
             raise HTTPException(status_code=503, detail="微信登录未配置")
         return RedirectResponse(wechat.authorize_url(next))
 
-    def _wechat_login(profile: dict, response: Response, next_path: str) -> RedirectResponse:
-        with session_scope() as db:
-            try:
-                user = wechat.login_or_register(db, profile)
-                token = auth.create_session(db, user)
-                auth.purge_expired_sessions(db)
-            except (ValueError, wechat.WeChatError) as exc:
-                return RedirectResponse(
-                    f"/login?reason=wechat&message={quote(str(exc))}", status_code=302
-                )
-        target = next_path if next_path.startswith("/") and not next_path.startswith("//") else "/"
-        redirect = RedirectResponse(target, status_code=302)
-        set_session_cookie(redirect, token)
-        return redirect
 
     @app.get("/auth/wechat/callback")
     def wechat_callback(
@@ -1372,21 +1715,7 @@ def create_app():
         return {"changed": True, "relogin": True}
 
     # --------------------------------------------------------------- billing
-    def billing_user(db) -> User:
-        user_id = (current_user() or {}).get("id")
-        user = db.get(User, user_id) if user_id else None
-        if user is None:
-            raise HTTPException(status_code=401, detail="请先登录")
-        return user
 
-    def require_own_order(db, order_id: str) -> RechargeOrder:
-        order = db.get(RechargeOrder, order_id)
-        user = current_user() or {}
-        if order is None or (
-            order.user_id != user.get("id") and user.get("role") != auth.ROLE_SUPER_ADMIN
-        ):
-            raise HTTPException(status_code=404, detail="订单不存在")
-        return order
 
     @app.get("/billing/summary")
     def billing_summary() -> dict[str, Any]:
@@ -1404,9 +1733,6 @@ def create_app():
                 "wechat_pay_mock": settings.wechat_pay_mock,
             }
 
-    def _reject_sub_billing(user: User) -> None:
-        if user.parent_id:
-            raise HTTPException(status_code=403, detail="子账号费用由主账号承担，无需单独充值")
 
     @app.post("/billing/orders", status_code=201)
     def create_order(payload: OrderCreate) -> dict[str, Any]:
@@ -1597,36 +1923,11 @@ def create_app():
         return {"code": "SUCCESS", "message": "成功"}
 
     # ---------------------------------------------------------------- admin
-    def require_super(request: Request) -> None:
-        if request.state.user.get("role") != auth.ROLE_SUPER_ADMIN:
-            raise HTTPException(status_code=403, detail="仅超级管理员可访问")
 
-    def package_audit(action: str, name: str) -> None:
-        with session_scope() as db:
-            audit(db, None, action, {"name": name})
 
-    def validate_kind(kind: str, provider: str) -> None:
-        if kind not in {"chat", "image", "embedding"}:
-            raise HTTPException(status_code=400, detail="kind 只能是 chat/image/embedding")
-        if provider not in {"openai", "ollama", "custom"}:
-            raise HTTPException(status_code=400, detail="provider 只能是 openai/ollama/custom")
-        if provider == "ollama" and kind != "chat":
-            raise HTTPException(status_code=400, detail="Ollama 目前仅支持对话模型")
 
-    def validate_kb(kind: str, provider: str) -> None:
-        if kind not in {"local", "api"}:
-            raise HTTPException(status_code=400, detail="kind 只能是 local/api")
-        allowed = {"local"} if kind == "local" else {"generic", "dify", "ragflow"}
-        if provider not in allowed:
-            raise HTTPException(status_code=400, detail=f"{kind} 知识库 provider 不合法")
 
-    def unset_default_model(db, kind: str) -> None:
-        for row in db.scalars(select(ModelConfig).where(ModelConfig.kind == kind)):
-            row.is_default = False
 
-    def unset_default_kb(db) -> None:
-        for row in db.scalars(select(KnowledgeBase)):
-            row.is_default = False
 
     @app.get("/admin/models")
     def list_models(request: Request, limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
@@ -1970,36 +2271,10 @@ def create_app():
             return {"deleted": True, "source": source}
 
     # --------------------------------------------------------------- plugins
-    def plugin_name(value: str | None) -> str:
-        try:
-            return plugins.plugin_name(value)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    def plugin_transport(value: str | None, *, default: str = "stdio") -> str:
-        try:
-            return plugins.plugin_transport(value, default=default)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    def plugin_validate(transport: str, command: str, url: str) -> None:
-        try:
-            plugins.plugin_validate(transport, command, url)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    def plugin_items(value, *, field: str, limits: int = 64) -> list[str]:
-        """接受数组、JSON 文本或逗号分隔字符串，去空去重后返回。"""
-        try:
-            return plugins.plugin_items(value, field=field, limits=limits)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    def plugin_env(value, *, field: str = "env") -> dict[str, str]:
-        try:
-            return plugins.plugin_env(value, field=field)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/admin/plugins/catalog")
     def plugin_catalog(request: Request) -> list[dict[str, Any]]:
@@ -2437,25 +2712,8 @@ def create_app():
             return {"deleted": True, "id": user_id}
 
     # -------------------------------------------------------- rule packages
-    def rule_package_record(name: str, document: str | None = None) -> dict[str, Any]:
-        with session_scope() as db:
-            usage = _package_usage(db)
-        payload = _rule_package_admin_payload(name, usage, document)
-        if payload is None:  # pragma: no cover - defensive
-            raise HTTPException(status_code=404, detail="规则包不存在")
-        return payload
 
-    def check_package_name(name: str) -> str:
-        try:
-            return package_store.validate_name(name)
-        except package_store.StoreError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    def check_package_document(document: str, name: str = "") -> None:
-        result = validate_package_text(document, name)
-        if not result["ok"]:
-            detail = "；".join(str(problem) for problem in result["problems"])
-            raise HTTPException(status_code=400, detail=detail or "规则包校验失败")
 
     @app.get("/admin/rule-packages")
     def admin_list_rule_packages(
@@ -2557,22 +2815,7 @@ def create_app():
         return rule_package_record(name, document)
 
     # ---------------------------------------------------------------- quotas
-    def quota_name(value: str | None) -> str:
-        name = (value or "").strip()
-        if not name:
-            raise HTTPException(status_code=400, detail="定额名称不能为空")
-        if len(name) > 120:
-            raise HTTPException(status_code=400, detail="定额名称不能超过 120 个字符")
-        return name
 
-    def quota_price(value: float | None) -> float:
-        try:
-            price = float(value)
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail="定额单价必须是数字") from exc
-        if not math.isfinite(price) or price < 0:
-            raise HTTPException(status_code=400, detail="定额单价必须是非负有限数字")
-        return round(price, 4)
 
     @app.get("/admin/quotas")
     def list_quotas(
@@ -2781,16 +3024,7 @@ def create_app():
             return {"deleted": True, "id": term_id}
 
     # ------------------------------------------------------ textqa config
-    class TextQaUpdate(BaseModel):
-        typos: Any = None
 
-    def textqa_payload(db) -> dict[str, Any]:
-        typos = textqa.load_custom(db)
-        return {
-            "typos": typos,
-            "count": len(typos),
-            "builtin_count": len(textqa.TYPO_RULES),
-        }
 
     @app.get("/admin/textqa")
     def get_textqa(request: Request) -> dict[str, Any]:
@@ -2810,28 +3044,7 @@ def create_app():
             return textqa_payload(db)
 
     # ------------------------------------------------------ wechat config
-    class WechatConfigUpdate(BaseModel):
-        app_id: str | None = None
-        app_secret: str | None = None
-        clear_secret: bool = False
-        redirect_uri: str | None = None
-        enabled: bool | None = None
-        mock: bool | None = None
 
-    def wechat_config_payload(db) -> dict[str, Any]:
-        from .models import WechatConfig
-
-        row = db.get(WechatConfig, "default")
-        cfg = wechat.effective(db)
-        return {
-            "app_id": (row.app_id if row else settings.wechat_app_id) or "",
-            "has_secret": bool(row.app_secret_enc) if row else bool(settings.wechat_app_secret),
-            "redirect_uri": (row.redirect_uri if row else settings.wechat_redirect_uri) or "",
-            "enabled": bool(row.enabled) if row else False,
-            "mock": bool(cfg["mock"]),
-            "available": wechat.available(db),
-            "source": cfg["source"],
-        }
 
     @app.get("/admin/wechat")
     def admin_get_wechat(request: Request) -> dict[str, Any]:
@@ -2842,8 +3055,8 @@ def create_app():
     @app.put("/admin/wechat")
     def admin_update_wechat(payload: WechatConfigUpdate, request: Request) -> dict[str, Any]:
         require_super(request)
-        from .models import WechatConfig
-        from .security import encrypt_secret
+        from ..models import WechatConfig
+        from ..security import encrypt_secret
 
         with session_scope() as db:
             row = db.get(WechatConfig, "default")
@@ -2937,7 +3150,7 @@ def create_app():
             "wechat_pay": wechatpay.available(),
             "wechat_pay_mock": settings.wechat_pay_mock,
             "home": str(settings.home),
-            "web_ready": (Path(__file__).resolve().parent / "web_dist" / "index.html").is_file(),
+            "web_ready": (Path(__file__).resolve().parent.parent / "web_dist" / "index.html").is_file(),
         }
 
     @app.get("/admin/health")
@@ -2970,7 +3183,7 @@ def create_app():
             "home": str(settings.home),
             "db_size_bytes": db_size,
             "disk_free_bytes": disk_free,
-            "web_ready": (Path(__file__).resolve().parent / "web_dist" / "index.html").is_file(),
+            "web_ready": (Path(__file__).resolve().parent.parent / "web_dist" / "index.html").is_file(),
             "offline": settings.offline,
             "docs_enabled": settings.docs_enabled,
             "health_public": settings.health_public,
@@ -3553,27 +3766,7 @@ def create_app():
             return _project_payload(new, _project_stats(db, new.id), my_role)
 
     # ------------------------------------------------------------- members
-    def _member_payload(member: ProjectMember, user: User | None) -> dict[str, Any]:
-        return {
-            "user_id": member.user_id,
-            "username": user.username if user is not None else "",
-            "display_name": (user.display_name or user.username)
-            if user is not None
-            else "",
-            "role": member.role,
-            "created_at": _iso(member.created_at),
-        }
 
-    def _member(db, project_id: str, user_id: str) -> ProjectMember:
-        member = db.scalar(
-            select(ProjectMember).where(
-                ProjectMember.project_id == project_id,
-                ProjectMember.user_id == user_id,
-            )
-        )
-        if member is None:
-            raise LookupError("成员不存在")
-        return member
 
     @app.get("/projects/{ref}/members")
     def project_members(
@@ -3675,24 +3868,7 @@ def create_app():
             return {"deleted": True}
 
     # -------------------------------------------------------------- audit
-    def _audit_item(row: AuditLog, project_name: dict[str, str] | None = None) -> dict[str, Any]:
-        item: dict[str, Any] = {
-            "id": row.id,
-            "action": row.action,
-            "username": row.username,
-            "display_name": row.display_name,
-            "detail": row.detail or {},
-            "created_at": _iso(row.created_at),
-        }
-        if project_name is not None:
-            item["project_id"] = row.project_id
-            item["project_name"] = (
-                project_name.get(row.project_id) if row.project_id else None
-            )
-        return item
 
-    def _clamp_limit(limit: int) -> int:
-        return max(1, min(200, limit))
 
     @app.get("/projects/{ref}/audit")
     def project_audit(
@@ -3748,14 +3924,6 @@ def create_app():
             }
 
     # -------------------------------------------------------------- images
-    def _image_http_error(exc: images.ImageError) -> HTTPException:
-        if isinstance(exc, images.ImageConfigError):
-            status = 503
-        elif isinstance(exc, images.ImageTooLarge):
-            status = 413
-        else:
-            status = 400
-        return HTTPException(status_code=status, detail=str(exc))
 
     @app.get("/projects/{ref}/images")
     def project_images(
@@ -4397,38 +4565,7 @@ def create_app():
             return {"chapters": _outline_payload(db, project.id)}
 
     # ------------------------------------------------------------- chapters
-    def _node(db, project_id: str, node_id: str) -> OutlineNode:
-        node = db.get(OutlineNode, node_id)
-        if node is None or node.project_id != project_id:
-            raise LookupError(f"章节不存在: {node_id}")
-        return node
 
-    def _chapter_payload(db, node: OutlineNode) -> dict[str, Any]:
-        section = db.scalar(select(Section).where(Section.node_id == node.id))
-        citations = provenance.node_citations(db, node.project_id, node.id)
-        return {
-            "id": node.id,
-            "heading": node.heading,
-            "intent": node.intent,
-            "target_words": node.target_words,
-            "needs": node.needs or [],
-            "body": section.body if section else "",
-            "words": section.words if section else 0,
-            "status": section.status if section else node.status,
-            "revision": (section.revision or 0) if section else 0,
-            "citations": len(citations),
-            "citations_stale": sum(1 for item in citations if item["stale"]),
-            "review_status": (section.review_status if section else "draft") or "draft",
-            "review_note": section.review_note if section else "",
-            "review_requested_at": clock.iso_beijing(section.review_requested_at)
-            if section
-            else None,
-            "review_requested_by": (section.review_requested_by or "") if section else "",
-            "confirmed_at": clock.iso_beijing(section.confirmed_at) if section else None,
-            "confirmed_by": (section.confirmed_by or "") if section else "",
-            "locked_at": clock.iso_beijing(section.locked_at) if section else None,
-            "locked_by": (section.locked_by or "") if section else "",
-        }
 
     @app.get("/projects/{ref}/chapters/{node_id}")
     def chapter(ref: str, node_id: str) -> dict[str, Any]:
@@ -5001,17 +5138,8 @@ def create_app():
             }
 
     # -------------------------------------------------------------- export
-    class AccountDelete(BaseModel):
-        password: str
-        confirm: str
 
-    class BillingProfilePayload(BaseModel):
-        title: str = ""
-        tax_no: str = ""
-        email: str = ""
 
-    class ExportTemplateUpdate(BaseModel):
-        id: str
 
     @app.get("/legal/versions")
     def legal_versions() -> dict[str, str]:
@@ -5208,7 +5336,7 @@ def create_app():
 
     @app.get("/projects/{ref}/export-templates")
     def export_templates_list(ref: str) -> dict[str, Any]:
-        from .export import templates as export_templates
+        from ..export import templates as export_templates
 
         with session_scope() as db:
             project, _role = _project(db, ref)
@@ -5219,7 +5347,7 @@ def create_app():
 
     @app.put("/projects/{ref}/export-template")
     def export_template_set(ref: str, payload: ExportTemplateUpdate) -> dict[str, Any]:
-        from .export import templates as export_templates
+        from ..export import templates as export_templates
 
         with session_scope() as db:
             project, role = _project(db, ref)
@@ -5259,7 +5387,7 @@ def create_app():
             output_dir = settings.project_dir(project.id) / "output"
             audit(db, project.id, "export.run", {"format": fmt})
             if fmt == "docx":
-                from .export import templates as export_templates
+                from ..export import templates as export_templates
 
                 path = export_docx(
                     output_dir / "bid.docx",
@@ -5272,11 +5400,11 @@ def create_app():
             elif fmt in {"md", "markdown"}:
                 path = export_markdown(output_dir / "bid.md", ledger, nodes)
             elif fmt == "xlsx":
-                from .export.xlsx import export_xlsx
+                from ..export.xlsx import export_xlsx
 
                 path = export_xlsx(output_dir / "bid.xlsx", ledger)
             elif fmt == "pdf":
-                from .export.pdf import PdfExportError, export_pdf
+                from ..export.pdf import PdfExportError, export_pdf
 
                 docx_path = export_docx(
                     output_dir / "bid.docx",
@@ -5301,39 +5429,9 @@ def create_app():
             return FileResponse(path, filename=f"{safe[:60]}-{label}{path.suffix}")
 
     # -------------------------------------------------------------- packages
-    def _bid_packages(db, project_id: str) -> list[BidPackage]:
-        return list(
-            db.scalars(
-                select(BidPackage)
-                .where(BidPackage.project_id == project_id)
-                .order_by(BidPackage.position, BidPackage.created_at, BidPackage.id)
-            )
-        )
 
-    def _bid_package(db, project: Project, package_id: str) -> BidPackage:
-        package = db.get(BidPackage, package_id)
-        if package is None or package.project_id != project.id:
-            raise LookupError(f"包件不存在：{package_id}")
-        return package
 
-    def _boq_package_ids(db, project_id: str, ids: list[str]) -> set[str]:
-        if not ids:
-            return set()
-        return set(
-            db.scalars(
-                select(BoqSnapshot.package_id).where(
-                    BoqSnapshot.project_id == project_id,
-                    BoqSnapshot.package_id.in_(ids),
-                )
-            )
-        )
 
-    def _resolve_boq_package(db, project: Project, package_id: str | None):
-        """Map boq.resolve_package's 400 semantics onto the HTTP layer."""
-        try:
-            return boq.resolve_package(db, project, package_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/projects/{ref}/packages")
     def package_list(
@@ -5819,7 +5917,7 @@ def create_app():
 
     @app.post("/projects/{ref}/boq/export")
     def boq_export(ref: str, package_id: str | None = None) -> FileResponse:
-        from .export.boq_xlsx import export_boq_xlsx
+        from ..export.boq_xlsx import export_boq_xlsx
 
         with session_scope() as db:
             project, _role = _project(db, ref)
@@ -5848,7 +5946,6 @@ def create_app():
             return boq.pending_for_user(db, current_user() or {})
 
     # ------------------------------------------------------------------ web
-    dist = Path(__file__).resolve().parent / "web_dist"
     if (dist / "index.html").is_file():
         if (dist / "assets").is_dir():
             app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
