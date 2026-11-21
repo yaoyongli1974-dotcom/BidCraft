@@ -1,3 +1,4 @@
+import { isProjectAdmin } from '../../lib/permissions'
 import { useState, type FormEvent } from 'react'
 import {
   History,
@@ -8,14 +9,9 @@ import {
   Users,
 } from 'lucide-react'
 import { useWorkspace } from '../useWorkspace'
-import {
-  addMember,
-  getMembers,
-  getProjectAudit,
-  messageOf,
-  removeMember,
-  updateMember,
-} from '../../lib/api'
+import { getProjectAudit } from '../../api/jobs'
+import { addMember, getMembers, removeMember, updateMember } from '../../api/project'
+import { messageOf } from '../../lib/http'
 import type { Member, MemberRole } from '../../lib/types'
 import {
   actionLabel,
@@ -42,7 +38,7 @@ export function CollabTab() {
   const { ref, project } = useWorkspace()
   const confirm = useConfirm()
   const toast = useToast()
-  const canManage = project.my_role === 'owner' || project.my_role === 'admin'
+  const canManage = isProjectAdmin(project)
 
   const membersQuery = useQuery(`members:${ref}`, () => getMembers(ref))
   const audit = useAuditFeed(`audit:${ref}`, (before) =>

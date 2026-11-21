@@ -1,6 +1,6 @@
 import { useCallback } from 'react'
 import { RefreshCw, ScrollText } from 'lucide-react'
-import { getAdminAudit } from '../../lib/api'
+import { getAdminAudit } from '../../api/jobs'
 import type { AuditEntry } from '../../lib/types'
 import {
   actionLabel,

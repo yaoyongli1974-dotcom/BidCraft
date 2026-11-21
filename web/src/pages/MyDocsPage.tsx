@@ -9,16 +9,9 @@ import {
   Trash2,
   UploadCloud,
 } from 'lucide-react'
-import {
-  awaitDesktopBridge,
-  createUserDoc,
-  deleteUserDoc,
-  desktopBridge,
-  getUserDocs,
-  messageOf,
-  userDocFileUrl,
-} from '../lib/api'
-import type { DesktopBridge } from '../lib/api'
+import { createUserDoc, deleteUserDoc, getUserDocs, userDocFileUrl } from '../api/tender'
+import { awaitDesktopBridge, desktopBridge, messageOf } from '../lib/http'
+import type { DesktopBridge } from '../lib/http'
 import type { UserDoc } from '../lib/types'
 import {
   className,

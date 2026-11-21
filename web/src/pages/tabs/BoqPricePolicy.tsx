@@ -6,13 +6,8 @@ import {
   TrendingUp,
 } from 'lucide-react'
 import type { BoqPayload, PriceCurrency, PricePolicy } from '../../lib/types'
-import {
-  adjustBoq,
-  messageOf,
-  normalizePricePolicy,
-  roundTo,
-  updatePricePolicy,
-} from '../../lib/api'
+import { adjustBoq, normalizePricePolicy, roundTo, updatePricePolicy } from '../../api/boq'
+import { messageOf } from '../../lib/http'
 import { className, formatMoney } from '../../lib/format'
 import { Button } from '../../components/Button'
 import { useConfirm } from '../../context/useConfirm'

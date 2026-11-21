@@ -16,7 +16,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { useWorkspace } from '../useWorkspace'
-import { getIssues } from '../../lib/api'
+import { getIssues } from '../../api/compliance'
 import {
   className,
   formatRelative,

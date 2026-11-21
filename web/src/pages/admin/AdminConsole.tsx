@@ -19,15 +19,10 @@ import {
 import { useAuth } from '../../context/useAuth'
 import { useHealth } from '../../context/useHealth'
 import { useDocumentTitle, useQuery } from '../../lib/hooks'
-import {
-  getKnowledgeBases,
-  getModels,
-  getQuotas,
-  getRulePackages,
-  getTerms,
-  getTextQa,
-  getUsers,
-} from '../../lib/api'
+import { getUsers } from '../../api/auth'
+import { getQuotas } from '../../api/boq'
+import { getModels, getRulePackages, getTextQa } from '../../api/compliance'
+import { getKnowledgeBases, getTerms } from '../../api/knowledge'
 import { formatNumber, roleMeta } from '../../lib/format'
 import { Badge } from '../../components/Badge'
 import { AdminModelsTab } from './AdminModelsTab'

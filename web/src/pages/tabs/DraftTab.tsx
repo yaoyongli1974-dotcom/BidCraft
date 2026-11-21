@@ -24,30 +24,11 @@ import {
   X,
 } from 'lucide-react'
 import { useWorkspace } from '../useWorkspace'
-import {
-  ApiError,
-  applyImagePlan,
-  chapterConflict,
-  createImage,
-  deleteImage,
-  generateChapter,
-  getChapter,
-  getChapterCitations,
-  getImagePlan,
-  getImagePolicy,
-  getJob,
-  getOutline,
-  getProjectJobs,
-  listImages,
-  messageOf,
-  regenerateImage,
-  reviewChapter,
-  saveChapter,
-  startDocumentGeneration,
-  startImageBatch,
-  updateImagePolicy,
-  uploadImage,
-} from '../../lib/api'
+import { generateChapter, getChapter, getChapterCitations, getOutline, getProjectJobs, reviewChapter, saveChapter, startDocumentGeneration, startImageBatch } from '../../api/generation'
+import { applyImagePlan, createImage, deleteImage, getImagePlan, getImagePolicy, listImages, regenerateImage, updateImagePolicy, uploadImage } from '../../api/images'
+import { ApiError, chapterConflict, messageOf } from '../../lib/http'
+import { watchJob } from '../../hooks/watchJob'
+import { canReviewChapter } from '../../lib/permissions'
 import type {
   ChapterConflict,
   ChapterDetail,
@@ -244,10 +225,6 @@ type JobEventPayload = Partial<Job> & {
   error?: string
 }
 
-function jobEventUrl(jobId: string): string {
-  return `/jobs/${encodeURIComponent(jobId)}/events`
-}
-
 interface DraftFocusTarget {
   nodeId: string
   quote: string
@@ -317,8 +294,6 @@ export function DraftTab() {
   const [creditGate, setCreditGate] = useState<string | null>(null)
   const selectedIdRef = useRef<string | null>(null)
   selectedIdRef.current = selectedId
-  const doneHandled = useRef(false)
-  const pollErrors = useRef(0)
   const jobRef = useRef<Job | null>(null)
   jobRef.current = job
 
@@ -760,7 +735,7 @@ export function DraftTab() {
     return detail
   }, [ref])
 
-  const reviewOwner = project?.my_role === 'owner' || project?.my_role === 'admin'
+  const reviewOwner = canReviewChapter(project)
   const chapterReview = chapterQuery.data?.review_status || selectedChapter?.review_status
   const reviewFrozen = isChapterFrozen(chapterReview)
   const steps = reviewSteps(chapterReview, Boolean(reviewOwner))
@@ -1188,7 +1163,6 @@ export function DraftTab() {
           (item) => item.status === 'queued' || item.status === 'running',
         )
         if (active) {
-          doneHandled.current = false
           setJob(active)
           toast.info('已恢复生成进度', '正在接续实时流；断线时自动回退到轮询。')
         }
@@ -1234,41 +1208,20 @@ export function DraftTab() {
     }
   }, [ref, toast])
 
-  // Image batches are polled rather than streamed: progress is coarse-grained
-  // and the browser does not need token-level previews.
+  // Image batches are polled (coarse progress); watchJob owns the polling transport.
   useEffect(() => {
     const current = imageBatchJobRef.current
-    if (
-      !current ||
-      (current.status !== 'queued' && current.status !== 'running')
-    )
-      return
+    if (!current || (current.status !== 'queued' && current.status !== 'running')) return
     const jobId = current.id
-    let cancelled = false
     let finished = false
-    let errors = 0
-    const tick = async () => {
-      try {
-        const next = await getJob(jobId)
-        if (cancelled) return
-        errors = 0
-        setImageBatchJob(next)
-        if (next.status !== 'done' && next.status !== 'failed') return
+    return watchJob(jobId, {
+      onUpdate: (next) => setImageBatchJob(next as Job),
+      onDone: (next) => {
         if (finished) return
         finished = true
-        window.clearInterval(timer)
         refreshImageDataRef.current()
-        if (next.status === 'failed') {
-          autoApplyAfterBatch.current = false
-          toast.error(
-            '配图任务失败',
-            next.error || next.message || '请检查图片模型后重试。',
-          )
-          return
-        }
         const failed = next.result?.failed ?? next.payload?.failed ?? 0
         if (autoApplyAfterBatch.current) {
-          // 生成结束即接「按计划插入」，只提示一次，避免两条互相打断的 toast。
           autoApplyAfterBatch.current = false
           if (failed > 0) {
             toast.warning(
@@ -1287,31 +1240,23 @@ export function DraftTab() {
             `${next.result?.succeeded ?? 0} 个成功，${failed} 个失败；可在配图计划中重试。`,
           )
         } else {
-          toast.success(
-            '配图生成完成',
-            next.message || '配图计划已更新，可逐章插入正文。',
-          )
+          toast.success('配图生成完成', next.message || '配图计划已更新，可逐章插入正文。')
         }
-      } catch (error) {
-        if (cancelled) return
-        errors += 1
-        if (errors < 3) return
-        window.clearInterval(timer)
-        const message = messageOf(error)
+      },
+      onFailed: (next) => {
+        if (finished) return
+        finished = true
+        autoApplyAfterBatch.current = false
+        refreshImageDataRef.current()
+        toast.error('配图任务失败', next.error || next.message || '请检查图片模型后重试。')
+      },
+      onPollError: (message) => {
         setImageBatchJob((currentJob) =>
-          currentJob
-            ? { ...currentJob, status: 'failed', error: message }
-            : currentJob,
+          currentJob ? { ...currentJob, status: 'failed', error: message } : currentJob,
         )
         toast.error('无法读取配图进度', message)
-      }
-    }
-    const timer = window.setInterval(() => void tick(), 1600)
-    void tick()
-    return () => {
-      cancelled = true
-      window.clearInterval(timer)
-    }
+      },
+    })
   }, [imageBatchJob?.id, toast])
 
   useEffect(() => {
@@ -1320,153 +1265,90 @@ export function DraftTab() {
       return
     }
     const jobId = currentJob.id
-    let cancelled = false
-    let source: EventSource | null = null
-    let timer: number | undefined
-    pollErrors.current = 0
 
-    const applyJob = (data: JobEventPayload) => {
+    const applyJob = (data: Job | JobEventPayload) => {
       if (!data.id) return
       setJob((current) =>
         current && current.id === jobId ? { ...current, ...(data as Job) } : (data as Job),
       )
     }
-
-    const finish = async (data: JobEventPayload) => {
-      if (doneHandled.current) return
-      doneHandled.current = true
-      source?.close()
-      const finished = { ...(data as Job), id: data.id || jobId }
+    const finish = (finished: Job) => {
       setJob(finished)
       if (finished.status === 'failed') {
-        toast.error('全书生成失败', finished.error || finished.message || '请查看后端日志后重试。')
+        toast.error(
+          '全书生成失败',
+          finished.error || finished.message || '请查看后端日志后重试。',
+        )
         return
       }
-      await finishJobRef.current(finished)
+      void finishJobRef.current(finished)
     }
 
-    const poll = async () => {
-      try {
-        const next = await getJob(jobId)
-        if (cancelled) return
-        pollErrors.current = 0
-        setJob(next)
-        if (next.status === 'done' && !doneHandled.current) {
-          doneHandled.current = true
-          if (timer) window.clearInterval(timer)
-          void finishJobRef.current(next)
-        }
-        if (next.status === 'failed') {
-          if (timer) window.clearInterval(timer)
-          toast.error('全书生成失败', next.error || next.message || '请查看后端日志后重试。')
-        }
-      } catch (error) {
-        if (cancelled) return
-        pollErrors.current += 1
-        if (pollErrors.current >= 3) {
-          if (timer) window.clearInterval(timer)
-          setJob((current) =>
-            current ? { ...current, status: 'failed', error: messageOf(error) } : current,
+    return watchJob(jobId, {
+      stream: !streamFallback,
+      onUpdate: applyJob,
+      onEvent: (kind, data) => {
+        if (kind === 'chapter_start') {
+          const heading = data.heading || ''
+          setStreamPreview((current) =>
+            current?.heading === heading ? current : { heading, text: '' },
           )
-          toast.error('无法读取生成进度', messageOf(error))
+          setJob((current) =>
+            current
+              ? {
+                  ...current,
+                  status: 'running',
+                  message: data.heading ? `正在生成：${data.heading}` : current.message,
+                  payload: {
+                    ...current.payload,
+                    heading: data.heading,
+                    done: Math.max(0, (data.index || 1) - 1),
+                    total: data.total || current.payload?.total,
+                  },
+                }
+              : current,
+          )
+        } else if (kind === 'delta') {
+          const heading = data.heading || ''
+          const text = data.text || ''
+          if (!text) return
+          setStreamPreview((current) =>
+            current?.heading === heading
+              ? { ...current, text: current.text + text }
+              : { heading, text },
+          )
+        } else if (kind === 'chapter') {
+          setJob((current) =>
+            current
+              ? {
+                  ...current,
+                  progress: data.progress ?? current.progress,
+                  message: data.heading
+                    ? data.failed
+                      ? `本章生成失败：${data.heading}`
+                      : `已完成：${data.heading}`
+                    : current.message,
+                  payload: {
+                    ...current.payload,
+                    heading: data.heading,
+                    done: data.done ?? current.payload?.done,
+                    total: data.total ?? current.payload?.total,
+                  },
+                }
+              : current,
+          )
         }
-      }
-    }
-
-    if (streamFallback || typeof EventSource === 'undefined') {
-      void poll()
-      timer = window.setInterval(() => void poll(), 1600)
-      return () => {
-        cancelled = true
-        if (timer) window.clearInterval(timer)
-      }
-    }
-
-    source = new EventSource(jobEventUrl(jobId))
-    const listen = (kind: string, handler: (data: JobEventPayload) => void) => {
-      source?.addEventListener(kind, (event) => {
-        try {
-          handler(JSON.parse((event as MessageEvent).data || '{}') as JobEventPayload)
-        } catch {
-          // A malformed frame should not tear down the stream.
-        }
-      })
-    }
-
-    listen('snapshot', (data) => {
-      applyJob(data)
-      if (data.status === 'done' || data.status === 'failed') {
-        void finish(data)
-      }
+      },
+      onDone: finish,
+      onFailed: finish,
+      onSseFallback: () => setStreamFallback(true),
+      onPollError: (message) => {
+        setJob((current) =>
+          current ? { ...current, status: 'failed', error: message } : current,
+        )
+        toast.error('无法读取生成进度', message)
+      },
     })
-    listen('queued', applyJob)
-    listen('status', applyJob)
-    listen('chapter_start', (data) => {
-      const heading = data.heading || ''
-      setStreamPreview((current) =>
-        current?.heading === heading ? current : { heading, text: '' },
-      )
-      setJob((current) =>
-        current
-          ? {
-              ...current,
-              status: 'running',
-              message: data.heading ? `正在生成：${data.heading}` : current.message,
-              payload: {
-                ...current.payload,
-                heading: data.heading,
-                done: Math.max(0, (data.index || 1) - 1),
-                total: data.total || current.payload?.total,
-              },
-            }
-          : current,
-      )
-    })
-    listen('delta', (data) => {
-      const heading = data.heading || ''
-      const text = data.text || ''
-      if (!text) return
-      setStreamPreview((current) =>
-        current?.heading === heading
-          ? { ...current, text: current.text + text }
-          : { heading, text },
-      )
-    })
-    listen('chapter', (data) => {
-      setJob((current) =>
-        current
-          ? {
-              ...current,
-              progress: data.progress ?? current.progress,
-              message: data.heading
-                ? data.failed
-                  ? `本章生成失败：${data.heading}`
-                  : `已完成：${data.heading}`
-                : current.message,
-              payload: {
-                ...current.payload,
-                heading: data.heading,
-                done: data.done ?? current.payload?.done,
-                total: data.total ?? current.payload?.total,
-              },
-            }
-          : current,
-      )
-    })
-    listen('done', (data) => void finish(data))
-    listen('failed', (data) => void finish(data))
-
-    source.onerror = () => {
-      if (cancelled || doneHandled.current) return
-      source?.close()
-      setStreamFallback(true)
-    }
-
-    return () => {
-      cancelled = true
-      source?.close()
-      if (timer) window.clearInterval(timer)
-    }
   }, [job?.id, streamFallback, toast])
 
   const startFullGeneration = async () => {
@@ -1487,7 +1369,6 @@ export function DraftTab() {
       if (!accepted) return
     }
     setStartingJob(true)
-    doneHandled.current = false
     setStreamFallback(false)
     setStreamPreview(null)
     try {

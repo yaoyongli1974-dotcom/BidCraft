@@ -15,7 +15,8 @@ import {
   X,
 } from 'lucide-react'
 import { useWorkspace } from '../useWorkspace'
-import { ApiError, getIssues, messageOf, runCheck } from '../../lib/api'
+import { getIssues, runCheck } from '../../api/compliance'
+import { ApiError, messageOf } from '../../lib/http'
 import type { CheckResult, Issue } from '../../lib/types'
 import {
   className,

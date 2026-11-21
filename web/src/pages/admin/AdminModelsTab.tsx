@@ -19,11 +19,8 @@ import {
   formatRelative,
   className,
 } from '../../lib/format'
-import {
-  deleteModel,
-  messageOf,
-  testModel,
-} from '../../lib/api'
+import { deleteModel, testModel } from '../../api/compliance'
+import { messageOf } from '../../lib/http'
 import { useConfirm } from '../../context/useConfirm'
 import { useToast } from '../../context/useToast'
 import { Badge } from '../../components/Badge'

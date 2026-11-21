@@ -21,7 +21,8 @@ import {
   roleHint,
   roleMeta,
 } from '../../lib/format'
-import { deleteUser, messageOf, updateUser } from '../../lib/api'
+import { deleteUser, updateUser } from '../../api/auth'
+import { messageOf } from '../../lib/http'
 import { useAuth } from '../../context/useAuth'
 import { useConfirm } from '../../context/useConfirm'
 import { useToast } from '../../context/useToast'

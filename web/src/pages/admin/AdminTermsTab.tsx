@@ -12,13 +12,8 @@ import {
 } from 'lucide-react'
 import type { TermInput, TermItem } from '../../lib/types'
 import { className, formatRelative } from '../../lib/format'
-import {
-  createTerm,
-  deleteTerm,
-  getTerms,
-  messageOf,
-  updateTerm,
-} from '../../lib/api'
+import { createTerm, deleteTerm, getTerms, updateTerm } from '../../api/knowledge'
+import { messageOf } from '../../lib/http'
 import { useDebouncedValue, useQuery } from '../../lib/hooks'
 import { useConfirm } from '../../context/useConfirm'
 import { useToast } from '../../context/useToast'

@@ -1,84 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import {
-  ApiError,
-  DEFAULT_IMAGE_POLICY,
-  DEFAULT_PRICE_POLICY,
-  PLUGIN_CPU_SECONDS,
-  PLUGIN_MEM_LIMIT,
-  UNAUTHORIZED_EVENT,
-  apiFetch,
-  applicableStages,
-  cnyTotalWithTax,
-  createBillingOrder,
-  createBoqVersion,
-  createPersonnel,
-  createPlugin,
-  createQualification,
-  createSubAccount,
-  createTerm,
-  createUserDoc,
-  createVipOrder,
-  deleteBoqVersion,
-  deleteKbDoc,
-  deletePersonnel,
-  deleteQualification,
-  deleteSubAccount,
-  deleteUserDoc,
-  duplicateProject,
-  errorDetailText,
-  exportPluginPackage,
-  exportProject,
-  bulkIssueStatus,
-  getBoqVersion,
-  getKbDocs,
-  getPendingApprovals,
-  getPersonnel,
-  getPreflight,
-  getProject,
-  getProjectScores,
-  getProjectTemplates,
-  getQualifications,
-  getRiskOverview,
-  getSubAccounts,
-  getTerms,
-  getTextQa,
-  getUserDocs,
-  grantUserVip,
-  importPluginPackage,
-  instantiateTemplate,
-  listBoqVersions,
-  messageOf,
-  normalizeApprovalChain,
-  normalizeBoqQuoteVersion,
-  normalizeBoqSummary,
-  normalizeImagePolicy,
-  normalizeKbDocPolicy,
-  normalizeKbDocs,
-  normalizePlugin,
-  normalizePreflight,
-  normalizePricePolicy,
-  normalizeQualification,
-  normalizeTerm,
-  normalizeTypoRules,
-  reindexKnowledgeBase,
-  restoreBoqVersion,
-  saveProjectScores,
-  reviewBoqVersion,
-  roundTo,
-  saveTextQa,
-  submitBoqVersion,
-  unapproveBoqVersion,
-  updateIssueStatus,
-  updatePlugin,
-  updateProject,
-  updateKbDoc,
-  updatePersonnel,
-  updateQualification,
-  updateSubAccount,
-  uploadForm,
-  uploadQualificationEvidence,
-  userDocFileUrl,
-} from './api'
+import { getProjectScores, saveProjectScores } from '../api/account'
+import { createBillingOrder, createSubAccount, createVipOrder, deleteSubAccount, getSubAccounts, grantUserVip, updateSubAccount } from '../api/billing'
+import { DEFAULT_PRICE_POLICY, cnyTotalWithTax, createBoqVersion, deleteBoqVersion, getBoqVersion, listBoqVersions, normalizeBoqQuoteVersion, normalizeBoqSummary, normalizePricePolicy, restoreBoqVersion, reviewBoqVersion, roundTo, submitBoqVersion, unapproveBoqVersion } from '../api/boq'
+import { bulkIssueStatus, getRiskOverview, getTextQa, normalizeTypoRules, saveTextQa, updateIssueStatus } from '../api/compliance'
+import { exportProject } from '../api/generation'
+import { DEFAULT_IMAGE_POLICY, normalizeImagePolicy } from '../api/images'
+import { getPendingApprovals } from '../api/jobs'
+import { createTerm, deleteKbDoc, getKbDocs, getTerms, normalizeKbDocPolicy, normalizeKbDocs, normalizeTerm, reindexKnowledgeBase, updateKbDoc } from '../api/knowledge'
+import { PLUGIN_CPU_SECONDS, PLUGIN_MEM_LIMIT, createPlugin, exportPluginPackage, importPluginPackage, normalizePlugin, updatePlugin } from '../api/plugins'
+import { applicableStages, duplicateProject, getProject, getProjectTemplates, instantiateTemplate, normalizeApprovalChain, updateProject } from '../api/project'
+import { createPersonnel, createQualification, createUserDoc, deletePersonnel, deleteQualification, deleteUserDoc, getPersonnel, getPreflight, getQualifications, getUserDocs, normalizePreflight, normalizeQualification, updatePersonnel, updateQualification, uploadQualificationEvidence, userDocFileUrl } from '../api/tender'
+import { ApiError, UNAUTHORIZED_EVENT, apiFetch, errorDetailText, messageOf, uploadForm } from './http'
 
 class FakeXhr {
   static instances: FakeXhr[] = []
@@ -2530,13 +2462,13 @@ describe('desktop bridge readiness (R29)', () => {
   })
 
   it('浏览器环境没有桥时立即返回 null', async () => {
-    const mod = await import('./api')
+    const mod = await import('./http')
     expect(mod.desktopBridge()).toBeNull()
     await expect(mod.awaitDesktopBridge(50)).resolves.toBeNull()
   })
 
   it('pywebview 注入完成前的桩对象不算就绪，ready 后可用', async () => {
-    const mod = await import('./api')
+    const mod = await import('./http')
     const stub: Record<string, unknown> = {}
     ;(window as unknown as { pywebview: { api: unknown } }).pywebview = { api: stub }
     expect(mod.desktopBridge()).toBeNull()
@@ -2560,7 +2492,7 @@ describe('writing profile (R38)', () => {
     })
 
   it('normalizes profile fields, tone fallback and dedupe', async () => {
-    const { normalizeWritingProfile } = await import('./api')
+    const { normalizeWritingProfile } = await import('../api/account')
     const profile = normalizeWritingProfile({
       company_name: '  某某科技  ',
       tone: '激昂',
@@ -2578,7 +2510,7 @@ describe('writing profile (R38)', () => {
   })
 
   it('loads profile by encoded project id', async () => {
-    const { getProjectProfile } = await import('./api')
+    const { getProjectProfile } = await import('../api/account')
     const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
       jsonResponse({ profile: { tone: '技术' }, anchors: {} }),
     )
@@ -2589,7 +2521,7 @@ describe('writing profile (R38)', () => {
   })
 
   it('saves profile with PUT and normalized body', async () => {
-    const { saveProjectProfile } = await import('./api')
+    const { saveProjectProfile } = await import('../api/account')
     const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
       jsonResponse({ profile: { company_name: '某公司' }, anchors: {} }),
     )

@@ -2,11 +2,8 @@ import { useEffect, useState } from 'react'
 import { Database, FolderOpen, KeyRound } from 'lucide-react'
 import type { KnowledgeBase, KnowledgeBaseInput } from '../../lib/types'
 import { KB_PROVIDERS, kbKindMeta, kbProviderLabel } from '../../lib/format'
-import {
-  createKnowledgeBase,
-  messageOf,
-  updateKnowledgeBase,
-} from '../../lib/api'
+import { createKnowledgeBase, updateKnowledgeBase } from '../../api/knowledge'
+import { messageOf } from '../../lib/http'
 import { Modal } from '../../components/Modal'
 import { Button } from '../../components/Button'
 import { Badge } from '../../components/Badge'

@@ -2,12 +2,8 @@ import { useEffect, useState } from 'react'
 import { Plus, X } from 'lucide-react'
 import { Modal } from './Modal'
 import { Button } from './Button'
-import {
-  PROFILE_TONES,
-  getProjectProfile,
-  messageOf,
-  saveProjectProfile,
-} from '../lib/api'
+import { PROFILE_TONES, getProjectProfile, saveProjectProfile } from '../api/account'
+import { messageOf } from '../lib/http'
 import type { Project, WritingProfile } from '../lib/types'
 
 interface ProjectProfileModalProps {

@@ -12,7 +12,8 @@ import {
 } from 'lucide-react'
 import { useAuth } from '../context/useAuth'
 import { useHealth } from '../context/useHealth'
-import { awaitDesktopBridge, messageOf, wechatLoginUrl } from '../lib/api'
+import { wechatLoginUrl } from '../api/auth'
+import { awaitDesktopBridge, messageOf } from '../lib/http'
 import { useDocumentTitle } from '../lib/hooks'
 import { AuthSplash } from '../components/AuthGate'
 

@@ -10,12 +10,8 @@ import {
   Trash2,
   X,
 } from 'lucide-react'
-import {
-  createBidPackage,
-  deleteBidPackage,
-  messageOf,
-  updateBidPackage,
-} from '../../lib/api'
+import { createBidPackage, deleteBidPackage, updateBidPackage } from '../../api/project'
+import { messageOf } from '../../lib/http'
 import type { BidPackage, BidPackageInput } from '../../lib/types'
 import { className } from '../../lib/format'
 import { Badge } from '../../components/Badge'

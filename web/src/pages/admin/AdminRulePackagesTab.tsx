@@ -29,11 +29,8 @@ import {
   normalizeProjectType,
   projectTypeMeta,
 } from '../../lib/format'
-import {
-  deleteRulePackage,
-  messageOf,
-  restoreRulePackage,
-} from '../../lib/api'
+import { deleteRulePackage, restoreRulePackage } from '../../api/compliance'
+import { messageOf } from '../../lib/http'
 import { invalidatePackageCache } from '../../lib/hooks'
 import { useConfirm } from '../../context/useConfirm'
 import { useToast } from '../../context/useToast'

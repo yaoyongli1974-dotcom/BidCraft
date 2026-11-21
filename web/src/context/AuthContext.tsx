@@ -5,17 +5,10 @@ import {
   useState,
   type ReactNode,
 } from 'react'
-import {
-  ApiError,
-  UNAUTHORIZED_EVENT,
-  changePassword as changePasswordRequest,
-  getMe,
-  login as loginRequest,
-  logout as logoutRequest,
-  register as registerRequest,
-  messageOf,
-} from '../lib/api'
+import { changePassword as changePasswordRequest, getMe, login as loginRequest, logout as logoutRequest, register as registerRequest } from '../api/auth'
+import { ApiError, UNAUTHORIZED_EVENT, messageOf } from '../lib/http'
 import type { User } from '../lib/types'
+import { canGlobalWrite, isSuperAdmin } from '../lib/permissions'
 import { clearQueryCache } from '../lib/queryCache'
 import { AuthContext, type AuthApi } from './auth'
 
@@ -123,8 +116,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     user,
     loading,
     error,
-    isSuperAdmin: user?.role === 'super_admin',
-    canWrite: Boolean(user && user.role !== 'viewer'),
+    isSuperAdmin: isSuperAdmin(user),
+    canWrite: canGlobalWrite(user),
     login,
     register,
     updateUser,

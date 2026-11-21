@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Modal } from './Modal'
 import { Button } from './Button'
-import { getProjectTemplates, instantiateTemplate, messageOf } from '../lib/api'
+import { getProjectTemplates, instantiateTemplate } from '../api/project'
+import { messageOf } from '../lib/http'
 import type { Project, ProjectTemplate } from '../lib/types'
 import { className, formatRelative } from '../lib/format'
 

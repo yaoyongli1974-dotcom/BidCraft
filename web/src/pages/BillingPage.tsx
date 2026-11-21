@@ -22,20 +22,8 @@ import {
 import { useAuth } from '../context/useAuth'
 import { useConfirm } from '../context/useConfirm'
 import { useToast } from '../context/useToast'
-import {
-  billingOrderQrUrl,
-  createBillingOrder,
-  createSubAccount,
-  createVipOrder,
-  deleteSubAccount,
-  getBillingOrder,
-  getBillingSummary,
-  getSubAccounts,
-  messageOf,
-  mockPayOrder,
-  redeemCreditCode,
-  updateSubAccount,
-} from '../lib/api'
+import { billingOrderQrUrl, createBillingOrder, createSubAccount, createVipOrder, deleteSubAccount, getBillingOrder, getBillingSummary, getSubAccounts, mockPayOrder, redeemCreditCode, updateSubAccount } from '../api/billing'
+import { messageOf } from '../lib/http'
 import type { RechargeOrder, SubAccount } from '../lib/types'
 import {
   creditKindMeta,

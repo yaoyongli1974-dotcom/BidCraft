@@ -17,14 +17,8 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { useWorkspace } from '../useWorkspace'
-import {
-  ApiError,
-  generateChapter,
-  generateOutline,
-  getOutline,
-  messageOf,
-  saveOutline,
-} from '../../lib/api'
+import { generateChapter, generateOutline, getOutline, saveOutline } from '../../api/generation'
+import { ApiError, messageOf } from '../../lib/http'
 import type { OutlineChapter } from '../../lib/types'
 import {
   chapterStatus,

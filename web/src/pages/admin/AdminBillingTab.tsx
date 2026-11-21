@@ -13,12 +13,8 @@ import {
   Wallet,
 } from 'lucide-react'
 import { useQuery } from '../../lib/hooks'
-import {
-  generateRedeemCodes,
-  getAdminBilling,
-  messageOf,
-  saveAdminBilling,
-} from '../../lib/api'
+import { generateRedeemCodes, getAdminBilling, saveAdminBilling } from '../../api/billing'
+import { messageOf } from '../../lib/http'
 import type { BillingPackage, VipPackage } from '../../lib/types'
 import {
   formatCents,

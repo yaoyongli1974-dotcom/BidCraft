@@ -279,6 +279,7 @@ export BIDCRAFT_WECHAT_PAY_MOCK=1         # 本地演示支付
 | 数据库迁移 | ✅ | 引入 Alembic：旧库由 create_all+补列收敛后 stamp 基线，新增/改类型/重命名/索引走幂等 revision；跨进程迁移锁避免 serve/CLI/MCP 并发跑 DDL |
 | 报价金额精度 | ✅ | 统一金额服务内部 Decimal + ROUND_HALF_UP，消除浮点累计误差，JSON/API/Excel 出口仍 float 保持契约；报价版本冻结不可变计算依据（数量/税率/币种/汇率/系数）供审计与复算 |
 | 关联数据清理 | ✅ | 项目删除集中清理全部关联行（含此前漏掉的引用/包件/报价版本）；孤儿引用只读检测与可选清理（`bidcraft db-orphans`）；审计 user_id 悬挂留存供注销追责 |
+| 前端分层 | ✅ | `web/src/api/` 按业务域拆 14 个模块，传输与统一错误在 `lib/http.ts`；`hooks/watchJob.ts` 统一任务进度（SSE + 断线轮询兜底）、`lib/permissions.ts` 统一权限能力、`lib/format.ts`/`lib/queryCache.ts` 复用；无 Redux、无页面结构改动，SSE 断线续传保留 |
 | 架构分层 | ✅ | API 按业务域拆为 12 个路由模块（`bidcraft/api/routes/`），耗时任务剥离到 `bidcraft/workers/`，共享逻辑在 `bidcraft/services/`；配置启动校验区分 dev/test/prod；URL、请求响应与业务函数完全不变 |
 | 章节复核流转 | ✅ | 草稿 → 待复核 → 已确认 → 已锁定四态：编辑提交、负责人确认/锁定、撤回与解锁须填原因并写审计；已确认/锁定后正文冻结（保存与重生成被拒），待复核期间改正文自动退回草稿；导出只读取已确认的章节（强制导出也不能绕过） |
 | 报价 Service 层 | ✅ | 报价改价编排从 HTTP 路由抽离为独立 Service，HTTP/CLI 共用同一路径，`record_audit` 支持显式 actor；多包件命令行改价不再落空 |
@@ -443,8 +444,8 @@ DOCX 图注编号与版心宽度、批量生成默认风格尺寸；`tests/test_
 `tests/test_vip.py`、`tests/test_subaccounts.py`、`tests/test_jobqueue.py` 覆盖 VIP 授权/续期/折扣、
 子账号共享计费与权限隔离、优先级队列调度、审批条件分支；`tests/test_user_docs.py` 覆盖个人文档上传/索引、列表/下载/删除、跨用户隔离与检索防泄漏、审计；`tests/test_client.py`、`tests/test_desktop.py` 覆盖客户端登录/Cookie 复用、文档与原件上传、下载、网关反代与 Cookie 透传、静态/SPA 回退、令牌门禁与本地文件桥；`tests/test_offline_cache.py`、`tests/test_qtshell.py` 覆盖只读离线缓存回放与淘汰、Qt 外壳版本比较/桥接注入脚本/导航映射/设置键、Qt 缺失回退与原生页面辅助函数；`tests/test_qualifications.py` 覆盖资质台账 CRUD 与归属隔离、证据上传/下载/删除与越界防护、按开标日的自查判定与汇总、审计；`tests/test_personnel.py` 覆盖人员台账 CRUD 与归属隔离、字段校验、在建锁定、审计与知识库文档元数据接口；`tests/test_textqa.py` 覆盖错别字/重复标点规则、截止/截至语境、跨章节一致性、段落重复与核对集成；`tests/test_mineru.py` 覆盖 MinerU 响应映射、表格还原、异常回退与内置链优先级；`tests/test_dedup.py` 覆盖跨文件/同文件重复、阈值与截断、docx 跳过、CLI 行为；`tests/test_invoices.py` 覆盖注册同意留痕、开票申请/开具/下载/驳回、备份保留与注销清理；`tests/test_clock.py` 覆盖北京日历日判定、带时区的时间戳序列化与对账单按日归档；`tests/test_desktop_recipe.py` 守住桌面端归档后的冻结配方（desktop/build extra、uv.lock 锁定、构建脚本查齐四依赖、CI 仅手动触发且默认不重新附加 Release）；`tests/test_risk_overview.py` 覆盖风险总览四档聚合、问题锚定章节、处置状态跨核对保留、忽略必填原因、批量处置，以及 HTTP/MCP/CLI/批量导出四条路径的交付门禁与强制导出留痕；`tests/test_substantive.py` 覆盖 ★/▲ 标记与原文行保留、3-gram 覆盖判定、人工确认「已响应 / 不适用」留痕、编号稳定与未响应条款拦截导出；`tests/test_provenance.py` 覆盖正文数字边界匹配、短值与通用值忽略、引用落库含出处页码、改值后章节标记需复核、恢复原值清除、viewer 可读与越权隔离；`tests/test_chapter_review.py` 覆盖章节复核四态流转与权限、冻结后拒绝改写与重生成、待复核改写自动退回、撤回/解锁原因校验、导出只认已确认章节与强制导出被拦；`tests/test_quote_service.py` 不加载 FastAPI 直接测报价 Service（单/多包件改价、审计身份、异常上抛），覆盖多包件命令行改价 bug 回归；`tests/test_registration_consent.py` 覆盖注册同意缺省/显式 False 拒绝、显式 True 记录条款版本与同意时间、旧客户端缺同意被拒；`tests/test_authorization.py` 脱离 FastAPI 验证统一资源授权入口（项目/成员/超管可见性与写/所有者动作、任务按 project_id 与 owner_id 归属、批量项目过滤含成员角色一致性修复、节点跨项目隔离，`tests/test_jobqueue.py` 覆盖 DB 驱动队列的原子认领、租约心跳、重排队、背压，以及 fencing 令牌（认领刷新、关键写入令牌校验、启动恢复只收过期租约、心跳随令牌失效退出）、reaper 改为独立常驻线程（队列繁忙时也能按时回收过期租约）、API/Worker 可分离部署（`BIDCRAFT_EMBEDDED_WORKERS=0` + `bidcraft worker`），当前全量 **841 passed**）。
 
-前端验证：`cd web && npm run build`（TypeScript 编译 + Vite 产物输出到
-`bidcraft/web_dist`），随后 `bidcraft serve --open` 做浏览器全流程验收。
+前端验证：`cd web && npm run lint && npm test && npm run build`（ESLint + 186 个单元测试 +
+TypeScript 编译 + Vite 产物输出到 `bidcraft/web_dist`），随后 `bidcraft serve --open` 做浏览器全流程验收。
 
 ## 许可与合规
 

@@ -1,13 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, Plug } from 'lucide-react'
 import type { Plugin, PluginCatalogEntry, PluginInput } from '../../lib/types'
-import {
-  createPlugin,
-  messageOf,
-  PLUGIN_CPU_SECONDS,
-  PLUGIN_MEM_LIMIT,
-  updatePlugin,
-} from '../../lib/api'
+import { createPlugin, PLUGIN_CPU_SECONDS, PLUGIN_MEM_LIMIT, updatePlugin } from '../../api/plugins'
+import { messageOf } from '../../lib/http'
 import { className } from '../../lib/format'
 import { Modal } from '../../components/Modal'
 import { Button } from '../../components/Button'

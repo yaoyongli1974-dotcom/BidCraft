@@ -1,3 +1,4 @@
+import { canEditProject } from '../lib/permissions'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, NavLink, Outlet, useLocation, useParams } from 'react-router-dom'
 import {
@@ -22,7 +23,8 @@ import {
   WifiOff,
   type LucideIcon,
 } from 'lucide-react'
-import { getProject, getRiskOverview, getSources } from '../lib/api'
+import { getRiskOverview } from '../api/compliance'
+import { getProject, getSources } from '../api/project'
 import type { PackageInfo, ProjectDetail, SourceFile } from '../lib/types'
 import {
   className,
@@ -122,7 +124,7 @@ export function WorkspacePage() {
     [sourcesQuery.data, project?.sources],
   )
 
-  const readOnly = !canWrite || project?.my_role === 'viewer'
+  const readOnly = !canEditProject(project, canWrite)
 
   const contextValue = useMemo<WorkspaceContextValue | null>(() => {
     if (!project) return null

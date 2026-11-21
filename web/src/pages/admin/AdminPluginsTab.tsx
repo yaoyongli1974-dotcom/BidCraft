@@ -15,18 +15,9 @@ import {
   XCircle,
 } from 'lucide-react'
 import type { Plugin, PluginCatalogEntry, PluginTestResult } from '../../lib/types'
-import {
-  ApiError,
-  deletePlugin,
-  downloadBlob,
-  exportPluginPackage,
-  getPluginCatalog,
-  getPlugins,
-  importPluginPackage,
-  messageOf,
-  testPlugin,
-  updatePlugin,
-} from '../../lib/api'
+import { downloadBlob } from '../../api/generation'
+import { deletePlugin, exportPluginPackage, getPluginCatalog, getPlugins, importPluginPackage, testPlugin, updatePlugin } from '../../api/plugins'
+import { ApiError, messageOf } from '../../lib/http'
 import { className, formatLatency, formatRelative } from '../../lib/format'
 import { useConfirm } from '../../context/useConfirm'
 import { useToast } from '../../context/useToast'

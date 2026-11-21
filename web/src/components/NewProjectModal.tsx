@@ -3,7 +3,8 @@ import { Check, Loader2, PackageSearch } from 'lucide-react'
 import { Modal } from './Modal'
 import { Button } from './Button'
 import { Badge } from './Badge'
-import { createProject, messageOf } from '../lib/api'
+import { createProject } from '../api/project'
+import { messageOf } from '../lib/http'
 import type { PackageInfo, Project } from '../lib/types'
 import {
   className,

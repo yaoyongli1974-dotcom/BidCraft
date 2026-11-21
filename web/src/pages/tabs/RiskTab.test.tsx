@@ -2,12 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { RiskTab } from './RiskTab'
-import {
-  getRequirements,
-  getRiskOverview,
-  updateIssueStatus,
-  updateRequirementResponse,
-} from '../../lib/api'
+import { getRequirements, getRiskOverview, updateIssueStatus, updateRequirementResponse } from '../../api/compliance'
 import type { Issue, RequirementResponse, RiskOverview } from '../../lib/types'
 import { clearQueryCache } from '../../lib/queryCache'
 
@@ -45,8 +40,8 @@ const confirmStub = vi.hoisted(() => vi.fn(async () => true))
 vi.mock('../useWorkspace', () => ({ useWorkspace: () => workspace }))
 vi.mock('../../context/useToast', () => ({ useToast: () => toast }))
 vi.mock('../../context/useConfirm', () => ({ useConfirm: () => confirmStub }))
-vi.mock('../../lib/api', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../lib/api')>()
+vi.mock('../../api/compliance', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../api/compliance')>()
   return {
     ...actual,
     getRiskOverview: vi.fn(),

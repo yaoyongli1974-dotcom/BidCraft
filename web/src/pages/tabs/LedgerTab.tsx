@@ -27,7 +27,8 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { useWorkspace } from '../useWorkspace'
-import { getLedger, messageOf, updateFact } from '../../lib/api'
+import { getLedger, updateFact } from '../../api/ledger'
+import { messageOf } from '../../lib/http'
 import type { Fact, Ledger } from '../../lib/types'
 import {
   className,

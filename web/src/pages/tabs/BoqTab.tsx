@@ -1,3 +1,4 @@
+import { canManageProject } from '../../lib/permissions'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertCircle,
@@ -16,20 +17,9 @@ import {
   X,
 } from 'lucide-react'
 import { useWorkspace } from '../useWorkspace'
-import {
-  ApiError,
-  applyBoq,
-  cnyTotalWithTax,
-  deleteBoq,
-  exportBoq,
-  getBoq,
-  getPricePolicy,
-  messageOf,
-  roundTo,
-  setBoqPrice,
-  uploadBoq,
-  downloadBlob,
-} from '../../lib/api'
+import { applyBoq, cnyTotalWithTax, deleteBoq, exportBoq, getBoq, getPricePolicy, roundTo, setBoqPrice, uploadBoq } from '../../api/boq'
+import { downloadBlob } from '../../api/generation'
+import { ApiError, messageOf } from '../../lib/http'
 import type { BidPackage, BoqAction, BoqPayload, BoqRow, BoqStatus, PricePolicy } from '../../lib/types'
 import { className, formatDate, formatMoney, formatNumber } from '../../lib/format'
 import { useQuery } from '../../lib/hooks'
@@ -122,7 +112,7 @@ function diffNotes(row: BoqRow): string[] {
 export function BoqTab() {
   const { ref, canWrite, project, reloadProject } = useWorkspace()
   const { user, isSuperAdmin } = useAuth()
-  const canReview = !project.my_role || project.my_role === 'owner' || project.my_role === 'admin'
+  const canReview = canManageProject(project)
   const toast = useToast()
   const confirm = useConfirm()
 

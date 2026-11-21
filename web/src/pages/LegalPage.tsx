@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { getLegalDoc } from '../lib/api'
+import { getLegalDoc } from '../api/account'
 import { ErrorState } from '../components/Feedback'
 
 export default function LegalPage() {

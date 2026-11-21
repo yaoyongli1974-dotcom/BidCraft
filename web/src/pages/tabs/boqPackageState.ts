@@ -1,4 +1,4 @@
-import { getBidPackages } from '../../lib/api'
+import { getBidPackages } from '../../api/project'
 import type { BidPackage } from '../../lib/types'
 
 export interface BoqPackageState {

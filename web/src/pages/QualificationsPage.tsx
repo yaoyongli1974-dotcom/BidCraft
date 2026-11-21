@@ -21,22 +21,8 @@ import {
   Users,
   XCircle,
 } from 'lucide-react'
-import {
-  ApiError,
-  createPersonnel,
-  createQualification,
-  deletePersonnel,
-  deleteQualification,
-  deleteQualificationEvidence,
-  getPersonnel,
-  getPreflight,
-  getQualifications,
-  messageOf,
-  qualificationEvidenceUrl,
-  updatePersonnel,
-  updateQualification,
-  uploadQualificationEvidence,
-} from '../lib/api'
+import { createPersonnel, createQualification, deletePersonnel, deleteQualification, deleteQualificationEvidence, getPersonnel, getPreflight, getQualifications, qualificationEvidenceUrl, updatePersonnel, updateQualification, uploadQualificationEvidence } from '../api/tender'
+import { ApiError, messageOf } from '../lib/http'
 import type {
   Personnel,
   PersonnelInput,

@@ -13,7 +13,8 @@ import {
   X,
 } from 'lucide-react'
 import { useWorkspace } from '../useWorkspace'
-import { messageOf, parseProject, sourceFileUrl, uploadSource } from '../../lib/api'
+import { parseProject, sourceFileUrl, uploadSource } from '../../api/project'
+import { messageOf } from '../../lib/http'
 import type { SourceFile } from '../../lib/types'
 import {
   className,

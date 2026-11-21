@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { watchJob } from '../../hooks/watchJob'
+import { messageOf } from '../../lib/http'
 import {
   Cloud,
   Database,
@@ -21,16 +23,8 @@ import {
   kbProviderLabel,
   kbVectorMeta,
 } from '../../lib/format'
-import {
-  deleteKnowledgeBase,
-  embedKnowledgeBase,
-  getJob,
-  messageOf,
-  parseKbReindexResult,
-  reindexKnowledgeBase,
-  testKnowledgeBase,
-  type KbReindexResult,
-} from '../../lib/api'
+import type { KbReindexResult } from '../../api/knowledge'
+import { deleteKnowledgeBase, embedKnowledgeBase, parseKbReindexResult, reindexKnowledgeBase, testKnowledgeBase } from '../../api/knowledge'
 import { useConfirm } from '../../context/useConfirm'
 import { useToast } from '../../context/useToast'
 import { Badge } from '../../components/Badge'
@@ -155,25 +149,18 @@ export function AdminKnowledgeTab({
 
   // A rebuild can take minutes for a large directory: the server accepts the
   // job and the UI polls it at a coarse cadence until the terminal state.
+  // Transport (polling / terminal guard / error counting) lives in watchJob.
   useEffect(() => {
     const target = reindexJobRef.current
     if (!target) return
     const jobId = target.id
     const { kbId, kbName } = target
-    let cancelled = false
-    let finished = false
-    let errors = 0
-
     const stop = () => {
       if (reindexJobRef.current?.id === jobId) reindexJobRef.current = null
       setReindexJobId(null)
     }
-
-    const tick = async () => {
-      try {
-        const job = await getJob(jobId)
-        if (cancelled || finished) return
-        errors = 0
+    return watchJob(jobId, {
+      onUpdate: (job) => {
         const message = job.message || ''
         const processed = typeof job.payload?.done === 'number' ? job.payload.done : 0
         const total = typeof job.payload?.total === 'number' ? job.payload.total : 0
@@ -185,37 +172,26 @@ export function AdminKnowledgeTab({
         if (progressText) {
           setReindexResults((current) => ({ ...current, [kbId]: progressText }))
         }
-        if (job.status !== 'done' && job.status !== 'failed') return
-        finished = true
-        window.clearInterval(timer)
+      },
+      onDone: (job) => {
         setReindexingId(null)
         stop()
-        if (job.status === 'failed') {
-          const detail = job.error || job.message || '请稍后重试。'
-          setActionError(detail)
-          toastRef.current.error('重建索引失败', detail)
-          return
-        }
         reportReindexRef.current(kbId, kbName, parseKbReindexResult(job.result))
-      } catch (error) {
-        if (cancelled) return
-        errors += 1
-        if (errors < 3) return
-        window.clearInterval(timer)
+      },
+      onFailed: (job) => {
+        const detail = job.error || job.message || '请稍后重试。'
+        setActionError(detail)
+        toastRef.current.error('重建索引失败', detail)
         setReindexingId(null)
         stop()
-        const message = messageOf(error)
+      },
+      onPollError: (message) => {
+        setReindexingId(null)
+        stop()
         setActionError(message)
         toastRef.current.error('无法读取重建进度', message)
-      }
-    }
-
-    const timer = window.setInterval(() => void tick(), 1600)
-    void tick()
-    return () => {
-      cancelled = true
-      window.clearInterval(timer)
-    }
+      },
+    })
   }, [reindexJobId])
 
   const counts = useMemo(() => {

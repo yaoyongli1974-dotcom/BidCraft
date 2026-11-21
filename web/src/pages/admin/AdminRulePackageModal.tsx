@@ -18,13 +18,8 @@ import {
   projectTypeMeta,
   PROJECT_TYPES,
 } from '../../lib/format'
-import {
-  createRulePackage,
-  getRulePackage,
-  messageOf,
-  updateRulePackage,
-  validateRulePackage,
-} from '../../lib/api'
+import { createRulePackage, getRulePackage, updateRulePackage, validateRulePackage } from '../../api/compliance'
+import { messageOf } from '../../lib/http'
 import { useSaveShortcut } from '../../lib/hooks'
 import { useConfirm } from '../../context/useConfirm'
 import { Modal } from '../../components/Modal'

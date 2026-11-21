@@ -15,12 +15,8 @@ import {
   formatMoney,
   formatRelative,
 } from '../../lib/format'
-import {
-  deleteQuota,
-  getQuotas,
-  matchQuotas,
-  messageOf,
-} from '../../lib/api'
+import { deleteQuota, getQuotas, matchQuotas } from '../../api/boq'
+import { messageOf } from '../../lib/http'
 import { useDebouncedValue, useQuery } from '../../lib/hooks'
 import { useConfirm } from '../../context/useConfirm'
 import { useToast } from '../../context/useToast'

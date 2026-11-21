@@ -1,3 +1,4 @@
+import { canEditProject, canManageProject } from '../lib/permissions'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import {
@@ -23,16 +24,10 @@ import {
   X,
 } from 'lucide-react'
 import { usePackages, useQuery, useDocumentTitle } from '../lib/hooks'
-import {
-  batchCheck,
-  batchExport,
-  deleteProject,
-  downloadBatchZip,
-  downloadBlob,
-  getBatchJob,
-  getProjects,
-  messageOf,
-} from '../lib/api'
+import { downloadBlob } from '../api/generation'
+import { batchCheck, batchExport, downloadBatchZip, getBatchJob } from '../api/jobs'
+import { deleteProject, getProjects } from '../api/project'
+import { messageOf } from '../lib/http'
 import type {
   BatchFormat,
   BatchJob,
@@ -1148,14 +1143,11 @@ function ProjectRow({
   const progress = progressOf(stats)
   const factProgress = percent(stats.facts_filled, stats.facts_total)
   const ready = stats.missing_required === 0 && stats.issues_open === 0 && stats.written > 0
-  // Project deletion is owner/admin only; older servers omit `my_role`.
-  const canDelete =
-    canWrite &&
-    (!project.my_role || project.my_role === 'owner' || project.my_role === 'admin')
-  const canEdit = canWrite && project.my_role !== 'viewer'
-  // R22 复制与编辑同权限：owner/editor/admin 可复制，viewer 隐藏入口；
-  // 旧后端省略 my_role 时按可写处理（与 canEdit 一致）。
-  const canDuplicate = canWrite && project.my_role !== 'viewer'
+  // 权限能力统一由 permissions.ts 判断：删除仅负责人/超管（兼容旧后端缺 my_role），
+  // 编辑/复制（R22）沿用「非 viewer 且全局可写」。
+  const canDelete = canWrite && canManageProject(project)
+  const canEdit = canEditProject(project, canWrite)
+  const canDuplicate = canEditProject(project, canWrite)
 
   return (
     <div

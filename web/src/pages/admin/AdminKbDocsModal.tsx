@@ -2,12 +2,8 @@ import { useEffect, useState } from 'react'
 import { FileText, RefreshCw, Tags, Trash2 } from 'lucide-react'
 import type { KbDocMetaItem, KbDocMetaResponse, KnowledgeBase } from '../../lib/types'
 import { className } from '../../lib/format'
-import {
-  deleteKbDoc,
-  getKbDocs,
-  messageOf,
-  updateKbDoc,
-} from '../../lib/api'
+import { deleteKbDoc, getKbDocs, updateKbDoc } from '../../api/knowledge'
+import { messageOf } from '../../lib/http'
 import { Badge } from '../../components/Badge'
 import { Button, IconButton } from '../../components/Button'
 import { EmptyState, ErrorState, Skeleton } from '../../components/Feedback'

@@ -2,21 +2,12 @@ import { useState } from 'react'
 import { Download, FileSpreadsheet, ShieldAlert, Trash2 } from 'lucide-react'
 import { Button } from '../components/Button'
 import { useToast } from '../context/useToast'
-import {
-  cancelAccountDeletion,
-  createInvoice,
-  deleteAccount,
-  getInvoices,
-  invoiceFileUrl,
-  getDeletionState,
-  downloadAccountExport,
-  downloadStatement,
-  getBillingProfile,
-  saveBillingProfile,
-  messageOf,
-} from '../lib/api'
+import { cancelAccountDeletion, deleteAccount, getDeletionState, downloadAccountExport, downloadStatement, getBillingProfile, saveBillingProfile } from '../api/account'
+import { createInvoice, getInvoices, invoiceFileUrl } from '../api/auth'
+import { messageOf } from '../lib/http'
 import { useEffect } from 'react'
-import type { DeletionState, InvoiceRequest } from '../lib/api'
+import type { DeletionState } from '../api/account'
+import type { InvoiceRequest } from '../api/auth'
 
 export default function AccountPage() {
   const toast = useToast()

@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Modal } from './Modal'
 import { Button } from './Button'
-import { messageOf, updateProject } from '../lib/api'
+import { updateProject } from '../api/project'
+import { messageOf } from '../lib/http'
 import type { Project } from '../lib/types'
 import { className } from '../lib/format'
 

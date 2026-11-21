@@ -1,3 +1,4 @@
+import { canForceWrite } from '../../lib/permissions'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
@@ -17,14 +18,10 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { useWorkspace } from '../useWorkspace'
-import {
-  ApiError,
-  downloadBlob,
-  exportProject,
-  getRiskOverview,
-  messageOf,
-  type ExportForceOptions,
-} from '../../lib/api'
+import { getRiskOverview } from '../../api/compliance'
+import type { ExportForceOptions } from '../../api/generation'
+import { downloadBlob, exportProject } from '../../api/generation'
+import { ApiError, messageOf } from '../../lib/http'
 import type { ExportFormat, ExportRecord, RiskOverview } from '../../lib/types'
 import {
   className,
@@ -105,7 +102,7 @@ export function ExportTab() {
   const gateReason =
     riskOverview?.gate?.reason?.trim() ||
     `存在 ${blockingOpen} 项未处置的废标/阻断风险，请先在风险总览中处置。`
-  const canForce = project.my_role === 'owner' || project.my_role === 'admin'
+  const canForce = canForceWrite(project)
   const forceReasonValid = forceReason.trim().length >= 4
 
   const runExport = async (format: ExportFormat, force?: ExportForceOptions) => {

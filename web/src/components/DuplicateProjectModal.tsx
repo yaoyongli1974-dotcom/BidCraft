@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Modal } from './Modal'
 import { Button } from './Button'
-import { duplicateProject, messageOf } from '../lib/api'
+import { duplicateProject } from '../api/project'
+import { messageOf } from '../lib/http'
 import type { Project } from '../lib/types'
 import { className } from '../lib/format'
 

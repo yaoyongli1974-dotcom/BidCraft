@@ -4,7 +4,8 @@ import {
   useState,
   type ReactNode,
 } from 'react'
-import { getHealth, messageOf } from '../lib/api'
+import { getHealth } from '../api/tender'
+import { messageOf } from '../lib/http'
 import type { Health } from '../lib/types'
 import { HealthContext } from './health'
 

@@ -28,21 +28,9 @@ import type {
   QuoteApprovalRecord,
   QuoteVersionStatus,
 } from '../../lib/types'
-import {
-  ApiError,
-  applicableStages,
-  createBoqVersion,
-  deleteBoqVersion,
-  getBoqVersionDiff,
-  getMembers,
-  listBoqVersions,
-  messageOf,
-  restoreBoqVersion,
-  reviewBoqVersion,
-  submitBoqVersion,
-  unapproveBoqVersion,
-  updateProject,
-} from '../../lib/api'
+import { createBoqVersion, deleteBoqVersion, getBoqVersionDiff, listBoqVersions, restoreBoqVersion, reviewBoqVersion, submitBoqVersion, unapproveBoqVersion } from '../../api/boq'
+import { applicableStages, getMembers, updateProject } from '../../api/project'
+import { ApiError, messageOf } from '../../lib/http'
 import { className, formatDate, formatMoney, memberRoleMeta, type Tone } from '../../lib/format'
 import { useQuery } from '../../lib/hooks'
 import { Badge } from '../../components/Badge'

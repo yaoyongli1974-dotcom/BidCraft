@@ -7,7 +7,8 @@ import {
   type SetStateAction,
 } from 'react'
 import { useBlocker } from 'react-router-dom'
-import { getPackages, isAbortError, messageOf } from '../lib/api'
+import { getPackages } from '../api/tender'
+import { isAbortError, messageOf } from './http'
 import { readStorage, writeStorage } from '../lib/format'
 import type { AuditEntry, AuditPage, PackageInfo } from '../lib/types'
 import { useConfirm } from '../context/useConfirm'

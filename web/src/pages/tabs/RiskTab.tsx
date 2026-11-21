@@ -20,16 +20,8 @@ import {
   X,
 } from 'lucide-react'
 import { useWorkspace } from '../useWorkspace'
-import {
-  ApiError,
-  bulkIssueStatus,
-  getRequirements,
-  getRiskOverview,
-  messageOf,
-  runCheck,
-  updateIssueStatus,
-  updateRequirementResponse,
-} from '../../lib/api'
+import { bulkIssueStatus, getRequirements, getRiskOverview, runCheck, updateIssueStatus, updateRequirementResponse } from '../../api/compliance'
+import { ApiError, messageOf } from '../../lib/http'
 import type {
   Issue,
   RequirementResponse,
