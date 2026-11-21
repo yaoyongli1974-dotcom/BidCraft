@@ -239,3 +239,127 @@ def test_check_project_rescans_bodies(db):
     chapter = client.get(f"/projects/{project_id}/chapters/{node_id}").json()
     assert chapter["citations"] == 1
     assert chapter["citations_stale"] == 0
+
+
+def test_refresh_project_is_idempotent(db):
+    """全书重扫可反复执行，不会累积重复引用行。"""
+
+    from bidcraft import provenance
+    from bidcraft.db import session_scope
+
+    client = _login(*ADMIN)
+    project_id = _make_project(client)
+    n1, n2 = _seed(project_id, {"project.budget": "3500000"}, ["章一", "章二"])
+    _save_chapter(client, project_id, n1, "预算 3500000 元。")
+    _save_chapter(client, project_id, n2, "总价 3500000 元整。")
+
+    with session_scope() as session:
+        first = provenance.refresh_project(session, project_id)
+        second = provenance.refresh_project(session, project_id)
+    assert first == 2 and second == 2
+
+    overview = client.get(f"/projects/{project_id}/citations").json()
+    assert overview["summary"]["citations"] == 2
+    assert overview["summary"]["sections_citing"] == 2
+
+
+def test_report_aggregates_multiple_chapters(db):
+    """report() 全书视图：计数聚合、章节按位置排序、stale 章节数正确。"""
+
+    from bidcraft import provenance
+    from bidcraft.db import session_scope
+
+    client = _login(*ADMIN)
+    project_id = _make_project(client)
+    n1, n2 = _seed(
+        project_id,
+        {"project.budget": "3500000", "project.duration": "90"},
+        ["章一", "章二"],
+    )
+    _save_chapter(client, project_id, n1, "预算 3500000 元。")
+    _save_chapter(client, project_id, n2, "总价 3500000 元，工期 90 天。")
+    client.patch(
+        f"/projects/{project_id}/facts/project.budget", json={"value": "3600000"}
+    )
+
+    with session_scope() as session:
+        report = provenance.report(session, project_id)
+    summary = report["summary"]
+    assert summary["citations"] == 3  # 预算在两章各一次 + 工期一次
+    assert summary["facts_cited"] == 2
+    assert summary["stale"] == 2  # 预算被两章引用，改值后两条都 stale
+    assert summary["sections_citing"] == 2
+    assert summary["sections_needing_review"] == 2
+    assert [chapter["heading"] for chapter in report["chapters"]] == ["章一", "章二"]
+    assert report["chapters"][1]["stale"] == 1
+
+
+def test_affected_by_change_direct(db):
+    """改值前后的受影响章节：改成原值 / 无关字段都返回空。"""
+
+    from bidcraft import provenance
+    from bidcraft.db import session_scope
+
+    client = _login(*ADMIN)
+    project_id = _make_project(client)
+    node_id = _seed(
+        project_id, {"project.budget": "3500000", "project.duration": "90"}, ["章一"]
+    )[0]
+    _save_chapter(client, project_id, node_id, "预算 3500000 元，工期 90 天。")
+
+    with session_scope() as session:
+        affected = provenance.affected_by_change(
+            session, project_id, "project.budget", "3600000"
+        )
+        assert [item["node_id"] for item in affected] == [node_id]
+        assert affected[0]["stale_value"] == "3500000"
+        # 改回原值 / 未改动的字段 / 无引用的字段都不需要复核
+        assert provenance.affected_by_change(session, project_id, "project.budget", "3500000") == []
+        assert provenance.affected_by_change(session, project_id, "project.duration", "90") == []
+        assert provenance.affected_by_change(session, project_id, "no.such.fact", "x") == []
+
+
+def test_deleted_fact_marks_citation_stale(db):
+    """事实被删除后，旧引用标记 stale、标签回退到 key、当前值为空。"""
+
+    from sqlalchemy import delete
+
+    from bidcraft.db import session_scope
+    from bidcraft.models import Fact
+
+    client = _login(*ADMIN)
+    project_id = _make_project(client)
+    node_id = _seed(project_id, {"project.budget": "3500000"}, ["章一"])[0]
+    _save_chapter(client, project_id, node_id, "预算 3500000 元。")
+
+    with session_scope() as session:
+        session.execute(
+            delete(Fact).where(
+                Fact.project_id == project_id, Fact.key == "project.budget"
+            )
+        )
+
+    items = client.get(f"/projects/{project_id}/chapters/{node_id}/citations").json()
+    assert len(items["citations"]) == 1
+    item = items["citations"][0]
+    assert item["stale"] is True
+    assert item["current_value"] == ""
+    assert item["label"] == "project.budget"
+
+
+def test_citations_isolated_between_projects(db):
+    """同名字段在不同项目取值不同，引用不得串项目。"""
+
+    client = _login(*ADMIN)
+    p1 = _make_project(client, "项目甲")
+    p2 = _make_project(client, "项目乙")
+    n1 = _seed(p1, {"project.budget": "3500000"}, ["章甲"])[0]
+    n2 = _seed(p2, {"project.budget": "8800000"}, ["章乙"])[0]
+    _save_chapter(client, p1, n1, "预算 3500000 元。")
+    _save_chapter(client, p2, n2, "预算 8800000 元。")
+
+    c1 = client.get(f"/projects/{p1}/chapters/{n1}/citations").json()["citations"]
+    c2 = client.get(f"/projects/{p2}/chapters/{n2}/citations").json()["citations"]
+    assert [item["value"] for item in c1] == ["3500000"]
+    assert [item["value"] for item in c2] == ["8800000"]
+    assert all(not item["stale"] for item in c1 + c2)

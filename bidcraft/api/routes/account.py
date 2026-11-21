@@ -19,6 +19,7 @@ from ..shared import (  # noqa: F401
     audit,
     billing_user,
     compliance,
+    logger,
     session_scope,
     settings,
 )
@@ -124,8 +125,9 @@ def account_export() -> FileResponse:
         user = billing_user(db)
         try:
             path = compliance.export_account(db, user, settings.home)
-        except Exception as exc:  # noqa: BLE001 - 导出失败需可读
-            raise HTTPException(status_code=500, detail=f"导出失败：{exc}") from exc
+        except Exception as exc:  # noqa: BLE001 - 内部细节只进日志，不回传给客户端
+            logger.exception("账户数据导出失败（用户 %s）", user.id)
+            raise HTTPException(status_code=500, detail="导出失败，请稍后重试") from exc
         audit(db, None, "account.export", {"user_id": user.id})
         db.flush()
         return FileResponse(
