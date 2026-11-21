@@ -76,6 +76,7 @@
 |---|---|---|
 | 客户端 | React 18 + TypeScript + Vite | 项目列表与类型分组/标段筛选/批量核对导出、上传、台账校订、清单对齐与报价、大纲、章节编辑、章节配图、项目图库与配图计划、整篇配图策略、规则包管理、协作成员与审计、核对、导出 |
 | HTTP 层 | FastAPI + uvicorn | REST、静态资源托管、SPA 深链接回退、后台任务；另有 `bidcraft mcp` stdio JSON-RPC 服务供外部 Agent 接入 |
+| 统一授权入口 | `bidcraft/authorization.py` | 项目/任务/节点/批量项目的可见性与动作判定收口为单一模块，HTTP/CLI/MCP 共用；HTTP 层薄封装委托并映射领域异常 404/403，不 import FastAPI |
 | API 架构 | `bidcraft/api/app.py` + `bidcraft/api/routes/`（12 域） | 应用装配与共享 helper 在 `app.py`；194 个路由按 auth/account/billing/admin/projects/my/jobs/batch_jobs/legal/packages/health/approvals 拆到 `routes/`；耗时任务在 `bidcraft/workers/`，跨任务共享逻辑在 `bidcraft/services/job_support.py`；`bidcraft.api` 保持既有导入路径与 monkeypatch 语义 |
 | 数据库迁移 | `bidcraft/migrations/` | Alembic 记账后续 schema 变更；`create_all`+`_migrate_columns` 作历史基线；`0002_quote_basis` 为首个真实 revision；跨进程 fcntl 迁移锁 |
 | 金额服务 | `bidcraft/services/money.py` | Decimal + ROUND_HALF_UP 统一报价/税额/汇总/调价计算，边界转 float；报价版本 `basis` 列冻结不可变计算依据 |

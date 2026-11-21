@@ -30,6 +30,17 @@ from .. import (
     wechat,
 )
 from ..audit import record_audit
+from ..authorization import (
+    MEMBER_ROLES,  # noqa: F401 - 兼容路由 from ..app import MEMBER_ROLES
+    PROJECT_WRITE_ROLES,  # noqa: F401 - 同上，保留既有导出面
+    Forbidden,
+    authorize_job,
+    authorize_node,
+    authorize_project,
+    authorize_projects,
+    check_owner,
+    check_write,
+)
 from ..config import settings, validate_startup
 from ..context import current_user, set_current_user
 from ..db import init_db, session_scope
@@ -55,7 +66,6 @@ from ..models import (
     SourceFile,
     User,
 )
-from ..pipeline import resolve_project
 from ..rules import store as package_store
 from ..rules.loader import (
     list_packages,
@@ -595,9 +605,6 @@ def _iso(value) -> str | None:
     return value.isoformat()
 
 
-PROJECT_WRITE_ROLES = {"owner", "editor", "admin"}
-MEMBER_ROLES = {"editor", "viewer"}
-
 
 def _safe_filename(name: str | None, fallback: str) -> str:
     """Return the basename of an uploaded file, or ``fallback`` when empty."""
@@ -655,41 +662,25 @@ def _bid_package_payload(package: BidPackage, has_boq: bool = False) -> dict[str
 def _project(db: Session, ref: str) -> tuple[Project, str]:
     """Resolve a project the caller may see, plus their effective project role.
 
-    Roles: ``admin`` (super administrator, any project), ``owner`` (project
-    creator), ``editor``/``viewer`` (``ProjectMember`` grant). Anyone else gets
-    a 404 so project existence is never leaked.
+    薄封装：真实判定统一在 :mod:`bidcraft.authorization`，HTTP 层只保留名字
+    与异常映射（``LookupError``→404），CLI/MCP 共用同一口径。
     """
 
-    try:
-        project = resolve_project(db, ref)
-    except ValueError as exc:
-        raise LookupError(str(exc)) from exc
-    user = current_user()
-    if not user:
-        raise LookupError("项目不存在")
-    if user.get("role") == auth.ROLE_SUPER_ADMIN:
-        return project, "admin"
-    if project.owner_id and project.owner_id == user.get("id"):
-        return project, "owner"
-    member = db.scalar(
-        select(ProjectMember).where(
-            ProjectMember.project_id == project.id,
-            ProjectMember.user_id == user.get("id"),
-        )
-    )
-    if member is not None and member.role in MEMBER_ROLES:
-        return project, member.role
-    raise LookupError("项目不存在")
+    return authorize_project(db, ref)
 
 
 def _require_write(role: str) -> None:
-    if role not in PROJECT_WRITE_ROLES:
-        raise _http_error(403, "只读成员不能修改该项目")
+    try:
+        check_write(role)
+    except Forbidden as exc:
+        raise _http_error(403, str(exc)) from exc
 
 
 def _require_owner(role: str) -> None:
-    if role not in {"owner", "admin"}:
-        raise _http_error(403, "仅项目负责人可执行此操作")
+    try:
+        check_owner(role)
+    except Forbidden as exc:
+        raise _http_error(403, str(exc)) from exc
 
 
 def audit(
@@ -701,58 +692,22 @@ def audit(
 
 
 def _job(db, job_id: str) -> Job:
-    """Load a job and enforce the same project ownership as other endpoints."""
+    """Load a job and enforce the same project ownership as other endpoints.
 
-    job = db.get(Job, job_id)
-    if job is None:
-        raise LookupError(f"任务不存在: {job_id}")
-    if job.project_id:
-        _project(db, job.project_id)
-    else:
-        user = current_user()
-        owner_id = str((job.payload or {}).get("owner_id") or "")
-        if not user or (
-            user.get("role") != auth.ROLE_SUPER_ADMIN
-            and owner_id != str(user.get("id") or "")
-        ):
-            raise LookupError("任务不存在")
-    return job
+    薄封装：判定统一在 :func:`bidcraft.authorization.authorize_job`。
+    """
+
+    return authorize_job(db, job_id)
 
 
 def _batch_projects(db, ids: list[str]) -> list[Project]:
     """Resolve requested project ids to those the caller may operate on.
 
-    Super administrators see every project; everyone else is limited to owned
-    projects and project memberships. Unknown ids are dropped, duplicates are
-    collapsed while keeping the request order.
+    薄封装：判定统一在 :func:`bidcraft.authorization.authorize_projects`，
+    并顺带修复了成员分支漏校验 ``role in MEMBER_ROLES`` 的一致性问题。
     """
 
-    user = current_user() or {}
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for raw in ids:
-        ref = str(raw or "").strip()
-        if ref and ref not in seen:
-            seen.add(ref)
-            ordered.append(ref)
-    projects: list[Project] = []
-    is_admin = user.get("role") == auth.ROLE_SUPER_ADMIN
-    for ref in ordered:
-        project = db.get(Project, ref)
-        if project is None:
-            continue
-        if is_admin or (project.owner_id and project.owner_id == user.get("id")):
-            projects.append(project)
-            continue
-        member = db.scalar(
-            select(ProjectMember).where(
-                ProjectMember.project_id == project.id,
-                ProjectMember.user_id == user.get("id"),
-            )
-        )
-        if member is not None:
-            projects.append(project)
-    return projects
+    return authorize_projects(db, ids)
 
 
 def _project_stats(db, project_id: str) -> dict[str, Any]:
@@ -1406,10 +1361,9 @@ def _image_http_error(exc: images.ImageError) -> HTTPException:
 
 
 def _node(db, project_id: str, node_id: str) -> OutlineNode:
-    node = db.get(OutlineNode, node_id)
-    if node is None or node.project_id != project_id:
-        raise LookupError(f"章节不存在: {node_id}")
-    return node
+    """薄封装：节点归属校验统一在 :func:`bidcraft.authorization.authorize_node`。"""
+
+    return authorize_node(db, project_id, node_id)
 
 
 def _chapter_payload(db, node: OutlineNode) -> dict[str, Any]:
