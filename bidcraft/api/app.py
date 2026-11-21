@@ -42,7 +42,7 @@ from ..authorization import (
     check_write,
 )
 from ..config import settings, validate_startup
-from ..context import current_user, set_current_user
+from ..context import current_user, reset_current_user, set_current_user
 from ..db import init_db, session_scope
 from ..export_gate import (
     EXPORT_GATE_FORMATS,  # noqa: F401 - 保留 from bidcraft.api import 的既有导出面
@@ -1536,17 +1536,22 @@ def create_app():
                 return JSONResponse(status_code=401, content={"detail": "请先登录"})
             payload = auth.user_payload(user)
             request.state.user = payload
-            set_current_user(payload)
-        role = request.state.user["role"]
-        if path.startswith("/admin/") and role != auth.ROLE_SUPER_ADMIN:
-            return JSONResponse(status_code=403, content={"detail": "仅超级管理员可访问"})
-        if (
-            request.method not in {"GET", "HEAD", "OPTIONS"}
-            and role == auth.ROLE_VIEWER
-            and path not in {"/auth/password", "/auth/logout"}
-        ):
-            return JSONResponse(status_code=403, content={"detail": "只读成员不能执行此操作"})
-        return await call_next(request)
+            # 身份只在本请求内有效：拿到 token 后用 try/finally 还原，避免泄漏到
+            # 同一 context 里后续执行的工作；后台任务另走显式参数，不依赖这里。
+            token = set_current_user(payload)
+        try:
+            role = request.state.user["role"]
+            if path.startswith("/admin/") and role != auth.ROLE_SUPER_ADMIN:
+                return JSONResponse(status_code=403, content={"detail": "仅超级管理员可访问"})
+            if (
+                request.method not in {"GET", "HEAD", "OPTIONS"}
+                and role == auth.ROLE_VIEWER
+                and path not in {"/auth/password", "/auth/logout"}
+            ):
+                return JSONResponse(status_code=403, content={"detail": "只读成员不能执行此操作"})
+            return await call_next(request)
+        finally:
+            reset_current_user(token)
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
