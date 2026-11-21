@@ -1,8 +1,22 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger("bidcraft.config")
+
+#: 运行环境。仅影响配置校验强度与日志提示，不改变业务行为。
+#: - dev/test：缺失可选参数只记 warning，不阻断启动（测试与本地开发）
+#: - prod：缺失关键参数（支付/模型/管理员密码）直接阻断启动
+ENVIRONMENTS = ("dev", "test", "prod")
+DEFAULT_ENV = "dev"
+
+
+def _env_name() -> str:
+    raw = os.getenv("BIDCRAFT_ENV", DEFAULT_ENV).strip().lower()
+    return raw if raw in ENVIRONMENTS else DEFAULT_ENV
 
 
 def _bool(name: str, default: bool = False) -> bool:
@@ -10,6 +24,20 @@ def _bool(name: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def redact_secret(value: str | None, keep: int = 4) -> str:
+    """把密钥/口令脱敏成 ``ab****cd`` 形式，用于日志与健康检查展示。
+
+    空值返回空串；短于 ``keep * 2`` 的值全量打码，不泄露长度以外的信息。
+    """
+
+    text = value or ""
+    if not text:
+        return ""
+    if len(text) <= keep * 2:
+        return "*" * len(text)
+    return f"{text[:keep]}{'*' * 4}{text[-keep:]}"
 
 
 @dataclass(slots=True)
@@ -21,6 +49,7 @@ class Settings:
     no remote error reporting anywhere in this codebase.
     """
 
+    env: str = field(default_factory=_env_name)
     home: Path = field(default_factory=lambda: Path(os.getenv("BIDCRAFT_HOME", ".bidcraft")))
     db_url: str = ""
     model_base_url: str = field(default_factory=lambda: os.getenv("BIDCRAFT_MODEL_BASE_URL", ""))
@@ -148,6 +177,90 @@ class Settings:
         path = self.home / "projects" / project_id
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    # ---------------------------------------------------------- 启动校验
+    def _pay_configured(self) -> bool:
+        """微信支付是否声称已接入（未走 mock 且至少有一个支付参数）。"""
+
+        return not self.wechat_pay_mock and bool(
+            self.wechat_pay_mch_id
+            or self.wechat_pay_serial_no
+            or self.wechat_pay_private_key
+            or self.wechat_pay_apiv3_key
+        )
+
+    def _pay_missing(self) -> list[str]:
+        fields = {
+            "BIDCRAFT_WECHAT_PAY_MCH_ID": self.wechat_pay_mch_id,
+            "BIDCRAFT_WECHAT_PAY_SERIAL_NO": self.wechat_pay_serial_no,
+            "BIDCRAFT_WECHAT_PAY_PRIVATE_KEY": self.wechat_pay_private_key,
+            "BIDCRAFT_WECHAT_PAY_PLATFORM_CERT": self.wechat_pay_platform_cert,
+            "BIDCRAFT_WECHAT_PAY_APIV3_KEY": self.wechat_pay_apiv3_key,
+            "BIDCRAFT_WECHAT_PAY_NOTIFY_URL": self.wechat_pay_notify_url,
+        }
+        return [name for name, value in fields.items() if not value]
+
+    def validate(self) -> tuple[list[str], list[str]]:
+        """返回 ``(errors, warnings)``，不抛异常、不打印，便于测试与复用。
+
+        覆盖三类启动期就能发现的问题：模型参数、支付参数、管理员口令。
+        校验刻意保持"保守"——只校验齐全性，不校验可达性（不发起任何网络请求）。
+        """
+
+        errors: list[str] = []
+        warnings: list[str] = []
+        if self.env not in ENVIRONMENTS:
+            warnings.append(f"BIDCRAFT_ENV={self.env!r} 无效，已按 {DEFAULT_ENV} 处理")
+        if self.env == "prod":
+            if not self.offline and not (self.model_base_url and self.model_name):
+                errors.append("生产环境未配置模型（BIDCRAFT_MODEL_BASE_URL / BIDCRAFT_MODEL_NAME）")
+            if not self.admin_password:
+                errors.append("生产环境必须设置管理员口令 BIDCRAFT_ADMIN_PASSWORD")
+            if self._pay_configured():
+                missing = self._pay_missing()
+                if missing:
+                    errors.append("生产环境微信支付参数不全：" + "、".join(missing))
+            if not self.secure_cookie:
+                warnings.append("生产环境建议开启 BIDCRAFT_SECURE_COOKIE（需 HTTPS）")
+        else:
+            if not self.offline and not self.model_configured:
+                warnings.append("模型未配置，章节生成将走降级路径")
+            if self._pay_configured() and self._pay_missing():
+                warnings.append("微信支付参数不全，支付功能不可用")
+            if not self.admin_password:
+                warnings.append("未设置 BIDCRAFT_ADMIN_PASSWORD，将使用初始化口令")
+        return errors, warnings
+
+    def safe_dict(self) -> dict[str, object]:
+        """配置脱敏视图，供 /admin/health 展示；绝不返回明文密钥。"""
+
+        return {
+            "env": self.env,
+            "home": str(self.home),
+            "offline": self.offline,
+            "model_base_url": self.model_base_url,
+            "model_name": self.model_name,
+            "model_api_key": redact_secret(self.model_api_key),
+            "wechat_pay": self._pay_configured(),
+            "wechat_pay_mch_id": self.wechat_pay_mch_id,
+            "wechat_pay_apiv3_key": redact_secret(self.wechat_pay_apiv3_key),
+            "wechat_pay_private_key": redact_secret(self.wechat_pay_private_key),
+            "wechat_app_secret": redact_secret(self.wechat_app_secret),
+        }
+
+
+def validate_startup(config: Settings | None = None) -> None:
+    """启动期校验：dev/test 记 warning；prod 关键项缺失直接阻断。
+
+    只依赖 ``config.validate()`` 的纯结果，便于单独测试。被 ``create_app()`` 调用。
+    """
+
+    config = config or settings
+    errors, warnings = config.validate()
+    for message in warnings:
+        logger.warning("配置检查：%s", message)
+    if errors:
+        raise RuntimeError("启动配置校验失败：" + "；".join(errors))
 
 
 settings = Settings()

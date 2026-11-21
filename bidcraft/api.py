@@ -54,7 +54,7 @@ from . import (
     wechatpay,
 )
 from .audit import record_audit
-from .config import settings
+from .config import settings, validate_startup
 from .context import current_user, set_current_user
 from .db import init_db, session_scope
 from .duplicate import duplicate_project
@@ -1943,6 +1943,8 @@ def create_app():
     from .models import AuthSession, KbChunk, KnowledgeBase, ModelConfig, User
     from .security import encrypt_secret, hash_password, verify_password
 
+    # 启动即校验配置：dev/test 只记 warning，prod 关键项缺失直接阻断（不会拖到业务阶段）。
+    validate_startup()
     init_db()
     auth.ensure_admin()
     try:
