@@ -23,7 +23,6 @@ from .models import (
     AppSetting,
     AuditLog,
     CreditTransaction,
-    Material,
     OutlineNode,
     Personnel,
     Project,
@@ -159,48 +158,24 @@ def legal_doc(name: str) -> str:
 def delete_account(db, user: User) -> dict[str, int]:
     """Delete the account and everything it owns.
 
-    主账号若仍有子账号，要求先处理子账号，避免误删团队数据。
+    主账号若仍有子账号，要求先处理子账号，避免误删团队数据。关联行统一走
+    ``purge.delete_user_rows``：SQLite 上顺手消掉历史孤儿，PostgreSQL 上则
+    保证不会因为漏删子表触发外键约束。
     """
+    from .services.purge import delete_user_rows
+
     subs = db.scalars(select(User).where(User.parent_id == user.id)).all()
     if subs:
         raise ComplianceError("请先删除或移交名下子账号，再注销主账号")
-    projects = db.scalars(select(Project).where(Project.owner_id == user.id)).all()
-    removed = {"projects": 0, "docs": 0, "qualifications": 0, "personnel": 0}
-    project_ids = [project.id for project in projects]
-    if project_ids:
-        db.query(Section).filter(
-            Section.node_id.in_(
-                select(OutlineNode.id).where(OutlineNode.project_id.in_(project_ids))
-            )
-        ).delete(synchronize_session=False)
-        db.query(OutlineNode).filter(OutlineNode.project_id.in_(project_ids)).delete(
-            synchronize_session=False
-        )
-        db.query(Material).filter(Material.project_id.in_(project_ids)).delete(
-            synchronize_session=False
-        )
-        db.query(Project).filter(Project.id.in_(project_ids)).delete(
-            synchronize_session=False
-        )
-        removed["projects"] = len(project_ids)
+
+    # 用户文档的文件本体要先落盘删除；行本身由 delete_user_rows 统一清理。
     for row in db.scalars(select(UserDoc).where(UserDoc.user_id == user.id)).all():
         try:
             Path(row.stored_path).unlink(missing_ok=True)
         except OSError:
             pass
-        db.delete(row)
-        removed["docs"] += 1
-    for row in db.scalars(
-        select(Qualification).where(Qualification.owner_id == user.id)
-    ).all():
-        db.delete(row)
-        removed["qualifications"] += 1
-    for row in db.scalars(select(Personnel).where(Personnel.owner_id == user.id)).all():
-        db.delete(row)
-        removed["personnel"] += 1
-    db.query(CreditTransaction).filter(CreditTransaction.user_id == user.id).delete(
-        synchronize_session=False
-    )
+
+    removed = delete_user_rows(db, user.id)
     try:
         from .invoices import delete_user_files
 
@@ -517,10 +492,66 @@ def statement_csv(db, user_id: str, *, start: str = "", end: str = "") -> str:
 
 
 def verify_backup(path: str | Path) -> dict[str, Any]:
-    """Restore a backup into a temp dir and check schema + integrity."""
+    """校验备份可恢复：SQLite 跑 integrity_check，PostgreSQL 解析 pg_dump SQL。
+
+    两种后端打包出的 zip 分别含 ``bidcraft.db`` 或 ``dump.sql``；旧版纯 .db
+    文件也继续支持。这里只读不执行任何 SQL，避免把备份内容当代码跑。
+    """
+    import re
+    import zipfile
+
     source = Path(path)
     if not source.is_file():
         raise ComplianceError("备份文件不存在")
+
+    sql_text: str | None = None
+    sqlite_source: Path = source
+    if zipfile.is_zipfile(source):
+        with zipfile.ZipFile(source) as bundle:
+            names = set(bundle.namelist())
+            if "dump.sql" in names:
+                sql_text = bundle.read("dump.sql").decode("utf-8", errors="replace")
+            elif "bidcraft.db" in names:
+                with tempfile.TemporaryDirectory(prefix="bidcraft-verify-") as tmp:
+                    sqlite_source = Path(tmp) / "restore.db"
+                    sqlite_source.write_bytes(bundle.read("bidcraft.db"))
+                    # 必须在临时目录仍存在时校验——退出 with 后文件就被删了。
+                    return _verify_sqlite_backup(sqlite_source)
+            else:
+                raise ComplianceError("备份包里既没有 bidcraft.db 也没有 dump.sql")
+    if sql_text is None:
+        return _verify_sqlite_backup(sqlite_source)
+
+    # pg_dump 纯文本：统计 CREATE TABLE 与 COPY 数据行，检查关键表是否齐全。
+    tables = re.findall(r"^CREATE TABLE (?:public\.)?[\"']?(\w+)[\"']?", sql_text, re.MULTILINE)
+    if not tables:
+        raise ComplianceError("dump.sql 中没有找到建表语句，备份可能不完整")
+    required = {"projects", "users", "jobs"}
+    missing = required - set(tables)
+    if missing:
+        raise ComplianceError("备份缺少关键表：" + "、".join(sorted(missing)))
+    rows = 0
+    in_copy = False
+    for line in sql_text.splitlines():
+        if line.startswith("COPY "):
+            in_copy = True
+            continue
+        if in_copy:
+            if line.startswith("\\."):
+                in_copy = False
+            elif line.strip():
+                rows += 1
+    return {
+        "ok": True,
+        "backend": "postgresql",
+        "tables": len(tables),
+        "rows": rows,
+        "counts": {},
+    }
+
+
+def _verify_sqlite_backup(source: Path) -> dict[str, Any]:
+    """原有的 SQLite 备份校验路径；保持行为不变。"""
     with tempfile.TemporaryDirectory(prefix="bidcraft-verify-") as tmp:
         copy = Path(tmp) / "restore.db"
         shutil.copy2(source, copy)
@@ -544,6 +575,7 @@ def verify_backup(path: str | Path) -> dict[str, Any]:
         raise ComplianceError(f"备份完整性校验失败：{integrity}")
     return {
         "ok": True,
+        "backend": "sqlite",
         "tables": len(counts),
         "rows": sum(counts.values()),
         "counts": counts,

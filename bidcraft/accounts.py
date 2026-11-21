@@ -105,6 +105,11 @@ def delete_sub_account(db: Session, parent: User, sub_id: str) -> None:
     for project in db.scalars(select(Project).where(Project.owner_id == row.id)).all():
         project.owner_id = parent.id
     auth.revoke_user_sessions(db, row.id)
+    # 项目已移交给主账号，这里只清理其余个人关联（订单、发票、成员关系等），
+    # 否则 PostgreSQL 的外键约束会让删除失败。
+    from .services.purge import delete_user_rows
+
+    delete_user_rows(db, row.id)
     db.delete(row)
     db.flush()
 

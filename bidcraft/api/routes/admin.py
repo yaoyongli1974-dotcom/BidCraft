@@ -919,7 +919,10 @@ def delete_user(user_id: str, request: Request) -> dict[str, Any]:
             )
             if not others:
                 raise HTTPException(status_code=400, detail="至少保留一个启用的超级管理员")
-        db.execute(delete(AuthSession).where(AuthSession.user_id == row.id))
+        from ...services.purge import delete_user_rows
+
+        # 与账户注销共用同一套关联清理：PostgreSQL 强制外键时漏表会直接失败。
+        delete_user_rows(db, row.id)
         db.delete(row)
         return {"deleted": True, "id": user_id}
 

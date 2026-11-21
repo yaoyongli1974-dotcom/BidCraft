@@ -36,12 +36,12 @@ WORKDIR /app
 
 # 依赖层：只依赖清单，源码变更可复用缓存。
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --no-dev --extra api --no-install-project
+RUN uv sync --frozen --no-dev --extra api --extra postgres --no-install-project
 
 # 源码层：复制后再安装项目自身（含 resources 与 Web 构建产物）。
 COPY bidcraft ./bidcraft
 COPY --from=webbuild /src/bidcraft/web_dist ./bidcraft/web_dist
-RUN uv sync --frozen --no-dev --extra api \
+RUN uv sync --frozen --no-dev --extra api --extra postgres \
     && chown -R bidcraft:bidcraft /app
 
 USER bidcraft

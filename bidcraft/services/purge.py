@@ -23,26 +23,33 @@ from sqlalchemy.orm import Session
 
 from ..models import (
     AuditLog,
+    AuthSession,
     BidPackage,
     BoqQuoteVersion,
     BoqSnapshot,
+    CreditTransaction,
     Delivery,
     Fact,
     FactCitation,
     ImageAsset,
+    InvoiceRequest,
     Issue,
     Job,
     JobEvent,
     Material,
     OutlineNode,
     Parameter,
+    Personnel,
     Project,
     ProjectMember,
+    Qualification,
+    RechargeOrder,
     Requirement,
     Risk,
     ScoringItem,
     Section,
     SourceFile,
+    UserDoc,
 )
 
 # ------------------------------------------------------------------ 项目删除
@@ -121,6 +128,49 @@ def delete_project_rows(db: Session, project_id: str) -> dict[str, int]:
     ).rowcount or 0
     removed["audit_logs"] = db.execute(
         delete(AuditLog).where(AuditLog.project_id == project_id)
+    ).rowcount or 0
+    return removed
+
+
+# ------------------------------------------------------------------ 用户删除
+
+
+def delete_user_rows(db: Session, user_id: str) -> dict[str, int]:
+    """显式清理某用户拥有的全部行（**不删除 User 本身**）。
+
+    SQLite 从不启用外键，过去删除路径漏掉的子表会静默变成孤儿；PostgreSQL
+    默认强制 ForeignKey，任何漏表都会直接让 ``DELETE FROM users`` 失败。这里
+    把所有 ``ForeignKey("users.id")`` 关联与成员关系收敛到一处，供账户注销、
+    超管删除、子账号删除共用。
+
+    留存红线：不按 ``AuditLog.user_id`` 清理（注销后仍要留追责记录）。
+    """
+
+    removed: dict[str, int] = {}
+    owned_ids = list(db.scalars(select(Project.id).where(Project.owner_id == user_id)))
+    for project_id in owned_ids:
+        for table, count in delete_project_rows(db, project_id).items():
+            removed[table] = removed.get(table, 0) + count
+    removed["projects"] = db.execute(
+        delete(Project).where(Project.owner_id == user_id)
+    ).rowcount or 0
+    for model in (
+        AuthSession,
+        UserDoc,
+        CreditTransaction,
+        RechargeOrder,
+        InvoiceRequest,
+    ):
+        removed[model.__tablename__] = db.execute(
+            delete(model).where(model.user_id == user_id)
+        ).rowcount or 0
+    # Qualification/Personnel 用 owner_id 而非 user_id。
+    for model in (Qualification, Personnel):
+        removed[model.__tablename__] = db.execute(
+            delete(model).where(model.owner_id == user_id)
+        ).rowcount or 0
+    removed["project_members"] = db.execute(
+        delete(ProjectMember).where(ProjectMember.user_id == user_id)
     ).rowcount or 0
     return removed
 

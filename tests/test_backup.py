@@ -109,3 +109,17 @@ def test_backup_list_shows_existing_archives(db):
 
     assert result.exit_code == 0, result.output
     assert "bidcraft-" in result.output
+
+
+def test_backup_verify_command_is_registered(db):
+    """回归：backup-verify 曾误绑到 backup-prune，真正的校验函数无装饰器。"""
+    from bidcraft.cli import app
+
+    _seed_project()
+    made = CliRunner().invoke(app, ["backup"])
+    assert made.exit_code == 0, made.output
+    archive = next(iter((settings.home / "backups").glob("bidcraft-*.zip")))
+
+    result = CliRunner().invoke(app, ["backup-verify", str(archive)])
+    assert result.exit_code == 0, result.output
+    assert "备份完整" in result.output

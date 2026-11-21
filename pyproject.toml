@@ -1,6 +1,6 @@
 [project]
 name = "bidcraft"
-version = "0.16.0"
+version = "0.17.0"
 description = "投标文件编制系统：招标解析 → 事实台账 → 规则引擎 → 大纲/正文 → 合规核对 → 清单报价 → DOCX/PDF 导出"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -41,6 +41,9 @@ api = [
   "python-multipart>=0.0.9",
   "qrcode[pil]>=7.4",
 ]
+# PostgreSQL 支持：设置 BIDCRAFT_DB_URL=postgresql+psycopg://... 时安装此 extra。
+# SQLite 是默认后端，不装也能正常运行。
+postgres = ["psycopg[binary]>=3.1"]
 # 测试与静态检查依赖。安装：uv sync --extra dev（或 uv pip install -e '.[dev]'）。
 # 版本锁定以仓库根目录 uv.lock 为准；CI 用 `uv sync --frozen` 复现环境。
 dev = [

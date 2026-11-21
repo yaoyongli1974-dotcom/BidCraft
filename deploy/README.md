@@ -6,10 +6,10 @@
 ## 1. 镜像
 
 ```bash
-docker build -t bidcraft:0.16.0 .          # 构建机
-docker save bidcraft:0.16.0 | gzip -1 > bidcraft-0.16.0.tar.gz
+docker build -t bidcraft:0.17.0 .          # 构建机
+docker save bidcraft:0.17.0 | gzip -1 > bidcraft-0.17.0.tar.gz
 # 传到服务器后：
-docker load -i bidcraft-0.16.0.tar.gz
+docker load -i bidcraft-0.17.0.tar.gz
 ```
 
 ## 2. 数据目录与配置
@@ -21,6 +21,7 @@ sudo cp deploy/docker-compose.yml /opt/bidcraft/compose/
 # 参考 .env.example 创建 /opt/bidcraft/compose/.env（chmod 600）：
 #   BIDCRAFT_ADMIN_PASSWORD=<强密码>   首次启动创建 admin，之后改它不会重置密码
 #   BIDCRAFT_SECURE_COOKIE=1           仅 HTTP 访问时临时设 0（见下）
+#   BIDCRAFT_DB_URL=（可选）postgresql://user:pass@host:5432/db   详见 docs/postgresql.md
 cd /opt/bidcraft/compose && sudo docker compose up -d
 ```
 
@@ -79,7 +80,9 @@ bidcraft worker
 - 任务恢复只在 Worker 入口执行；多个 Worker 同时启动只会重排**已过期租约**，不会误伤
   其他 Worker 正在跑的任务。
 - `bidcraft worker` 常驻运行，Ctrl-C / SIGTERM 退出；运行中任务靠租约超时由其他 Worker 回收。
-- 仍不需要 Redis/PostgreSQL；Worker 发现新任务有最多 5 秒的轮询延迟。
+- 仍不需要 Redis；Worker 发现新任务有最多 5 秒的轮询延迟。
+- PostgreSQL 可选（v0.17.0+）：多机部署时在 `.env` 设置 `BIDCRAFT_DB_URL`，
+  所有进程指向同一个 PG 库，不再要求共享文件卷；详见 `docs/postgresql.md`。
 - 继续使用单进程镜像时无需任何改动（默认 `BIDCRAFT_EMBEDDED_WORKERS=1`）。
 
 ## 6. 上线前的暴露面收紧（v0.6.3+ 内置，0.7.0 增补 `/admin/health`）
@@ -130,7 +133,7 @@ curl -s -o /dev/null -w '%{http_code}\n' https://bid.xalcy.cn/docs   # 404
 curl -I http://bid.xalcy.cn/ | head -3     # 301 → https
 ```
 
-## 8. 升级到最新版本（示例：→ 0.16.0）
+## 8. 升级到最新版本（示例：→ 0.17.0）
 
 线上 0.4.8 缺少审批条件分支、VIP/子账号/优先级队列、模板库等本轮能力。步骤：
 
@@ -139,19 +142,19 @@ cd /opt/bidcraft
 docker compose -f compose/docker-compose.yml down          # 可选，改镜像后 up 即可
 # 方式 A：服务器上构建
 git clone https://github.com/yaoyongli1974-dotcom/BidCraft.git src && cd src
-git fetch origin --tags && git checkout v0.16.0      # 或 origin/main
-docker build -t bidcraft:0.16.0 .
+git fetch origin --tags && git checkout v0.17.0      # 或 origin/main
+docker build -t bidcraft:0.17.0 .
 # 方式 B：本地构建后导出/导入
-# docker save bidcraft:0.16.0 | gzip > bidcraft-0.16.0.tar.gz   （本地）
-# docker load < bidcraft-0.16.0.tar.gz                          （服务器）
+# docker save bidcraft:0.17.0 | gzip > bidcraft-0.17.0.tar.gz   （本地）
+# docker load < bidcraft-0.17.0.tar.gz                          （服务器）
 
-sed -i 's/image: bidcraft:.*/image: bidcraft:0.16.0/' /opt/bidcraft/compose/docker-compose.yml
+sed -i 's/image: bidcraft:.*/image: bidcraft:0.17.0/' /opt/bidcraft/compose/docker-compose.yml
 cd /opt/bidcraft/compose && docker compose up -d
 
 sleep 5
 curl -s http://127.0.0.1:8000/health     # 最小字段（不显示版本）
 # 超管确认版本：带 Cookie 访问 /admin/health，见「5. 运维」
-docker exec bidcraft python -c "import bidcraft;print(bidcraft.__version__)"   # 0.16.0
+docker exec bidcraft python -c "import bidcraft;print(bidcraft.__version__)"   # 0.17.0
 ```
 
 升级后 `/opt/bidcraft/data` 不变，数据库增量列由启动时迁移自动补齐；建议先备份该目录。

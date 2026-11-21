@@ -1017,21 +1017,34 @@ def backup(
     ),
     list_existing: bool = typer.Option(False, "--list", help="列出已有备份后退出"),
 ) -> None:
-    """在线备份数据库与 secret.key（一致性快照打包为 zip）。"""
+    """在线备份数据库与 secret.key（一致性快照打包为 zip）。
+
+    SQLite 走在线备份 API；PostgreSQL 走 pg_dump（需 postgresql-client），
+    口令通过 PGPASSWORD 传递，不进入命令行参数。
+    """
+    import os
+    import shutil
     import sqlite3
+    import subprocess
     import tempfile
     import zipfile
     from datetime import UTC, datetime
+
+    from sqlalchemy.engine import make_url
 
     backup_dir = settings.home / "backups"
     if list_existing:
         _print_backups(backup_dir)
         return
 
+    is_pg = settings.is_postgres
     db_path = settings.home / "bidcraft.db"
-    if not db_path.is_file():
+    if not is_pg and not db_path.is_file():
         console.print(f"[red]数据库不存在：{db_path}[/red]")
         console.print("[dim]请先运行 bidcraft init 或 bidcraft doctor 初始化。[/dim]")
+        raise typer.Exit(1)
+    if is_pg and not shutil.which("pg_dump"):
+        console.print("[red]PostgreSQL 备份需要 pg_dump，请先安装 postgresql-client。[/red]")
         raise typer.Exit(1)
 
     from . import clock
@@ -1054,32 +1067,56 @@ def backup(
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="bidcraft-backup-") as tmp:
-            snapshot = Path(tmp) / "bidcraft.db"
-            # SQLite 在线备份 API：在源库事务一致性点复制，不写原库。
-            source = sqlite3.connect(str(db_path), timeout=30)
-            try:
-                dest = sqlite3.connect(str(snapshot))
+            if is_pg:
+                url = make_url(settings.db_url)
+                # 直接按部件拼 libpq URI：render_as_string 无论 hide_password 真假都会
+                # 把口令写进 URI（真值或 "***"），pg_dump 会拿它覆盖 PGPASSWORD。
+                user = f"{url.username}@" if url.username else ""
+                port = f":{url.port}" if url.port else ""
+                libpq_uri = f"postgresql://{user}{url.host}{port}/{url.database or ''}"
+                dump = Path(tmp) / "dump.sql"
+                env = os.environ.copy()
+                if url.password:
+                    env["PGPASSWORD"] = url.password
+                result = subprocess.run(
+                    [
+                        "pg_dump", "--no-owner", "--no-privileges",
+                        "-d", libpq_uri, "-f", str(dump),
+                    ],
+                    env=env, capture_output=True, text=True, check=False,
+                )
+                if result.returncode != 0:
+                    raise RuntimeError("pg_dump 失败：" + (result.stderr or "").strip()[:500])
+                snapshot, db_entry = dump, "dump.sql"
+            else:
+                snapshot, db_entry = Path(tmp) / "bidcraft.db", "bidcraft.db"
+                # SQLite 在线备份 API：在源库事务一致性点复制，不写原库。
+                source = sqlite3.connect(str(db_path), timeout=30)
                 try:
-                    source.backup(dest)
-                    check = dest.execute("PRAGMA quick_check").fetchone()
+                    dest = sqlite3.connect(str(snapshot))
+                    try:
+                        source.backup(dest)
+                        check = dest.execute("PRAGMA quick_check").fetchone()
+                    finally:
+                        dest.close()
                 finally:
-                    dest.close()
-            finally:
-                source.close()
-            if not check or check[0] != "ok":
-                detail = check[0] if check else "无结果"
-                raise RuntimeError(f"快照完整性校验失败：{detail}")
+                    source.close()
+                if not check or check[0] != "ok":
+                    detail = check[0] if check else "无结果"
+                    raise RuntimeError(f"快照完整性校验失败：{detail}")
 
             db_bytes = snapshot.stat().st_size
             manifest = {
                 "version": __version__,
                 "created_at": datetime.now(UTC).isoformat(),
+                "db_backend": settings.db_backend,
+                "db_file": db_entry,
                 "db_bytes": db_bytes,
                 "includes_secret_key": includes_secret,
                 "bidcraft_home": str(settings.home),
             }
             with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                archive.write(snapshot, "bidcraft.db")
+                archive.write(snapshot, db_entry)
                 if includes_secret:
                     archive.write(secret_path, "secret.key")
                 archive.writestr(
@@ -1098,10 +1135,16 @@ def backup(
         f"大小 {_format_bytes(size)}（{size:,} 字节）· "
         f"secret.key：{'已包含' if includes_secret else '未找到（跳过）'}"
     )
-    console.print(
-        "[dim]恢复：停止服务 → 解压 zip → 将 bidcraft.db 与 secret.key 放回 "
-        "BIDCRAFT_HOME → 启动服务。[/dim]"
-    )
+    if is_pg:
+        console.print(
+            "[dim]恢复：停止服务 → 解压出 dump.sql → 用 pg_restore/psql 导入目标库 "
+            "→ 放回 secret.key → 启动服务。[/dim]"
+        )
+    else:
+        console.print(
+            "[dim]恢复：停止服务 → 解压 zip → 将 bidcraft.db 与 secret.key 放回 "
+            "BIDCRAFT_HOME → 启动服务。[/dim]"
+        )
 
 
 # ------------------------------------------------------------------ client CLI
@@ -1431,7 +1474,6 @@ def mineru_check(
     )
 
 
-@app.command("backup-verify")
 @app.command("backup-prune")
 def backup_prune(
     keep: int = typer.Option(10, "--keep", "-k", help="保留最近多少份备份"),
@@ -1453,10 +1495,11 @@ def backup_prune(
         console.print(f"  - {name}")
 
 
+@app.command("backup-verify")
 def backup_verify(
-    path: str = typer.Argument(..., help="备份文件（SQLite .db）"),
+    path: str = typer.Argument(..., help="备份 zip 或 SQLite .db 文件"),
 ) -> None:
-    """校验备份可恢复：复制到临时目录，跑 integrity_check 并统计表行数。"""
+    """校验备份可恢复：SQLite 跑 integrity_check，PostgreSQL 解析 pg_dump SQL。"""
     from .compliance import ComplianceError, verify_backup
 
     try:

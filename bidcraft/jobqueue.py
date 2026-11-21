@@ -340,22 +340,14 @@ def position(job_id: str) -> int:
         return int(ahead or 0) + 1
 
 
-def claim_next() -> Job | None:
-    """Atomically claim one queued row for this worker.
+def _claim_statement(now, lease_until, token: str):
+    """构造原子认领语句；独立出来便于跨方言编译校验。
 
-    The conditional ``UPDATE`` is single-statement atomic in SQLite: even if two
-    processes select the same candidate, only the first to commit flips
-    ``status`` to ``running``; the second matches zero rows.  Priority (lower
-    first) and FIFO break ties.  ``attempts`` is incremented on every claim so
-    the reaper can cap retries.
+    外层带 ``status='queued'`` 是并发正确性的关键：PostgreSQL 下两个事务
+    若选出同一行，后提交者会在 EvalPlanQual 重检时因状态已变而更新 0 行。
     """
 
-    now = utc_now()
-    lease_until = now + timedelta(seconds=_lease_seconds())
-    # Fresh token on every claim: after a reaper reclaim the old worker's token
-    # no longer matches, so all of its subsequent writes are fenced out.
-    token = uuid.uuid4().hex
-    statement = (
+    return (
         update(Job)
         .where(
             Job.id
@@ -377,6 +369,24 @@ def claim_next() -> Job | None:
         )
         .returning(Job.id)
     )
+
+
+def claim_next() -> Job | None:
+    """Atomically claim one queued row for this worker.
+
+    The conditional ``UPDATE`` is single-statement atomic in SQLite: even if two
+    processes select the same candidate, only the first to commit flips
+    ``status`` to ``running``; the second matches zero rows.  Priority (lower
+    first) and FIFO break ties.  ``attempts`` is incremented on every claim so
+    the reaper can cap retries.
+    """
+
+    now = utc_now()
+    lease_until = now + timedelta(seconds=_lease_seconds())
+    # Fresh token on every claim: after a reaper reclaim the old worker's token
+    # no longer matches, so all of its subsequent writes are fenced out.
+    token = uuid.uuid4().hex
+    statement = _claim_statement(now, lease_until, token)
     with session_scope() as db:
         row = db.execute(statement).first()
         if row is None:

@@ -40,6 +40,49 @@ def redact_secret(value: str | None, keep: int = 4) -> str:
     return f"{text[:keep]}{'*' * 4}{text[-keep:]}"
 
 
+def db_backend(url: str) -> str:
+    """从连接串读出方言名，未知/畸形串一律按 sqlite 处理（保守）。"""
+
+    raw = (url or "").strip().lower()
+    for prefix in ("postgresql+psycopg", "postgresql+psycopg2", "postgres+psycopg"):
+        if raw.startswith(prefix):
+            return "postgresql"
+    if raw.startswith(("postgresql://", "postgres://", "jdbc:postgresql")):
+        return "postgresql"
+    return "sqlite"
+
+
+def normalize_db_url(url: str) -> str:
+    """统一 PostgreSQL 连接串的驱动名，便于只安装一个驱动。
+
+    SQLAlchemy 的 ``postgresql://`` 默认走 psycopg2，``postgres://`` 不是合法
+    方言名；这里都归一到 ``postgresql+psycopg://``（psycopg 3，``postgres`` extra）。
+    SQLite 与其它串原样返回。
+    """
+
+    raw = (url or "").strip()
+    lowered = raw.lower()
+    if lowered.startswith(("postgresql://", "postgres://")):
+        return "postgresql+psycopg://" + raw.split("://", 1)[1]
+    return raw
+
+
+def redact_db_url(url: str) -> str:
+    """把连接串里的口令打码，用于 /admin/health 与日志，绝不返回明文。"""
+
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    scheme, sep, rest = raw.partition("://")
+    if not sep or "@" not in rest:
+        return raw
+    userinfo, at, host = rest.rpartition("@")
+    if ":" not in userinfo:
+        return raw
+    user, _colon, _password = userinfo.partition(":")
+    return f"{scheme}://{user}:****@{host}" if at else raw
+
+
 @dataclass(slots=True)
 class Settings:
     """Runtime settings.
@@ -51,7 +94,8 @@ class Settings:
 
     env: str = field(default_factory=_env_name)
     home: Path = field(default_factory=lambda: Path(os.getenv("BIDCRAFT_HOME", ".bidcraft")))
-    db_url: str = ""
+    # 数据库连接串。默认 SQLite；设置 BIDCRAFT_DB_URL 可切到 PostgreSQL。
+    db_url: str = field(default_factory=lambda: os.getenv("BIDCRAFT_DB_URL", "").strip())
     model_base_url: str = field(default_factory=lambda: os.getenv("BIDCRAFT_MODEL_BASE_URL", ""))
     model_api_key: str = field(default_factory=lambda: os.getenv("BIDCRAFT_MODEL_API_KEY", ""))
     model_name: str = field(default_factory=lambda: os.getenv("BIDCRAFT_MODEL_NAME", ""))
@@ -196,6 +240,23 @@ class Settings:
         self.plugin_timeout = max(5.0, min(120.0, self.plugin_timeout))
         if not self.db_url:
             self.db_url = f"sqlite+pysqlite:///{self.home / 'bidcraft.db'}"
+        self.db_url = normalize_db_url(self.db_url)
+
+    @property
+    def db_backend(self) -> str:
+        """``sqlite`` / ``postgresql``；用于方言分支与运维展示。"""
+
+        return db_backend(self.db_url)
+
+    @property
+    def is_postgres(self) -> bool:
+        return self.db_backend == "postgresql"
+
+    @property
+    def db_url_display(self) -> str:
+        """脱敏后的连接串（隐藏口令），供健康检查与日志展示。"""
+
+        return redact_db_url(self.db_url)
 
     @property
     def model_configured(self) -> bool:
@@ -265,6 +326,8 @@ class Settings:
         return {
             "env": self.env,
             "home": str(self.home),
+            "db_backend": self.db_backend,
+            "db_url": self.db_url_display,
             "offline": self.offline,
             "model_base_url": self.model_base_url,
             "model_name": self.model_name,

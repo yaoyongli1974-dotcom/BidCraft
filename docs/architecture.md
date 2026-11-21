@@ -15,7 +15,7 @@
 │                       ├─ 静态客户端 bidcraft/web_dist            │
 │                       ├─ 业务 API /projects /jobs ...            │
 │                       ├─ 管理 API /admin (超级管理员)            │
-│                       ├─ SQLite  .bidcraft/bidcraft.db           │
+│                       ├─ SQLite / PostgreSQL (BIDCRAFT_DB_URL)     │
 │                       ├─ 原件/导出件  .bidcraft/projects/<id>/   │
 │                       ├─ 可选：LibreOffice（PDF 目录页码刷新）   │
 │                       ├─ 可选：pdftoppm + tesseract（扫描件 OCR） │
@@ -45,7 +45,7 @@
 
 ### 备份与恢复
 
-项目数据集中在 `BIDCRAFT_HOME`：`bidcraft.db`（SQLite，WAL 模式）、
+项目数据集中在 `BIDCRAFT_HOME`：`bidcraft.db`（SQLite，WAL 模式）或 PostgreSQL 库（由 `BIDCRAFT_DB_URL` 指定）、
 `projects/<id>/`（招标原件、清单原件、`images/` 配图）、`packages/`（管理员规则包覆盖）、
 `output/`（导出件）以及 `secret.key`（模型/知识库密钥的 Fernet 主密钥）。
 
@@ -82,7 +82,8 @@
 | 统一授权入口 | `bidcraft/authorization.py` | 项目/任务/节点/批量项目的可见性与动作判定收口为单一模块，HTTP/CLI/MCP 共用；HTTP 层薄封装委托并映射领域异常 404/403，不 import FastAPI |
 | 身份上下文 | bidcraft/context.py | 请求身份存 ContextVar；set 返回 token，中间件 try/finally reset；后台任务显式传参、不依赖上下文 |
 | API 架构 | `bidcraft/api/app.py` + `bidcraft/api/routes/`（12 域） | 应用装配与共享 helper 在 `app.py`；194 个路由按 auth/account/billing/admin/projects/my/jobs/batch_jobs/legal/packages/health/approvals 拆到 `routes/`；耗时任务在 `bidcraft/workers/`，跨任务共享逻辑在 `bidcraft/services/job_support.py`；`bidcraft.api` 保持既有导入路径与 monkeypatch 语义 |
-| 数据库迁移 | `bidcraft/migrations/` | Alembic 记账后续 schema 变更；`create_all`+`_migrate_columns` 作历史基线；`0002_quote_basis` 为首个真实 revision；跨进程 fcntl 迁移锁 |
+| 数据库迁移 | `bidcraft/migrations/` | Alembic 记账后续 schema 变更；`create_all`+`_migrate_columns` 作历史基线（后者仅 SQLite）；`0002_quote_basis` 为首个真实 revision；SQLite 用 fcntl 文件锁、PostgreSQL 用 `pg_advisory_lock` 串行化并发迁移 |
+| 双数据库后端 | `bidcraft/db.py` / `config.py` | 默认 SQLite；`BIDCRAFT_DB_URL` 切 PostgreSQL（psycopg 3）。删除路径统一走 `services/purge.py` 以应对 PG 强制外键；备份 SQLite 走在线备份 API、PG 走 `pg_dump` |
 | 金额服务 | `bidcraft/services/money.py` | Decimal + ROUND_HALF_UP 统一报价/税额/汇总/调价计算，边界转 float；报价版本 `basis` 列冻结不可变计算依据 |
 | 报价 Service | `bidcraft/services/quote_service.py` | 报价改价编排从 HTTP 路由抽离，HTTP/CLI 共用，显式 actor 承载审计身份，可脱离 FastAPI 测试 |
 | 关联清理 | `bidcraft/services/purge.py` | 项目删除集中清理关联行；`find_orphans`/`clean_orphans` + `bidcraft db-orphans` 检测清理孤儿引用；审计 user_id 悬挂留存 |
