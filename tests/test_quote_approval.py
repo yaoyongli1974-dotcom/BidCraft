@@ -404,6 +404,7 @@ def test_legacy_schema_migration_adds_approval_columns(tmp_path):
                 "note VARCHAR(200), "
                 "prices JSON, "
                 "summary JSON, "
+                "basis JSON, "
                 "created_at DATETIME)"
             )
         )

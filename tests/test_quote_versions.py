@@ -108,6 +108,7 @@ def test_version_save_list_detail_restore_delete(db, tmp_path):
         "note",
         "package_id",
         "summary",
+        "basis",
         "created_at",
         "price_count",
         "status",
@@ -318,3 +319,44 @@ def test_versions_follow_package(db, tmp_path):
     )
     assert restored.status_code == 200, restored.text
     assert restored.json()["snapshot"]["package_id"] == package_a
+
+
+def test_version_freezes_immutable_calculation_basis(db, tmp_path):
+    """报价版本除单价(prices)与结果(summary)外，还冻结数量/税率/币种/汇率。
+
+    保存后再改项目策略，已存版本的 basis 不受影响（审计与复算依据）。
+    """
+    client = _client()
+    project_id = _seed(client, tmp_path)
+    _price(client, project_id, 2, 12.5)
+    _price(client, project_id, 3, 3.0)
+
+    # 保存前设置税率与币种，让 basis 捕获到非默认值
+    policy = client.put(
+        f"/projects/{project_id}/price-policy",
+        json={"tax_rate": 0.13, "currency": "USD", "exchange_rate": 7.2},
+    )
+    assert policy.status_code == 200, policy.text
+
+    saved = client.post(
+        f"/projects/{project_id}/boq/versions", json={"name": "依据快照"}
+    ).json()
+    basis = saved["basis"]
+    assert set(basis) >= {"qty", "tax_rate", "currency", "exchange_rate", "factor", "round_digits"}
+    assert basis["tax_rate"] == 0.13
+    assert basis["currency"] == "USD"
+    assert basis["exchange_rate"] == 7.2
+    # 单价在 prices、数量在 basis.qty（按 sheet!row 键）
+    assert basis["qty"], "应冻结每行的工程量"
+    assert all(v is not None for v in basis["qty"].values())
+
+    # 保存后改策略，旧版本的 basis 仍是旧值
+    client.put(
+        f"/projects/{project_id}/price-policy",
+        json={"tax_rate": 0.06, "currency": "CNY", "exchange_rate": 1.0},
+    )
+    detail = client.get(
+        f"/projects/{project_id}/boq/versions/{saved['id']}"
+    ).json()
+    assert detail["basis"]["tax_rate"] == 0.13
+    assert detail["basis"]["currency"] == "USD"

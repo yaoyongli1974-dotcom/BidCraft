@@ -544,7 +544,8 @@ def test_legacy_schema_migration_adds_approvals(tmp_path):
                 "submitted_at DATETIME, "
                 "review_note VARCHAR(200) DEFAULT '', "
                 "reviewed_by VARCHAR(80) DEFAULT '', "
-                "reviewed_at DATETIME)"
+                "reviewed_at DATETIME, "
+                "basis JSON)"
             )
         )
         connection.execute(

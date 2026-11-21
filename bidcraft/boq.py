@@ -38,6 +38,7 @@ from .models import (
     utcnow,
 )
 from .pipeline import add_source
+from .services import money
 
 logger = logging.getLogger("bidcraft.boq")
 
@@ -322,7 +323,9 @@ def _classify(item: dict[str, Any], material: Material) -> tuple[str, dict[str, 
     ledger_qty = material.qty
     qty_diff = False
     if boq_qty is not None and ledger_qty is not None:
-        delta = round(float(boq_qty) - float(ledger_qty), 6)
+        delta = money.qty_delta(boq_qty, ledger_qty)
+        if delta is None:
+            delta = 0.0
         if abs(delta) > _qty_tolerance(float(boq_qty), float(ledger_qty)):
             qty_diff = True
             diff["qty"] = {"boq": boq_qty, "ledger": ledger_qty, "delta": delta}
@@ -362,15 +365,12 @@ def _price_payload(item: dict[str, Any], unit_price: Any) -> dict[str, Any] | No
     """Return the per-row quote values; amount is derived from BOQ quantity."""
     if unit_price is None:
         return None
-    try:
-        price = float(unit_price)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(price) or price < 0:
+    price = money.unit_price(unit_price)
+    if price is None:
         return None
     qty = item.get("qty")
-    amount = round(float(qty) * price, 2) if qty is not None else None
-    return {"unit_price": round(price, 4), "amount": amount}
+    amount = money.line_amount(qty, price) if qty is not None else None
+    return {"unit_price": price, "amount": amount}
 
 
 def _row(
@@ -463,6 +463,7 @@ EMPTY_SUMMARY: dict[str, Any] = {
 
 def _summarize(rows: list[dict[str, Any]], boq_rows: int) -> dict[str, Any]:
     summary = dict(EMPTY_SUMMARY)
+    summary["_amounts"] = []
     summary["boq_rows"] = boq_rows
     for row in rows:
         status = row["status"]
@@ -480,9 +481,9 @@ def _summarize(rows: list[dict[str, Any]], boq_rows: int) -> dict[str, Any]:
         if price.get("amount") is None:
             summary["quantity_missing"] += 1
         else:
-            summary["total_amount"] += float(price["amount"])
+            summary["_amounts"].append(price["amount"])
     summary["total_diffs"] = summary["qty_diff"] + summary["unit_diff"] + summary["spec_diff"]
-    summary["total_amount"] = round(summary["total_amount"], 2)
+    summary["total_amount"] = money.sum_amounts(summary.pop("_amounts"))
     matched = summary["matched"] + summary["total_diffs"]
     summary["match_rate"] = round(matched / boq_rows, 3) if boq_rows else 0.0
     return summary
@@ -940,6 +941,7 @@ def version_payload(
         "note": version.note or "",
         "package_id": version.package_id,
         "summary": summary,
+        "basis": dict(version.basis or {}),
         "created_at": clock.iso_utc(version.created_at),
         "price_count": len(prices),
         "status": version.status or "draft",
@@ -1028,6 +1030,22 @@ def save_version(
     if count_versions(db, project.id, resolved) >= MAX_QUOTE_VERSIONS:
         raise BoqConflictError(f"版本数已达上限（{MAX_QUOTE_VERSIONS}）")
     payload = build_payload(db, project.id, resolved)
+    # 不可变计算依据：单价存 prices，这里冻结数量、税率、币种、汇率、系数与
+    # 舍入位，供审计与复算；save 之后项目策略再改也不影响这份快照。
+    qty_by_key = {
+        f"{snapshot.sheet}!{row.get('row')}": row.get("qty")
+        for row in (snapshot.items or [])
+        if row.get("qty") is not None
+    }
+    policy = get_price_policy(project)
+    basis = {
+        "qty": qty_by_key,
+        "tax_rate": policy["tax_rate"],
+        "currency": policy["currency"],
+        "exchange_rate": policy["exchange_rate"],
+        "factor": policy["factor"],
+        "round_digits": policy["round_digits"],
+    }
     version = BoqQuoteVersion(
         project_id=project.id,
         package_id=resolved,
@@ -1035,6 +1053,7 @@ def save_version(
         note=(note or "").strip()[:QUOTE_VERSION_NOTE_MAX],
         prices=dict(snapshot.prices or {}),
         summary=dict(payload.get("summary") or {}),
+        basis=basis,
     )
     db.add(version)
     db.flush()
@@ -1355,7 +1374,7 @@ def diff_version(
         qty = (meta.get(key) or {}).get("qty")
         if qty is None or price is None:
             return None
-        return round(float(qty) * float(price), 2)
+        return money.line_amount(qty, price)
 
     def entry(key: str, price: Any) -> dict[str, Any]:
         return {
@@ -1424,13 +1443,10 @@ def set_unit_price(
     if unit_price is None:
         prices.pop(key, None)
     else:
-        try:
-            value = float(unit_price)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("单价必须是数字") from exc
-        if not math.isfinite(value) or value < 0:
+        value = money.unit_price(unit_price)
+        if value is None:
             raise ValueError("单价必须是非负有限数字")
-        prices[key] = round(value, 4)
+        prices[key] = value
     snapshot.prices = prices
     db.flush()
     return build_payload(db, project.id, package_id)
@@ -1650,8 +1666,11 @@ def _adjusted_total(summary: dict[str, Any], policy: dict[str, Any]) -> float | 
     """Adjusted total for display only; quoted rows always keep their prices."""
     if not policy.get("enabled"):
         return None
-    total = float(summary.get("total_amount") or 0.0)
-    return round(total * float(policy.get("factor", 1.0)), int(policy.get("round_digits", 2)))
+    return money.adjusted_total(
+        summary.get("total_amount") or 0.0,
+        policy.get("factor", 1.0),
+        int(policy.get("round_digits", 2)),
+    )
 
 
 def _apply_tax(summary: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
@@ -1666,17 +1685,16 @@ def _apply_tax(summary: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any
         summary["total_with_tax"] = None
         summary["cny_total_with_tax"] = None
         return summary
-    rate = float(policy.get("tax_rate") or 0.0)
-    tax = round(float(total) * rate, 2)
-    summary["tax_amount"] = tax
-    summary["total_with_tax"] = round(float(total) + tax, 2)
+    summary["tax_amount"], summary["total_with_tax"] = money.tax_amount(
+        total, policy.get("tax_rate") or 0.0
+    )
     exchange_rate = _resolve_exchange_rate(
         policy.get("currency") or DEFAULT_CURRENCY,
         policy.get("exchange_rate"),
         DEFAULT_EXCHANGE_RATE,
     )
-    summary["cny_total_with_tax"] = round(
-        float(summary["total_with_tax"]) * exchange_rate, 2
+    summary["cny_total_with_tax"] = money.cny_total(
+        summary["total_with_tax"], exchange_rate
     )
     return summary
 
@@ -1692,7 +1710,7 @@ def quota_payload(quota: QuotaItem) -> dict[str, Any]:
         "name": quota.name,
         "spec": quota.spec or "",
         "unit": quota.unit or "",
-        "unit_price": round(float(quota.unit_price or 0.0), 4),
+        "unit_price": money.unit_price(quota.unit_price or 0.0),
         "category": quota.category or "",
         "note": quota.note or "",
         "created_at": clock.iso_utc(created),
@@ -1751,7 +1769,7 @@ def quota_fill(
                 "name": item.get("name", ""),
                 "quota_id": quota.id,
                 "quota_name": quota.name,
-                "unit_price": round(float(quota.unit_price or 0.0), 4),
+                "unit_price": money.unit_price(quota.unit_price or 0.0),
                 "score": round(float(score), 4),
             }
         )
@@ -1759,7 +1777,7 @@ def quota_fill(
             continue
         if only_missing and _price_payload(item, prices.get(key)) is not None:
             continue
-        prices[key] = round(float(quota.unit_price or 0.0), 4)
+        prices[key] = money.unit_price(quota.unit_price or 0.0)
         applied += 1
     if not dry_run and applied:
         snapshot.prices = prices
@@ -1784,7 +1802,7 @@ def adjust_prices(
         price = _price_payload(item, prices.get(key))
         if price is None:
             continue
-        prices[key] = round(float(price["unit_price"]) * factor, digits)
+        prices[key] = money.adjusted_total(price["unit_price"], factor, digits)
         rows += 1
     if rows == 0:
         raise BoqConflictError("该包件尚未录入任何单价，无法调价")

@@ -1,12 +1,24 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 
+from alembic import command
+from alembic.config import Config
+from alembic.runtime.migration import MigrationContext
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import settings
+
+try:  # 服务端是 Linux；桌面端已冻结，Windows 下降级为无锁
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
+
+logger = logging.getLogger("bidcraft.db")
 
 _engine = None
 _SessionLocal: sessionmaker[Session] | None = None
@@ -43,8 +55,46 @@ def get_session_factory() -> sessionmaker[Session]:
 def init_db() -> None:
     from . import models
 
-    models.Base.metadata.create_all(get_engine())
-    _migrate_columns(get_engine())
+    engine = get_engine()
+    with _migration_guard():
+        # 1) 历史兼容：建缺失表 + 补 0.8.0 之前遗留的列
+        models.Base.metadata.create_all(engine)
+        _migrate_columns(engine)
+        # 2) 新 schema 变更统一走 Alembic revision（幂等，见 0001_baseline）
+        _run_alembic(engine)
+
+
+@contextmanager
+def _migration_guard() -> Iterator[None]:
+    """跨进程串行化 schema 变更：serve / CLI / MCP 可能同时启动。"""
+    if fcntl is None:  # pragma: no cover - Windows
+        yield
+        return
+    lock = settings.home / ".migration.lock"
+    with lock.open("a+") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _run_alembic(engine) -> None:
+    """把库带入 Alembic 记账：老库 stamp 基线，再执行后续 revision。"""
+    cfg = Config()
+    cfg.set_main_option(
+        "script_location", str(Path(__file__).resolve().parent / "migrations")
+    )
+    cfg.set_main_option("sqlalchemy.url", str(engine.url).replace("%", "%%"))
+    with engine.connect() as connection:
+        current = MigrationContext.configure(connection).get_current_revision()
+    if current is None:
+        # 旧机制已把库收敛到基线 schema，这里只记账，不重复执行基线的 DDL。
+        logger.info("数据库首次纳入 Alembic 管理，stamp 到 0001_baseline")
+        command.stamp(cfg, "0001_baseline")
+    command.upgrade(cfg, "head")
+    # Alembic 用独立连接执行 DDL；回收应用连接池，避免缓存旧 schema。
+    engine.dispose()
 
 
 def _migrate_columns(engine) -> None:

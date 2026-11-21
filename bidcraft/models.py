@@ -190,6 +190,9 @@ class BoqQuoteVersion(Base):
     note: Mapped[str] = mapped_column(String(200), default="")
     prices: Mapped[dict] = mapped_column(JSON, default=dict)
     summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 不可变计算依据（单价已在 prices，这里存数量/税率/币种/汇率/系数/舍入位）：
+    # save_version 时冻结，供审计与复算，避免"只存结果不存依据"。
+    basis: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     status: Mapped[str] = mapped_column(
         String(16), default="draft", server_default="draft"

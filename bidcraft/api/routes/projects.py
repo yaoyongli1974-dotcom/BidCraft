@@ -655,38 +655,20 @@ def delete_project(ref: str) -> dict[str, Any]:
         _require_owner(_role)
         project_id = project.id
         project_name = project.name
-        node_ids = list(
-            db.scalars(select(OutlineNode.id).where(OutlineNode.project_id == project.id))
-        )
-        if node_ids:
-            db.execute(delete(Section).where(Section.node_id.in_(node_ids)))
-        job_ids = list(
-            db.scalars(select(Job.id).where(Job.project_id == project.id))
-        )
-        if job_ids:
-            db.execute(delete(JobEvent).where(JobEvent.job_id.in_(job_ids)))
-        for model in (
-            OutlineNode,
-            Issue,
-            Delivery,
-            Job,
-            Fact,
-            Material,
-            Parameter,
-            ScoringItem,
-            Requirement,
-            Risk,
-            SourceFile,
-            ImageAsset,
-            BoqSnapshot,
-        ):
-            db.execute(delete(model).where(model.project_id == project.id))
-        db.execute(delete(ProjectMember).where(ProjectMember.project_id == project_id))
-        db.execute(delete(AuditLog).where(AuditLog.project_id == project_id))
+        # 显式清理全部关联行（含此前漏掉的报价版本/包件/引用），口径集中在
+        # services.purge，避免各入口各写一份、再次漏表。审计 user_id 留存不受影响。
+        from ...services.purge import delete_project_rows
+
+        removed = delete_project_rows(db, project_id)
         project_dir = settings.project_dir(project.id)
         db.delete(project)
         db.flush()
-        audit(db, None, "project.delete", {"name": project_name, "project_id": project_id})
+        audit(
+            db,
+            None,
+            "project.delete",
+            {"name": project_name, "project_id": project_id, "removed": removed},
+        )
     shutil.rmtree(project_dir, ignore_errors=True)
     return {"deleted": True, "id": project_id}
 

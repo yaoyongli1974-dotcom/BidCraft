@@ -1414,3 +1414,34 @@ def purge_accounts(
     skipped = ", ".join(item["username"] for item in report["skipped"]) or "无"
     typer.echo(f"{prefix}到期账号 {len(report['purged'])} 个：{usernames}")
     typer.echo(f"{prefix}跳过（仍有子账号）{len(report['skipped'])} 个：{skipped}")
+
+
+@app.command("db-orphans")
+def db_orphans(
+    apply: bool = typer.Option(False, "--apply", help="实际删除孤儿行；默认只报告"),
+) -> None:
+    """检测并可选清理数据库中的孤儿引用（ID 指向已不存在的父行）。
+
+    只读运行（默认）列出各关联字段的孤儿数量；``--apply`` 才会删除。这是开启
+    外键强制之前的数据体检手段：先清零孤儿，再整表重建补 FK。注意审计
+    ``user_id`` 的悬挂是注销追责的有意设计，不在检测/清理范围。
+    """
+    from .db import session_scope
+    from .services.purge import clean_orphans, find_orphans
+
+    with session_scope() as db:
+        found = find_orphans(db)
+        total = sum(len(rows) for rows in found.values())
+        if not found:
+            typer.echo("未发现孤儿引用")
+            return
+        for key, rows in sorted(found.items()):
+            sample = ", ".join(str(row) for row in rows[:5])
+            suffix = " ..." if len(rows) > 5 else ""
+            typer.echo(f"[yellow]{key}[/yellow]: {len(rows)} 条 ({sample}{suffix})")
+        typer.echo(f"共 {total} 条孤儿引用")
+        if apply:
+            removed = clean_orphans(db)
+            typer.echo(f"[green]已清理 {sum(removed.values())} 条孤儿引用[/green]")
+        else:
+            typer.echo("[dim]只报告模式；加 --apply 才会删除[/dim]")
