@@ -2033,29 +2033,26 @@ def boq_apply(ref: str, payload: BoqApplyRequest) -> dict[str, Any]:
 
 @router.post("/projects/{ref}/boq/price")
 def boq_price(ref: str, payload: BoqPriceRequest) -> dict[str, Any]:
+    from ...services.quote_service import set_unit_price as service_set_unit_price
+
     with session_scope() as db:
         project, _role = _project(db, ref)
         _require_write(_role)
         try:
-            package = boq.resolve_package(db, project, payload.package_id)
-            resolved = package.id if package else None
-            result = boq.set_unit_price(
-                db, project, payload.boq_row, payload.unit_price, package_id=resolved
+            # 编排下沉到 Service：解析包件 + 改价 + 审计一次完成，真实身份作为
+            # actor 显式注入；HTTP 异常映射仍留在路由层（Service 只抛领域异常）。
+            result = service_set_unit_price(
+                db,
+                project,
+                payload.boq_row,
+                payload.unit_price,
+                package_id=payload.package_id,
+                actor=current_user(),
             )
         except boq.BoqConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        audit(
-            db,
-            project.id,
-            "boq.price",
-            {
-                "row": payload.boq_row,
-                "unit_price": payload.unit_price,
-                "package_id": resolved,
-            },
-        )
         return result
 
 

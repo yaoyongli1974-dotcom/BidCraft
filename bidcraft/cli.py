@@ -675,9 +675,12 @@ def boq_price(
     boq_row: int = typer.Argument(..., help="清单行号"),
     unit_price: float | None = typer.Argument(None, help="单价（元）；用 --clear 清除"),
     clear: bool = typer.Option(False, "--clear", help="清除该行单价"),
+    package: str | None = typer.Option(
+        None, "--package", help="包件 ID/名称（多包件项目必填；省略则操作默认清单）"
+    ),
 ) -> None:
     """设置或清除某条清单的单价（报价按清单数量计算合价）。"""
-    from .boq import set_unit_price
+    from .services.quote_service import set_unit_price as service_set_unit_price
 
     if clear is False and unit_price is None:
         console.print("[red]请提供单价，或使用 --clear 清除已有单价[/red]")
@@ -685,7 +688,15 @@ def boq_price(
     with _db() as db:
         project = _project_or_exit(db, ref)
         try:
-            payload = set_unit_price(db, project, boq_row, None if clear else unit_price)
+            # 与 HTTP 共用同一编排：透传 package_id 修复多包件项目改价落空的 bug。
+            # CLI 无请求用户，actor 省略 → 审计记 system（既有语义）。
+            payload = service_set_unit_price(
+                db,
+                project,
+                boq_row,
+                None if clear else unit_price,
+                package_id=package,
+            )
         except Exception as exc:
             console.print(f"[red]设置单价失败：{exc}[/red]")
             raise typer.Exit(1) from exc

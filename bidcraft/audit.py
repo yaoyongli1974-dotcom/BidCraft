@@ -16,11 +16,24 @@ from .models import AuditLog
 
 
 def record_audit(
-    db, project_id: str | None, action: str, detail: dict[str, Any] | None = None
+    db,
+    project_id: str | None,
+    action: str,
+    detail: dict[str, Any] | None = None,
+    *,
+    actor: dict[str, Any] | None = None,
 ) -> AuditLog:
-    """Record a successful mutating action for the current context user."""
+    """Record a successful mutating action.
 
-    user = current_user() or {}
+    身份来源优先级：显式 ``actor``（供 Service 层由调用入口注入）> 请求上下文
+    ``current_user()``（HTTP 中间件注入）> ``system``（CLI/MCP 本地操作者）。
+
+    抽 Service 层后，HTTP 会把真实用户作为 ``actor`` 传入，CLI/MCP 传 ``None``
+    保持记 system 的既有语义（测试已固化）。未传 ``actor`` 时行为完全不变，
+    export_gate / 旧路由调用点无需改动。
+    """
+
+    user = actor if actor is not None else (current_user() or {})
     row = AuditLog(
         project_id=project_id,
         user_id=user.get("id"),
