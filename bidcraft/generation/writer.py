@@ -339,7 +339,18 @@ def generate_document(
     only_node: str | None = None,
     force: bool = False,
     knowledge_provider: Callable[[str], str] | None = None,
+    before_chapter: Callable[[dict[str, Any], Session], bool] | None = None,
+    after_chapter: Callable[[dict[str, Any], Session], None] | None = None,
 ) -> GenerationReport:
+    """Generate chapters in outline order.
+
+    ``before_chapter``/``after_chapter`` are optional reliability hooks.  The
+    worker uses them as (a) an abort checkpoint — they may raise to stop the run
+    when the lease is lost/shutdown is requested — and (b) a per-unit
+    idempotency ledger — returning ``False`` skips a unit already completed by
+    an earlier attempt, ``after_chapter`` records it on success.  They receive
+    the live session so the body write and the ledger mark commit atomically.
+    """
     from .outline import load_outline
 
     nodes = load_outline(db, project_id)
@@ -359,27 +370,34 @@ def generate_document(
     previous_texts: list[str] = []
     chapters: list[tuple[str, str]] = []
     for index, node in enumerate(nodes, start=1):
+        info = {
+            "node_id": node["id"],
+            "heading": node["heading"],
+            "index": index,
+            "total": len(nodes),
+            "target_words": int(node.get("target_words") or 0),
+        }
         if only_node and node["id"] != only_node:
             if node.get("body"):
                 previous_texts.append(node["body"])
                 chapters.append((node["heading"], node["body"]))
             continue
-        if node.get("body") and not only_node and not force:
-            previous_texts.append(node["body"])
-            chapters.append((node["heading"], node["body"]))
+        already_written = bool(node.get("body")) and not only_node and not force
+        # Abort checkpoint + idempotency gate happen before the expensive model
+        # call, including on chapters we would otherwise skip by body presence.
+        should_generate = True
+        if before_chapter is not None:
+            should_generate = before_chapter(info, db)
+        if already_written or not should_generate:
+            if node.get("body"):
+                previous_texts.append(node["body"])
+                chapters.append((node["heading"], node["body"]))
             continue
         chapter_words = 0
         chapter_source = ""
         chapter_failed = False
         if on_chapter_start:
-            on_chapter_start(
-                {
-                    "heading": node["heading"],
-                    "index": index,
-                    "total": len(nodes),
-                    "target_words": int(node.get("target_words") or 0),
-                }
-            )
+            on_chapter_start(info)
         try:
             knowledge_text = ""
             if knowledge_provider is not None:
@@ -416,6 +434,8 @@ def generate_document(
             if outline_node is not None:
                 outline_node.status = "fallback" if source == "fallback" else "drafted"
             db.flush()
+            if after_chapter is not None:
+                after_chapter(info, db)
             previous_texts.append(body)
             chapters.append((node["heading"], body))
             report.written.append(node["heading"])

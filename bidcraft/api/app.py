@@ -1475,6 +1475,19 @@ def create_app():
     # 每次 create_app() 都重新读取开关：测试与部署会在构造前改 settings，
     # 若在模块加载时缓存，后续 create_app() 会拿到过期值。
     docs_on = settings.docs_enabled
+    from contextlib import asynccontextmanager
+
+    from .. import jobqueue as _jobqueue
+
+    @asynccontextmanager
+    async def _lifespan(application):  # noqa: ANN001
+        # 优雅退出：HTTP drain 完成后通知 worker 停止认领并等待在途任务收尾。
+        # 分离部署里 API 进程通常不跑 worker，wait_for_workers 立即返回。
+        yield
+        if _jobqueue.workers_running():
+            _jobqueue.request_shutdown()
+            _jobqueue.wait_for_workers(timeout=settings.shutdown_grace_seconds)
+
     app = FastAPI(
         title="BidCraft",
         version=__version__,
@@ -1482,6 +1495,7 @@ def create_app():
         docs_url="/docs" if docs_on else None,
         redoc_url="/redoc" if docs_on else None,
         openapi_url="/openapi.json" if docs_on else None,
+        lifespan=_lifespan,
     )
     app.state.started_at = datetime.now(UTC)
 

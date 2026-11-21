@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import signal
 import sys
 import time
 from pathlib import Path
@@ -24,6 +25,22 @@ from .rules.loader import list_packages, load_package, validate_package
 
 app = typer.Typer(add_completion=False, help="BidCraft · 弱电投标文件编制系统")
 console = Console()
+
+
+def _install_shutdown_handlers() -> None:
+    """SIGTERM/SIGINT 触发 worker 优雅退出（主线程外调用静默忽略）。"""
+
+    from . import jobqueue
+
+    def _handle(signum, frame) -> None:  # noqa: ANN001, ARG001
+        console.print("[yellow]收到退出信号，正在优雅停止…[/yellow]")
+        jobqueue.request_shutdown()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _handle)
+        except (ValueError, OSError):  # pragma: no cover - 非主线程/平台不支持
+            pass
 
 
 def _db():
@@ -845,6 +862,9 @@ def serve(
 
     jobqueue.recover_on_startup()
     jobqueue.start_workers()
+    # uvicorn 安装自己的信号处理器；应用层的 shutdown 钩子（create_app）负责在
+    # HTTP 优雅关闭时 drain worker。这里额外注册，覆盖 uvicorn 退出后的窗口。
+    _install_shutdown_handlers()
     web_ready = (Path(__file__).resolve().parent / "web_dist" / "index.html").is_file()
     console.print(f"[green]BidCraft[/green] http://{host}:{port}  API 文档 /docs")
     if web_ready:
@@ -888,14 +908,18 @@ def worker() -> None:
 
     requeued, failed = jobqueue.recover_on_startup()
     jobqueue.start_workers()
+    _install_shutdown_handlers()
     console.print(
         f"[green]BidCraft Worker[/green] 已启动（恢复 {requeued} 项，失败 {failed} 项），等待任务…"
     )
     try:
-        while True:
-            time.sleep(3600)
+        while not jobqueue.is_shutdown_requested():
+            time.sleep(0.5)
     except KeyboardInterrupt:  # pragma: no cover - 交互式退出
-        console.print("[yellow]Worker 已停止[/yellow]")
+        jobqueue.request_shutdown()
+    # 等待在途任务在检查点收尾（有上限，不会永久阻塞退出）。
+    jobqueue.wait_for_workers(timeout=settings.shutdown_grace_seconds)
+    console.print("[yellow]Worker 已优雅停止[/yellow]")
 
 
 @app.command("reset-password")

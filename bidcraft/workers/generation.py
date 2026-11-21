@@ -13,7 +13,14 @@ from .. import jobs
 from ..db import session_scope
 from ..generation.outline import build_outline, load_outline, save_outline
 from ..generation.writer import generate_document
-from ..jobqueue import fenced_job
+from ..jobqueue import (
+    JobAborted,
+    current_claim_token,
+    fenced_job,
+    mark_step_done,
+    raise_if_aborted,
+    step_status,
+)
 from ..ledger import load_ledger
 from ..models import Project
 from ..rules.engine import ledger_gate
@@ -146,9 +153,30 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
             def on_delta(chunk: str) -> None:
                 if not chunk:
                     return
+                # Stop an in-flight model stream promptly once the lease is
+                # lost or shutdown begins (the callback exception propagates
+                # out of the stream generator and aborts the run).
+                raise_if_aborted()
                 delta["text"] += chunk
                 if len(delta["text"]) >= 320 or time.monotonic() - delta["last"] >= 0.25:
                     flush_delta()
+
+            def before_chapter(info: dict[str, Any], chapter_db) -> bool:
+                # Abort first (lease/shutdown), then consult the idempotency
+                # ledger: a unit finished by an earlier attempt is skipped.
+                raise_if_aborted()
+                status = step_status(chapter_db, job_id, f"chapter:{info['node_id']}")
+                if status is None:  # lost the claim between guard and lookup
+                    raise JobAborted("章节任务认领已失效")
+                return not status
+
+            def after_chapter(info: dict[str, Any], chapter_db) -> None:
+                mark_step_done(
+                    chapter_db,
+                    job_id,
+                    f"chapter:{info['node_id']}",
+                    current_claim_token(),
+                )
 
             report = generate_document(
                 work_db,
@@ -162,6 +190,8 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
                 on_chapter_start=on_chapter_start,
                 force=force,
                 knowledge_provider=_knowledge_provider(work_db, owner_id),
+                before_chapter=before_chapter,
+                after_chapter=after_chapter,
             )
             flush_delta()
             project.status = "drafting"
@@ -183,6 +213,11 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
                     db=done_db,
                 )
                 done_db.flush()
+    except JobAborted:
+        # Lease lost / graceful shutdown.  Do NOT mark failed or refund here:
+        # the job stays 'running' and the reaper returns it to 'queued'; the
+        # resumed attempt skips completed chapters via the idempotency ledger.
+        logger.info("生成任务 %s 已中止，等待重新排队", job_id)
     except Exception:  # noqa: BLE001 - surfaced to the UI as a stable message
         logger.exception("生成任务 %s 失败", job_id)
         failed_message = "生成失败：模型服务不可用或响应异常，详情见服务日志"

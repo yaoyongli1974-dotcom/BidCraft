@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import sys
 import threading
+import time
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -76,6 +77,101 @@ def fenced_job(db, job_id: str) -> Job | None:
     if job is None or (job.claim_token or "") != token:
         return None
     return job
+
+
+class JobAborted(Exception):
+    """Runner stopped because its lease was lost or shutdown was requested.
+
+    Raised by the abort guard the generation runner installs at chapter
+    boundaries.  It is *not* a business failure: ``_execute`` leaves the job in
+    ``running`` so the reaper/requeue path returns it to ``queued`` and another
+    worker resumes from the idempotency ledger (no ``failed`` status, no refund
+    bookkeeping on an interrupted run).
+    """
+
+
+# Per-execution abort signal.  The heartbeat thread sets it when the lease was
+# reclaimed; SIGTERM/SIGINT (via request_shutdown) makes workers check the global
+# event.  ContextVar keeps it scoped to the executing worker thread.
+_abort_event: ContextVar[threading.Event | None] = ContextVar(
+    "bidcraft_abort_event", default=None
+)
+_shutdown = threading.Event()
+
+
+def job_abort_event() -> threading.Event | None:
+    return _abort_event.get()
+
+
+def request_shutdown() -> None:
+    """Ask all workers to stop claiming and let in-flight jobs wind down."""
+
+    _shutdown.set()
+    _stop.set()
+    with _lock:
+        _lock.notify_all()
+
+
+def is_shutdown_requested() -> bool:
+    return _shutdown.is_set()
+
+
+def workers_running() -> bool:
+    """Whether an in-process worker pool was started (vs API-only deployment)."""
+
+    return _workers_started
+
+
+@contextmanager
+def execution_context(token: str, abort: threading.Event) -> Iterator[None]:
+    """Bind both fencing token and abort signal for a runner thread."""
+
+    token_reset = _claim_token.set(token)
+    abort_reset = _abort_event.set(abort)
+    try:
+        yield
+    finally:
+        _abort_event.reset(abort_reset)
+        _claim_token.reset(token_reset)
+
+
+def raise_if_aborted() -> None:
+    """Checkpoint helper for runners: bail out the moment the lease is gone."""
+
+    abort = _abort_event.get()
+    if (abort is not None and abort.is_set()) or _shutdown.is_set():
+        raise JobAborted("租约失效或服务正在关闭")
+
+
+def step_status(db, job_id: str, step_key: str) -> bool | None:
+    """Idempotency ledger lookup for one unit of work inside a job.
+
+    Completed step keys live in ``Job.payload['done_steps']`` and survive
+    requeues/restarts, so a resumed worker skips work already finished by an
+    earlier attempt.  Returns ``True`` (done → skip), ``False`` (todo → run), or
+    ``None`` if this worker no longer owns the claim (→ abort).
+    """
+
+    job = fenced_job(db, job_id)
+    if job is None:
+        return None
+    done = (job.payload or {}).get("done_steps") or []
+    return step_key in done
+
+
+def mark_step_done(db, job_id: str, step_key: str, token: str) -> None:
+    """Record one completed unit; only the current token holder may write."""
+
+    job = fenced_job(db, job_id)
+    if job is None or (job.claim_token or "") != token:
+        return
+    payload = dict(job.payload or {})
+    done = list(payload.get("done_steps") or [])
+    if step_key not in done:
+        done.append(step_key)
+        payload["done_steps"] = done
+        job.payload = payload
+        db.flush()
 
 
 _lock = threading.Condition()
@@ -292,12 +388,18 @@ def claim_next() -> Job | None:
         return claimed
 
 
-def _heartbeat(job_id: str, stop: threading.Event, token: str) -> None:
+def _heartbeat(
+    job_id: str,
+    stop: threading.Event,
+    token: str,
+    abort: threading.Event | None = None,
+) -> None:
     """Renew the lease only while our claim token is still current.
 
-    ``token`` is passed explicitly because ContextVar does not propagate into
-    this thread.  A zero-row update means the lease was reclaimed; stop renewing
-    so the new owner's heartbeat is the only one extending it.
+    ``token``/``abort`` are passed explicitly because ContextVar does not
+    propagate into this thread.  A zero-row update means the lease was reclaimed;
+    stop renewing *and* set the abort signal so the runner stops at its next
+    checkpoint instead of continuing to burn model calls into the void.
     """
 
     interval = _heartbeat_seconds()
@@ -319,7 +421,10 @@ def _heartbeat(job_id: str, stop: threading.Event, token: str) -> None:
                 if result.rowcount:
                     db.commit()
                 else:
-                    # Lease no longer ours — stop renewing (the new owner took over).
+                    # Lease no longer ours — stop renewing and tell the runner to
+                    # abort at its next checkpoint (the new owner took over).
+                    if abort is not None:
+                        abort.set()
                     return
         except Exception:  # noqa: BLE001 - heartbeat must never kill the worker
             logger.debug("心跳更新失败 job=%s", job_id, exc_info=True)
@@ -444,12 +549,15 @@ def _finalize_after_run(job_id: str) -> None:
 
 
 def _execute(job: Job) -> None:
-    # Bind the claimed token for this worker thread so every runner write is
-    # fenced.  If the lease was reclaimed mid-run, fenced_job() returns None
-    # and the stale worker skips its writes (business work may already be in
-    # flight — this is at-least-once, not exactly-once, execution).
+    # Bind the fencing token AND an abort signal for this worker thread.  Every
+    # runner write is fenced (a reclaimed lease makes fenced_job return None),
+    # and the abort signal is set by the heartbeat when the lease is lost or by
+    # request_shutdown() on SIGTERM — runners that install the guard stop at
+    # their next checkpoint.  Idempotency is completed by the per-unit ledger
+    # (step_status/mark_step_done): a resumed run skips units already done.
     token = job.claim_token or ""
-    with claim_context(token):
+    abort = threading.Event()
+    with execution_context(token, abort):
         runner = _runner_for(job.kind)
         if runner is None:
             logger.error("未知任务类型 %s (job=%s)", job.kind, job.id)
@@ -463,13 +571,18 @@ def _execute(job: Job) -> None:
         stop = threading.Event()
         hb = threading.Thread(
             target=_heartbeat,
-            args=(job.id, stop, token),
+            args=(job.id, stop, token, abort),
             daemon=True,
             name="bidcraft-hb",
         )
         hb.start()
         try:
             runner(*args)
+        except JobAborted:
+            # Lease lost or graceful shutdown: leave status 'running'.  The
+            # reaper (or restart recovery) returns it to queued, and the new
+            # attempt resumes from done_steps.  Never mark this as failed.
+            logger.info("任务已中止，等待重新排队 job=%s", job.id)
         except Exception:  # noqa: BLE001 - runner owns its error status; fallback only
             logger.exception("任务执行异常 job=%s kind=%s", job.id, job.kind)
             with session_scope() as db:
@@ -534,15 +647,22 @@ def _reaper_loop() -> None:
             break
 
 
+_worker_threads: list[threading.Thread] = []
+_reaper_thread: threading.Thread | None = None
+
+
 def _start_reaper() -> None:
     """Start the single reaper thread (idempotent)."""
 
-    global _reaper_started
+    global _reaper_started, _reaper_thread
     with _lock:
         if _reaper_started:
             return
         _reaper_started = True
-    threading.Thread(target=_reaper_loop, daemon=True, name="bidcraft-reaper").start()
+    _reaper_thread = threading.Thread(
+        target=_reaper_loop, daemon=True, name="bidcraft-reaper"
+    )
+    _reaper_thread.start()
 
 
 def _ensure_workers() -> None:
@@ -550,11 +670,31 @@ def _ensure_workers() -> None:
     with _lock:
         if _workers_started:
             return
-        _stop.clear()
+        # A shutdown request is terminal; never resurrect workers after one.
+        if not _shutdown.is_set():
+            _stop.clear()
         _workers_started = True
         _start_reaper()
         for _ in range(_max_workers()):
-            threading.Thread(target=_worker, daemon=True, name="bidcraft-job").start()
+            thread = threading.Thread(target=_worker, daemon=True, name="bidcraft-job")
+            _worker_threads.append(thread)
+            thread.start()
+
+
+def wait_for_workers(timeout: float) -> None:
+    """Join worker/reaper threads after a shutdown request (bounded drain).
+
+    In-flight runners see the abort signal at their next checkpoint and return
+    quickly; ``timeout`` is an upper bound so shutdown never hangs forever.
+    """
+
+    deadline = time.monotonic() + timeout
+    threads = list(_worker_threads)
+    if _reaper_thread is not None:
+        threads.append(_reaper_thread)
+    for thread in threads:
+        remaining = max(0.0, deadline - time.monotonic())
+        thread.join(remaining)
 
 
 def _reset() -> None:
@@ -565,9 +705,12 @@ def _reset() -> None:
     jobs, otherwise a worker from a previous test could claim them.
     """
 
-    global _workers_started, _reaper_started
+    global _workers_started, _reaper_started, _reaper_thread
+    _shutdown.clear()
     _stop.set()
     with _lock:
         _workers_started = False
         _reaper_started = False
+        _worker_threads.clear()
+        _reaper_thread = None
         _lock.notify_all()

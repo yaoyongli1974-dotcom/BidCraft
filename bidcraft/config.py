@@ -135,6 +135,10 @@ class Settings:
     embedded_workers: bool = field(
         default_factory=lambda: _bool("BIDCRAFT_EMBEDDED_WORKERS", True)
     )
+    # 优雅退出：SIGTERM 后等待在途任务在检查点收尾的最长时间（秒）。
+    shutdown_grace_seconds: int = field(
+        default_factory=lambda: int(os.getenv("BIDCRAFT_SHUTDOWN_GRACE_SECONDS", "30"))
+    )
     ocr_enabled: bool = field(default_factory=lambda: _bool("BIDCRAFT_OCR", True))
     mineru_url: str = field(default_factory=lambda: os.getenv("BIDCRAFT_MINERU_URL", "").strip())
     mineru_enabled: bool = field(default_factory=lambda: _bool("BIDCRAFT_MINERU", True))
