@@ -566,6 +566,8 @@ export function normalizeRequirement(value: unknown): RequirementResponse | null
     id: asText(raw.id),
     kind: asText(raw.kind) || 'substantive',
     marker: asText(raw.marker),
+    requirement_type: asText(raw.requirement_type) || undefined,
+    requirement_type_label: asText(raw.requirement_type_label) || undefined,
     text: asText(raw.text),
     mandatory: Boolean(raw.mandatory),
     source_quote: asText(raw.source_quote),

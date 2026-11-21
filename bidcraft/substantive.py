@@ -108,6 +108,117 @@ def requirement_keywords(text: str) -> list[str]:
     return keywords[:12]
 
 
+# ---------------------------------------------------------- 条款类型结构化判定
+# 3-gram 对「改写过但意思到了」的响应偏保守：数值换了、同义词换了就判未响应。
+# 这里为可识别的条款类型补一条结构化锚点命中路径——锚点是「条款和正文都出现的
+# 模式」（如「近N年」「数字+单位」「资质等级」），比精确字符串更能容忍改写，
+# 但只统计条款自身也有的模式，避免正文随便写个数字就算响应。
+REQ_TYPE_QUALIFICATION = "qualification"  # 资质 / 资格 / 证书
+REQ_TYPE_ACHIEVEMENT = "achievement"      # 业绩 / 案例 / 合同
+REQ_TYPE_PARAMETER = "parameter"          # 技术参数 / 阈值 / 规格
+REQ_TYPE_COMMITMENT = "commitment"        # 承诺 / 服务 / 质保
+REQ_TYPE_GENERAL = "general"              # 无法归类，回退到 3-gram
+
+REQUIREMENT_TYPES = (
+    REQ_TYPE_QUALIFICATION,
+    REQ_TYPE_ACHIEVEMENT,
+    REQ_TYPE_PARAMETER,
+    REQ_TYPE_COMMITMENT,
+    REQ_TYPE_GENERAL,
+)
+REQ_TYPE_LABELS = {
+    REQ_TYPE_QUALIFICATION: "资质资格",
+    REQ_TYPE_ACHIEVEMENT: "业绩案例",
+    REQ_TYPE_PARAMETER: "技术参数",
+    REQ_TYPE_COMMITMENT: "承诺服务",
+    REQ_TYPE_GENERAL: "通用条款",
+}
+
+# 类型信号词：条款文本命中任一组才归类；刻意要求具体词，避免「要求/提供」这类泛词。
+_TYPE_SIGNALS: dict[str, tuple[str, ...]] = {
+    REQ_TYPE_QUALIFICATION: (
+        "资质", "资格", "证书", "执照", "许可证", "认证", "等级", "甲级", "乙级",
+        "一级", "二级", "特级", "ISO", "CMMI", "ISO9001", "执业", "注册",
+    ),
+    REQ_TYPE_ACHIEVEMENT: (
+        "业绩", "案例", "类似项目", "同类项目", "已完成", "承担过", "合同", "中标",
+    ),
+    REQ_TYPE_PARAMETER: (
+        "参数", "规格", "型号", "技术指标", "技术参数", "不低于", "不小于", "不大于",
+        "大于等于", "小于等于", "毫米", "千伏", "千瓦", "分辨率", "带宽", "容量",
+    ),
+    REQ_TYPE_COMMITMENT: (
+        "承诺", "保证", "免费", "质保", "售后", "响应", "到场", "无条件", "服务期",
+        "保质期", "保修", "培训", "响应时间", "上门",
+    ),
+}
+
+# 锚点用正则以容忍改写：数值可变（3 项 → 5 项）、同义可换（类似 → 同类），
+# 但模式本身必须具体，不能是「项目」「要求」这种满篇都是的词。
+# 招标文本里「近三年」「不少于六项」和「近 3 年」「≥3 项」都常见，锚点两种数字都认。
+_CN_NUM = r"(?:\d+|[一二三四五六七八九十百]{1,3})"
+
+_TYPE_ANCHORS: dict[str, tuple[str, ...]] = {
+    REQ_TYPE_QUALIFICATION: (
+        r"(?:特级|一级|二级|三级|甲级|乙级|丙级)",
+        r"(?:ISO|CMMI|GB/T|OHSAS)\s*[-]?\s*\d+",
+        r"(?:注册|执业|建造师|工程师|资质|证书|认证|许可证|执照)",
+    ),
+    REQ_TYPE_ACHIEVEMENT: (
+        rf"近\s*{_CN_NUM}\s*年",
+        rf"{_CN_NUM}\s*(?:项|个|份|例)",
+        r"(?:类似|同类|相同|相近)\s*项目",
+        r"(?:业绩|案例|合同|中标)",
+    ),
+    REQ_TYPE_PARAMETER: (
+        r"\d+(?:\.\d+)?\s*(?:mm|cm|m|kV|kW|V|A|%|路|口|个|米|吨|条|台|套|Mbps|Gbps)",
+        rf"(?:不低于|不小于|不大于|≥|≤|大于等于|小于等于)\s*{_CN_NUM}",
+        rf"{_CN_NUM}\s*(?:小时|天|年|分钟)",
+    ),
+    REQ_TYPE_COMMITMENT: (
+        r"(?:承诺|保证|免费|质保|售后|保修|无条件|响应|到场|培训)",
+        rf"{_CN_NUM}\s*(?:小时|天|年|分钟)[^，。；]{{0,10}}(?:内|响应|到场|质保|保修)",
+    ),
+}
+
+
+def classify_requirement(text: str) -> str:
+    """按条款文本推断类型；只有命中具体信号词才归类，否则 general。
+
+    归类只影响判定路径（结构化锚点），不改变条款的实质性与处置规则。
+    """
+
+    source = clean_text(text)
+    for req_type in (
+        REQ_TYPE_QUALIFICATION,
+        REQ_TYPE_ACHIEVEMENT,
+        REQ_TYPE_PARAMETER,
+        REQ_TYPE_COMMITMENT,
+    ):
+        if any(signal in source for signal in _TYPE_SIGNALS[req_type]):
+            return req_type
+    return REQ_TYPE_GENERAL
+
+
+def type_anchor_patterns(text: str, req_type: str) -> list[str]:
+    """返回「条款自身也出现」的锚点模式——正文里凭空出现的模式不算响应。"""
+
+    patterns = _TYPE_ANCHORS.get(req_type, ())
+    return [pattern for pattern in patterns if re.search(pattern, text or "")]
+
+
+def anchor_coverage(text: str, body: str, req_type: str) -> float:
+    """结构化锚点命中率（0–1）；无相关锚点时返回 0，回退到 3-gram 判定。"""
+
+    if not body or req_type == REQ_TYPE_GENERAL:
+        return 0.0
+    relevant = type_anchor_patterns(text, req_type)
+    if not relevant:
+        return 0.0
+    hit = sum(1 for pattern in relevant if re.search(pattern, body))
+    return hit / len(relevant)
+
+
 # 中文没有词边界，逐字比较会把「改写过但意思到了」的响应判成未响应；
 # 用字符 3-gram 覆盖率衡量「这段话有没有被正面回答」，比关键词命中稳。
 _NGRAM = 3
@@ -121,8 +232,15 @@ def _ngrams(text: str, size: int = _NGRAM) -> set[str]:
     return {cleaned[index : index + size] for index in range(len(cleaned) - size + 1)}
 
 
-def coverage_ratio(text: str, body: str) -> float:
-    """条款在某一章正文里的覆盖率（0–1）：核心短语的 3-gram 有多少出现在该章。"""
+def coverage_ratio(text: str, body: str, req_type: str = REQ_TYPE_GENERAL) -> float:
+    """条款在某一章正文里的覆盖率（0–1）。
+
+    基线是 3-gram；对可归类的条款再算结构化锚点命中率，取较高者：
+    - 锚点全中：关键事实（资质等级 / 业绩数量 / 参数阈值）在正文明确出现，
+      即便措辞改写也视为已覆盖（0.75，高于长条款 0.45 阈值）；
+    - 部分命中：给 0.6 倍加成，需多数锚点命中才够阈值；
+    - 通用条款或无关锚点：完全回退到 3-gram，行为与旧版一致。
+    """
 
     if not body:
         return 0.0
@@ -130,15 +248,22 @@ def coverage_ratio(text: str, body: str) -> float:
     if len(core) >= 6 and core in body:
         return 1.0
     grams = _ngrams(core)
-    if not grams:
-        return 0.0
-    return len(grams & _ngrams(body)) / len(grams)
+    gram_ratio = len(grams & _ngrams(body)) / len(grams) if grams else 0.0
+    anchor = anchor_coverage(text, body, req_type)
+    if anchor <= 0:
+        return gram_ratio
+    if anchor >= 0.999:
+        return max(gram_ratio, 0.75)
+    return max(gram_ratio, anchor * 0.6)
 
 
-def find_covering_section(text: str, nodes: list[dict]) -> dict | None:
+def find_covering_section(
+    text: str, nodes: list[dict], req_type: str = REQ_TYPE_GENERAL
+) -> dict | None:
     """返回覆盖该条款的章节（position 最小者），没有则 None。
 
-    阈值取 0.5 且至少命中 2 个关键词：单靠一个泛词（「业绩」「资质」）不算响应。
+    阈值取 0.45（长条款）或 1.0（短条款必须整句包含）：单靠一个泛词不算响应。
+    req_type 决定是否在 3-gram 之外启用结构化锚点判定。
     """
 
     core = requirement_core(text)
@@ -148,7 +273,7 @@ def find_covering_section(text: str, nodes: list[dict]) -> dict | None:
         body = node.get("body") or ""
         if not body:
             continue
-        ratio = coverage_ratio(text, body)
+        ratio = coverage_ratio(text, body, req_type)
         if ratio < threshold:
             continue
         position = node.get("position")
@@ -192,7 +317,8 @@ def requirement_issues(requirements, nodes: list[dict]) -> list[CheckResult]:
         if not text:
             continue
         marker = getattr(requirement, "marker", "") or marker_of(text)
-        if find_covering_section(text, nodes):
+        req_type = classify_requirement(text)
+        if find_covering_section(text, nodes, req_type):
             continue
         results.append(
             CheckResult(
@@ -209,6 +335,7 @@ def requirement_issues(requirements, nodes: list[dict]) -> list[CheckResult]:
                 evidence={
                     "requirement_id": getattr(requirement, "id", ""),
                     "marker": marker,
+                    "requirement_type": req_type,
                     "keywords": requirement_keywords(text),
                 },
             )

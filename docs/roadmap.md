@@ -28,7 +28,7 @@
 | C7 可插拔 Agent / API | ✅ | `generation/agent.py`、`bidcraft/api.py`、`bidcraft/mcp.py` | OpenAI 兼容端点；FastAPI + 后台生成任务；MCP stdio 服务 |
 | C8 行业包 | ✅ 8 个行业包 + 通用基包 | `bidcraft/resources/packages/*.yaml` | 弱电（综合布线/安防/BA）+ 消防、安装、土建、暖通、装修；管理员可在 `/admin` 维护 YAML 覆盖包 |
 | 规则包管理 | ✅ | `rules/store.py`、`/admin/rule-packages`、`web/` | 超级管理员创建/修改/隐藏/恢复规则包；新建时可填写名称、唯一包名并选择工程类型；内置包只读，用户覆盖写入 `BIDCRAFT_HOME/packages`；保存前校验继承、字段、大纲与核对表达式 |
-| C9 回归/部署 | ✅ 基本 | `tests/`、`Dockerfile`、`web/` | 859 个测试；Docker 多阶段构建 Web（含 OCR 依赖）；本地/局域网两种部署 |
+| C9 回归/部署 | ✅ 基本 | `tests/`、`Dockerfile`、`web/` | 869 个测试；Docker 多阶段构建 Web（含 OCR 依赖）；本地/局域网两种部署 |
 | SSE 流式进度 | ✅ | `bidcraft/jobs.py`、`/jobs/{id}/events`、`web/` | 章节/逐字事件持久化；Last-Event-ID 断线续传；SSE 失败回退轮询；刷新后重新挂接任务 |
 | Excel 清单双向对齐 | ✅ | `boq.py`、`export/boq_xlsx.py`、`/projects/{ref}/boq`、`web/` | 清单导入与表头识别、材料模糊匹配、缺项/多项/数量·单位·规格差异、差异回写、响应表导出 |
 | 清单报价 | ✅ | `boq.py`、`/projects/{ref}/boq/price`、`export/boq_xlsx.py`、`web/` | 逐行单价录入/清除、按清单数量计算合价、已报价/未报价/缺数量统计、报价汇总与响应表价格列；不自动生成价格 |

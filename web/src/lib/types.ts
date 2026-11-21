@@ -631,6 +631,9 @@ export interface RequirementResponse {
   id: string
   kind: string
   marker: string
+  /** 自动归类的条款类型（资质/业绩/参数/承诺/通用），用于结构化判定。 */
+  requirement_type?: string
+  requirement_type_label?: string
   text: string
   mandatory: boolean
   source_quote: string

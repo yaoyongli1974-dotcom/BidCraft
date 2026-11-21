@@ -981,6 +981,11 @@ function SubstantiveSection() {
                         ) : (
                           <span className="substantive-marker substantive-marker--plain">条款</span>
                         )}
+                        {item.requirement_type_label && item.requirement_type !== 'general' && (
+                          <Badge tone="info" subtle title="按条款类型启用结构化判定，改写的响应也能识别">
+                            {item.requirement_type_label}
+                          </Badge>
+                        )}
                         <Badge tone={statusMeta.tone} subtle>
                           {statusMeta.label}
                         </Badge>

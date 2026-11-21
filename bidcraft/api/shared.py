@@ -137,6 +137,7 @@ from ..services.job_support import (  # noqa: F401 - 保留 api 名字空间，�
     _recover_interrupted_jobs,
     _report_payload,
 )
+from ..substantive import REQ_TYPE_LABELS, classify_requirement  # noqa: F401,E402
 from ..workers import (  # noqa: F401 - 同上；测试也 monkeypatch 这些名字
     _run_batch_check_job,
     _run_batch_export_job,
@@ -487,10 +488,13 @@ def _requirement_payload(db: Session, requirement: Requirement) -> dict[str, Any
         node = db.get(OutlineNode, node_id)
         if node is not None:
             heading = node.heading or ""
+    req_type = classify_requirement(requirement.text or "")
     return {
         "id": requirement.id,
         "kind": requirement.kind,
         "marker": requirement.marker or "",
+        "requirement_type": req_type,
+        "requirement_type_label": REQ_TYPE_LABELS.get(req_type, "通用条款"),
         "text": requirement.text,
         "mandatory": bool(requirement.mandatory),
         "source_quote": requirement.source_quote or "",
@@ -1017,6 +1021,7 @@ __all__ = [
     'MEMBER_ROLES',
     'PROJECT_WRITE_ROLES',
     'REQUIREMENT_RESPONSE_MIN_NOTE',
+    'REQ_TYPE_LABELS',
     'SEVERITY_ORDER',
     'STARTUP_INTERRUPTED_MESSAGE',
     'TENDER_SOURCE_ROLES',
@@ -1216,6 +1221,7 @@ __all__ = [
     'check_package_name',
     'check_project',
     'check_write',
+    'classify_requirement',
     'clock',
     'compliance',
     'count_words',
