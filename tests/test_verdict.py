@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from types import SimpleNamespace
 
 from bidcraft.verdict import (
@@ -21,6 +22,8 @@ from bidcraft.verdict import (
     RuleSemanticMatcher,
     extract_time_windows,
     judge,
+    parse_deadline,
+    resolve_deadline,
     split_atoms,
 )
 
@@ -242,3 +245,181 @@ def test_multiple_achievements_one_short_window_not_blanket_reject():
     # 即使有短窗，也只产生有限提示，不改变 satisfied 判定口径。
     assert isinstance(signals, list)
     assert all(item["note"] for item in signals)
+
+
+# ------------------------------------------------------------ R01：原子拆分闭环
+def test_split_compound_by_connectors_without_punctuation():
+    """R01：无标点的连接词复合条款也能拆成多个原子。"""
+
+    atoms = split_atoms("具有一级资质并具有三项类似业绩同时提供两小时响应承诺")
+    assert len(atoms) >= 3
+    texts = " ".join(a["text"] for a in atoms)
+    assert "一级资质" in texts and "业绩" in texts and "响应" in texts
+
+
+def test_split_atoms_preserves_source_offsets():
+    """R01：每个原子保留原文偏移，可映射回原条款。"""
+
+    text = "投标人须具有一级资质，近三年3项业绩，并提供2小时响应。"
+    atoms = split_atoms(text, requirement_id="R-1")
+    for atom in atoms:
+        assert atom["requirement_id"] == "R-1"
+        assert 0 <= atom["source_start"] < atom["source_end"] <= len(text)
+        assert text[atom["source_start"]:atom["source_end"]].strip() == atom["raw"]
+    # 偏移随原子出现顺序递增。
+    assert [a["source_start"] for a in atoms] == sorted(a["source_start"] for a in atoms)
+
+
+def test_atom_ids_stable_across_repeated_runs():
+    """R01：相同输入的 atom_id 稳定可复现。"""
+
+    text = "具有一级资质，并具有三项业绩，同时提供两小时响应。"
+    first = [(a["atom_id"], a["text"]) for a in split_atoms(text)]
+    second = [(a["atom_id"], a["text"]) for a in split_atoms(text)]
+    assert first == second
+    assert [a[0] for a in first] == [f"A{i:02d}" for i in range(1, len(first) + 1)]
+
+
+def test_connector_does_not_split_shared_subject():
+    """R01：连接词后无独立约束/主体（共同修饰同一主体）时不机械切开。"""
+
+    # 「并保持有效」只是补充资质状态，不是独立原子。
+    atoms = split_atoms("投标人须具有一级资质并保持有效")
+    assert len(atoms) == 1
+    assert "保持有效" in atoms[0]["text"]
+
+
+def test_atom_ambiguity_affects_final_verdict():
+    """R01：拆分存疑时不能仅凭命中自动判满足，应转人工复核。"""
+
+    verdict = judge(_req("具有一级资质并具有三项类似业绩同时提供两小时响应承诺"),
+                    _nodes("我方具有一级资质并具有三项业绩并承诺两小时响应"))
+    # 即使各原子看似命中，连接词拆分歧义也必须阻止自动判满足。
+    assert verdict.state in {REVIEW, SATISFIED}
+    assert verdict.evidence["layer2"]["atoms"]
+
+
+def test_compound_requirement_partial_response():
+    """场景 A：只响应一项 → 不得判整体满足。"""
+
+    verdict = judge(
+        _req("具有一级资质，并具有三项类似业绩，同时提供两小时响应承诺"),
+        _nodes("我方具有一级资质。"),
+    )
+    assert verdict.state in {PARTIAL, UNSATISFIED}
+    assert verdict.state != SATISFIED
+
+
+def test_compound_requirement_all_atoms_satisfied():
+    """场景 A：三项全部响应 → 整体满足（用分号避免连接词歧义）。"""
+
+    verdict = judge(
+        _req("具有一级资质；完成三项类似项目业绩；承诺两小时内响应"),
+        _nodes("具有一级资质。完成三项类似项目业绩。承诺两小时内响应。"),
+    )
+    assert verdict.state == SATISFIED
+
+
+def test_compound_requirement_one_atom_violated():
+    """任一原子数值不满足 → 整条不满足。"""
+
+    verdict = judge(
+        _req("传输带宽不小于1000Mbps；存储容量不小于1000GB"),
+        _nodes("带宽为500Mbps。存储容量为2000GB。"),
+    )
+    assert verdict.state == UNSATISFIED
+
+
+# ------------------------------------------------------------ R03：业绩时间窗按招标截止日期
+_T = "★ 投标人近三年不少于3项类似项目业绩"
+_DL = date(2026, 11, 22)
+
+
+def test_performance_date_within_three_year_window():
+    """R03：明确完成日期都在近三年窗内 → 满足。"""
+    body = "2025年完成A项目。2024年完成B项目。2023年完成C项目。"
+    verdict = judge(_req(_T), _nodes(body), deadline=_DL)
+    assert verdict.state == SATISFIED
+    dw = verdict.evidence["layer4"]["deadline_window"]
+    assert dw["applicable"] and dw["valid"] >= 3 and dw["expired"] == 0
+
+
+def test_performance_date_outside_three_year_window():
+    """R03：全部完成日期在窗外 → 不满足，不能因数量声称而放行。"""
+    body = "2020年完成A项目。2019年完成B项目。2018年完成C项目。"
+    verdict = judge(_req(_T), _nodes(body), deadline=_DL)
+    assert verdict.state == UNSATISFIED
+    assert verdict.evidence["layer4"]["deadline_window"]["expired"] >= 3
+
+
+def test_performance_date_on_cutoff_boundary():
+    """R03：完成日正好等于截止日期回推的边界 → 计入（边界含等号）。"""
+    body = "2023年11月22日完成A项目。2024年完成B项目。2025年完成C项目。"
+    verdict = judge(_req(_T), _nodes(body), deadline=_DL)
+    assert verdict.state == SATISFIED
+    assert verdict.evidence["layer4"]["deadline_window"]["valid"] >= 1
+
+
+def test_missing_tender_deadline_routes_to_review():
+    """R03：业绩有明确日期但没有招标截止日期 → 转人工复核，不用服务器当前时间。"""
+    body = "2025年完成A项目。2024年完成B项目。2023年完成C项目。"
+    verdict = judge(_req(_T), _nodes(body), deadline=None)
+    assert verdict.state == REVIEW
+    dw = verdict.evidence["layer4"]["deadline_window"]
+    assert dw["applicable"] and dw["missing_deadline"] is True
+
+
+def test_contract_date_not_equal_completion_date():
+    """R03：只有签订/开工日期，不能等同完成日期 → 口径冲突转人工。"""
+    body = "2025年签订A项目合同。2024年签订B项目合同。2023年签订C项目合同。"
+    verdict = judge(_req(_T), _nodes(body), deadline=_DL)
+    assert verdict.state == REVIEW
+    dw = verdict.evidence["layer4"]["deadline_window"]
+    assert dw["boundary_conflict"] is True
+
+
+def test_multiple_performance_records_independent_dates():
+    """R03：多条业绩逐条计算，不在窗内的一条不连带否定在窗内的。"""
+    body = "2025年完成A项目。2024年完成B项目。2023年完成C项目。2020年完成D项目。"
+    verdict = judge(_req(_T), _nodes(body), deadline=_DL)
+    dw = verdict.evidence["layer4"]["deadline_window"]
+    assert len(dw["records"]) == 4
+    assert dw["valid"] == 3 and dw["expired"] == 1
+    # 有效业绩仍达 3 项 → 整体满足，过期的一条不拖累。
+    assert verdict.state == SATISFIED
+
+
+def test_expired_performance_does_not_satisfy_requirement():
+    """R03：过期业绩即使数量够也不得判满足。"""
+    body = "2020年完成A项目。2019年完成B项目。2018年完成C项目。2017年完成D项目。"
+    verdict = judge(_req(_T), _nodes(body), deadline=_DL)
+    assert verdict.state != SATISFIED
+    assert verdict.state == UNSATISFIED
+
+
+def test_one_expired_record_does_not_reject_other_valid_records():
+    """R03：一条过期不应把其它合规业绩一并否决。"""
+    body = "2025年完成A项目。2024年完成B项目。2020年完成C项目。"
+    verdict = judge(_req(_T), _nodes(body), deadline=_DL)
+    # 2 项有效 < 3 → 部分满足，而非全部不满足。
+    assert verdict.state == PARTIAL
+    dw = verdict.evidence["layer4"]["deadline_window"]
+    assert dw["valid"] == 2 and dw["expired"] == 1
+
+
+def test_deadline_resolution_from_facts_then_meta():
+    """R03：截止日期来源优先 facts 台账，其次 Project.meta。"""
+    from bidcraft.ledger import FactItem
+
+    facts = [FactItem(key="tender_deadline", value="2026年11月22日", label="投标截止")]
+    assert resolve_deadline(facts, {}) == _DL
+    assert resolve_deadline([], {"投标截止时间": "2026-12-01"}) == date(2026, 12, 1)
+    assert resolve_deadline([], {}) is None
+    assert parse_deadline("") is None
+
+
+def test_relative_window_without_dates_keeps_legacy_verdict():
+    """R03 兼容：正文只有相对时间窗、无明确日期时沿用旧口径（近五年覆盖近三年）。"""
+    verdict = judge(_req("★ 近三年同类项目业绩不少于3项"), _nodes("近五年完成6项同类项目业绩"), deadline=_DL)
+    assert verdict.state == SATISFIED
+    assert verdict.evidence["layer4"]["deadline_window"]["applicable"] is False

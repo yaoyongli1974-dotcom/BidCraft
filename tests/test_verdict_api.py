@@ -242,3 +242,223 @@ def test_force_export_audits_overridden_substantive(owner):
     assert overridden[0]["marker"] == "★"
     assert overridden[0]["verdict"] == "review"
     assert overridden[0]["code"].startswith("SUB-")
+
+
+# ---------------------------------------------------------------------------
+# R05：彻底消除 GET /requirements 的 OutlineNode N+1
+# ---------------------------------------------------------------------------
+
+
+def _seed_bulk(project_id: str, count: int, node_count: int) -> None:
+    """造 count 条条款、分布在 node_count 个章节节点上（R05 的压力场景）。"""
+
+    from bidcraft.db import session_scope
+    from bidcraft.models import OutlineNode, Requirement, Section
+
+    with session_scope() as db:
+        nodes = []
+        for i in range(node_count):
+            node = OutlineNode(project_id=project_id, heading=f"章节{i}", position=i)
+            db.add(node)
+            nodes.append(node)
+        db.flush()
+        for node in nodes:
+            db.add(
+                Section(
+                    node_id=node.id,
+                    body="系统带宽500Mbps，质保3年。",
+                    status="written",
+                    words=10,
+                    review_status="confirmed",
+                )
+            )
+        for i in range(count):
+            db.add(
+                Requirement(
+                    project_id=project_id,
+                    kind="substantive",
+                    text=f"★ 第{i}条带宽不小于1000Mbps",
+                    source_quote="带宽不小于1000Mbps",
+                    marker="★",
+                    mandatory=True,
+                    node_id=nodes[i % node_count].id,
+                    response_status="pending",
+                )
+            )
+        db.flush()
+
+
+def _seed_linked(project_id: str, heading: str = "技术方案") -> str:
+    """造一条带 node_id 链接的条款，使 section_heading 可被验证（R05）。"""
+
+    from bidcraft.db import session_scope
+    from bidcraft.models import OutlineNode, Requirement, Section
+
+    with session_scope() as db:
+        node = OutlineNode(project_id=project_id, heading=heading, position=1)
+        db.add(node)
+        db.flush()
+        db.add(
+            Section(
+                node_id=node.id,
+                body="系统带宽500Mbps。",
+                status="written",
+                words=8,
+                review_status="confirmed",
+            )
+        )
+        row = Requirement(
+            project_id=project_id,
+            kind="substantive",
+            text="★ 带宽不小于1000Mbps",
+            source_quote="带宽不小于1000Mbps",
+            marker="★",
+            mandatory=True,
+            node_id=node.id,
+            response_status="pending",
+        )
+        db.add(row)
+        db.flush()
+        return row.id
+
+
+def test_requirements_endpoint_has_no_per_requirement_db_get(owner, monkeypatch):
+    """R05：列表渲染不再对每条条款执行 db.get(OutlineNode)。"""
+
+    from sqlalchemy.orm import Session
+
+    calls = {"outline_get": 0}
+    real_get = Session.get
+
+    def counting_get(self, entity, ident, *args, **kwargs):
+        if getattr(entity, "__name__", "") == "OutlineNode":
+            calls["outline_get"] += 1
+        return real_get(self, entity, ident, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "get", counting_get)
+
+    pid = _project(owner)
+    _seed_bulk(pid, count=100, node_count=50)
+    items = owner.get(f"/projects/{pid}/requirements").json()
+    assert len(items) == 100
+    # 旧实现每条条款一次 db.get(OutlineNode) → 100 次；新实现为 0。
+    assert calls["outline_get"] == 0, calls
+
+
+def test_requirements_endpoint_uses_one_outline_query(owner):
+    """R05：100 条款/50 章节下，outline_nodes 的 SELECT 次数不随条款数线性增长。"""
+
+    from sqlalchemy import event
+
+    from bidcraft.db import get_engine
+
+    pid = _project(owner)
+    _seed_bulk(pid, count=100, node_count=50)
+
+    engine = get_engine()
+    sql = {"outline_select": 0}
+
+    def before_cursor(conn, cursor, statement, params, context, executemany):
+        upper = statement.upper()
+        if "SELECT" in upper and "OUTLINE_NODES" in upper:
+            sql["outline_select"] += 1
+
+    event.listen(engine, "before_cursor_execute", before_cursor)
+    try:
+        items = owner.get(f"/projects/{pid}/requirements").json()
+    finally:
+        event.remove(engine, "before_cursor_execute", before_cursor)
+    assert len(items) == 100
+    # 一次 load_outline 只查一次 outline_nodes；不得随 100 条条款增长。
+    assert sql["outline_select"] == 1, sql
+
+
+def test_requirements_endpoint_preloads_node_map(owner, monkeypatch):
+    """R05：一次 load_outline 同时构建 node_id→heading 索引，供 section_heading 展示。"""
+
+    import importlib
+
+    shared_mod = importlib.import_module("bidcraft.api.shared")
+    real_loader = shared_mod.load_outline
+    calls = {"n": 0}
+
+    def counting_loader(db, project_id):
+        calls["n"] += 1
+        return real_loader(db, project_id)
+
+    monkeypatch.setattr(shared_mod, "load_outline", counting_loader)
+
+    pid = _project(owner)
+    _seed_linked(pid)
+    items = owner.get(f"/projects/{pid}/requirements").json()
+    assert items[0]["section_heading"] == "技术方案"
+    assert calls["n"] == 1, calls
+
+
+def test_requirements_multiple_projects_isolated(owner):
+    """R05：不同项目的 node_map 不串（按 project_id 隔离）。"""
+
+    import importlib
+
+    from bidcraft.db import session_scope
+
+    shared_mod = importlib.import_module("bidcraft.api.shared")
+
+    p1 = _project(owner)
+    p2 = _project(owner)
+    _seed(project_id=p1, text="★ 甲项目带宽", marker="★", body="带宽500Mbps")
+    _seed(project_id=p2, text="★ 乙项目质保", marker="★", body="质保3年")
+
+    with session_scope() as db:
+        c1 = shared_mod.build_requirement_context(db, p1)
+        c2 = shared_mod.build_requirement_context(db, p2)
+    assert set(c1.node_map).isdisjoint(c2.node_map)
+    assert set(c1.node_map.values()) == {"技术方案"}
+    assert set(c2.node_map.values()) == {"技术方案"}
+
+
+def test_outline_update_visible_on_next_request(owner):
+    """R05：大纲更新后下一次请求必须拿到最新 heading（无跨请求陈旧缓存）。"""
+
+    from bidcraft.db import session_scope
+    from bidcraft.models import OutlineNode
+
+    pid = _project(owner)
+    _seed_linked(pid)
+    first = owner.get(f"/projects/{pid}/requirements").json()
+    assert first[0]["section_heading"] == "技术方案"
+
+    with session_scope() as db:
+        node = db.scalars(
+            __import__("sqlalchemy").select(OutlineNode).where(OutlineNode.project_id == pid)
+        ).first()
+        node.heading = "已改名的章节"
+
+    second = owner.get(f"/projects/{pid}/requirements").json()
+    assert second[0]["section_heading"] == "已改名的章节"
+
+
+def test_requirement_response_update_reuses_request_context(owner, monkeypatch):
+    """R05：PATCH 确认时判定与返回 payload 共享一次上下文加载。"""
+
+    import importlib
+
+    shared_mod = importlib.import_module("bidcraft.api.shared")
+    real_loader = shared_mod.load_outline
+    calls = {"n": 0}
+
+    def counting_loader(db, project_id):
+        calls["n"] += 1
+        return real_loader(db, project_id)
+
+    monkeypatch.setattr(shared_mod, "load_outline", counting_loader)
+
+    pid = _project(owner)
+    req_id = _seed_linked(pid)
+    resp = owner.patch(
+        f"/projects/{pid}/requirements/{req_id}",
+        json={"response_status": "responded", "note": "已人工复核确认"},
+    )
+    assert resp.status_code == 200, resp.text
+    # 判定一次 + 返回 payload 共享同一 context，整次请求只加载一次大纲。
+    assert calls["n"] == 1, calls

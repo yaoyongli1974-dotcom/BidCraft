@@ -179,6 +179,13 @@ def enforce_export_gate(
     reason = (force_reason or "").strip()
     if len(reason) < FORCE_REASON_MIN_CHARS:
         raise ExportGateError(400, FORCE_REASON_REQUIRED)
+    # 强制导出只覆盖「未处置阻断风险」；章节未确认仍然拦截——强制导出不能绕过人工检查点。
+    # 关键：所有门禁（含章节确认）必须全部通过，才能写 export.force 审计。
+    # 否则「导出因章节未确认而失败」仍会留下成功的强制导出审计（R07 事务边界 bug）。
+    if require_confirmed_chapters:
+        pending = unconfirmed_chapters(db, project_id)
+        if pending:
+            raise ExportGateError(409, chapter_gate_message(pending))
     detail: dict[str, Any] = {
         "format": fmt,
         "blocking_open": blocking_open,
@@ -192,9 +199,4 @@ def enforce_export_gate(
     if substantives:
         detail["overridden_substantives"] = substantives
     record_audit(db, project_id, "export.force", detail)
-    # 强制导出只覆盖「未处置阻断风险」；章节未确认仍然拦截——强制导出不能绕过人工检查点。
-    if require_confirmed_chapters:
-        pending = unconfirmed_chapters(db, project_id)
-        if pending:
-            raise ExportGateError(409, chapter_gate_message(pending))
     return blocking_open

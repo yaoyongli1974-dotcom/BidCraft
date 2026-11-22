@@ -34,7 +34,9 @@ _NUM = r"(?:\d+(?:\.\d+)?|[一二三四五六七八九十百]{1,3})"
 _UNITS = (
     # 字节率先于存储：100MB/s 必须整体匹配为 byte_rate，不能被拆成 MB；
     # 存储容量（无 /s）与字节率是不同的量纲，绝不可互相比较。
-    r"GB/s|MB/s|KB/s|B/s|TB|GB|MB|KB|B|Gbps|Mbps|Kbps|bps|GHz|MHz|Hz|"
+    # 二进制容量（KiB/MiB/GiB/TiB，1024 进制）与十进制（KB/MB/GB/TB，1000 进制）
+    # 分开登记，避免「1TB == 1TiB」这类错误换算。
+    r"GB/s|MB/s|KB/s|B/s|TiB|GiB|MiB|KiB|TB|GB|MB|KB|B|Gbps|Mbps|Kbps|bps|GHz|MHz|Hz|"
     r"kV|kW|mm|cm|米|项|个|份|例|台|套|路|条|家|人|"
     r"年|月|小时|天|分钟|V|W|A|%"
 )
@@ -65,6 +67,9 @@ FAMILY_KEYWORDS = {
     "response": ("响应", "到场", "到达", "回复", "服务"),
     "warranty": ("质保", "保修", "质量保证", "免费"),
     "bandwidth": ("带宽", "速率", "吞吐", "链路", "传输"),
+    # R02/R04：存储容量独立成族，避免「1000GB 存储」被归到带宽主体。
+    "storage": ("存储", "容量", "硬盘", "磁盘", "内存"),
+    "frequency": ("频率", "主频", "处理器", "CPU"),
 }
 
 
@@ -161,11 +166,17 @@ _UNIT_DIMENSIONS: dict[str, tuple[str, float]] = {
     "GB/s": ("byte_rate", 1000.0),
     # 存储容量：基准 B（与带宽/频率/字节率都不同量纲）。
     # 注意 GB（存储）与 Gbps（带宽）、GB/s（字节率）三者互不可比。
+    # 十进制容量（1000 进制）：1TB = 1000GB。
     "B": ("storage", 1.0),
     "KB": ("storage", 1000.0),
     "MB": ("storage", 1_000_000.0),
     "GB": ("storage", 1_000_000_000.0),
     "TB": ("storage", 1_000_000_000_000.0),
+    # 二进制容量（1024 进制）：1TiB = 1024GiB，与十进制 GB/TB 不可混为等值。
+    "KiB": ("storage", 1024.0),
+    "MiB": ("storage", 1024.0**2),
+    "GiB": ("storage", 1024.0**3),
+    "TiB": ("storage", 1024.0**4),
     # 频率：基准 MHz（与带宽无关）
     "Hz": ("frequency", 1 / 1_000_000),
     "MHz": ("frequency", 1.0),
@@ -255,15 +266,26 @@ def _unit_compatible(left: str, right: str) -> bool:
 
 @dataclass(frozen=True)
 class Constraint:
-    """从条款里抽出的一条可比较约束。"""
+    """从条款里抽出的一条可比较约束。
+
+    R02：复合条款里每条约束**独立**持有自己的主体/指标定位字段，不再共享整条
+    文本的单一 family。这样「近三年3项类似项目业绩，且带宽不低于1000Mbps」里
+    业绩用 achievement、带宽用 bandwidth，各自只关联自己的证据。
+    """
 
     kind: str           # "numeric" | "grade"
     comparator: str     # ">=" | "<=" | "grade>="
     threshold: float
     unit: str
-    family: str
+    family: str         # 局部子句推断出的主体词族（R02）
     grade: str
     label: str          # 面向人的说明，写入 issue.evidence
+    # R02 逐约束定位（可选，带默认值以兼容既有的位置参数构造）。
+    metric: str = ""        # 指标名（数值/比较词，如「不小于」「至少」）
+    subject: str = ""       # 主体对象（如「类似项目」「链路带宽」）
+    object: str = ""        # 宾语/对象（同 subject，供前端展示）
+    quantity: str = ""      # 阈值原文（如「3」「1000」）
+    source_span: str = ""   # 该约束在条款原文中的完整片段，保证可追溯
 
 
 @dataclass(frozen=True)
@@ -290,9 +312,11 @@ class ConstraintVerdict:
 
 
 # 方向比较：要求 >= / <= 某个数。单位留空表示由数值上下文推断。
+# R04：方向正则直接复用完整单位注册表 _UNITS（最长优先），保证「已注册的单位
+# 一定能被方向约束提取」——GB/TB/MB/s/GHz/Kbps 等不再出现「注册了却提取不到」。
 _DIRECTION_PATTERNS = (
-    (r"(?:不小于|不少于|不低于|大于等于|至少|≥)\s*(" + _NUM + r")\s*(项|个|份|例|年|月|小时|天|分钟|Mbps|Gbps|mm|cm|米|kV|kW|%)?", ">="),
-    (r"(?:不大于|不超过|小于等于|最多|≤)\s*(" + _NUM + r")\s*(项|个|份|例|年|月|小时|天|分钟|Mbps|Gbps|mm|cm|米|kV|kW|%)?", "<="),
+    (r"(?:不小于|不少于|不低于|大于等于|至少|≥)\s*(" + _NUM + r")\s*(" + _UNITS + r")?", ">="),
+    (r"(?:不大于|不超过|小于等于|最多|≤)\s*(" + _NUM + r")\s*(" + _UNITS + r")?", "<="),
 )
 
 
@@ -300,18 +324,30 @@ def extract_constraints(text: str) -> list[Constraint]:
     """从一条条款文本里抽出全部可比较约束；复合条款会返回多条。"""
 
     source = text or ""
-    family = _infer_family(source)
+    global_family = _infer_family(source)
     constraints: list[Constraint] = []
 
+    def _subject_of(family: str, clause: str) -> str:
+        for keyword in FAMILY_KEYWORDS.get(family, ()):
+            if keyword in clause:
+                return keyword
+        return ""
+
+    # R02：方向约束的主体取**局部子句**推断值，复合条款里业绩/带宽各归各族。
     for pattern, comparator in _DIRECTION_PATTERNS:
         for match in re.finditer(pattern, source):
             value = _cn_number(match.group(1))
             if value is None:
                 continue
             unit = match.group(2) or ""
+            local_family = _local_family(source, match.start(), global_family)
+            clause = clause_at(source, match.start())
             label = f"{'至少' if comparator == '>=' else '至多'} {match.group(1)}{unit}"
             constraints.append(
-                Constraint("numeric", comparator, float(value), unit, family, "", label)
+                Constraint("numeric", comparator, float(value), unit, local_family, "", label,
+                           metric=f"{'≥' if comparator == '>=' else '≤'}",
+                           subject=_subject_of(local_family, clause), object=clause.strip()[:24],
+                           quantity=match.group(1), source_span=_source_span(source, match.start(), len(match.group(0))))
             )
 
     # 质保 N 年 = 至少 N 年（越长越好）。「质保5年」与「5年免费质保」都要认。
@@ -326,7 +362,9 @@ def extract_constraints(text: str) -> list[Constraint]:
                 continue
             constraints.append(
                 Constraint("numeric", ">=", float(value), match.group(2), "warranty", "",
-                           f"质保不少于 {match.group(1)}{match.group(2)}")
+                           f"质保不少于 {match.group(1)}{match.group(2)}",
+                           metric="质保", subject=_subject_of("warranty", source), object="质保",
+                           quantity=match.group(1), source_span=_source_span(source, match.start(), len(match.group(0))))
             )
 
     # N 小时内响应 / 响应时间不超过 N 小时 = 至多 N 小时（越短越好）。
@@ -337,7 +375,9 @@ def extract_constraints(text: str) -> list[Constraint]:
         if value is not None:
             constraints.append(
                 Constraint("numeric", "<=", float(value), "小时", "response", "",
-                           f"响应不超过 {match.group(1)} 小时")
+                           f"响应不超过 {match.group(1)} 小时", metric="响应时间", subject="服务响应",
+                           object="响应", quantity=match.group(1),
+                           source_span=_source_span(source, match.start(), len(match.group(0))))
             )
     for match in re.finditer(
         r"(?:响应|到场|到达)\s*(?:时间)?\s*(?:不超过|小于等于|≤)?\s*(" + _NUM + r")\s*小时", source
@@ -346,7 +386,9 @@ def extract_constraints(text: str) -> list[Constraint]:
         if value is not None:
             constraints.append(
                 Constraint("numeric", "<=", float(value), "小时", "response", "",
-                           f"响应不超过 {match.group(1)} 小时")
+                           f"响应不超过 {match.group(1)} 小时", metric="响应时间", subject="服务响应",
+                           object="响应", quantity=match.group(1),
+                           source_span=_source_span(source, match.start(), len(match.group(0))))
             )
 
     # 资质等级：一级 >= 二级；只比较等级序，不做跨量纲（甲级/一级）比较。
@@ -357,7 +399,8 @@ def extract_constraints(text: str) -> list[Constraint]:
             continue
         constraints.append(
             Constraint("grade", "grade>=", float(rank[0]), "", "qualification", grade,
-                       f"资质等级不低于 {grade}")
+                       f"资质等级不低于 {grade}", metric="资质等级", subject="资质", object="资质",
+                       quantity=grade, source_span=grade)
         )
 
     # 同一比较被多个模式命中时去重（标签相同视为同一条）。
@@ -369,6 +412,21 @@ def extract_constraints(text: str) -> list[Constraint]:
         seen.add(item.label)
         unique.append(item)
     return unique
+
+
+def _local_family(source: str, pos: int, fallback: str) -> str:
+    """R02：用约束所在的**局部子句**推断主体词族，而非整条文本。
+
+    复合条款里业绩与带宽共存时，带宽约束只应继承「带宽」词族。局部子句取不到
+    词族时才退回调用方给的 fallback（质保/响应/资质等由专用模式直接指定）。
+    """
+
+    family = _infer_family(clause_at(source, pos))
+    return family or fallback
+
+
+def _source_span(source: str, pos: int, length: int) -> str:
+    return source[pos : pos + length].strip()
 
 
 def _family_matches(constraint: Constraint, clause: str) -> bool:

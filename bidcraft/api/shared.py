@@ -13,6 +13,7 @@ import shutil  # noqa: F401,E402
 import tempfile  # noqa: F401,E402
 import threading  # noqa: F401,E402
 import time  # noqa: F401,E402
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta  # noqa: F401,E402
 from pathlib import Path
 from typing import Any, Literal
@@ -482,6 +483,40 @@ def _issue_tier(level: str) -> str:
     return level if level in {"blocking", "critical", "major"} else "minor"
 
 
+@dataclass
+class ProjectRequirementContext:
+    """单次 API 请求内、单个项目的条款渲染上下文（R05）。
+
+    一次 load_outline 同时得到大纲正文（供判定）与 ``node_id → heading`` 索引
+    （供 section_heading 展示），避免 ``_requirement_payload`` 对每条条款执行
+    ``db.get(OutlineNode)`` 的 N+1 查询。上下文按请求创建、按 project_id 隔离，
+    请求结束即丢弃，不存在跨请求陈旧缓存。字段带默认值以保持构造兼容。
+    """
+
+    project_id: str = ""
+    outline_nodes: list[dict] = field(default_factory=list)
+    node_map: dict[str, str] = field(default_factory=dict)
+
+    def heading_of(self, node_id: str | None) -> str:
+        return self.node_map.get(node_id or "", "")
+
+
+def build_requirement_context(
+    db: Session, project_id: str, outline_cache: dict[str, list[dict]] | None = None
+) -> ProjectRequirementContext:
+    """一次查询构建条款上下文：大纲正文 + node_id→heading 索引（R05）。"""
+
+    nodes = get_outline_cached(db, project_id, outline_cache)
+    node_map = {
+        str(node["id"]): (node.get("heading") or "")
+        for node in nodes
+        if node.get("id")
+    }
+    return ProjectRequirementContext(
+        project_id=project_id, outline_nodes=nodes, node_map=node_map
+    )
+
+
 def get_outline_cached(
     db: Session, project_id: str, cache: dict[str, list[dict]] | None = None
 ) -> list[dict]:
@@ -501,18 +536,28 @@ def get_outline_cached(
 
 
 def _requirement_payload(
-    db: Session, requirement: Requirement, outline_cache: dict[str, list[dict]] | None = None
+    db: Session,
+    requirement: Requirement,
+    outline_cache: dict[str, list[dict]] | None = None,
+    context: ProjectRequirementContext | None = None,
 ) -> dict[str, Any]:
-    heading = ""
     node_id = requirement.node_id
-    if node_id:
-        node = db.get(OutlineNode, node_id)
-        if node is not None:
-            heading = node.heading or ""
     req_type = classify_requirement(requirement.text or "")
-    # 五层判定：用大纲正文实时评估这一条的当前结论（每次读取都反映最新正文）。
-    # 大纲按请求缓存，避免每条条款都 load_outline（T06）。
-    nodes = get_outline_cached(db, requirement.project_id, outline_cache)
+    # 五层判定 + section_heading 共用一次大纲加载（T06/R05）：
+    # 有 context 时用请求级预加载的 node_map（消除逐条 db.get 的 N+1）。
+    if context is not None:
+        nodes = context.outline_nodes
+        heading = context.heading_of(node_id)
+    else:
+        # 兼容未传 context 的调用方：仍按请求缓存加载大纲，heading 从同一批
+        # 大纲节点取，而不再逐条 db.get(OutlineNode)。
+        nodes = get_outline_cached(db, requirement.project_id, outline_cache)
+        heading = ""
+        if node_id:
+            heading = next(
+                (n.get("heading") or "" for n in nodes if str(n.get("id")) == node_id),
+                "",
+            )
     verdict = judge_requirement(requirement, nodes)
     return {
         "id": requirement.id,
@@ -1161,6 +1206,7 @@ __all__ = [
     'ProjectDuplicate',
     'ProjectInstantiate',
     'ProjectMember',
+    'ProjectRequirementContext',
     'ProjectUpdate',
     'QualificationCreate',
     'QualificationUpdate',
@@ -1269,6 +1315,7 @@ __all__ = [
     'billing_user',
     'boq',
     'build_outline',
+    'build_requirement_context',
     'check_owner',
     'check_package_document',
     'check_package_name',

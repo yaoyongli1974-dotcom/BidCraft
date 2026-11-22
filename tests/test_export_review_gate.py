@@ -160,3 +160,93 @@ def test_confirmation_removes_substantive_blocker(actors):
     assert owner.post(f"/projects/{pid}/check").status_code == 200
     after = owner.get(f"/projects/{pid}/risk-overview").json()["items"]
     assert not any(item["code"].startswith("SUB-") for item in after)
+
+
+def _first_star_req_id(pid: str) -> str:
+    from sqlalchemy import select
+
+    from bidcraft.db import session_scope
+    from bidcraft.models import Requirement
+
+    with session_scope() as db:
+        req = db.scalar(
+            select(Requirement).where(
+                Requirement.project_id == pid, Requirement.marker == "★"
+            )
+        )
+        assert req is not None
+        return req.id
+
+
+def test_editor_cannot_final_confirm_star_but_owner_can(actors):
+    """R07：编制≠确认。editor 不能最终确认 ★ 条款，项目负责人可以。"""
+
+    _seed_substantive(actors)
+    owner, editor, pid = actors["owner"], actors["editor"], actors["project_id"]
+    req_id = _first_star_req_id(pid)
+
+    denied = editor.patch(
+        f"/projects/{pid}/requirements/{req_id}",
+        json={"response_status": "responded", "note": "我已自行复核确认"},
+    )
+    assert denied.status_code == 403, denied.text
+
+    allowed = owner.patch(
+        f"/projects/{pid}/requirements/{req_id}",
+        json={"response_status": "responded", "note": "负责人复核后确认"},
+    )
+    assert allowed.status_code == 200, allowed.text
+    assert allowed.json()["responded_by"] == "ex-owner"
+
+
+def test_failed_force_export_leaves_no_success_audit(actors):
+    """R07 事务边界：章节未确认导致强制导出失败时，不得留下成功的 export.force 审计。"""
+
+    from bidcraft.db import session_scope
+    from bidcraft.models import OutlineNode, Requirement, Section
+
+    pid = actors["project_id"]
+    # ★ 条款（制造 blocking）+ 正文草稿（章节门禁未通过）。
+    with session_scope() as db:
+        db.add(
+            Requirement(
+                project_id=pid,
+                kind="substantive",
+                text="★ 投标人须提供详细的项目实施方案说明",
+                mandatory=True,
+                source_quote="投标人须提供详细的项目实施方案说明",
+                marker="★",
+                response_status="pending",
+            )
+        )
+        node = OutlineNode(project_id=pid, heading="技术方案", position=1)
+        db.add(node)
+        db.flush()
+        db.add(
+            Section(
+                node_id=node.id,
+                body="方案另行编制。",
+                status="written",
+                words=6,
+                review_status="draft",  # 未确认 → 章节门禁拦截
+            )
+        )
+        db.flush()
+
+    owner = actors["owner"]
+    assert owner.post(f"/projects/{pid}/check").status_code == 200
+    # 先确认没有基线 export.force 审计
+    before = owner.get(f"/projects/{pid}/audit?limit=100").json()["items"]
+    assert not any(item["action"] == "export.force" for item in before)
+
+    # force 满足权限+原因，但因章节未确认失败（409）。
+    forced = owner.post(
+        f"/projects/{pid}/export",
+        json={"format": "docx", "force": True, "force_reason": "业主已确认风险可控"},
+    )
+    assert forced.status_code == 409, forced.text
+    assert "未确认" in forced.json()["detail"]
+
+    # 关键：失败后仍不得出现 export.force 成功审计。
+    after = owner.get(f"/projects/{pid}/audit?limit=100").json()["items"]
+    assert not any(item["action"] == "export.force" for item in after)

@@ -279,7 +279,12 @@ def check_project(db: Session, project_id: str) -> tuple[list, dict]:
         db.scalars(select(Requirement).where(Requirement.project_id == project_id))
     )
     _annotate_requirement_coverage(requirements, nodes)
-    all_results.extend(substantive.requirement_issues(requirements, nodes))
+    # R03：招标截止日期是业绩时间窗的校验基准——优先 facts 台账，meta 兜底；
+    # 拿不到时 judge 会把带明确日期的业绩转人工复核，绝不用服务器当前时间。
+    from .verdict import resolve_deadline
+
+    deadline = resolve_deadline(ledger.facts, project.meta)
+    all_results.extend(substantive.requirement_issues(requirements, nodes, deadline=deadline))
     results = [result for result in all_results if not result.passed]
     anchors = [
         {

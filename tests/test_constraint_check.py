@@ -13,6 +13,8 @@ from __future__ import annotations
 import pytest
 
 from bidcraft.constraint_check import (
+    _UNIT_DIMENSIONS,
+    _VALUE_RE,
     UNIT_COMPATIBLE,
     UNIT_INCOMPATIBLE,
     UNIT_UNKNOWN,
@@ -161,13 +163,88 @@ def test_unit_relation_three_states():
 
 
 def test_storage_capacity_units_do_not_cross_compare():
-    """存储容量（500GB）与带宽（1000Mbps）不可比 → unclear，不判违反。"""
+    """存储与带宽跨量纲不可比；同为存储容量则按量纲归一后真实比较。
+
+    R04 修订：GB/TB 已纳入方向正则后，500GB 应作为真实存储值被比较，
+    「500GB < 1000GB」→ violated（不再因「提取不到单位」误转 unclear）。
+    """
+
+    # 同为存储容量，归一后可比（1000GB = 1TB）→ 满足。
+    assert _blocked("存储容量不小于1000GB", "设备配备1TB硬盘") is False
+    # 500GB < 1000GB → 真实不满足（R04 明确要求）。
+    states = _states("存储容量不小于1000GB", "设备配备500GB硬盘")
+    assert any(item[1] == "violated" for item in states), states
+    # 跨量纲：存储证据不能回答带宽约束（absent/unclear 皆可，唯独不能满足或违反）。
+    cross = _states("传输带宽不小于1000Mbps", "设备配备500GB硬盘")
+    assert all(item[1] in {"absent", "unclear"} for item in cross), cross
+
+
+# -------------------------------------------------- R04：单位与约束提取完整性
+
+
+def test_storage_capacity_1000gb_equals_1tb():
+    """R04 特别要求：必须断言真实状态 satisfied，而非只看 constraint_blocked。"""
+
+    states = _states("存储容量不小于1000GB", "设备配备1TB硬盘")
+    assert states and all(item[1] == "satisfied" for item in states), states
+
+
+def test_storage_capacity_500gb_below_1000gb():
+    """R04 特别要求：500GB < 1000GB 必须真实判 violated。"""
 
     states = _states("存储容量不小于1000GB", "设备配备500GB硬盘")
+    assert any(item[1] == "violated" for item in states), states
+
+
+def test_bandwidth_mbps_and_byte_rate_not_equal():
+    """R04：带宽(Mbps) 与字节率(MB/s) 不同量纲，不得认定相等，转 unclear。"""
+
+    states = _states("带宽不小于1000Mbps", "接口带宽100MB/s")
     assert any(item[1] == "unclear" for item in states), states
-    assert _blocked("存储容量不小于1000GB", "设备配备500GB硬盘") is False
-    # 同为存储容量，归一后可比（1000GB = 1TB）。
-    assert _blocked("存储容量不小于1000GB", "设备配备1TB硬盘") is False
+    assert unit_relation("Mbps", "MB/s") == UNIT_INCOMPATIBLE
+
+
+def test_all_registered_units_are_extractable():
+    """R04：单位已注册但方向约束正则提取不到 = 失效；此处逐一验证可提取。"""
+
+    for unit in _UNIT_DIMENSIONS:
+        match = _VALUE_RE.search(f"1{unit}")
+        assert match is not None, f"单位 {unit} 无法被数值正则提取"
+        assert match.group(2) == unit, f"单位 {unit} 被截断为 {match.group(2)}"
+
+
+def test_unknown_unit_routes_to_review():
+    """R04：单位无法确定必须转人工复核（unclear 不硬拦，但上层不覆盖）。"""
+
+    from bidcraft.substantive import find_covering_section
+
+    states = _states("带宽不小于1000Mbps", "链路带宽1000xyz")
+    assert any(item[1] == "unclear" for item in states), states
+    # unclear 不得自动放行 → find_covering_section 不覆盖。
+    assert find_covering_section(
+        "带宽不小于1000Mbps", [{"id": "n1", "position": 1, "body": "链路带宽1000xyz"}]
+    ) is None
+
+
+def test_unit_conversion_decimal_and_binary():
+    """R04：十进制(1000) 与二进制(1024) 容量按各自基准换算，不可混为等值。"""
+
+    assert unit_dimension("GiB") == "storage"
+    assert unit_relation("GB", "GiB") == UNIT_COMPATIBLE  # 同量纲，可按字节换算
+    # 十进制：1TB = 1000GB。
+    assert _states("存储容量不小于1000GB", "配备1TB硬盘")[0][1] == "satisfied"
+    # 二进制：1GiB ≈ 1.074GB，小于 2GB 要求 → violated（不会因「1GiB=1GB」误判）。
+    states = _states("存储容量不小于2GB", "配备1GiB硬盘")
+    assert any(item[1] in {"violated", "unclear"} for item in states), states
+
+
+def test_direction_pattern_captures_complete_unit():
+    """R04：方向约束正则必须捕获完整单位（GB/TB/MB/s/GHz 不被截断）。"""
+
+    text = "存储不小于1000GB，带宽至少500Mbps，主频不低于2GHz，速率不低于100MB/s"
+    units = [item.constraint.unit for item in evaluate_constraints(text, "x")]
+    for expected in ("GB", "Mbps", "GHz", "MB/s"):
+        assert expected in units, f"{expected} 未被方向正则完整提取: {units}"
 
 
 # -------------------------------------------------- T04：多候选数值关联

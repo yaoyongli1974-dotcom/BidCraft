@@ -128,6 +128,7 @@ from ..shared import (  # noqa: F401
     billing_user,
     boq,
     build_outline,
+    build_requirement_context,
     check_project,
     clock,
     count_words,
@@ -140,7 +141,6 @@ from ..shared import (  # noqa: F401
     export_docx,
     export_markdown,
     generate_document,
-    get_outline_cached,
     images,
     jobqueue,
     jobs,
@@ -1649,10 +1649,10 @@ def requirements(ref: str) -> list[dict[str, Any]]:
                 .order_by(Requirement.marker.desc(), Requirement.text)
             )
         )
-        # 单请求内项目级预加载大纲：多条条款共享一次 load_outline（T06）。
-        # 缓存按请求创建、按 project_id 隔离，请求结束即失效。
-        outline_cache: dict[str, list[dict]] = {}
-        return [_requirement_payload(db, row, outline_cache=outline_cache) for row in rows]
+        # 单请求内项目级预加载：一次 load_outline 同时得到大纲正文与
+        # node_id→heading 索引（R05），多条条款共享，消除逐条 db.get(OutlineNode)。
+        context = build_requirement_context(db, project.id)
+        return [_requirement_payload(db, row, context=context) for row in rows]
 
 
 @router.patch("/projects/{ref}/requirements/{req_id}")
@@ -1665,16 +1665,21 @@ def requirement_response_update(
         requirement = db.get(Requirement, req_id)
         if requirement is None or requirement.project_id != project.id:
             raise LookupError(f"条款不存在: {req_id}")
+        # R07：编制与确认分离。★ 实质性条款的最终确认（含撤回）必须由项目负责人/超管
+        # 执行；editor 仍可写响应正文（章节编辑），但不能自行确认 ★ 条款。
+        # 权限在后端强制校验，不依赖前端隐藏按钮。
+        if (requirement.marker or "").strip() == "★":
+            _require_owner(role)
         note = _validate_requirement_note(payload.response_status, payload.note)
         username = str((current_user() or {}).get("username") or "")
         # 确认时快照「原始自动判定结果」，让人员/时间/原因/判定可被完整追溯。
         snapshot: dict[str, str] = {}
-        # 与返回 payload 共享同一次大纲加载（T06）。
-        outline_cache: dict[str, list[dict]] = {}
+        # 与返回 payload 共享同一次大纲加载（T06/R05）：一次查询同时供判定与展示。
+        context = build_requirement_context(db, project.id)
         if payload.response_status != "pending":
             from ...verdict import judge as judge_requirement
 
-            current = judge_requirement(requirement, get_outline_cached(db, project.id, outline_cache))
+            current = judge_requirement(requirement, context.outline_nodes)
             snapshot = {
                 "state": current.state,
                 "label": current.label,
@@ -1698,7 +1703,7 @@ def requirement_response_update(
             },
         )
         db.flush()
-        return _requirement_payload(db, requirement, outline_cache=outline_cache)
+        return _requirement_payload(db, requirement, context=context)
 
 
 @router.patch("/projects/{ref}/issues/{issue_id}")

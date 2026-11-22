@@ -60,9 +60,9 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      - name: Install dependencies
-        # package-lock.json 尚未生成时回退到 npm install。
-        run: npm ci || npm install
+      - name: Install dependencies (locked)
+        # 严格按锁文件安装：锁文件缺失或不一致直接失败，不允许回退到 npm install。
+        run: npm ci
 
       - name: Lint
         run: npm run lint
@@ -72,3 +72,58 @@ jobs:
 
       - name: Build (tsc + vite)
         run: npm run build
+
+  postgres:
+    name: postgres (real integration)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # 独立临时测试库，绝不连接真实业务数据库。
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: bidcraft
+          POSTGRES_PASSWORD: bidcraft_test
+          POSTGRES_DB: bidcraft_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bidcraft -d bidcraft_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install Python
+        run: uv python install 3.13
+
+      - name: Sync dependencies (locked, with postgres)
+        run: uv sync --frozen --python 3.13 --extra api --extra dev --extra postgres
+
+      - name: Test (real PostgreSQL integration)
+        env:
+          BIDCRAFT_TEST_PG_URL: postgresql+psycopg://bidcraft:bidcraft_test@127.0.0.1:5432/bidcraft_test
+        run: |
+          uv run --frozen pytest -q --junitxml=/tmp/pg-results.xml tests/test_postgres_integration.py
+          uv run --frozen python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse('/tmp/pg-results.xml').getroot()
+          suite = root.find('testsuite') if root.tag == 'testsuites' else root
+          tests = int(suite.get('tests', 0))
+          skipped = int(suite.get('skipped', 0))
+          failures = int(suite.get('failures', 0)) + int(suite.get('errors', 0))
+          # PG 测试不得因缺环境变量而静默跳过：数量不足或有跳过都让 CI 失败。
+          assert tests >= 8, f"PG 集成测试数量不足: {tests}"
+          assert skipped == 0, f"PG 集成测试被跳过 {skipped} 项（环境变量可能缺失）"
+          assert failures == 0, f"PG 集成测试失败 {failures} 项"
+          print(f"PG integration OK: {tests} tests, 0 skipped")
+          PY

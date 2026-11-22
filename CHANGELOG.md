@@ -2,6 +2,20 @@
 
 按版本倒序。对外口径以 `docs/release-notes/` 下对应文件为准；本文件是仓库内的简明索引。
 
+## v0.21.0 (2026-11-22)
+
+判定引擎深度改造（R01–R07，任务书驱动）。
+
+- R01 复合条款原子拆分闭环：连接词拆分 + 原子独立判定 + 歧义进入 judge 最终判定，杜绝「一个原子满足即整条满足」。
+- R02 多约束主体关联：每条约束按局部子句独立推断 family，禁止不同指标相互替代。
+- R03 业绩时间窗按招标截止日期（事实台账 + meta）实际校验，逐项计算、过期不计、缺日期转人工复核。
+- R04 单位提取完整性：方向正则复用完整单位表 + 二进制容量单位，禁止跨量纲比较。
+- R05 requirements API 消除 N+1：ProjectRequirementContext 单请求共享大纲与 node_map。
+- R06 CI 严格 npm ci + 真实 PostgreSQL service container 集成 job（禁止静默跳过）。
+- R07 export.force 审计移到门禁之后（失败不留成功审计）；★ 最终确认权限收紧到 owner/admin。
+
+验证：979 passed / 8 skipped，web lint/test/build 全绿，PG 集成 8/8，docker build exit 0。
+
 ## v0.20.1 (2026-11-22)
 
 T01–T08 任务书改造（可靠性 / 可重复性收尾）。
