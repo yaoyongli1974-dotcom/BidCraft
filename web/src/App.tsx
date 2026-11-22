@@ -73,6 +73,9 @@ const CommercialTab = lazy(() =>
 const SimilarityTab = lazy(() =>
   import('./pages/tabs/SimilarityTab').then((module) => ({ default: module.SimilarityTab })),
 )
+const AgentsTab = lazy(() =>
+  import('./pages/tabs/AgentsTab').then((module) => ({ default: module.AgentsTab })),
+)
 
 function page(element: ReactNode, fallback: ReactNode = <PageFallback />) {
   return <Suspense fallback={fallback}>{element}</Suspense>
@@ -116,6 +119,7 @@ export const router = createBrowserRouter([
           { path: 'enterprise', element: page(<EnterpriseTab />, <TabFallback />) },
           { path: 'commercial', element: page(<CommercialTab />, <TabFallback />) },
           { path: 'similarity', element: page(<SimilarityTab />, <TabFallback />) },
+          { path: 'agents', element: page(<AgentsTab />, <TabFallback />) },
           { path: 'export', element: page(<ExportTab />, <TabFallback />) },
           { path: 'collab', element: page(<CollabTab />, <TabFallback />) },
           { path: '*', element: <NotFoundContent /> },

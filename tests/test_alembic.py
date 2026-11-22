@@ -14,7 +14,7 @@ from bidcraft.config import settings
 from bidcraft.db import get_engine, init_db, reset_engine_for_tests
 
 #: 当前 alembic head（新增 revision 时同步这里）。
-HEAD = "0005_yibiao_batch2"
+HEAD = "0006_yibiao_batch3"
 
 
 def _version() -> list[str]:

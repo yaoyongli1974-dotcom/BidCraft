@@ -268,6 +268,7 @@ def test_rebuild_args_by_kind(db):
             "images": (_seed(session, kind="images", project_id="p1", payload={"targets": [{"label": "L"}]}), ("p1", [{"label": "L"}])),
             "generate": (_seed(session, kind="generate", project_id="p2", payload={"force": True}), ("p2", True)),
             "kb_reindex": (_seed(session, kind="kb_reindex", payload={"kb_id": "k1"}), ("k1",)),
+            "agent": (_seed(session, kind="agent", payload={"run_id": "r1"}), ("r1",)),
         }
         session.flush()
         for kind, (job, tail) in cases.items():

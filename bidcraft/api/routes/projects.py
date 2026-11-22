@@ -1347,6 +1347,17 @@ def save_chapter(ref: str, node_id: str, payload: ChapterSave) -> Any:
             section.review_requested_at = None
             section.review_requested_by = None
         db.flush()
+        # 第三批（协作版本）：每次有效正文保存生成一条不可变修订快照，
+        # revision 与 Section.revision 对齐；与正文同事务，失败整体回滚。
+        from ...collaboration import snapshot_on_save
+
+        snapshot_on_save(
+            db,
+            section,
+            project.id,
+            (current_user() or {}).get("username") or "system",
+            "",
+        )
         provenance.refresh_node(db, project.id, node.id, payload.body)
         detail = {"heading": node.heading}
         if review_before == "review":

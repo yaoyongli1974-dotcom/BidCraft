@@ -63,7 +63,7 @@ def test_schema_created_and_alembic_stamped(pg_engine):
     assert {"projects", "jobs", "sections", "facts", "alembic_version"} <= tables
     with pg_engine.connect() as connection:
         head = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
-    assert head == "0005_yibiao_batch2"
+    assert head == "0006_yibiao_batch3"
 
 
 def test_crud_roundtrip_with_json_and_chinese(pg_engine):

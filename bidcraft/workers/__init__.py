@@ -5,6 +5,7 @@
 """
 
 from .. import jobqueue
+from .agent import _run_agent_job
 from .compliance import _run_batch_check_job
 from .export import _run_batch_export_job
 from .generation import _run_generation_job
@@ -18,8 +19,10 @@ jobqueue._register("batch_export", _run_batch_export_job)
 jobqueue._register("generate", _run_generation_job)
 jobqueue._register("images", _run_image_batch_job)
 jobqueue._register("kb_reindex", _run_kb_reindex_job)
+jobqueue._register("agent", _run_agent_job)
 
 __all__ = [
+    "_run_agent_job",
     "_run_batch_check_job",
     "_run_batch_export_job",
     "_run_generation_job",

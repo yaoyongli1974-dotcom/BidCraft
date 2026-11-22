@@ -29,6 +29,7 @@ import { Badge } from '../../components/Badge'
 import { Button, IconButton } from '../../components/Button'
 import { EmptyState, ErrorState, Skeleton } from '../../components/Feedback'
 import { TabHeading } from '../../components/Workbench'
+import { AssignmentPanel } from '../../components/AssignmentPanel'
 import { useConfirm } from '../../context/useConfirm'
 import { useToast } from '../../context/useToast'
 
@@ -462,6 +463,10 @@ export function CollabTab() {
               <span className="audit-foot-note">已显示全部</span>
             ) : null}
           </div>
+        </section>
+
+        <section className="panel collab-card" aria-labelledby="collab-assignments">
+          <AssignmentPanel projectRef={ref} members={members} canWrite={canManage} />
         </section>
       </div>
     </div>

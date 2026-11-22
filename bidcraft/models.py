@@ -936,3 +936,113 @@ class CommercialDoc(Base):
     created_by: Mapped[str] = mapped_column(String(80), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+# ---------------------------------------------------------------------------
+# 对标易标第三批：AI Agent 编排 + 协作与版本管理
+# ---------------------------------------------------------------------------
+class WorkflowRun(Base):
+    """Agent 工作流运行实例。状态独立于 Job，审批挂起不占 Job 租约。"""
+
+    __tablename__ = "workflow_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    job_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    workflow_type: Mapped[str] = mapped_column(String(40), default="standard")
+    status: Mapped[str] = mapped_column(String(20), default="queued")  # queued|running|waiting_approval|done|failed|cancelled
+    goal: Mapped[str] = mapped_column(Text, default="")
+    input_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    result: Mapped[dict] = mapped_column(JSON, default=dict)
+    stats: Mapped[dict] = mapped_column(JSON, default=dict)
+    budget: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str] = mapped_column(String(80), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class WorkflowTask(Base):
+    """工作流中的单个 Agent 任务。"""
+
+    __tablename__ = "workflow_tasks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(ForeignKey("workflow_runs.id"), index=True)
+    seq: Mapped[int] = mapped_column(Integer, default=0)
+    task_key: Mapped[str] = mapped_column(String(80), default="")
+    agent_type: Mapped[str] = mapped_column(String(40), default="")
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending|running|done|failed|skipped
+    input: Mapped[dict] = mapped_column(JSON, default=dict)
+    output: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str] = mapped_column(Text, default="")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class WorkflowApproval(Base):
+    """工作流人工审批闸门。"""
+
+    __tablename__ = "workflow_approvals"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(ForeignKey("workflow_runs.id"), index=True)
+    task_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    approval_type: Mapped[str] = mapped_column(String(40), default="delivery")
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending|approved|rejected
+    submitted_by: Mapped[str] = mapped_column(String(80), default="")
+    reviewed_by: Mapped[str] = mapped_column(String(80), default="")
+    review_note: Mapped[str] = mapped_column(Text, default="")
+    submitted_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class SectionRevision(Base):
+    """章节正文修订快照。每次有效保存生成一条，revision 与 Section.revision 对齐。"""
+
+    __tablename__ = "section_revisions"
+    __table_args__ = (UniqueConstraint("node_id", "revision"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    node_id: Mapped[str] = mapped_column(ForeignKey("outline_nodes.id"), index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    body: Mapped[str] = mapped_column(Text, default="")
+    body_hash: Mapped[str] = mapped_column(String(64), default="")
+    changed_by: Mapped[str] = mapped_column(String(80), default="")
+    change_type: Mapped[str] = mapped_column(String(20), default="edit")  # edit|restore|generate
+    change_note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class SectionEditLock(Base):
+    """章节编辑锁（与审核锁分离）。lock_token + 有效期，原子获取。"""
+
+    __tablename__ = "section_edit_locks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    node_id: Mapped[str] = mapped_column(ForeignKey("outline_nodes.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    lock_token: Mapped[str] = mapped_column(String(36), default="")
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class ChapterAssignment(Base):
+    """章节责任分配。"""
+
+    __tablename__ = "chapter_assignments"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    node_id: Mapped[str] = mapped_column(ForeignKey("outline_nodes.id"), index=True)
+    assignee_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    assigned_by: Mapped[str] = mapped_column(String(80), default="")
+    status: Mapped[str] = mapped_column(String(20), default="assigned")  # assigned|in_progress|done
+    deadline: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)

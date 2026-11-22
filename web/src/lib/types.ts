@@ -1920,3 +1920,193 @@ export interface SimilarityHit {
   review_status: SimilarityHitStatus
   review_note?: string
 }
+
+// ---------------------------------------------------------------- Agent 编排（第三批）
+
+/** Agent 注册表条目；注册表可扩展，早期后端可能只返回 agent_type / name。 */
+export interface AgentInfo {
+  agent_type: string
+  name: string
+  description?: string
+  role?: string
+  capabilities?: string[]
+  tools?: string[]
+  inputs?: string[]
+  outputs?: string[]
+  enabled?: boolean
+  [key: string]: unknown
+}
+
+export type WorkflowStatus =
+  | 'queued'
+  | 'running'
+  | 'waiting_approval'
+  | 'done'
+  | 'failed'
+  | 'cancelled'
+
+export type WorkflowTaskStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped'
+
+export type WorkflowApprovalStatus = 'pending' | 'approved' | 'rejected'
+
+/** 工作流统计；具体键随执行器实现扩展。 */
+export interface WorkflowStats {
+  tasks?: number
+  total?: number
+  done?: number
+  succeeded?: number
+  failed?: number
+  skipped?: number
+  tokens?: number
+  prompt_tokens?: number
+  completion_tokens?: number
+  cost?: number
+  cost_usd?: number
+  duration_ms?: number
+  [key: string]: unknown
+}
+
+/** 工作流预算；token 上限与实际用量都可能在预算对象里。 */
+export interface WorkflowBudget {
+  tokens?: number
+  cost?: number
+  max_tokens?: number
+  max_cost?: number
+  used_tokens?: number
+  used_cost?: number
+  [key: string]: unknown
+}
+
+export interface WorkflowRun {
+  id: string
+  project_id?: string
+  workflow_type: string
+  status: WorkflowStatus | string
+  goal: string
+  result?: Record<string, unknown> | null
+  stats?: WorkflowStats | null
+  budget?: WorkflowBudget | null
+  created_at?: string | null
+  completed_at?: string | null
+  [key: string]: unknown
+}
+
+export interface WorkflowTask {
+  id: string
+  seq: number
+  task_key: string
+  agent_type: string
+  status: WorkflowTaskStatus | string
+  error?: string
+  attempts?: number
+  started_at?: string | null
+  completed_at?: string | null
+  [key: string]: unknown
+}
+
+export interface WorkflowApproval {
+  id: string
+  approval_type: string
+  status: WorkflowApprovalStatus | string
+  review_note?: string
+  run_id?: string
+  task_id?: string | null
+  submitted_by?: string
+  reviewed_by?: string
+  submitted_at?: string | null
+  reviewed_at?: string | null
+  [key: string]: unknown
+}
+
+export interface WorkflowCreateInput {
+  workflow_type: string
+  goal: string
+  input?: Record<string, unknown>
+  budget?: Record<string, unknown>
+}
+
+export interface WorkflowApprovalReviewInput {
+  decision: 'approve' | 'reject' | string
+  note?: string
+}
+
+// ---------------------------------------------------------------- 协作版本（第三批）
+
+export type SectionChangeType = 'edit' | 'restore' | 'generate'
+
+export type ChapterAssignmentStatus = 'assigned' | 'in_progress' | 'done'
+
+export interface SectionRevision {
+  id: string
+  node_id: string
+  revision: number
+  body_hash?: string
+  changed_by?: string
+  change_type: SectionChangeType | string
+  change_note?: string
+  created_at?: string | null
+  [key: string]: unknown
+}
+
+export interface SectionRevisionDetail extends SectionRevision {
+  body: string
+}
+
+/** 双栏差异中的一行；left 为空表示新增，right 为空表示删除。 */
+export interface RevisionDiffRow {
+  kind: 'equal' | 'add' | 'remove' | 'change'
+  left?: string
+  right?: string
+}
+
+export interface SectionDiff {
+  from?: number | null
+  to?: number | null
+  from_body?: string
+  to_body?: string
+  rows: RevisionDiffRow[]
+  added: number
+  removed: number
+  /** 服务端返回无法结构化的 diff 文本时保留原文，避免丢掉信息。 */
+  text?: string
+}
+
+export interface SectionLock {
+  node_id: string
+  user_id: string
+  lock_token: string
+  expires_at?: string | null
+  display_name?: string
+  username?: string
+  [key: string]: unknown
+}
+
+export interface ChapterAssignment {
+  id: string
+  node_id: string
+  assignee_id: string
+  status: ChapterAssignmentStatus | string
+  deadline?: string | null
+  note?: string
+  assigned_by?: string
+  created_at?: string | null
+  updated_at?: string | null
+  [key: string]: unknown
+}
+
+export interface ChapterAssignmentInput {
+  node_id: string
+  assignee_id: string
+  deadline?: string | null
+  note?: string
+}
+
+export interface ChapterAssignmentUpdateInput {
+  status: string
+  note?: string
+}
+
+export interface RestoreRevisionInput {
+  revision: number
+  note: string
+}

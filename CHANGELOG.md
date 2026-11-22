@@ -2,6 +2,10 @@
 
 按版本倒序。对外口径以 `docs/release-notes/` 下对应文件为准；本文件是仓库内的简明索引。
 
+## v0.26.0 (2026-11-22)
+
+对标易标第三批：AI Agent 编排（注册表/DAG 工作流/编排器/人工审批闸门，复用任务队列与 fencing，审批不占 Job 租约；ModelClient.complete_with_tools）+ 项目协作与版本管理（章节编辑锁、修订历史与 diff/恢复、章节分工）。新增 Alembic `0006_yibiao_batch3`（6 表，downgrade 可执行）。前端新增 Agent 编排 tab 与章节协作入口。后端 1209 passed / 前端 232 tests。
+
 ## v0.25.0 (2026-11-22)
 
 对标易标第二批：企业知识库 2.0（企业/成员、KbDocument 增量索引、企业共享资质/人员/业绩）、商务标自动编制（确定性汇编、approved 报价口径、复用审批链、XLSX/DOCX 导出）、多维查重（文本/结构/语义/图片四维、报告命中落库与复核）。新增 Alembic `0005_yibiao_batch2`（6 表 + 可空列，downgrade 可执行）。前端新增企业/商务/查重三 tab。后端 1178 passed / 前端 224 tests。

@@ -70,6 +70,7 @@ import { Button, IconButton } from '../../components/Button'
 import { EmptyState, ErrorState, ProgressBar, Skeleton } from '../../components/Feedback'
 import { Modal } from '../../components/Modal'
 import { TabHeading } from '../../components/Workbench'
+import { ChapterCollab } from '../../components/ChapterCollab'
 import { useConfirm } from '../../context/useConfirm'
 import { useToast } from '../../context/useToast'
 import { useAuth } from '../../context/useAuth'
@@ -2000,6 +2001,20 @@ export function DraftTab() {
                       ))}
                     </div>
                   </div>
+                )}
+
+                {selectedChapter && (
+                  <ChapterCollab
+                    ref={ref}
+                    nodeId={selectedChapter.id}
+                    heading={selectedChapter.heading}
+                    canWrite={canWrite && !reviewFrozen}
+                    dirty={dirty}
+                    onRestored={() => {
+                      if (selectedChapter) void reloadChapterData(selectedChapter.id)
+                      setUnsaved(false)
+                    }}
+                  />
                 )}
 
                 {activeCitation && (

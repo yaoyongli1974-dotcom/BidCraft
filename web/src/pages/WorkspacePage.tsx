@@ -4,6 +4,7 @@ import { Link, NavLink, Outlet, useLocation, useParams } from 'react-router-dom'
 import {
   ArrowLeft,
   ArrowLeftRight,
+  Bot,
   Building2,
   ChevronRight,
   ClipboardList,
@@ -265,6 +266,11 @@ export function WorkspacePage() {
       icon: FileSearch,
     },
     {
+      to: `${basePath}/agents`,
+      label: 'Agent 编排',
+      icon: Bot,
+    },
+    {
       to: `${basePath}/export`,
       label: '导出',
       icon: Download,
@@ -430,7 +436,7 @@ function WorkspaceSkeleton() {
             </div>
           </div>
           <div className="workspace-tabs">
-            {Array.from({ length: 13 }).map((_, index) => (
+            {Array.from({ length: 14 }).map((_, index) => (
               <Skeleton key={index} width={78} height={18} />
             ))}
           </div>

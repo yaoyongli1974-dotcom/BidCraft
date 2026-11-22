@@ -565,3 +565,36 @@ class CommercialDocUpdate(BaseModel):
 class CommercialReview(BaseModel):
     action: str = "submit"
     note: str = ""
+
+# ---- 对标易标第三批：Agent 编排 + 协作 ----
+class WorkflowCreate(BaseModel):
+    workflow_type: str = "standard"
+    goal: str = ""
+    input: dict = {}
+    budget: dict = {}
+
+
+class WorkflowApprovalReview(BaseModel):
+    decision: str = "approve"
+    note: str = ""
+
+
+class SectionRevisionRestore(BaseModel):
+    revision: int
+    note: str = ""
+
+
+class ChapterAssignmentCreate(BaseModel):
+    node_id: str = Field(min_length=1, max_length=36)
+    assignee_id: str = Field(min_length=1, max_length=36)
+    deadline: str | None = None
+    note: str = ""
+
+
+class ChapterAssignmentUpdate(BaseModel):
+    status: str = "assigned"
+    note: str = ""
+
+
+class SectionLockRenew(BaseModel):
+    lock_token: str = Field(min_length=1, max_length=36)

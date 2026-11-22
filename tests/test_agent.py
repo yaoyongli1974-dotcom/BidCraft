@@ -110,3 +110,48 @@ def test_openai_client_still_uses_chat_completions(monkeypatch):
     assert client.complete([{"role": "user", "content": "hi"}]) == "ok"
     assert calls["url"] == "http://localhost:8000/v1/chat/completions"
     assert calls["payload"]["max_tokens"] > 0
+
+
+def test_complete_with_tools_parses_tool_calls(monkeypatch):
+    """新增的结构化调用解析 tool_calls，且不改变 complete 的字符串契约。"""
+    from bidcraft.generation.agent import ModelClient
+
+    calls = {}
+
+    def fake_post(url, **kwargs):
+        calls["payload"] = kwargs["json"]
+        return SimpleNamespace(
+            status_code=200,
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {"name": "get_project", "arguments": '{"ref": "p1"}'},
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr("bidcraft.generation.agent.httpx.post", fake_post)
+    client = ModelClient(
+        Endpoint(model_base_url="http://x/v1", model_name="m", model_api_key="k")
+    )
+    tools = [{"type": "function", "function": {"name": "get_project"}}]
+    result = client.complete_with_tools([{"role": "user", "content": "go"}], tools)
+    assert calls["payload"]["tools"] == tools
+    assert calls["payload"]["tool_choice"] == "auto"
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].name == "get_project"
+    assert result.finish_reason == "tool_calls"
+    # 原 complete 仍返回字符串（签名不变）
+    assert isinstance(client.complete([{"role": "user", "content": "hi"}]), str)
