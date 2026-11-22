@@ -13,6 +13,11 @@ from __future__ import annotations
 
 import re
 
+from .constraint_check import (
+    constraint_blocked,
+    evaluate_constraints,
+    negation_at,
+)
 from .schemas import CheckResult
 
 # ★ / ▲ 是招标文件里最常见的「实质性条款」标记。
@@ -207,15 +212,30 @@ def type_anchor_patterns(text: str, req_type: str) -> list[str]:
     return [pattern for pattern in patterns if re.search(pattern, text or "")]
 
 
+def _match_is_affirmative(body: str, match: re.Match) -> bool:
+    """锚点/整句命中是否落在肯定句里——「不具备 X」不算「具备 X」。"""
+
+    return not negation_at(body, match.start())
+
+
 def anchor_coverage(text: str, body: str, req_type: str) -> float:
-    """结构化锚点命中率（0–1）；无相关锚点时返回 0，回退到 3-gram 判定。"""
+    """结构化锚点命中率（0–1）；无相关锚点时返回 0，回退到 3-gram 判定。
+
+    否定句里的锚点不算命中：正文写「不具备一级建造师资格」时，「一级建造师」
+    这个锚点即使字面出现，也不是对「须具备一级建造师资格」的响应。
+    """
 
     if not body or req_type == REQ_TYPE_GENERAL:
         return 0.0
     relevant = type_anchor_patterns(text, req_type)
     if not relevant:
         return 0.0
-    hit = sum(1 for pattern in relevant if re.search(pattern, body))
+    hit = 0
+    for pattern in relevant:
+        for match in re.finditer(pattern, body):
+            if _match_is_affirmative(body, match):
+                hit += 1
+                break
     return hit / len(relevant)
 
 
@@ -232,7 +252,9 @@ def _ngrams(text: str, size: int = _NGRAM) -> set[str]:
     return {cleaned[index : index + size] for index in range(len(cleaned) - size + 1)}
 
 
-def coverage_ratio(text: str, body: str, req_type: str = REQ_TYPE_GENERAL) -> float:
+def coverage_ratio(
+    text: str, body: str, req_type: str = REQ_TYPE_GENERAL, check_constraints: bool = True
+) -> float:
     """条款在某一章正文里的覆盖率（0–1）。
 
     基线是 3-gram；对可归类的条款再算结构化锚点命中率，取较高者：
@@ -245,16 +267,28 @@ def coverage_ratio(text: str, body: str, req_type: str = REQ_TYPE_GENERAL) -> fl
     if not body:
         return 0.0
     core = requirement_core(text)
-    if len(core) >= 6 and core in body:
+    core_hit = len(core) >= 6 and core in body
+    if core_hit:
+        # 整句字面包含也可能是反话：「我方不具备一级建造师资格」包含
+        # 「具备一级建造师资格」。否定句里的整句命中不算覆盖。
+        position = body.find(core)
+        if negation_at(body, position):
+            return 0.0
         return 1.0
     grams = _ngrams(core)
     gram_ratio = len(grams & _ngrams(body)) / len(grams) if grams else 0.0
     anchor = anchor_coverage(text, body, req_type)
-    if anchor <= 0:
-        return gram_ratio
+    ratio = gram_ratio
     if anchor >= 0.999:
-        return max(gram_ratio, 0.75)
-    return max(gram_ratio, anchor * 0.6)
+        ratio = max(ratio, 0.75)
+    elif anchor > 0:
+        ratio = max(ratio, anchor * 0.6)
+
+    # 约束否决：即使字面/锚点命中，只要量化约束被违反或有约束未证实，就不算覆盖。
+    # find_covering_section 会对合并正文统一做一次，传 check_constraints=False 避免重复。
+    if ratio > 0 and check_constraints:
+        return 0.0 if constraint_blocked(evaluate_constraints(text, body)) else ratio
+    return ratio
 
 
 def find_covering_section(
@@ -268,21 +302,37 @@ def find_covering_section(
 
     core = requirement_core(text)
     threshold = 0.45 if len(core) >= 8 else 1.0
+
+    # 约束比较针对整份正文（合并各章），而不是单章：复合条款的三条约束
+    # 可能分散在不同章节响应。违反或未证实的约束直接判未覆盖。
+    combined = "\n".join((node.get("body") or "") for node in nodes)
+    verdicts = evaluate_constraints(text, combined)
+    if constraint_blocked(verdicts):
+        return None
+
     best: tuple[float, int, dict] | None = None
+    fallback: tuple[float, int, dict] | None = None
     for order, node in enumerate(nodes):
         body = node.get("body") or ""
         if not body:
             continue
-        ratio = coverage_ratio(text, body, req_type)
-        if ratio < threshold:
-            continue
+        ratio = coverage_ratio(text, body, req_type, check_constraints=False)
         position = node.get("position")
         if not isinstance(position, int):
             position = order
         candidate = (ratio, -position, node)
-        if best is None or candidate[:2] > best[:2]:
+        # 即使单章没到阈值也记一个候选：复合条款的约束满足后，各章可能只响应了
+        # 其中一部分，单章分数上不去；此时选正文最相关的章作为跳转锚点。
+        if fallback is None or candidate[:2] > fallback[:2]:
+            fallback = candidate
+        if ratio >= threshold and (best is None or candidate[:2] > best[:2]):
             best = candidate
-    return best[2] if best else None
+    if best is not None:
+        return best[2]
+    # 只有当确实存在已证实的量化约束时才用锚点兜底，避免泛词误覆盖。
+    if verdicts and all(item.state == "satisfied" for item in verdicts):
+        return fallback[2] if fallback else None
+    return None
 
 
 def is_substantive(requirement) -> bool:
@@ -320,12 +370,20 @@ def requirement_issues(requirements, nodes: list[dict]) -> list[CheckResult]:
         req_type = classify_requirement(text)
         if find_covering_section(text, nodes, req_type):
             continue
+        combined = "\n".join((node.get("body") or "") for node in nodes)
+        verdicts = evaluate_constraints(text, combined)
+        violated = [item for item in verdicts if item.state == "violated"]
+        detail = ""
+        if violated:
+            detail = "（数值/等级/否定语义不符合要求）"
+        elif verdicts:
+            detail = "（部分约束未在正文体现）"
         results.append(
             CheckResult(
                 code=f"SUB-{index:03d}",
                 level="blocking" if marker else "critical",
                 category="实质性响应",
-                message=f"实质性条款未在正文找到明确响应：{text[:60]}",
+                message=f"实质性条款未在正文找到明确响应：{text[:60]}{detail}",
                 location=(getattr(requirement, "source_quote", "") or "")[:255],
                 finding=text[:200],
                 recommendation=(
@@ -337,6 +395,8 @@ def requirement_issues(requirements, nodes: list[dict]) -> list[CheckResult]:
                     "marker": marker,
                     "requirement_type": req_type,
                     "keywords": requirement_keywords(text),
+                    # 逐条约束判定让「哪条没过」直接可见，便于人工复核举证。
+                    "constraints": [item.as_dict() for item in verdicts],
                 },
             )
         )
