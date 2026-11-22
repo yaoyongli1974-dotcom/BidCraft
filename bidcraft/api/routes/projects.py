@@ -140,6 +140,7 @@ from ..shared import (  # noqa: F401
     export_docx,
     export_markdown,
     generate_document,
+    get_outline_cached,
     images,
     jobqueue,
     jobs,
@@ -1648,7 +1649,10 @@ def requirements(ref: str) -> list[dict[str, Any]]:
                 .order_by(Requirement.marker.desc(), Requirement.text)
             )
         )
-        return [_requirement_payload(db, row) for row in rows]
+        # 单请求内项目级预加载大纲：多条条款共享一次 load_outline（T06）。
+        # 缓存按请求创建、按 project_id 隔离，请求结束即失效。
+        outline_cache: dict[str, list[dict]] = {}
+        return [_requirement_payload(db, row, outline_cache=outline_cache) for row in rows]
 
 
 @router.patch("/projects/{ref}/requirements/{req_id}")
@@ -1665,10 +1669,12 @@ def requirement_response_update(
         username = str((current_user() or {}).get("username") or "")
         # 确认时快照「原始自动判定结果」，让人员/时间/原因/判定可被完整追溯。
         snapshot: dict[str, str] = {}
+        # 与返回 payload 共享同一次大纲加载（T06）。
+        outline_cache: dict[str, list[dict]] = {}
         if payload.response_status != "pending":
             from ...verdict import judge as judge_requirement
 
-            current = judge_requirement(requirement, load_outline(db, project.id))
+            current = judge_requirement(requirement, get_outline_cached(db, project.id, outline_cache))
             snapshot = {
                 "state": current.state,
                 "label": current.label,
@@ -1692,7 +1698,7 @@ def requirement_response_update(
             },
         )
         db.flush()
-        return _requirement_payload(db, requirement)
+        return _requirement_payload(db, requirement, outline_cache=outline_cache)
 
 
 @router.patch("/projects/{ref}/issues/{issue_id}")

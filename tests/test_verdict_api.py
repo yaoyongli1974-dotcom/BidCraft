@@ -82,6 +82,38 @@ def _seed(client=None, *, project_id: str, text: str, marker: str, body: str, pa
         return row.id
 
 
+def test_requirements_endpoint_loads_outline_once_per_request(owner, monkeypatch):
+    """T06：GET /requirements 多条条款只加载一次大纲，且请求间缓存隔离。"""
+
+    import importlib
+
+    shared_mod = importlib.import_module("bidcraft.api.shared")
+
+    real_loader = shared_mod.load_outline
+    calls = {"n": 0}
+
+    def _counting_loader(db, project_id):
+        calls["n"] += 1
+        return real_loader(db, project_id)
+
+    monkeypatch.setattr(shared_mod, "load_outline", _counting_loader)
+
+    pid = _project(owner)
+    # 用 _seed 造三条条款（每条都会带一个 OutlineNode + Section）。
+    _seed(project_id=pid, text="★ 带宽不小于1000Mbps", marker="★", body="带宽500Mbps")
+    _seed(project_id=pid, text="▲ 质保5年", marker="▲", body="质保3年")
+    _seed(project_id=pid, text="★ 2小时响应", marker="★", body="4小时响应")
+
+    items = owner.get(f"/projects/{pid}/requirements").json()
+    assert len(items) == 3
+    # 三条条款共享一次大纲加载，而不是三次。
+    assert calls["n"] == 1, calls
+
+    # 再发一次请求（模拟大纲更新后的新请求）→ 重新加载，不使用陈旧缓存。
+    owner.get(f"/projects/{pid}/requirements")
+    assert calls["n"] == 2, calls
+
+
 def test_requirements_payload_exposes_five_layer_fields(owner):
     pid = _project(owner)
     req_id = _seed(

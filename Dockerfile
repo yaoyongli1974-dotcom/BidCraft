@@ -4,7 +4,8 @@
 FROM node:22-slim AS webbuild
 WORKDIR /src
 COPY web ./web
-RUN cd web && (npm ci || npm install) && npm run build
+# 严格按 package-lock.json 安装：锁文件与清单不一致时直接失败，保证构建可重复。
+RUN cd web && npm ci && npm run build
 
 # ---- application ------------------------------------------------------------
 FROM python:3.13-slim

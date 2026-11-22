@@ -106,24 +106,29 @@ def _pg_migration_guard() -> Iterator[None]:
 
     from sqlalchemy import text
 
+    # 咨询锁是 PG 上跨进程/跨主机串行化 schema 变更的**唯一**手段。获取失败
+    # 绝不降级为本地文件锁：文件锁只在单机有效，多实例会各自以为拿到了锁并
+    # 并发跑 Alembic，正是要避免的场景。失败时直接阻止迁移（fail-closed）。
     connection = get_engine().connect()
+    acquired = False
     try:
-        connection.execute(
-            text("SELECT pg_advisory_lock(:key)"), {"key": _PG_MIGRATION_LOCK_KEY}
-        )
-    except Exception:  # noqa: BLE001 - 老版本/受限账号无咨询锁时退回文件锁
-        logger.warning("PostgreSQL 咨询锁不可用，退回文件锁", exc_info=True)
-        connection.close()
-        with _file_migration_guard():
-            yield
-        return
-    try:
+        try:
+            connection.execute(
+                text("SELECT pg_advisory_lock(:key)"), {"key": _PG_MIGRATION_LOCK_KEY}
+            )
+            acquired = True
+        except Exception as exc:  # noqa: BLE001 - 任何获取失败都必须阻止迁移
+            raise RuntimeError(
+                "PostgreSQL 迁移咨询锁获取失败，已阻止本次迁移以避免并发 DDL；"
+                "请检查数据库权限与连通性后重试"
+            ) from exc
         yield
     finally:
         try:
-            connection.execute(
-                text("SELECT pg_advisory_unlock(:key)"), {"key": _PG_MIGRATION_LOCK_KEY}
-            )
+            if acquired:
+                connection.execute(
+                    text("SELECT pg_advisory_unlock(:key)"), {"key": _PG_MIGRATION_LOCK_KEY}
+                )
         finally:
             connection.close()
 

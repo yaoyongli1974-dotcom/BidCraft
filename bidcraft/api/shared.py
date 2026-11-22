@@ -482,7 +482,27 @@ def _issue_tier(level: str) -> str:
     return level if level in {"blocking", "critical", "major"} else "minor"
 
 
-def _requirement_payload(db: Session, requirement: Requirement) -> dict[str, Any]:
+def get_outline_cached(
+    db: Session, project_id: str, cache: dict[str, list[dict]] | None = None
+) -> list[dict]:
+    """取项目大纲正文；``cache`` 是**单请求内**按 project_id 共享的缓存（T06）。
+
+    - 同一请求里读多条 requirement 时只加载一次大纲，消除 N+1；
+    - 缓存以 project_id 为键，天然隔离不同项目数据；
+    - 缓存由调用方按请求创建，请求结束即丢弃，大纲更新后的下一个请求必然
+      重新加载，不存在跨请求的陈旧缓存。不传 cache 时行为与直接调用一致（兼容）。
+    """
+
+    if cache is None:
+        return load_outline(db, project_id)
+    if project_id not in cache:
+        cache[project_id] = load_outline(db, project_id)
+    return cache[project_id]
+
+
+def _requirement_payload(
+    db: Session, requirement: Requirement, outline_cache: dict[str, list[dict]] | None = None
+) -> dict[str, Any]:
     heading = ""
     node_id = requirement.node_id
     if node_id:
@@ -491,9 +511,8 @@ def _requirement_payload(db: Session, requirement: Requirement) -> dict[str, Any
             heading = node.heading or ""
     req_type = classify_requirement(requirement.text or "")
     # 五层判定：用大纲正文实时评估这一条的当前结论（每次读取都反映最新正文）。
-    from ..generation.outline import load_outline
-
-    nodes = load_outline(db, requirement.project_id)
+    # 大纲按请求缓存，避免每条条款都 load_outline（T06）。
+    nodes = get_outline_cached(db, requirement.project_id, outline_cache)
     verdict = judge_requirement(requirement, nodes)
     return {
         "id": requirement.id,
@@ -1272,6 +1291,7 @@ __all__ = [
     'export_markdown',
     'func',
     'generate_document',
+    'get_outline_cached',
     'hash_password',
     'images',
     'init_db',

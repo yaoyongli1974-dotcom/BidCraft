@@ -32,9 +32,11 @@ from dataclasses import dataclass
 _NUM = r"(?:\d+(?:\.\d+)?|[一二三四五六七八九十百]{1,3})"
 # 单位表按「最长优先」排列，保证 MB/s 先于 MB、GHz 先于 Hz 之类不被截断。
 _UNITS = (
-    r"GB/s|MB/s|KB/s|B/s|Gbps|Mbps|Kbps|bps|GHz|MHz|Hz|"
+    # 字节率先于存储：100MB/s 必须整体匹配为 byte_rate，不能被拆成 MB；
+    # 存储容量（无 /s）与字节率是不同的量纲，绝不可互相比较。
+    r"GB/s|MB/s|KB/s|B/s|TB|GB|MB|KB|B|Gbps|Mbps|Kbps|bps|GHz|MHz|Hz|"
     r"kV|kW|mm|cm|米|项|个|份|例|台|套|路|条|家|人|"
-    r"年|月|小时|天|分钟|V|W|%"
+    r"年|月|小时|天|分钟|V|W|A|%"
 )
 _VALUE_RE = re.compile(rf"({_NUM})\s*({_UNITS})?")
 
@@ -157,6 +159,13 @@ _UNIT_DIMENSIONS: dict[str, tuple[str, float]] = {
     "KB/s": ("byte_rate", 1 / 1000),
     "MB/s": ("byte_rate", 1.0),
     "GB/s": ("byte_rate", 1000.0),
+    # 存储容量：基准 B（与带宽/频率/字节率都不同量纲）。
+    # 注意 GB（存储）与 Gbps（带宽）、GB/s（字节率）三者互不可比。
+    "B": ("storage", 1.0),
+    "KB": ("storage", 1000.0),
+    "MB": ("storage", 1_000_000.0),
+    "GB": ("storage", 1_000_000_000.0),
+    "TB": ("storage", 1_000_000_000_000.0),
     # 频率：基准 MHz（与带宽无关）
     "Hz": ("frequency", 1 / 1_000_000),
     "MHz": ("frequency", 1.0),
@@ -212,18 +221,36 @@ def _to_base(value: float, unit: str) -> float:
     return value * info[1] if info else value
 
 
-def _unit_compatible(left: str, right: str) -> bool:
-    """只有**两边单位都明确且量纲一致**才认为可比较。
+# 单位关系的三种结果（T02）：明确可比的「兼容」、跨量纲的「不可兼容」、
+# 单位缺失/无法识别的「未知」。调用方据此决定：只有 compatible 才做数值比较；
+# incompatible / unknown 都转人工复核，且都不计入「不满足」硬伤。
+UNIT_COMPATIBLE = "compatible"
+UNIT_INCOMPATIBLE = "incompatible"
+UNIT_UNKNOWN = "unknown"
 
-    任一侧缺失 → False：正文里裸写的「500」可能是 500 台设备、500MHz 处理器，
-    不能因为约束单位是 Mbps 就把它当成 500Mbps。单位不明确交给调用方转人工复核。
+
+def unit_relation(left: str, right: str) -> str:
+    """返回两个单位的量纲关系：compatible / incompatible / unknown。
+
+    - 任一侧单位缺失或未登记 → ``unknown``（裸写的「500」可能是台/处理器/带宽）；
+    - 两边都登记但量纲不同 → ``incompatible``（Mbps vs MB/s、GB vs GHz 等）；
+    - 两边都登记且量纲一致 → ``compatible``，此时才允许数值比较与换算。
     """
 
     left_info = _unit_info(left)
     right_info = _unit_info(right)
     if left_info is None or right_info is None:
-        return False
-    return left_info[0] == right_info[0]
+        return UNIT_UNKNOWN
+    return UNIT_COMPATIBLE if left_info[0] == right_info[0] else UNIT_INCOMPATIBLE
+
+
+def _unit_compatible(left: str, right: str) -> bool:
+    """兼容性的布尔视图：只有 ``unit_relation == compatible`` 才为 True。
+
+    保留此函数供既有调用方使用；三态判断请用 :func:`unit_relation`。
+    """
+
+    return unit_relation(left, right) == UNIT_COMPATIBLE
 
 
 @dataclass(frozen=True)
@@ -351,53 +378,91 @@ def _family_matches(constraint: Constraint, clause: str) -> bool:
     return any(keyword in clause for keyword in keywords)
 
 
+def _association_score(clause: str, pos: int, family: str) -> int:
+    """候选数值与约束主体（指标名 / 对象名）的上下文关联强度。
+
+    T04：不能只取第一个数值，也不能简单取最大值。一个候选若与约束讲的是同一
+    件事（同一主体词族出现在它附近的上下文窗口里），关联更强。用这个分数在
+    多个候选中做归因，而不是靠顺序或数值大小。
+    """
+
+    keywords = FAMILY_KEYWORDS.get(family, ())
+    if not keywords:
+        return 0
+    lo, hi = max(0, pos - 16), min(len(clause), pos + 16)
+    window = clause[lo:hi]
+    return sum(1 for keyword in keywords if keyword in window)
+
+
 def _evaluate_one(constraint: Constraint, clauses: list[str]) -> ConstraintVerdict:
+    """把一条约束拿到正文各子句里核对，综合全部候选后给出判定。
+
+    T04 候选关联流程：
+    1. 只在主体词族匹配的子句里找值（避免「500 台设备」答「1000Mbps 带宽」）；
+    2. 收集**所有**同量纲候选，各自比较得出 satisfied/violated，并算主体关联分；
+    3. 结论一致 → 采纳；结论冲突 → 取关联分更高的一组；仍冲突 → ``unclear`` 转人工；
+    4. 数值缺失 / 跨量纲 → 收集为歧义，转人工复核，绝不套用约束单位去比较。
+    """
+
     ambiguous: list[str] = []
+    # 每个候选：(state, 原文子句, 关联分, 是否被否定)
+    candidates: list[tuple[str, str, int, bool]] = []
+
     for clause in clauses:
         if not _family_matches(constraint, clause):
             continue
 
         if constraint.kind == "grade":
-            hit = _GRADE_RE.search(clause)
-            if hit is None:
-                continue
-            grade = hit.group()
-            rank = _grade_rank(grade)
-            if rank is None or rank[1] != _grade_rank(constraint.grade)[1]:
-                continue  # 不同量纲（甲级 vs 一级）无法比较，跳过
-            if negation_before(clause, hit.start()):
-                return ConstraintVerdict(constraint, "violated", clause.strip())
-            state = "satisfied" if rank[0] <= int(constraint.threshold) else "violated"
-            return ConstraintVerdict(constraint, state, clause.strip())
+            for hit in _GRADE_RE.finditer(clause):
+                grade = hit.group()
+                rank = _grade_rank(grade)
+                if rank is None or rank[1] != _grade_rank(constraint.grade)[1]:
+                    continue  # 不同量纲（甲级 vs 一级）无法比较，跳过
+                negated = negation_before(clause, hit.start())
+                state = "satisfied" if rank[0] <= int(constraint.threshold) else "violated"
+                candidates.append(
+                    (state, clause.strip(), _association_score(clause, hit.start(), constraint.family), negated)
+                )
+            continue
 
-        # 数值：只拿与约束**量纲一致**的值做比较（单位缺失 / 跨量纲一律不比）。
         # 「近三年」是时间窗描述，不当作业绩数量——先剔除，再按量纲筛。
         hits = list(_VALUE_RE.finditer(clause))
         usable = [hit for hit in hits if not (hit.start() > 0 and clause[hit.start() - 1] == "近")]
-        compatible = [
-            hit for hit in usable if _unit_compatible(hit.group(2) or "", constraint.unit)
-        ]
-        for hit in compatible:
-            value = _cn_number(hit.group(1))
-            if value is None:
-                continue
-            if negation_before(clause, hit.start()):
-                return ConstraintVerdict(constraint, "violated", clause.strip())
-            base = _to_base(float(value), hit.group(2) or "")
-            threshold = _to_base(constraint.threshold, constraint.unit)
-            ok = base >= threshold if constraint.comparator == ">=" else base <= threshold
-            return ConstraintVerdict(constraint, "satisfied" if ok else "violated", clause.strip())
-
-        # 正文有数值，但单位缺失或与约束不同量纲：不足以判定，记下来转人工复核。
-        # 关键：这些值绝不拿来和约束阈值比较（避免「500台设备」被当成 500Mbps）。
         for hit in usable:
             value = _cn_number(hit.group(1))
             if value is None:
                 continue
-            ambiguous.append(f"{value}{hit.group(2) or '（无单位）'}")
+            relation = unit_relation(hit.group(2) or "", constraint.unit)
+            if relation != UNIT_COMPATIBLE:
+                # 单位缺失（unknown）或跨量纲（incompatible）都不足以比较。
+                ambiguous.append(f"{value}{hit.group(2) or '（无单位）'}")
+                continue
+            negated = negation_before(clause, hit.start())
+            base = _to_base(float(value), hit.group(2) or "")
+            threshold = _to_base(constraint.threshold, constraint.unit)
+            ok = base >= threshold if constraint.comparator == ">=" else base <= threshold
+            state = "satisfied" if ok else "violated"
+            candidates.append(
+                (state, clause.strip(), _association_score(clause, hit.start(), constraint.family), negated)
+            )
+
+    if candidates:
+        # 否定优先：任一候选被明确否定，按「否定语义」原则判违反（保守）。
+        if any(item[3] for item in candidates):
+            return ConstraintVerdict(constraint, "violated", next(c[1] for c in candidates if c[3]))
+        states = {item[0] for item in candidates}
+        if len(states) == 1:
+            return ConstraintVerdict(constraint, candidates[0][0], candidates[0][1])
+        # 结论冲突：用主体关联分归因。分高的一组若结论一致则采纳，否则转人工。
+        best_score = max(item[2] for item in candidates)
+        top_states = {item[0] for item in candidates if item[2] == best_score}
+        if len(top_states) == 1:
+            chosen = next(item for item in candidates if item[2] == best_score)
+            return ConstraintVerdict(constraint, chosen[0], chosen[1])
+        detail = "；".join(f"{item[0]}:{item[1]}" for item in candidates[:3])
+        return ConstraintVerdict(constraint, "unclear", f"多个候选数值与约束关联不明确：{detail}")
 
     if ambiguous:
-        # 兼容的数值已在上面 return；走到这里说明没有任何可比数值，只有歧义项。
         return ConstraintVerdict(
             constraint, "unclear", f"数值单位缺失或与约束量纲不同：{'、'.join(ambiguous[:3])}"
         )

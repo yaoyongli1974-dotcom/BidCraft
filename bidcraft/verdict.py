@@ -41,6 +41,7 @@ from .constraint_check import (
     ConstraintVerdict,
     _cn_number,
     evaluate_constraints,
+    extract_constraints,
 )
 from .substantive import (
     REQ_TYPE_GENERAL,
@@ -126,16 +127,64 @@ class Structure:
         }
 
 
+# 复合条款的连接/转折词：出现它们说明子句之间可能相互限定，机械切分有歧义。
+_ATOM_CONNECTORS = re.compile(r"(?:并|且|同时|以及|其中|但|但须|还须|另外|须同时|均应)")
+# 原子归属用的主体词，辅助判断一个子句属于哪类约束。
+_ATOM_SUBJECT_HINTS = {
+    "资质": ("资质", "资格", "证书", "建造师", "等级", "认证"),
+    "业绩": ("业绩", "案例", "项目", "合同", "中标"),
+    "响应": ("响应", "到场", "到达", "回复", "服务"),
+    "质保": ("质保", "保修", "质量保证", "免费"),
+    "带宽": ("带宽", "速率", "吞吐", "传输", "容量", "存储"),
+    "时间窗": ("近", "最近", "过去", "年", "月"),
+}
+
+
+def _atom_subjects(text: str) -> list[str]:
+    return [name for name, hints in _ATOM_SUBJECT_HINTS.items() if any(h in text for h in hints)]
+
+
 def split_atoms(text: str) -> list[dict]:
-    """L2：把复合条款拆成原子要求（按子句切，保留序号与原文）。"""
+    """L2：把复合条款拆成原子要求。
+
+    不再是「见到标点就切」的机械拆分（T03）：
+    - 保留每个原子对应的**原始子句**与稳定编号（``atom_id`` / ``index``）；
+    - 为每个原子标注它归属的约束主体（``subjects``）与该子句命中的约束标签
+      （``constraints``），保留「原条款 ↔ 原子要求」的映射；
+    - 含转折/并列连接词或跨子句共享主语时打 ``ambiguous`` 标记：这类拆分
+      可能有歧义，上层可据此转人工复核，而不是武断地按单原子判定。
+    """
 
     atoms: list[dict] = []
-    for index, raw in enumerate(_CLAUSE_SPLIT.split(text or ""), start=1):
+    raw_clauses = [raw for raw in _CLAUSE_SPLIT.split(text or "") if raw.strip()]
+    for index, raw in enumerate(raw_clauses, start=1):
         atom = _LEAD_RE.sub("", raw).strip()
         if len(atom) < 4:
             continue
-        atoms.append({"index": index, "text": atom})
+        constraints = [item.label for item in extract_constraints(atom)]
+        atoms.append(
+            {
+                "index": index,
+                "atom_id": f"A{index:02d}",
+                "text": atom,
+                "raw": raw.strip(),
+                "subjects": _atom_subjects(atom),
+                "constraints": constraints,
+                # 连接词说明子句可能相互限定；无可执行约束的片段也视为拆分存疑。
+                "ambiguous": bool(_ATOM_CONNECTORS.search(atom)) or not constraints,
+            }
+        )
     return atoms
+
+
+def atom_split_is_ambiguous(atoms: list[dict]) -> bool:
+    """拆分是否存在歧义（供上层转人工复核）。
+
+    复合条款里只要有原子带连接词、或某原子未能抽出任何可执行约束，就认为这次
+    拆分不够可靠——交给人工确认，而不是凭机械切分自动下结论。
+    """
+
+    return len(atoms) > 1 and any(atom.get("ambiguous") for atom in atoms)
 
 
 def extract_time_windows(text: str) -> list[dict]:
@@ -150,24 +199,64 @@ def extract_time_windows(text: str) -> list[dict]:
     return windows
 
 
+# 业绩/完成日期的关联词（T05）：时间窗必须和业绩对象、完成日期放一起评估，
+# 不能因为正文某处出现一个更短的时间窗就认定「全部业绩不足」。
+_DATE_RE = re.compile(r"(?:20\d{2}|19\d{2})\s*[年\-/\.]\s*\d{1,2}\s*月?")
+_ACHIEVEMENT_RE = re.compile(r"业绩|案例|同类项目|类似项目|相近项目|合同|中标")
+
+
 def _time_window_signals(req_windows: list[dict], body: str) -> list[dict]:
-    """正文时间窗短于要求时记一条 review 信号；长于/相等不算问题。"""
+    """时间窗 × 业绩对象 × 完成日期 的关联审阅信号（T05）。
+
+    规则（保守，只产 review 信号，绝不升级成 violated）：
+    - 只有「较短时间窗」与业绩对象出现在**同一子句**时才记信号——避免正文里
+      一个无关的短窗（如「近一年完成培训」）误伤另一处的业绩响应；
+    - 同一子句里带有明确完成日期（如「2023年5月」）时，日期是更可靠的锚点，
+      时间窗偏短仅作提示，不强判业绩不足；
+    - 要求含时间窗，但正文里带业绩对象的子句**没有任何日期或时间窗** → 记一条
+      「缺少完成日期」的信号，转人工复核（无法计算业绩是否满足时间范围）。
+    """
 
     signals: list[dict] = []
-    body_windows = extract_time_windows(body)
+    clauses = [c.strip() for c in _CLAUSE_SPLIT.split(body or "") if c.strip()]
+    achievement_clauses = [c for c in clauses if _ACHIEVEMENT_RE.search(c)]
+
     for req in req_windows:
         months_req = req["years"] * (12 if req["unit"] == "年" else 1)
-        for got in body_windows:
+        window_hits: list[dict] = []
+        dated = False
+        for clause in achievement_clauses:
+            if _DATE_RE.search(clause):
+                dated = True
+            for got in extract_time_windows(clause):
+                window_hits.append({"required": req["raw"], "found": got["raw"], "clause": clause})
+
+        if not window_hits and not dated and achievement_clauses:
+            signals.append(
+                {
+                    "required": req["raw"],
+                    "found": "",
+                    "note": "业绩未注明完成日期或时间范围，无法核对，转人工复核",
+                }
+            )
+            continue
+
+        for hit in window_hits:
+            got = extract_time_windows(hit["clause"])[0]
             months_got = got["years"] * (12 if got["unit"] == "年" else 1)
             if months_got < months_req:
                 signals.append(
                     {
                         "required": req["raw"],
                         "found": got["raw"],
-                        "note": "正文时间范围短于招标要求，建议人工确认",
+                        "note": (
+                            "业绩时间窗短于要求但有明确完成日期，仅提示核对"
+                            if dated
+                            else "业绩时间范围短于招标要求，建议人工确认"
+                        ),
                     }
                 )
-                break
+                break  # 同一要求只记一条，避免长文里多处业绩重复报
     return signals
 
 

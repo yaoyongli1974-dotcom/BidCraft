@@ -13,10 +13,14 @@ from __future__ import annotations
 import pytest
 
 from bidcraft.constraint_check import (
+    UNIT_COMPATIBLE,
+    UNIT_INCOMPATIBLE,
+    UNIT_UNKNOWN,
     constraint_blocked,
     evaluate_constraints,
     extract_constraints,
     unit_dimension,
+    unit_relation,
 )
 from bidcraft.substantive import find_covering_section
 
@@ -138,6 +142,53 @@ def test_mbps_and_gbps_convert_within_same_dimension():
 
     assert _blocked("传输带宽不小于1000Mbps", "链路带宽1Gbps") is False
     assert all(item[1] != "unclear" for item in _states("传输带宽不小于1000Mbps", "链路带宽1Gbps"))
+
+
+# -------------------------------------------------- T02：单位三态 + 存储量纲
+
+
+def test_unit_relation_three_states():
+    """T02：兼容 / 不可兼容 / 未知三态，缺单位默认 unknown 而非兼容。"""
+
+    assert unit_relation("Mbps", "Gbps") == UNIT_COMPATIBLE
+    assert unit_relation("Mbps", "MHz") == UNIT_INCOMPATIBLE
+    assert unit_relation("Mbps", "") == UNIT_UNKNOWN
+    assert unit_relation("", "Mbps") == UNIT_UNKNOWN
+    assert unit_relation("GB", "Gbps") == UNIT_INCOMPATIBLE  # 存储 vs 带宽
+    assert unit_relation("GB", "TB") == UNIT_COMPATIBLE  # 同为存储
+    assert unit_dimension("GB") == "storage"
+    assert unit_dimension("GB/s") == "byte_rate"
+
+
+def test_storage_capacity_units_do_not_cross_compare():
+    """存储容量（500GB）与带宽（1000Mbps）不可比 → unclear，不判违反。"""
+
+    states = _states("存储容量不小于1000GB", "设备配备500GB硬盘")
+    assert any(item[1] == "unclear" for item in states), states
+    assert _blocked("存储容量不小于1000GB", "设备配备500GB硬盘") is False
+    # 同为存储容量，归一后可比（1000GB = 1TB）。
+    assert _blocked("存储容量不小于1000GB", "设备配备1TB硬盘") is False
+
+
+# -------------------------------------------------- T04：多候选数值关联
+
+
+def test_multiple_candidates_use_subject_association_not_first_or_max():
+    """T04：多候选场景不能取第一个也不能取最大值，按主体关联归因；冲突转 unclear。"""
+
+    # 两个候选都是带宽量纲、结论一致（都满足）→ 采纳满足。
+    states_ok = _states("带宽不小于100Mbps", "链路带宽1000Mbps，备份带宽200Mbps")
+    assert all(item[1] != "violated" for item in states_ok), states_ok
+
+    # 两个候选结论冲突（满足 vs 违反），且主体关联分相同（都含「带宽」）→ 转 unclear。
+    conflict_clause = "带宽1000Mbps；带宽50Mbps"
+    text = "带宽不小于500Mbps"
+    conflict = _states(text, conflict_clause)
+    assert any(item[1] == "unclear" for item in conflict), conflict
+    # unclear 不是硬伤，但也不能自动放行 → find_covering_section 不覆盖。
+    from bidcraft.substantive import find_covering_section
+
+    assert find_covering_section(text, [{"id": "n1", "position": 1, "body": conflict_clause}]) is None
 
 
 def test_unclear_routes_to_review_via_judge():

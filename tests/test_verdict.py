@@ -183,3 +183,62 @@ def test_matcher_is_pluggable_without_affecting_constraints():
     assert verdict.state == UNSATISFIED
     assert verdict.evidence["layer4"]["matcher"] == "PerfectMatcher"
     assert isinstance(RuleSemanticMatcher().coverage("abc", "abc"), float)
+
+
+# ------------------------------------------------------------ T03：原子拆分
+def test_split_atoms_preserves_mapping_and_flags_ambiguity():
+    """T03：原子保留原始子句/编号/归属，连接词子句标歧义。"""
+
+    from bidcraft.verdict import atom_split_is_ambiguous
+
+    atoms = split_atoms("投标人须具有一级资质，近三年3项业绩，并提供2小时响应。")
+    assert len(atoms) >= 3
+    for atom in atoms:
+        assert {"index", "atom_id", "text", "raw", "subjects", "constraints", "ambiguous"} <= set(atom)
+        assert atom["atom_id"].startswith("A")
+        assert atom["raw"]  # 映射回原文子句
+    # 含「并」的子句应被标为歧义（拆分可能相互限定）。
+    assert any(atom["ambiguous"] for atom in atoms)
+    assert atom_split_is_ambiguous(atoms) is True
+    # 业绩原子的归属里应能识别出业绩主体。
+    achievement = next(a for a in atoms if "业绩" in a["text"])
+    assert "业绩" in achievement["subjects"]
+
+
+def test_single_clean_atom_is_not_ambiguous():
+    from bidcraft.verdict import atom_split_is_ambiguous
+
+    atoms = split_atoms("传输带宽不小于1000Mbps")
+    assert len(atoms) == 1
+    assert atom_split_is_ambiguous(atoms) is False
+
+
+# ------------------------------------------------------------ T05：时间窗关联
+def test_time_window_signals_associate_with_achievement_object():
+    """T05：短窗只在与业绩对象同子句时报，缺日期转人工复核。"""
+
+    from bidcraft.verdict import _time_window_signals, extract_time_windows
+
+    req = extract_time_windows("近三年类似项目业绩")
+    # 无关短窗（培训）不该触发；业绩子句有明确完成日期 → 仅提示。
+    noisy = "近一年完成内部培训。近三年类似项目业绩：2023年5月竣工项目A。"
+    signals = _time_window_signals(req, noisy)
+    assert all("培训" not in item.get("found", "") for item in signals)
+
+    # 业绩子句无任何日期/时间窗 → 转人工复核信号。
+    no_date = "我方提供了类似项目业绩若干。"
+    signals2 = _time_window_signals(req, no_date)
+    assert signals2 and any("人工" in item["note"] for item in signals2)
+
+
+def test_multiple_achievements_one_short_window_not_blanket_reject():
+    """T05：一处时间窗偏短不应把另一处完整业绩一并否定（仍只产 review 信号）。"""
+
+    from bidcraft.verdict import _time_window_signals, extract_time_windows
+
+    req = extract_time_windows("近三年类似项目业绩不少于3项")
+    body = "近五年完成6项同类业绩。另有近一年完成的1项类似项目。"
+    signals = _time_window_signals(req, body)
+    # 即使有短窗，也只产生有限提示，不改变 satisfied 判定口径。
+    assert isinstance(signals, list)
+    assert all(item["note"] for item in signals)
