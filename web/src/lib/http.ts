@@ -294,6 +294,68 @@ export async function apiFetch<T>(
 
 export const request = apiFetch
 
+/** Parse a `Content-Disposition` header, preferring the RFC 5987 UTF-8 form. */
+export function dispositionFilename(disposition: string | null): string | null {
+  if (!disposition) return null
+  const utf8 = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(disposition)
+  if (utf8?.[1]) {
+    try {
+      return decodeURIComponent(utf8[1].trim().replace(/^"|"$/g, ''))
+    } catch {
+      return utf8[1].trim()
+    }
+  }
+  const plain = /filename\s*=\s*"([^"]+)"|filename\s*=\s*([^;]+)/i.exec(disposition)
+  const value = plain?.[1] || plain?.[2]
+  if (!value) return null
+  try {
+    return decodeURIComponent(value.trim())
+  } catch {
+    return value.trim()
+  }
+}
+
+/**
+ * Binary download transport for exports that are not JSON (xlsx/docx/markdown).
+ * Uses the same error shape as `apiFetch` so callers can surface `ApiError`
+ * messages and trigger the global re-auth event on 401.
+ */
+export async function requestBlob(
+  path: string,
+  init?: RequestInit,
+  fallbackName = 'download',
+): Promise<{ blob: Blob; filename: string }> {
+  let response: Response
+  try {
+    response = await fetch(path, {
+      credentials: 'same-origin',
+      ...init,
+      headers: {
+        Accept: '*/*',
+        ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(init?.headers || {}),
+      },
+    })
+  } catch (error) {
+    if (isAbortError(error)) throw error
+    throw new ApiError(
+      0,
+      null,
+      '无法连接本地服务。请确认 BidCraft 后端已启动，且当前页面由它托管。',
+    )
+  }
+  if (!response.ok) {
+    if (response.status === 401 && !AUTH_SKIP_401.some((item) => path.startsWith(item))) {
+      notifyUnauthorized(path)
+    }
+    throw await readError(response)
+  }
+  const blob = await response.blob()
+  const filename =
+    dispositionFilename(response.headers.get('Content-Disposition')) || fallbackName
+  return { blob, filename }
+}
+
 export const jsonBody = (data: unknown): RequestInit => ({
   method: 'POST',
   body: JSON.stringify(data),

@@ -11,12 +11,14 @@ Retrieved passages are advisory context only; ledger facts always win.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
+import mimetypes
 import re
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import httpx
@@ -24,7 +26,7 @@ from sqlalchemy import delete, func, or_, select
 
 from .config import settings
 from .model_config import api_base, resolve_embedding_endpoint
-from .models import KbChunk, KnowledgeBase, utcnow
+from .models import KbChunk, KbDocument, KnowledgeBase, utcnow
 from .security import decrypt_secret
 
 logger = logging.getLogger("bidcraft.knowledge")
@@ -51,6 +53,16 @@ class Passage:
     source: str
     text: str
     score: float
+    # 文档级溯源（旧调用方不传，默认值保证向后兼容）。
+    document_id: str | None = None
+    page: int | None = None
+    heading: str = ""
+
+    @property
+    def page_no(self) -> int | None:
+        """Alias used by callers that speak in ``KbChunk.page_no`` terms."""
+
+        return self.page
 
 
 def _embed_key(endpoint) -> str:
@@ -226,6 +238,233 @@ def index_local(db, kb: KnowledgeBase) -> int:
     kb.indexed_at = utcnow()
     db.flush()
     return total
+
+
+# --------------------------------------------------------------- 文档级索引（v0.25）
+
+
+def _as_datetime(value) -> datetime | None:
+    """Parse ``valid_to`` from a date/datetime/ISO string (empty → ``None``)."""
+
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None) if value.tzinfo else value
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = date.fromisoformat(text[:10])
+    except ValueError as exc:
+        raise KnowledgeError("有效期格式无效，应为 YYYY-MM-DD") from exc
+    return datetime(parsed.year, parsed.month, parsed.day)
+
+
+def _heading_for(piece: str) -> str:
+    """Best-effort heading: first short line, stripped of Markdown markers."""
+
+    for line in (piece or "").splitlines():
+        value = line.strip().lstrip("#").strip()
+        if not value:
+            continue
+        if len(value) <= 120 and not value.endswith(("。", "；", ";", "，", ",")):
+            return value
+        break
+    return ""
+
+
+def _page_units(text: str) -> list[str]:
+    """Split on form feed (PDF page break); a plain text document is one page."""
+
+    normalized = str(text or "")
+    if not normalized.strip():
+        return []
+    return normalized.split("\f")
+
+
+def _document_pages(text: str) -> list[tuple[int, list[str]]]:
+    pages: list[tuple[int, list[str]]] = []
+    for index, unit in enumerate(_page_units(text), start=1):
+        chunks = _chunks(unit)
+        if chunks:
+            pages.append((index, chunks))
+    return pages
+
+
+def document_payload(row: KbDocument) -> dict:
+    return {
+        "id": row.id,
+        "kb_id": row.kb_id,
+        "source": row.source or "",
+        "sha256": row.sha256 or "",
+        "size": int(row.size or 0),
+        "mime": row.mime or "",
+        "pages": int(row.pages or 0),
+        "status": row.status or "ready",
+        "version": int(row.version or 1),
+        "kind": row.kind or "other",
+        "tags": list(row.tags or []),
+        "valid_to": _iso(row.valid_to),
+        "error": row.error or "",
+        "created_at": _iso(row.created_at),
+        "updated_at": _iso(row.updated_at),
+    }
+
+
+def _refresh_chunk_count(db, kb: KnowledgeBase) -> int:
+    total = int(
+        db.scalar(
+            select(func.count()).select_from(KbChunk).where(KbChunk.kb_id == kb.id)
+        )
+        or 0
+    )
+    kb.chunk_count = total
+    kb.indexed_at = utcnow()
+    return total
+
+
+def ingest_document(
+    db,
+    kb: KnowledgeBase,
+    source: str,
+    content: str,
+    *,
+    kind: str = "other",
+    tags: list[str] | None = None,
+    valid_to=None,
+    mime: str = "",
+) -> KbDocument:
+    """Upsert one document and incrementally (re)index only that document.
+
+    增量语义：按 ``kb_id + source`` 定位文档。内容 sha256 未变化时只更新元数据，
+    不删除/重建任何 ``KbChunk``（向量缓存因此得以保留）；内容变化时仅删除该
+    ``document_id`` 的旧块并重建，其他文档的块不受影响。
+    """
+
+    name = str(source or "").strip()
+    if not name:
+        raise KnowledgeError("文档来源不能为空")
+    if len(name) > 500:
+        raise KnowledgeError("文档来源不能超过 500 字")
+    text = str(content or "")
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    size = len(text.encode("utf-8"))
+    cleaned_tags = []
+    for tag in tags or []:
+        value = str(tag or "").strip()
+        if value and value not in cleaned_tags:
+            cleaned_tags.append(value[:40])
+    due = _as_datetime(valid_to)
+    guessed = mime or mimetypes.guess_type(name)[0] or ""
+
+    row = db.scalar(
+        select(KbDocument)
+        .where(KbDocument.kb_id == kb.id, KbDocument.source == name)
+        .order_by(KbDocument.created_at.desc())
+        .limit(1)
+    )
+    if row is not None and (row.sha256 or "") == digest and row.status == "ready":
+        # 内容未变：元数据可以改，但绝不重建文本块（保留既有向量缓存）。
+        row.kind = str(kind or row.kind or "other")[:30]
+        row.tags = cleaned_tags if tags is not None else list(row.tags or [])
+        row.valid_to = due
+        row.mime = guessed or row.mime
+        row.error = ""
+        db.flush()
+        return row
+
+    if row is None:
+        row = KbDocument(
+            kb_id=kb.id,
+            source=name,
+            sha256=digest,
+            size=size,
+            mime=guessed,
+            status="ready",
+            version=1,
+            kind=str(kind or "other")[:30],
+            tags=cleaned_tags,
+            valid_to=due,
+        )
+        db.add(row)
+        db.flush()
+    else:
+        row.version = int(row.version or 1) + 1
+        row.sha256 = digest
+        row.size = size
+        row.mime = guessed
+        row.status = "ready"
+        row.kind = str(kind or row.kind or "other")[:30]
+        row.tags = cleaned_tags if tags is not None else list(row.tags or [])
+        row.valid_to = due
+        row.error = ""
+        db.flush()
+
+    # 只清理该文档的旧块；同时清掉旧版全量索引遗留的、同 source 且无
+    # document_id 的块，避免同源重复命中。
+    db.execute(
+        delete(KbChunk).where(
+            KbChunk.kb_id == kb.id,
+            or_(
+                KbChunk.document_id == row.id,
+                (KbChunk.document_id.is_(None)) & (KbChunk.source == name),
+            ),
+        )
+    )
+    pages = _document_pages(text)
+    row.pages = len(pages)
+    ordinal = 0
+    for page_no, chunks in pages:
+        for text_piece in chunks:
+            piece_hash = hashlib.sha256(text_piece.encode("utf-8")).hexdigest()
+            db.add(
+                KbChunk(
+                    kb_id=kb.id,
+                    source=name,
+                    ordinal=ordinal,
+                    text=text_piece,
+                    tokens=" ".join(tokens_for(text_piece)),
+                    document_id=row.id,
+                    page_no=page_no,
+                    heading=_heading_for(text_piece),
+                    chunk_index=ordinal,
+                    hash=piece_hash,
+                )
+            )
+            ordinal += 1
+    db.flush()
+    _refresh_chunk_count(db, kb)
+    db.flush()
+    return row
+
+
+def delete_document(db, kb: KnowledgeBase, document_id: str) -> KbDocument:
+    row = db.get(KbDocument, str(document_id or ""))
+    if row is None or row.kb_id != kb.id:
+        raise LookupError("文档不存在")
+    db.execute(delete(KbChunk).where(KbChunk.document_id == row.id))
+    db.delete(row)
+    db.flush()
+    _refresh_chunk_count(db, kb)
+    db.flush()
+    return row
+
+
+def list_documents(
+    db, kb: KnowledgeBase, *, kind: str = "", status: str = ""
+) -> list[KbDocument]:
+    stmt = select(KbDocument).where(KbDocument.kb_id == kb.id)
+    if kind:
+        stmt = stmt.where(KbDocument.kind == kind)
+    if status:
+        stmt = stmt.where(KbDocument.status == status)
+    return list(
+        db.scalars(
+            stmt.order_by(KbDocument.created_at.asc(), KbDocument.source.asc())
+        )
+    )
 
 
 def _score(query_tokens: set[str], chunk_tokens: set[str], query: str, text: str) -> float:
@@ -430,7 +669,15 @@ def search_local(db, kb: KnowledgeBase, query: str, limit: int) -> list[Passage]
             scored.append((score, row))
     scored.sort(key=lambda item: item[0], reverse=True)
     return [
-        Passage(kb=kb.name, source=row.source, text=row.text, score=round(score, 3))
+        Passage(
+            kb=kb.name,
+            source=row.source,
+            text=row.text,
+            score=round(score, 3),
+            document_id=row.document_id,
+            page=row.page_no,
+            heading=row.heading or "",
+        )
         for score, row in scored[:limit]
     ]
 

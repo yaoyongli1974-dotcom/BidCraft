@@ -399,6 +399,9 @@ def create_app():
             "/billing/",
             "/account/",
             "/my/",
+            "/enterprise",
+            "/commercial",
+            "/similarity",
         )
         if not path.startswith(api_prefixes):
             return await call_next(request)
@@ -467,6 +470,12 @@ def create_app():
         billing as _routes_billing,
     )
     from .routes import (
+        commercial as _routes_commercial,
+    )
+    from .routes import (
+        enterprise as _routes_enterprise,
+    )
+    from .routes import (
         health as _routes_health,
     )
     from .routes import (
@@ -484,6 +493,9 @@ def create_app():
     from .routes import (
         projects as _routes_projects,
     )
+    from .routes import (
+        similarity as _routes_similarity,
+    )
     app.include_router(_routes_auth.router)
     app.include_router(_routes_billing.router)
     app.include_router(_routes_account.router)
@@ -496,6 +508,9 @@ def create_app():
     app.include_router(_routes_batch_jobs.router)
     app.include_router(_routes_legal.router)
     app.include_router(_routes_approvals.router)
+    app.include_router(_routes_enterprise.router)
+    app.include_router(_routes_commercial.router)
+    app.include_router(_routes_similarity.router)
 
 
 

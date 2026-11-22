@@ -12,7 +12,7 @@ import mimetypes
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from . import clock
 from .config import settings
@@ -190,6 +190,18 @@ def qualification_payload(row: Qualification, *, today: date | None = None) -> d
 payload = qualification_payload
 
 
+def enterprise_qualification_payload(
+    row: Qualification, *, today: date | None = None
+) -> dict:
+    """企业视图：在既有 payload 上补共享标记，不改动 ``qualification_payload``。"""
+
+    return {
+        **qualification_payload(row, today=today),
+        "enterprise_id": row.enterprise_id or None,
+        "shared": bool(row.enterprise_id),
+    }
+
+
 def _check_kind(kind: str) -> str:
     value = str(kind or "").strip()
     if value not in KINDS:
@@ -205,10 +217,18 @@ def _check_text(value, label: str, limit: int) -> str:
 
 
 def list_qualifications(
-    db, user, *, kind: str = "", status: str = ""
+    db, user, *, kind: str = "", status: str = "", enterprise_id: str | None = None
 ) -> list[Qualification]:
-    """Owner-scoped list ordered by ``valid_to`` ascending, no-expiry last."""
+    """Owner-scoped list ordered by ``valid_to`` ascending, no-expiry last.
 
+    传 ``enterprise_id`` 时切换到企业共享视图（成员可见）；不传时保持既有
+    owner 私有语义完全不变。
+    """
+
+    if enterprise_id:
+        return list_enterprise_qualifications(
+            db, user, enterprise_id, kind=kind, status=status
+        )
     uid = _user_id(user)
     stmt = select(Qualification).where(Qualification.owner_id == uid)
     wanted_kind = str(kind or "").strip()
@@ -228,11 +248,166 @@ def list_qualifications(
     return rows
 
 
+def _validate_status_filter(status: str) -> str:
+    wanted = str(status or "").strip()
+    if wanted and wanted not in STATUSES:
+        raise ValueError(f"状态筛选无效：{wanted}")
+    return wanted
+
+
+def list_enterprise_qualifications(
+    db,
+    user,
+    enterprise_id: str = "",
+    *,
+    kind: str = "",
+    status: str = "",
+) -> list[Qualification]:
+    """Enterprise-shared qualifications visible to one member.
+
+    ``enterprise_id`` 为空时返回该用户全部可访问企业的共享资产；显式传入时只
+    返回该企业，并校验成员关系（非成员 → ``LookupError``）。
+    """
+
+    eids = _accessible_enterprises(db, user)
+    if enterprise_id:
+        if str(enterprise_id) not in eids:
+            raise LookupError("企业不存在或无权访问")
+        scoped = {str(enterprise_id)}
+    else:
+        scoped = eids
+    if not scoped:
+        return []
+    stmt = select(Qualification).where(Qualification.enterprise_id.in_(scoped))
+    wanted_kind = str(kind or "").strip()
+    if wanted_kind:
+        stmt = stmt.where(Qualification.kind == _check_kind(wanted_kind))
+    stmt = stmt.order_by(
+        Qualification.valid_to.is_(None),
+        Qualification.valid_to.asc(),
+        Qualification.name.asc(),
+    )
+    rows = list(db.scalars(stmt))
+    wanted_status = _validate_status_filter(status)
+    if wanted_status:
+        rows = [row for row in rows if status_of(row.valid_to) == wanted_status]
+    return rows
+
+
+#: 「企业视图」的短名别名。
+list_shared_qualifications = list_enterprise_qualifications
+
+
+def list_visible_qualifications(
+    db,
+    user,
+    enterprise_id: str = "",
+    *,
+    kind: str = "",
+    status: str = "",
+) -> list[Qualification]:
+    """Owner-private rows + enterprise-shared rows the caller may see."""
+
+    eids = _accessible_enterprises(db, user)
+    if enterprise_id:
+        if str(enterprise_id) not in eids:
+            raise LookupError("企业不存在或无权访问")
+        scoped = {str(enterprise_id)}
+    else:
+        scoped = eids
+    conditions = [Qualification.owner_id == _user_id(user)]
+    if scoped:
+        conditions.append(Qualification.enterprise_id.in_(scoped))
+    stmt = select(Qualification).where(or_(*conditions))
+    wanted_kind = str(kind or "").strip()
+    if wanted_kind:
+        stmt = stmt.where(Qualification.kind == _check_kind(wanted_kind))
+    stmt = stmt.order_by(
+        Qualification.valid_to.is_(None),
+        Qualification.valid_to.asc(),
+        Qualification.name.asc(),
+    )
+    rows = list(db.scalars(stmt))
+    wanted_status = _validate_status_filter(status)
+    if wanted_status:
+        rows = [row for row in rows if status_of(row.valid_to) == wanted_status]
+    return rows
+
+
+def create_enterprise_qualification(
+    db, user, enterprise_id: str, data: dict
+) -> Qualification:
+    """Owner-only: register a qualification shared inside one enterprise."""
+
+    eid = _require_shared_owner(db, user, enterprise_id)
+    values = _values(data, existing=None)
+    row = Qualification(owner_id=_user_id(user), enterprise_id=eid, **values)
+    db.add(row)
+    db.flush()
+    return row
+
+
+def update_enterprise_qualification(
+    db, user, qualification_id: str, data: dict
+) -> Qualification:
+    row = get_visible_qualification(db, user, qualification_id)
+    if not row.enterprise_id:
+        raise LookupError("资质不存在")
+    _require_shared_owner(db, user, row.enterprise_id)
+    payload = dict(data)
+    payload.pop("enterprise_id", None)
+    for field, value in _values(payload, existing=row).items():
+        setattr(row, field, value)
+    db.flush()
+    return row
+
+
+def delete_enterprise_qualification(
+    db, user, qualification_id: str
+) -> Qualification:
+    row = get_visible_qualification(db, user, qualification_id)
+    if not row.enterprise_id:
+        raise LookupError("资质不存在")
+    _require_shared_owner(db, user, row.enterprise_id)
+    _remove_evidence(row)
+    db.delete(row)
+    db.flush()
+    return row
+
+
 def get_qualification(db, user, qualification_id: str) -> Qualification:
     row = db.get(Qualification, str(qualification_id or ""))
     if row is None or row.owner_id != _user_id(user):
         raise LookupError("资质不存在")
     return row
+
+
+def _accessible_enterprises(db, user) -> set[str]:
+    from .enterprise.assets import accessible_enterprise_ids
+
+    return set(accessible_enterprise_ids(db, user))
+
+
+def _require_shared_owner(db, user, enterprise_id: str) -> str:
+    """Shared asset writes are owner-only; returns the validated enterprise id."""
+
+    from .enterprise.assets import get_owned_enterprise
+
+    enterprise = get_owned_enterprise(db, user, enterprise_id)
+    return enterprise.id
+
+
+def get_visible_qualification(db, user, qualification_id: str) -> Qualification:
+    """Owner or enterprise-member read; private rows stay owner-only."""
+
+    row = db.get(Qualification, str(qualification_id or ""))
+    if row is None:
+        raise LookupError("资质不存在")
+    if row.owner_id == _user_id(user):
+        return row
+    if row.enterprise_id and row.enterprise_id in _accessible_enterprises(db, user):
+        return row
+    raise LookupError("资质不存在")
 
 
 def _values(data: dict, *, existing: Qualification | None) -> dict:
@@ -266,16 +441,37 @@ def _values(data: dict, *, existing: Qualification | None) -> dict:
     return values
 
 
-def create_qualification(db, user, data: dict) -> Qualification:
-    row = Qualification(owner_id=_user_id(user), **_values(data, existing=None))
+def create_qualification(db, user, data: dict, *, enterprise_id: str | None = None) -> Qualification:
+    payload = dict(data or {})
+    eid = payload.pop("enterprise_id", None)
+    if enterprise_id:
+        eid = enterprise_id
+    if eid:
+        eid = _require_shared_owner(db, user, str(eid))
+    row = Qualification(
+        owner_id=_user_id(user), enterprise_id=eid or None, **_values(payload, existing=None)
+    )
     db.add(row)
     db.flush()
     return row
 
 
 def update_qualification(db, user, qualification_id: str, data: dict) -> Qualification:
+    payload = dict(data or {})
+    eid = payload.pop("enterprise_id", None)
+    if eid is not None:
+        if not eid:
+            row = get_qualification(db, user, qualification_id)
+            row.enterprise_id = None
+            for field, value in _values(payload, existing=row).items():
+                setattr(row, field, value)
+            db.flush()
+            return row
+        eid = _require_shared_owner(db, user, str(eid))
     row = get_qualification(db, user, qualification_id)
-    for field, value in _values(data, existing=row).items():
+    if eid is not None:
+        row.enterprise_id = eid
+    for field, value in _values(payload, existing=row).items():
         setattr(row, field, value)
     db.flush()
     return row

@@ -513,3 +513,55 @@ class BillingProfilePayload(BaseModel):
 
 class ExportTemplateUpdate(BaseModel):
     id: str
+
+
+# --- 对标易标第二批（v0.25.0）请求模型 ---
+
+class EnterpriseCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class EnterpriseMemberAdd(BaseModel):
+    username: str = Field(min_length=1, max_length=80)
+    role: str = "member"
+
+
+class KbDocumentIngest(BaseModel):
+    source: str = Field(min_length=1, max_length=500)
+    content: str = ""
+    kind: str = "other"
+    tags: list[str] = []
+    valid_to: str | None = None
+
+
+class EnterpriseMatchRequest(BaseModel):
+    requirement: str = ""
+    kind: str = ""
+
+
+class SimilarityRequest(BaseModel):
+    scope: str = "project"
+    mode: str = "text"
+    threshold: float = 0.85
+    source_project_id: str | None = None
+
+
+class SimilarityHitReview(BaseModel):
+    status: str = "normal"
+    note: str = ""
+
+
+class CommercialDocCreate(BaseModel):
+    name: str = "商务标"
+    quote_version_id: str | None = None
+    package_id: str | None = None
+
+
+class CommercialDocUpdate(BaseModel):
+    name: str | None = None
+    sections: Any = None
+
+
+class CommercialReview(BaseModel):
+    action: str = "submit"
+    note: str = ""

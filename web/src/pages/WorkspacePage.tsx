@@ -11,7 +11,9 @@ import {
   Cpu,
   Download,
   Eye,
+  FileCheck2,
   FileStack,
+  FileSearch,
   HardDrive,
   LayoutDashboard,
   ListTree,
@@ -248,6 +250,21 @@ export function WorkspacePage() {
       tone: 'warn',
     },
     {
+      to: `${basePath}/enterprise`,
+      label: '企业共享',
+      icon: Building2,
+    },
+    {
+      to: `${basePath}/commercial`,
+      label: '商务标',
+      icon: FileCheck2,
+    },
+    {
+      to: `${basePath}/similarity`,
+      label: '多维查重',
+      icon: FileSearch,
+    },
+    {
       to: `${basePath}/export`,
       label: '导出',
       icon: Download,
@@ -413,7 +430,7 @@ function WorkspaceSkeleton() {
             </div>
           </div>
           <div className="workspace-tabs">
-            {Array.from({ length: 10 }).map((_, index) => (
+            {Array.from({ length: 13 }).map((_, index) => (
               <Skeleton key={index} width={78} height={18} />
             ))}
           </div>

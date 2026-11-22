@@ -229,6 +229,8 @@ class Qualification(Base):
     issuer: Mapped[str] = mapped_column(String(120), default="")
     valid_from: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     valid_to: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 企业共享：非 NULL 时该资产在企业内共享；NULL = owner 私有（向后兼容）。
+    enterprise_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     note: Mapped[str] = mapped_column(String(500), default="")
     evidence: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
@@ -252,6 +254,8 @@ class Personnel(Base):
     cert_no: Mapped[str] = mapped_column(String(80), default="")
     social_months: Mapped[int] = mapped_column(Integer, default=0)
     locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 企业共享：非 NULL 时该人员在企业内共享；NULL = owner 私有（向后兼容）。
+    enterprise_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     note: Mapped[str] = mapped_column(String(200), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
@@ -643,6 +647,12 @@ class KbChunk(Base):
     embedding: Mapped[list | None] = mapped_column(JSON, nullable=True)
     embed_key: Mapped[str] = mapped_column(String(200), default="")
     embed_dim: Mapped[int] = mapped_column(Integer, default=0)
+    # 文档级溯源：document_id/page_no/heading/chunk_index/hash 均可空，兼容旧块。
+    document_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    page_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    heading: Mapped[str] = mapped_column(String(300), default="")
+    chunk_index: Mapped[int] = mapped_column(Integer, default=0)
+    hash: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
@@ -816,5 +826,113 @@ class InvoiceRequest(Base):
     reject_reason: Mapped[str] = mapped_column(String(500), default="")
     file_path: Mapped[str] = mapped_column(String(500), default="")
     issued_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+# ---------------------------------------------------------------------------
+# 对标易标第二批（v0.25.0）：企业共享、知识库文档级、查重、商务标
+# 全部新表使用 uuid 字符串主键与 naive UTC 时间，遵循既有落库规范。
+# ---------------------------------------------------------------------------
+
+
+class Enterprise(Base):
+    """企业/组织：资质、人员、业绩等资产可在成员间共享。"""
+
+    __tablename__ = "enterprises"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class EnterpriseMember(Base):
+    __tablename__ = "enterprise_members"
+    __table_args__ = (UniqueConstraint("enterprise_id", "user_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    enterprise_id: Mapped[str] = mapped_column(ForeignKey("enterprises.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    role: Mapped[str] = mapped_column(String(20), default="member")  # owner | member
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class KbDocument(Base):
+    """知识库文档实体：版本/哈希/页码/有效期/密级，替代 options['docs'] 的脆弱元数据。"""
+
+    __tablename__ = "kb_documents"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    kb_id: Mapped[str] = mapped_column(ForeignKey("knowledge_bases.id"), index=True)
+    source: Mapped[str] = mapped_column(String(500), default="")
+    sha256: Mapped[str] = mapped_column(String(64), default="")
+    size: Mapped[int] = mapped_column(Integer, default=0)
+    mime: Mapped[str] = mapped_column(String(120), default="")
+    pages: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(20), default="ready")  # ready|indexing|failed
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    kind: Mapped[str] = mapped_column(String(30), default="other")
+    tags: Mapped[list] = mapped_column(JSON, default=list)
+    valid_to: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class SimilarityReport(Base):
+    """查重报告（一次查重任务的顶层结果）。"""
+
+    __tablename__ = "similarity_reports"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    scope: Mapped[str] = mapped_column(String(30), default="project")  # project|history
+    mode: Mapped[str] = mapped_column(String(30), default="text")  # text|structure|semantic|image
+    threshold: Mapped[float] = mapped_column(Float, default=0.85)
+    status: Mapped[str] = mapped_column(String(20), default="running")
+    stats: Mapped[dict] = mapped_column(JSON, default=dict)
+    skipped: Mapped[list] = mapped_column(JSON, default=list)
+    created_by: Mapped[str] = mapped_column(String(80), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class SimilarityHit(Base):
+    __tablename__ = "similarity_hits"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    report_id: Mapped[str] = mapped_column(ForeignKey("similarity_reports.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(20), default="text")
+    source_a: Mapped[str] = mapped_column(String(500), default="")
+    source_b: Mapped[str] = mapped_column(String(500), default="")
+    loc_a: Mapped[str] = mapped_column(String(120), default="")
+    loc_b: Mapped[str] = mapped_column(String(120), default="")
+    excerpt_a: Mapped[str] = mapped_column(Text, default="")
+    excerpt_b: Mapped[str] = mapped_column(Text, default="")
+    similarity: Mapped[float] = mapped_column(Float, default=0.0)
+    evidence: Mapped[dict] = mapped_column(JSON, default=dict)
+    review_status: Mapped[str] = mapped_column(String(20), default="pending")
+    review_note: Mapped[str] = mapped_column(Text, default="")
+
+
+class CommercialDoc(Base):
+    """商务标文档：汇编已审批报价版本 + 企业材料，结构化保存。"""
+
+    __tablename__ = "commercial_docs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    name: Mapped[str] = mapped_column(String(120), default="商务标")
+    quote_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    package_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="draft")  # draft|submitted|approved|rejected
+    sections: Mapped[dict] = mapped_column(JSON, default=dict)
+    validation: Mapped[dict] = mapped_column(JSON, default=dict)
+    submit_note: Mapped[str] = mapped_column(Text, default="")
+    submitted_by: Mapped[str] = mapped_column(String(80), default="")
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_by: Mapped[str] = mapped_column(String(80), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)

@@ -148,6 +148,12 @@ def _knowledge_provider(db, user_id: str | None = None):
     extra_kb_ids: list[str] = []
     if user_id:
         extra_kb_ids.append(user_docs.personal_kb(db, str(user_id)).id)
+        try:
+            from ..enterprise.assets import enterprise_kb_ids
+
+            extra_kb_ids.extend(enterprise_kb_ids(db, str(user_id)))
+        except Exception:  # noqa: BLE001 - 企业库不可用不应阻断生成
+            logger.debug("解析企业知识库失败", exc_info=True)
 
     def provide(query: str) -> str:
         # 用追加语义：全局已启用企业库照常参与，再纳入当前用户个人库。

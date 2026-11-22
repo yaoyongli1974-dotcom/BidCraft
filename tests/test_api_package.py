@@ -24,16 +24,22 @@ def test_domain_routers_are_importable_and_populated():
         auth,
         batch_jobs,
         billing,
+        commercial,
+        enterprise,
         health,
         jobs,
         legal,
         my,
         packages,
         projects,
+        similarity,
     )
 
-    modules = [account, admin, approvals, auth, batch_jobs, billing, health, jobs, legal, my, packages, projects]
-    assert sum(len(mod.router.routes) for mod in modules) == 195
+    modules = [
+        account, admin, approvals, auth, batch_jobs, billing, commercial,
+        enterprise, health, jobs, legal, my, packages, projects, similarity,
+    ]
+    assert sum(len(mod.router.routes) for mod in modules) == 220
 
 
 def test_route_modules_do_not_import_api_module_through_package():
@@ -104,7 +110,7 @@ def test_request_models_live_in_schemas_not_app():
             isinstance(b, ast.Name) and b.id == "BaseModel" for b in node.bases
         )
     ]
-    assert len(schema_models) == 71, f"schemas.py 应含 71 个请求模型，实际 {len(schema_models)}"
+    assert len(schema_models) == 80, f"schemas.py 应含 80 个请求模型，实际 {len(schema_models)}"
 
 
 def test_monkeypatch_reaches_route_call_site(monkeypatch):

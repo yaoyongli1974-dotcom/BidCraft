@@ -14,7 +14,7 @@ from bidcraft.config import settings
 from bidcraft.db import get_engine, init_db, reset_engine_for_tests
 
 #: 当前 alembic head（新增 revision 时同步这里）。
-HEAD = "0004_claim_token"
+HEAD = "0005_yibiao_batch2"
 
 
 def _version() -> list[str]:
@@ -51,6 +51,51 @@ def test_legacy_db_is_converged_then_stamped(tmp_path, monkeypatch):
         with get_engine().connect() as connection:
             cols = {column["name"] for column in inspect(connection).get_columns("kb_chunks")}
         assert {"embedding", "embed_key", "embed_dim"} <= cols
+        assert _version() == [HEAD]
+    finally:
+        reset_engine_for_tests("sqlite+pysqlite:///:memory:")
+
+
+def test_batch2_downgrade_drops_indexes_before_columns(tmp_path, monkeypatch):
+    """0005 的 downgrade 必须先删索引再删列（SQLite 不允许删被索引引用的列）。"""
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+
+    from bidcraft.migrations import __file__ as migrations_init
+
+    home = tmp_path / ".bidcraft"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(settings, "home", home)
+    db_file = home / "dgrade.sqlite"
+    reset_engine_for_tests(f"sqlite+pysqlite:///{db_file}")
+    try:
+        init_db()
+        engine = get_engine()
+
+        def table_set():
+            return set(inspect(engine).get_table_names())
+
+        added = {
+            "enterprises", "enterprise_members", "kb_documents",
+            "similarity_reports", "similarity_hits", "commercial_docs",
+        }
+        assert added <= table_set()
+
+        cfg = Config()
+        cfg.set_main_option("script_location", str(Path(migrations_init).parent))
+        cfg.set_main_option(
+            "sqlalchemy.url",
+            engine.url.render_as_string(hide_password=False).replace("%", "%%"),
+        )
+        # downgrade 到上一版：索引与列都必须干净移除，且可重复升级回来
+        command.downgrade(cfg, "0004_claim_token")
+        assert not (added & table_set())
+        cols = {c["name"] for c in inspect(engine).get_columns("kb_chunks")}
+        assert not ({"document_id", "page_no", "heading", "chunk_index", "hash"} & cols)
+        command.upgrade(cfg, "head")
+        assert added <= table_set()
         assert _version() == [HEAD]
     finally:
         reset_engine_for_tests("sqlite+pysqlite:///:memory:")

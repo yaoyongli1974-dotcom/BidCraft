@@ -1413,3 +1413,46 @@
     margin: 0;
   }
 }
+
+/* ------------------------------- 第二批：企业/商务标/查重 */
+@media (max-width: 1100px) {
+  .sim-layout,
+  .ent-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ent-side {
+    order: -1;
+  }
+
+  .ent-enterprise-list {
+    max-height: 240px;
+  }
+}
+
+@media (max-width: 720px) {
+  .sim-hit-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sim-form-foot,
+  .com-doc-head,
+  .com-doc-foot,
+  .ent-doc-form-foot,
+  .ent-match-foot {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .com-doc-actions {
+    justify-content: flex-start;
+  }
+
+  .sim-hit-foot {
+    align-items: stretch;
+  }
+
+  .ent-create {
+    flex-wrap: wrap;
+  }
+}

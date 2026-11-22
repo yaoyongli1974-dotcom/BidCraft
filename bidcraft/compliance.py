@@ -23,6 +23,10 @@ from .models import (
     AppSetting,
     AuditLog,
     CreditTransaction,
+    Enterprise,
+    EnterpriseMember,
+    KbDocument,
+    KnowledgeBase,
     OutlineNode,
     Personnel,
     Project,
@@ -155,6 +159,71 @@ def legal_doc(name: str) -> str:
 # --------------------------------------------------------------------- 注销
 
 
+def _detach_enterprise_memberships(db, user: User) -> dict[str, int]:
+    """Remove the user's memberships without deleting enterprise-shared assets.
+
+    - member：只删自己的成员行，企业、企业其他人的共享资产不动；
+    - owner：把所有权移交给最早加入的成员；没有其他成员时才删除企业容器
+      （容器不是资产，资质/人员/文档行不会被这里删除）；
+    - 用户拥有、但挂在企业下的共享资产移交给企业 owner，避免注销把其他成员
+      正在使用的共享资产一起带走。
+    """
+
+    removed = {"enterprise_members": 0, "enterprises": 0, "assets_transferred": 0}
+    rows = list(
+        db.scalars(
+            select(EnterpriseMember).where(EnterpriseMember.user_id == user.id)
+        )
+    )
+    for row in rows:
+        db.delete(row)
+        removed["enterprise_members"] += 1
+    owned = list(
+        db.scalars(select(Enterprise).where(Enterprise.owner_id == user.id))
+    )
+    for enterprise in owned:
+        others = list(
+            db.scalars(
+                select(EnterpriseMember)
+                .where(
+                    EnterpriseMember.enterprise_id == enterprise.id,
+                    EnterpriseMember.user_id != user.id,
+                )
+                .order_by(EnterpriseMember.created_at, EnterpriseMember.id)
+            )
+        )
+        if others:
+            successor = others[0]
+            enterprise.owner_id = successor.user_id
+            successor.role = "owner"
+            for extra in others[1:]:
+                if extra.role == "owner":
+                    extra.role = "member"
+        else:
+            for member in db.scalars(
+                select(EnterpriseMember).where(
+                    EnterpriseMember.enterprise_id == enterprise.id
+                )
+            ):
+                db.delete(member)
+            db.delete(enterprise)
+            removed["enterprises"] += 1
+    db.flush()
+    # 注销者的共享资产交给仍存在的企业 owner，保留成员正在使用的证据。
+    for model in (Qualification, Personnel):
+        for row in db.scalars(
+            select(model).where(
+                model.owner_id == user.id, model.enterprise_id.isnot(None)
+            )
+        ):
+            enterprise = db.get(Enterprise, row.enterprise_id)
+            if enterprise is not None and enterprise.owner_id != user.id:
+                row.owner_id = enterprise.owner_id
+                removed["assets_transferred"] += 1
+    db.flush()
+    return removed
+
+
 def delete_account(db, user: User) -> dict[str, int]:
     """Delete the account and everything it owns.
 
@@ -175,7 +244,9 @@ def delete_account(db, user: User) -> dict[str, int]:
         except OSError:
             pass
 
+    enterprise_removed = _detach_enterprise_memberships(db, user)
     removed = delete_user_rows(db, user.id)
+    removed.update(enterprise_removed)
     try:
         from .invoices import delete_user_files
 
@@ -338,6 +409,10 @@ def export_account(db, user: User, home: Path) -> Path:
         "qualifications": [],
         "personnel": [],
         "documents": [],
+        "enterprises": [],
+        "shared_qualifications": [],
+        "shared_personnel": [],
+        "enterprise_documents": [],
     }
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
         for project in projects:
@@ -380,7 +455,8 @@ def export_account(db, user: User, home: Path) -> Path:
                     "kind": row.kind,
                     "name": row.name,
                     "cert_no": row.cert_no,
-                    "valid_to": row.valid_to,
+                    "valid_to": clock.iso_utc(row.valid_to),
+                    "enterprise_id": row.enterprise_id or None,
                     "evidence": row.evidence or [],
                 }
             )
@@ -398,8 +474,82 @@ def export_account(db, user: User, home: Path) -> Path:
                     "cert_no": row.cert_no,
                     "social_months": row.social_months,
                     "locked": row.locked,
+                    "enterprise_id": row.enterprise_id or None,
                 }
             )
+        memberships = list(
+            db.scalars(
+                select(EnterpriseMember).where(EnterpriseMember.user_id == user.id)
+            )
+        )
+        enterprise_ids = {row.enterprise_id for row in memberships}
+        for membership in memberships:
+            enterprise = db.get(Enterprise, membership.enterprise_id)
+            if enterprise is None:
+                continue
+            manifest["enterprises"].append(
+                {
+                    "id": enterprise.id,
+                    "name": enterprise.name,
+                    "role": membership.role,
+                }
+            )
+        if enterprise_ids:
+            for row in db.scalars(
+                select(Qualification).where(
+                    Qualification.enterprise_id.in_(enterprise_ids),
+                    Qualification.owner_id != user.id,
+                )
+            ).all():
+                manifest["shared_qualifications"].append(
+                    {
+                        "id": row.id,
+                        "kind": row.kind,
+                        "name": row.name,
+                        "cert_no": row.cert_no,
+                        "valid_to": clock.iso_utc(row.valid_to),
+                        "enterprise_id": row.enterprise_id,
+                    }
+                )
+            for row in db.scalars(
+                select(Personnel).where(
+                    Personnel.enterprise_id.in_(enterprise_ids),
+                    Personnel.owner_id != user.id,
+                )
+            ).all():
+                manifest["shared_personnel"].append(
+                    {
+                        "id": row.id,
+                        "name": row.name,
+                        "title": row.title,
+                        "specialty": row.specialty,
+                        "cert_no": row.cert_no,
+                        "enterprise_id": row.enterprise_id,
+                    }
+                )
+            kbs = [
+                row
+                for row in db.scalars(select(KnowledgeBase)).all()
+                if str((row.options or {}).get("enterprise_id") or "")
+                in enterprise_ids
+            ]
+            for kb in kbs:
+                for row in db.scalars(
+                    select(KbDocument).where(KbDocument.kb_id == kb.id)
+                ).all():
+                    manifest["enterprise_documents"].append(
+                        {
+                            "id": row.id,
+                            "source": row.source,
+                            "sha256": row.sha256,
+                            "kind": row.kind,
+                            "version": row.version,
+                            "valid_to": clock.iso_utc(row.valid_to),
+                            "enterprise_id": str(
+                                (kb.options or {}).get("enterprise_id") or ""
+                            ),
+                        }
+                    )
         for row in db.scalars(select(UserDoc).where(UserDoc.user_id == user.id)).all():
             manifest["documents"].append(
                 {"id": row.id, "filename": row.filename, "size": row.size, "status": row.status}

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from . import material_policy
 from .models import Personnel
@@ -58,6 +58,16 @@ def person_payload(row: Personnel) -> dict:
 
 #: 契约里的短名别名。
 payload = person_payload
+
+
+def enterprise_person_payload(row: Personnel) -> dict:
+    """企业视图：在既有 payload 上补共享标记，不改动 ``person_payload``。"""
+
+    return {
+        **person_payload(row),
+        "enterprise_id": row.enterprise_id or None,
+        "shared": bool(row.enterprise_id),
+    }
 
 
 def policies() -> dict:
@@ -130,14 +140,91 @@ def _values(data: dict, *, existing: Personnel | None) -> dict:
     return values
 
 
-def list_personnel(db, owner_id) -> list[Personnel]:
-    """Owner-scoped list ordered by ``name`` ascending."""
+def list_personnel(db, owner_id, *, enterprise_id: str | None = None) -> list[Personnel]:
+    """Owner-scoped list ordered by ``name`` ascending.
 
+    ``enterprise_id`` 传入时走企业共享视图；默认保持 owner 私有语义不变。
+    """
+
+    if enterprise_id:
+        return list_enterprise_personnel(db, owner_id, enterprise_id)
     uid = _user_id(owner_id) if not isinstance(owner_id, str) else str(owner_id)
     stmt = select(Personnel).where(Personnel.owner_id == uid).order_by(
         Personnel.name.asc(), Personnel.created_at.asc()
     )
     return list(db.scalars(stmt))
+
+
+def _accessible_enterprises(db, user) -> set[str]:
+    from .enterprise.assets import accessible_enterprise_ids
+
+    return set(accessible_enterprise_ids(db, user))
+
+
+def _require_shared_owner(db, user, enterprise_id: str) -> str:
+    from .enterprise.assets import get_owned_enterprise
+
+    return get_owned_enterprise(db, user, enterprise_id).id
+
+
+def list_enterprise_personnel(
+    db, user, enterprise_id: str = ""
+) -> list[Personnel]:
+    """Enterprise-shared personnel visible to one member."""
+
+    eids = _accessible_enterprises(db, user)
+    if enterprise_id:
+        if str(enterprise_id) not in eids:
+            raise LookupError("企业不存在或无权访问")
+        scoped = {str(enterprise_id)}
+    else:
+        scoped = eids
+    if not scoped:
+        return []
+    return list(
+        db.scalars(
+            select(Personnel)
+            .where(Personnel.enterprise_id.in_(scoped))
+            .order_by(Personnel.name.asc(), Personnel.created_at.asc())
+        )
+    )
+
+
+#: 「企业视图」的短名别名。
+list_shared_personnel = list_enterprise_personnel
+
+
+def list_visible_personnel(db, user, enterprise_id: str = "") -> list[Personnel]:
+    """Owner-private personnel + enterprise-shared rows visible to the caller."""
+
+    eids = _accessible_enterprises(db, user)
+    if enterprise_id:
+        if str(enterprise_id) not in eids:
+            raise LookupError("企业不存在或无权访问")
+        scoped = {str(enterprise_id)}
+    else:
+        scoped = eids
+    conditions = [Personnel.owner_id == _user_id(user)]
+    if scoped:
+        conditions.append(Personnel.enterprise_id.in_(scoped))
+    return list(
+        db.scalars(
+            select(Personnel)
+            .where(or_(*conditions))
+            .order_by(Personnel.name.asc(), Personnel.created_at.asc())
+        )
+    )
+
+
+def find_visible_personnel(db, user, person_id: str) -> Personnel:
+    row = db.get(Personnel, str(person_id or ""))
+    if row is None:
+        raise LookupError("人员不存在")
+    if row.owner_id == _user_id(user):
+        return row
+    if row.enterprise_id and row.enterprise_id in _accessible_enterprises(db, user):
+        return row
+    raise LookupError("人员不存在")
 
 
 def find_personnel(db, owner_id, person_id: str) -> Personnel:
@@ -152,17 +239,70 @@ def find_personnel(db, owner_id, person_id: str) -> Personnel:
 get_personnel = find_personnel
 
 
-def create_personnel(db, owner_id, data: dict) -> Personnel:
+def create_personnel(db, owner_id, data: dict, *, enterprise_id: str | None = None) -> Personnel:
     uid = _user_id(owner_id) if not isinstance(owner_id, str) else str(owner_id)
-    row = Personnel(owner_id=uid, **_values(data, existing=None))
+    payload = dict(data or {})
+    eid = payload.pop("enterprise_id", None)
+    if enterprise_id:
+        eid = enterprise_id
+    if eid:
+        from .enterprise.assets import get_owned_enterprise
+
+        eid = get_owned_enterprise(db, {"id": uid}, str(eid)).id
+    row = Personnel(
+        owner_id=uid, enterprise_id=eid or None, **_values(payload, existing=None)
+    )
     db.add(row)
+    db.flush()
+    return row
+
+
+def create_enterprise_personnel(
+    db, user, enterprise_id: str, data: dict
+) -> Personnel:
+    """Owner-only: register a person shared inside one enterprise."""
+
+    eid = _require_shared_owner(db, user, enterprise_id)
+    row = Personnel(owner_id=_user_id(user), enterprise_id=eid, **_values(data, existing=None))
+    db.add(row)
+    db.flush()
+    return row
+
+
+def update_enterprise_personnel(
+    db, user, person_id: str, data: dict
+) -> Personnel:
+    row = find_visible_personnel(db, user, person_id)
+    if not row.enterprise_id:
+        raise LookupError("人员不存在")
+    _require_shared_owner(db, user, row.enterprise_id)
+    payload = dict(data or {})
+    payload.pop("enterprise_id", None)
+    for field, value in _values(payload, existing=row).items():
+        setattr(row, field, value)
+    db.flush()
+    return row
+
+
+def delete_enterprise_personnel(db, user, person_id: str) -> Personnel:
+    row = find_visible_personnel(db, user, person_id)
+    if not row.enterprise_id:
+        raise LookupError("人员不存在")
+    _require_shared_owner(db, user, row.enterprise_id)
+    db.delete(row)
     db.flush()
     return row
 
 
 def update_personnel(db, owner_id, person_id: str, data: dict) -> Personnel:
     row = find_personnel(db, owner_id, person_id)
-    for field, value in _values(data, existing=row).items():
+    payload = dict(data or {})
+    if "enterprise_id" in payload:
+        eid = payload.pop("enterprise_id")
+        if eid:
+            eid = _require_shared_owner(db, {"id": row.owner_id}, str(eid))
+        row.enterprise_id = eid or None
+    for field, value in _values(payload, existing=row).items():
         setattr(row, field, value)
     db.flush()
     return row

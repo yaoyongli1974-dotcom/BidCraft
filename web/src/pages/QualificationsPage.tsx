@@ -22,6 +22,7 @@ import {
   XCircle,
 } from 'lucide-react'
 import { createPersonnel, createQualification, deletePersonnel, deleteQualification, deleteQualificationEvidence, getPersonnel, getPreflight, getQualifications, qualificationEvidenceUrl, updatePersonnel, updateQualification, uploadQualificationEvidence } from '../api/tender'
+import { getEnterprises } from '../api/enterprise'
 import { ApiError, messageOf } from '../lib/http'
 import type {
   Personnel,
@@ -172,8 +173,10 @@ export function QualificationsPage() {
   const [pickerItem, setPickerItem] = useState<PreflightItem | null>(null)
   const [focusId, setFocusId] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [holderFilter, setHolderFilter] = useState('all')
 
   const qualificationsQuery = useQuery('qualifications', () => getQualifications())
+  const enterprisesQuery = useQuery('enterprises', () => getEnterprises())
   const personnelQuery = useQuery('personnel', () => getPersonnel())
   const preflightQuery = useQuery(`preflight:${effectiveDeadline}`, () =>
     getPreflight(effectiveDeadline),
@@ -188,6 +191,34 @@ export function QualificationsPage() {
       return left.name.localeCompare(right.name, 'zh-CN')
     })
   }, [qualificationsQuery.data])
+
+  const holderOptions = useMemo(() => {
+    const names = new Set<string>()
+    ;(enterprisesQuery.data || []).forEach((enterprise) => {
+      if (enterprise.name.trim()) names.add(enterprise.name.trim())
+    })
+    qualifications.forEach((qualification) => {
+      const holder = qualification.holder.trim()
+      if (holder) names.add(holder)
+    })
+    return Array.from(names).sort((left, right) => left.localeCompare(right, 'zh-CN'))
+  }, [enterprisesQuery.data, qualifications])
+
+  const visibleQualifications = useMemo(
+    () =>
+      holderFilter === 'all'
+        ? qualifications
+        : qualifications.filter(
+            (qualification) => qualification.holder.trim() === holderFilter,
+          ),
+    [qualifications, holderFilter],
+  )
+
+  useEffect(() => {
+    if (holderFilter !== 'all' && !holderOptions.includes(holderFilter)) {
+      setHolderFilter('all')
+    }
+  }, [holderFilter, holderOptions])
 
   const personnel = useMemo(() => {
     const list = personnelQuery.data || []
@@ -543,10 +574,28 @@ export function QualificationsPage() {
             <h3 id="qual-ledger-heading">证照与业绩</h3>
           </div>
           <div className="qual-panel-actions">
+            {holderOptions.length > 0 && (
+              <label className="qual-enterprise-filter">
+                <span className="subtle">企业视图</span>
+                <select
+                  className="select select--sm"
+                  aria-label="企业视图筛选"
+                  value={holderFilter}
+                  onChange={(event) => setHolderFilter(event.target.value)}
+                >
+                  <option value="all">全部企业</option>
+                  {holderOptions.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             <span className="subtle">
               {qualificationsQuery.loading && !qualificationsQuery.data
                 ? '正在读取…'
-                : `${qualifications.length} 条`}
+                : `${visibleQualifications.length} 条`}
             </span>
             <Button
               variant="primary"
@@ -565,21 +614,34 @@ export function QualificationsPage() {
           </div>
         ) : qualificationsQuery.loading && !qualificationsQuery.data ? (
           <QualTableSkeleton rows={3} />
-        ) : qualifications.length === 0 ? (
-          <EmptyState
-            icon={BadgeCheck}
-            title="还没有资质记录"
-            description="登记营业执照、资质证书、安全生产许可证、人员证书与类似业绩，系统会按开标日提示临期与缺失。"
-            actions={
-              <Button
-                variant="primary"
-                icon={<Plus size={15} />}
-                onClick={() => openCreate()}
-              >
-                登记第一条资质
-              </Button>
-            }
-          />
+        ) : visibleQualifications.length === 0 ? (
+          qualifications.length === 0 ? (
+            <EmptyState
+              icon={BadgeCheck}
+              title="还没有资质记录"
+              description="登记营业执照、资质证书、安全生产许可证、人员证书与类似业绩，系统会按开标日提示临期与缺失。"
+              actions={
+                <Button
+                  variant="primary"
+                  icon={<Plus size={15} />}
+                  onClick={() => openCreate()}
+                >
+                  登记第一条资质
+                </Button>
+              }
+            />
+          ) : (
+            <EmptyState
+              icon={BadgeCheck}
+              title="没有符合企业视图的资质"
+              description={`当前筛选：${holderFilter}。切换企业视图或清除筛选后查看全部资质。`}
+              actions={
+                <Button variant="secondary" onClick={() => setHolderFilter('all')}>
+                  查看全部资质
+                </Button>
+              }
+            />
+          )
         ) : (
           <div className="table-scroll">
             <table className="data-table qual-ledger-table">
@@ -596,7 +658,7 @@ export function QualificationsPage() {
                 </tr>
               </thead>
               <tbody>
-                {qualifications.map((qualification) => {
+                {visibleQualifications.map((qualification) => {
                   const meta = QUALIFICATION_STATUS_META[qualification.status]
                   return (
                     <tr

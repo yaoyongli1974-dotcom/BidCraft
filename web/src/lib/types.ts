@@ -1733,3 +1733,190 @@ export interface ScoreAnalysis {
   losses: ScoreEntry[]
   items: ScoreEntry[]
 }
+
+// ---------------------------------------------------------------- 企业知识库 / 企业共享（第二批）
+
+/** 企业（团队）账户；企业内共享资料与成员。 */
+export interface Enterprise {
+  id: string
+  name: string
+  owner_id?: string
+  /** 当前用户在企业中的角色（后端可省略）。 */
+  role?: string
+  member_count?: number
+  document_count?: number
+  created_at?: string | null
+}
+
+/** 企业成员；`user_id` 用于移除成员。 */
+export interface EnterpriseMember {
+  enterprise_id?: string
+  user_id: string
+  username: string
+  display_name?: string
+  role?: string
+  created_at?: string | null
+}
+
+export interface EnterpriseMemberInput {
+  username: string
+  role?: string
+}
+
+/** 企业资料入库入参；`tags` 为标签列表，`valid_to` 为 YYYY-MM-DD。 */
+export interface EnterpriseDocumentInput {
+  source: string
+  content: string
+  kind?: string
+  tags?: string[]
+  valid_to?: string | null
+}
+
+/** 企业共享资料（业绩、证书、人员等）。 */
+export interface EnterpriseDocument {
+  id: string
+  enterprise_id?: string
+  source: string
+  content: string
+  kind: string
+  tags: string[]
+  valid_to: string | null
+  created_at?: string | null
+  created_by?: string
+}
+
+/** 资产匹配结果：项目需求命中的企业资料。 */
+export interface EnterpriseMatch {
+  id?: string
+  document_id?: string
+  source: string
+  kind?: string
+  excerpt?: string
+  score?: number | null
+  tags?: string[]
+  valid_to?: string | null
+  reason?: string
+}
+
+/** 材料包条目；后端可返回条目（items）或资料（documents）。 */
+export interface EnterprisePackageItem {
+  id?: string
+  label?: string
+  title?: string
+  source?: string
+  kind?: string
+  status?: string
+  note?: string
+  count?: number
+}
+
+/** 项目企业材料包。 */
+export interface EnterprisePackage {
+  id?: string
+  name?: string
+  status?: string
+  items?: EnterprisePackageItem[]
+  documents?: EnterpriseDocument[]
+  generated_at?: string | null
+}
+
+// ---------------------------------------------------------------- 商务标（第二批）
+
+export type CommercialStatus = 'draft' | 'submitted' | 'approved' | 'rejected'
+
+/** 商务标章节预览行；字段随后端模板而定。 */
+export interface CommercialSection {
+  key?: string
+  title: string
+  content?: string
+  status?: string
+  note?: string
+}
+
+/** 商务标校验问题；提交/定稿前提示。 */
+export interface CommercialValidationIssue {
+  code?: string
+  message: string
+  severity?: string
+  section?: string
+}
+
+export interface CommercialValidation {
+  ok?: boolean
+  issues: CommercialValidationIssue[]
+}
+
+/** 商务标文档：绑定一个已定稿报价版本，含章节与校验结果。 */
+export interface CommercialDoc {
+  id: string
+  name: string
+  quote_version_id: string
+  package_id?: string | null
+  status: CommercialStatus
+  sections: CommercialSection[]
+  validation: CommercialValidation
+  submit_note?: string
+  submitted_by?: string
+  submitted_at?: string | null
+  review_note?: string
+  reviewed_by?: string
+  reviewed_at?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+export interface CommercialDocInput {
+  name: string
+  quote_version_id: string
+  package_id?: string | null
+}
+
+export type CommercialExportFormat = 'xlsx' | 'docx'
+
+// ---------------------------------------------------------------- 多维查重（第二批）
+
+export type SimilarityScope = 'all' | 'internal' | 'external' | string
+export type SimilarityMode = 'paragraph' | 'sentence' | 'section' | string
+export type SimilarityHitStatus = 'pending' | 'confirmed' | 'ignored' | string
+
+/** 查重报告统计；字段随版本演进，未知键按 unknown 保留。 */
+export interface SimilarityStats {
+  total?: number
+  checked?: number
+  hits?: number
+  reviewed?: number
+  pending?: number
+  skipped?: number
+  by_kind?: Record<string, number>
+  [key: string]: unknown
+}
+
+/** 查重报告。`status` 为 queued/running/done/failed 等服务端状态。 */
+export interface SimilarityReport {
+  id: string
+  scope: string
+  mode: string
+  threshold: number
+  status: string
+  stats: SimilarityStats
+  /** 跳过的条目数或说明；后端形状可能不同。 */
+  skipped?: number | string[]
+  source_project_id?: string | null
+  created_at: string | null
+  finished_at?: string | null
+}
+
+/** 查重命中：同一段内容在两个来源中的位置与相似度。 */
+export interface SimilarityHit {
+  id: string
+  kind: string
+  source_a: string
+  source_b: string
+  loc_a?: string
+  loc_b?: string
+  excerpt_a: string
+  excerpt_b: string
+  similarity: number
+  review_status: SimilarityHitStatus
+  review_note?: string
+}
