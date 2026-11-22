@@ -554,12 +554,17 @@ def search(
     limit: int = 4,
     kb_ids: list[str] | None = None,
     include_personal: bool = False,
+    extra_kb_ids: list[str] | None = None,
 ) -> list[Passage]:
     """Retrieve passages from enabled knowledge bases.
 
     Personal knowledge bases (``options.personal``) are opt-in: they are only
     searched when ``include_personal=True`` so one user's uploads never leak
     into another user's generation context.
+
+    ``kb_ids`` 保持**排他**语义（调用方显式限定检索范围）。``extra_kb_ids`` 是
+    **追加**语义：在全局已启用库之外再纳入这些库，且被追加的个人库可豁免
+    ``include_personal`` 过滤——用于「全局库 + 当前用户个人库」联合检索。
     """
 
     if not (query or "").strip():
@@ -568,8 +573,26 @@ def search(
     if kb_ids:
         statement = statement.where(KnowledgeBase.id.in_(kb_ids))
     bases = list(db.scalars(statement.order_by(KnowledgeBase.is_default.desc())))
+    extra_ids = {str(item) for item in (extra_kb_ids or []) if item}
+    if extra_ids:
+        known = {kb.id for kb in bases}
+        extras = list(
+            db.scalars(
+                select(KnowledgeBase)
+                .where(KnowledgeBase.enabled.is_(True), KnowledgeBase.id.in_(extra_ids))
+                .order_by(KnowledgeBase.is_default.desc())
+            )
+        )
+        for kb in extras:
+            if kb.id not in known:
+                bases.append(kb)
+                known.add(kb.id)
     if not include_personal:
-        bases = [kb for kb in bases if not (kb.options or {}).get("personal")]
+        bases = [
+            kb
+            for kb in bases
+            if kb.id in extra_ids or not (kb.options or {}).get("personal")
+        ]
     passages: list[Passage] = []
     for kb in bases:
         try:

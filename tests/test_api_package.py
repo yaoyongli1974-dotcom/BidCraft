@@ -33,7 +33,7 @@ def test_domain_routers_are_importable_and_populated():
     )
 
     modules = [account, admin, approvals, auth, batch_jobs, billing, health, jobs, legal, my, packages, projects]
-    assert sum(len(mod.router.routes) for mod in modules) == 194
+    assert sum(len(mod.router.routes) for mod in modules) == 195
 
 
 def test_route_modules_do_not_import_api_module_through_package():

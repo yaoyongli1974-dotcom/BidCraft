@@ -145,17 +145,18 @@ def _knowledge_provider(db, user_id: str | None = None):
     :func:`knowledge.search` otherwise skips personal bases).
     """
 
-    kb_ids: list[str] = []
+    extra_kb_ids: list[str] = []
     if user_id:
-        kb_ids.append(user_docs.personal_kb(db, str(user_id)).id)
+        extra_kb_ids.append(user_docs.personal_kb(db, str(user_id)).id)
 
     def provide(query: str) -> str:
+        # 用追加语义：全局已启用企业库照常参与，再纳入当前用户个人库。
+        # 旧写法把个人库 id 塞进 kb_ids（排他）导致全局库被排除，与注释矛盾。
         passages = knowledge.search(
             db,
             query,
-            kb_ids=kb_ids or None,
             limit=4,
-            include_personal=bool(kb_ids),
+            extra_kb_ids=extra_kb_ids or None,
         )
         block, _ = material_policy.context_block(db, passages)
         return block

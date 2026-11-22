@@ -297,6 +297,7 @@ def write_chapter(
         package_title=package.title,
         knowledge_text=knowledge_text,
         facts_text=facts_text,
+        needs=node.get("needs") or [],
     )
     body = client.complete(
         messages,

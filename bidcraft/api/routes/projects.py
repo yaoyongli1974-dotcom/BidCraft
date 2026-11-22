@@ -7,6 +7,10 @@ from fastapi import APIRouter
 
 _core = sys.modules['bidcraft.api.app']  # 运行期查找，保持 monkeypatch 生效
 
+from ...generation.coverage import (  # noqa: E402
+    calculate_score_coverage,
+    validate_scoring_coverage,
+)
 from ..shared import (  # noqa: F401
     BATCH_STALE_SECONDS,
     BOQ_UPLOAD_SUFFIXES,
@@ -623,6 +627,24 @@ def project_scores(ref: str) -> dict[str, Any]:
     with session_scope() as db:
         project, _role = _project(db, ref)
         return scoring.analysis(db, project)
+
+
+@router.get("/projects/{ref}/scoring-coverage")
+def project_scoring_coverage(ref: str) -> dict[str, Any]:
+    """评分覆盖矩阵（只读）：每个评分点是否映射到带正文的章节。
+
+    不修改大纲、不写库、不触发任务；viewer 可读。判定口径保守——匹配不到或
+    正文为空视为未覆盖，不做语义脑补。
+    """
+
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        scores = [scoring.score_payload(item) for item in scoring.list_scores(db, project)]
+        nodes = load_outline(db, project.id)
+        report = calculate_score_coverage(scores, nodes)
+        report["project_id"] = project.id
+        report["issues"] = validate_scoring_coverage(report)
+        return report
 
 
 @router.put("/projects/{ref}/scores")
@@ -1912,6 +1934,7 @@ def export(ref: str, payload: ExportRequest) -> FileResponse:
 
             path = export_xlsx(output_dir / "bid.xlsx", ledger)
         elif fmt == "pdf":
+            from ...export import templates as export_templates
             from ...export.pdf import PdfExportError, export_pdf
 
             docx_path = export_docx(
@@ -1920,6 +1943,7 @@ def export(ref: str, payload: ExportRequest) -> FileResponse:
                 nodes,
                 image_resolver=images.url_resolver(project.id),
                 image_policy=images.get_policy(project),
+                template=export_templates.load(project),
             )
             try:
                 path = export_pdf(docx_path)

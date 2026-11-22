@@ -27,6 +27,7 @@ def chapter_messages(
     package_title: str,
     knowledge_text: str = "",
     facts_text: str = "",
+    needs: list[str] | None = None,
 ) -> list[dict[str, str]]:
     knowledge = f"\n{knowledge_text}\n" if knowledge_text else ""
     facts = (
@@ -36,13 +37,22 @@ def chapter_messages(
         if facts_text
         else ""
     )
+    # 本章必须引用的事实字段（来自大纲 needs）。此前 needs 只在确定性降级路径使用，
+    # 模型路径丢失了这一约束，导致正文可能不引用本章应引用的台账字段。
+    needs_block = ""
+    if needs:
+        lines = "\n".join(f"- {item}" for item in needs)
+        needs_block = (
+            "【本章必须引用的事实字段（逐项在正文体现，缺失写 {{待填:字段名}}）】\n"
+            f"{lines}\n\n"
+        )
     user = f"""项目：{project_name}
 行业包：{package_title}
 当前章节：{heading}
 章节意图：{intent or '按招标文件与本行业惯例展开'}
 目标字数：约 {target_words} 字
 
-{ledger_text}
+{needs_block}{ledger_text}
 
 {facts}【全书大纲】
 {outline_text}

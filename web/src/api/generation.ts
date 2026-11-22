@@ -1,5 +1,5 @@
 import { ApiError, asArray, jsonBody, notifyUnauthorized, readError, request } from '../lib/http'
-import type { ChapterCitations, ChapterDetail, GenerationReport, Job, OutlineChapter, OutlineResponse, ProjectCitations } from '../lib/types'
+import type { ChapterCitations, ChapterDetail, GenerationReport, Job, OutlineChapter, OutlineResponse, ProjectCitations, ScoringCoverageReport } from '../lib/types'
 
 // ---------------------------------------------------------------- generation domain
 export async function getOutline(ref: string): Promise<OutlineChapter[]> {
@@ -14,6 +14,13 @@ export const generateOutline = (ref: string, mode: string, words: number) =>
     `/projects/${encodeURIComponent(ref)}/outline`,
     jsonBody({ mode, words }),
   )
+
+/** 评分点覆盖矩阵（只读）：每个评分点是否映射到带正文的章节。 */
+export function getScoringCoverage(ref: string): Promise<ScoringCoverageReport> {
+  return request<ScoringCoverageReport>(
+    `/projects/${encodeURIComponent(ref)}/scoring-coverage`,
+  )
+}
 
 export async function saveOutline(
   ref: string,

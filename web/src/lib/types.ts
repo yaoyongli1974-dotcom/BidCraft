@@ -412,6 +412,39 @@ export interface ScoringItem {
   source_quote?: string
 }
 
+/** 评分点覆盖矩阵（只读，来自 GET /projects/{ref}/scoring-coverage）。 */
+export interface ScoringCoverageNode {
+  id: string
+  heading: string
+  words: number
+  has_body: boolean
+  review_status?: string
+  reasons: string[]
+}
+
+export interface ScoringCoverageRow {
+  id?: string
+  name: string
+  score: number
+  category?: string
+  section_hint?: string
+  status: 'covered' | 'weak' | 'uncovered'
+  status_label: string
+  nodes: ScoringCoverageNode[]
+}
+
+export interface ScoringCoverageReport {
+  project_id?: string
+  total_items: number
+  total_score: number
+  covered_score: number
+  weak_score: number
+  covered_ratio: number
+  uncovered_count: number
+  rows: ScoringCoverageRow[]
+  issues: string[]
+}
+
 export interface Requirement {
   kind?: string
   text: string

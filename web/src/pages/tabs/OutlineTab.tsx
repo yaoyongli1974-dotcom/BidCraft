@@ -17,7 +17,13 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { useWorkspace } from '../useWorkspace'
-import { generateChapter, generateOutline, getOutline, saveOutline } from '../../api/generation'
+import {
+  generateChapter,
+  generateOutline,
+  getOutline,
+  getScoringCoverage,
+  saveOutline,
+} from '../../api/generation'
 import { ApiError, messageOf } from '../../lib/http'
 import type { OutlineChapter } from '../../lib/types'
 import {
@@ -30,6 +36,7 @@ import {
   percent,
   projectStats,
 } from '../../lib/format'
+import { ScoreCoverage } from '../../components/ScoreCoverage'
 import { useQuery, useSaveShortcut, useUnsavedGuard } from '../../lib/hooks'
 import { Badge } from '../../components/Badge'
 import { Button, IconButton } from '../../components/Button'
@@ -89,6 +96,7 @@ function snapshot(chapters: EditableChapter[]): string {
 export function OutlineTab() {
   const { ref, basePath, project, reloadProject, setUnsaved, canWrite } = useWorkspace()
   const outlineQuery = useQuery(`outline:${ref}`, () => getOutline(ref))
+  const coverageQuery = useQuery(`scoring-coverage:${ref}`, () => getScoringCoverage(ref))
   const confirm = useConfirm()
   const toast = useToast()
   const navigate = useNavigate()
@@ -501,6 +509,8 @@ export function OutlineTab() {
           </Button>
         </div>
       </section>
+
+      <ScoreCoverage report={coverageQuery.data} loading={coverageQuery.loading} />
 
       <section className="panel outline-editor">
         <div className="panel-head outline-editor-head">
