@@ -1,11 +1,16 @@
 {
   "_meta": {
     "purpose": "实质性条款判定回归集（v0.22.0 / R14）。每条样本含招标要求、投标响应、标准四态判定、★标记、人工审核说明与关键证据位置。",
-    "verdict_values": ["satisfied", "unsatisfied", "partial", "review"],
+    "verdict_values": [
+      "satisfied",
+      "unsatisfied",
+      "partial",
+      "review"
+    ],
     "binary_mapping": "satisfied=正类（放行），其余=负类；FAR=fp/(fp+tn)",
     "governance": "标准答案（expected）变更必须有明确人工审核记录，不得为提升通过率而修改。详见 docs/release-notes/v0.22.0.md。",
-    "deadline": "样本默认不传招标截止日期；带年份业绩的时间窗样本由 test_calibration 单独传 deadline。",
-    "coverage": "资质/业绩/类似项目/数量/金额/带宽/存储/质保/响应时间/交付时间/否定语义/复合条款/时间窗口/单位换算"
+    "deadline": "样本可自带 deadline（逐样本招标截止日期）；无 deadline 的时间窗样本转人工复核，不用服务器当前时间。",
+    "coverage": "资质/业绩/类似项目/数量/金额/带宽/存储/质保/响应时间/交付时间/否定语义/复合条款/时间窗口/单位换算/起始边界年/截止边界年/月边界/日边界/缺截止日期/合同日期冒充/项目类型不匹配/复合类型约束"
   },
   "cases": [
     {
@@ -151,6 +156,122 @@
       "marker": "",
       "note": "未在正文找到明确响应→不满足，不得自动认定满足。",
       "evidence_hint": "相关文件（无实质内容）"
+    },
+    {
+      "id": "c17_tw_in_window",
+      "requirement": "近三年不少于3项类似项目业绩",
+      "body": "2025年完成A项目。2024年完成B项目。2024年完成C项目。",
+      "expected": "satisfied",
+      "marker": "",
+      "deadline": "2026-11-22",
+      "category": "time_window",
+      "note": "三项业绩均在 2023-11-22~2026-11-22 窗口内（年精度内部年份），有效数=3→满足。",
+      "evidence_hint": "2025/2024/2024 年完成日期",
+      "expected_evidence": {
+        "min_valid": 3
+      }
+    },
+    {
+      "id": "c18_tw_out_of_window",
+      "requirement": "近三年不少于3项类似项目业绩",
+      "body": "2019年完成A项目。2018年完成B项目。2017年完成C项目。",
+      "expected": "unsatisfied",
+      "marker": "",
+      "deadline": "2026-11-22",
+      "category": "time_window",
+      "note": "三项业绩均早于起始年 2023，全部过期→不满足。",
+      "evidence_hint": "2019/2018/2017 年完成日期"
+    },
+    {
+      "id": "c19_tw_start_year_boundary",
+      "requirement": "近三年不少于3项类似项目业绩",
+      "body": "2023年完成A项目。2024年完成B项目。2025年完成C项目。",
+      "expected": "review",
+      "marker": "",
+      "deadline": "2026-11-22",
+      "category": "time_window",
+      "note": "2023年=起始年（起始边界），年精度无法证明在 2023-11-22 之后→边界转人工，不得自动计入。",
+      "evidence_hint": "2023年（起始边界年）",
+      "expected_evidence": {
+        "boundary_start_ge": 1
+      }
+    },
+    {
+      "id": "c20_tw_deadline_year_boundary",
+      "requirement": "近三年不少于3项类似项目业绩",
+      "body": "2026年完成A项目。2025年完成B项目。2024年完成C项目。",
+      "expected": "review",
+      "marker": "",
+      "deadline": "2026-11-22",
+      "category": "time_window",
+      "note": "2026年=截止年（截止边界），年精度无法证明在 2026-11-22 之前→边界转人工。",
+      "evidence_hint": "2026年（截止边界年）"
+    },
+    {
+      "id": "c21_tw_month_boundary",
+      "requirement": "近三年不少于3项类似项目业绩",
+      "body": "2023年11月完成A项目。2024年完成B项目。2025年完成C项目。",
+      "expected": "review",
+      "marker": "",
+      "deadline": "2026-11-22",
+      "category": "time_window",
+      "note": "2023年11月=起始月，月精度边界歧义（11月1日 vs 11月22日）→转人工。",
+      "evidence_hint": "2023年11月（起始边界月）"
+    },
+    {
+      "id": "c22_tw_day_boundary",
+      "requirement": "近三年不少于3项类似项目业绩",
+      "body": "2023-11-22完成A项目。2024年完成B项目。2025年完成C项目。",
+      "expected": "satisfied",
+      "marker": "",
+      "deadline": "2026-11-22",
+      "category": "time_window",
+      "note": "日精度起始日含等号（2023-11-22 视为有效），三项有效→满足。",
+      "evidence_hint": "2023-11-22（日精度起始边界，含等号）"
+    },
+    {
+      "id": "c23_tw_missing_deadline",
+      "requirement": "近三年不少于3项类似项目业绩",
+      "body": "2025年完成A项目。2024年完成B项目。2023年完成C项目。",
+      "expected": "review",
+      "marker": "",
+      "deadline": "",
+      "category": "time_window",
+      "note": "无招标截止日期且正文含业绩年份，无法计算时间窗→转人工，不自动放行。",
+      "evidence_hint": "缺失招标截止日期"
+    },
+    {
+      "id": "c24_tw_contract_date_not_completion",
+      "requirement": "近三年不少于3项类似项目业绩",
+      "body": "2020年签订A项目合同。2024年完成B项目。2025年完成C项目。",
+      "expected": "review",
+      "marker": "",
+      "deadline": "2026-11-22",
+      "category": "time_window",
+      "note": "合同签订日期（2020）不得当完成日期；存在早期合同日期冲突→转人工，不直接判满足。",
+      "evidence_hint": "2020年签订合同（非完成日）"
+    },
+    {
+      "id": "c25_tw_project_type_mismatch",
+      "requirement": "近三年不少于3项弱电智能化类似项目业绩",
+      "body": "2025年完成软件开发A项目。2024年完成软件开发B项目。2024年完成软件开发C项目。",
+      "expected": "unsatisfied",
+      "marker": "",
+      "deadline": "2026-11-22",
+      "category": "project_type",
+      "note": "三项均为软件开发，与弱电智能化类型明确不符→不计有效业绩→不满足。",
+      "evidence_hint": "软件开发项目A/B/C"
+    },
+    {
+      "id": "c26_tw_compound_type_constraint",
+      "requirement": "近三年不少于3项弱电智能化类似项目业绩，并提供合同复印件",
+      "body": "2025年完成弱电智能化A项目，提供合同复印件。2024年完成软件开发B项目，提供合同复印件。2024年完成弱电智能化C项目，提供合同复印件。",
+      "expected": "partial",
+      "marker": "★",
+      "deadline": "2026-11-22",
+      "category": "compound",
+      "note": "复合条款：合同复印件原子满足；业绩原子只 2 项弱电智能化有效（软件开发不计）→业绩数不足→整体部分满足，不得自动放行 ★。",
+      "evidence_hint": "弱电智能化A/C + 合同；软件开发B 不计入"
     }
   ]
 }

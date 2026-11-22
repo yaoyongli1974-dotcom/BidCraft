@@ -42,6 +42,7 @@ from .constraint_check import (
     _NUM,
     ConstraintVerdict,
     _cn_number,
+    clause_at,
     evaluate_constraints,
     extract_constraints,
 )
@@ -374,7 +375,11 @@ DEADLINE_KEYS = (
 
 @dataclass
 class PerformanceEvidence:
-    """R10：单条业绩证据（与 FactItem / 文档证据对齐的可追溯结构）。"""
+    """R10/R19：单条业绩证据（与 FactItem / 文档证据对齐的可追溯结构）。
+
+    R19：项目身份不能只看名称——增加归一化名称、合同编号、客户名；日期必须
+    归属到具体项目；来源页码/文件 ID 拿不到时必须**显式标记缺失**，不伪造。
+    """
 
     performance_id: str
     project_name: str
@@ -389,6 +394,12 @@ class PerformanceEvidence:
     source_page: int
     source_section: str
     evidence_file_id: str
+    # R19 新增：项目身份与来源可信度（均带默认值，兼容既有位置/关键字构造）。
+    normalized_project_name: str = ""
+    contract_number: str = ""
+    customer_name: str = ""
+    identity_status: str = "ambiguous"       # certain / ambiguous
+    source_reference_status: str = "missing"  # available / missing（不得伪造页码/文件 ID）
 
     def as_dict(self) -> dict:
         return {
@@ -408,6 +419,12 @@ class PerformanceEvidence:
             "source_page": self.source_page,
             "source_section": self.source_section,
             "evidence_file_id": self.evidence_file_id,
+            # R19：身份与来源元数据，供上层转人工复核 / 区分真实溯源与文本占位。
+            "normalized_project_name": self.normalized_project_name,
+            "contract_number": self.contract_number,
+            "customer_name": self.customer_name,
+            "identity_status": self.identity_status,
+            "source_reference_status": self.source_reference_status,
         }
 
     def _effective(self) -> str:
@@ -537,6 +554,68 @@ def _required_project_type(requirement_text: str) -> str:
     return ""
 
 
+# R19：合同编号 / 客户名 / 项目名归一化，用于项目身份识别与去重。
+_CONTRACT_NO_RE = re.compile(r"(?:合同编号|合同号|编号)\s*[:：]?\s*([A-Za-z0-9\-_]{4,40})")
+_CUSTOMER_RE = re.compile(r"(?:客户|甲方|业主|建设单位|采购单位)\s*[:：]?\s*([\u4e00-\u9fffA-Za-z0-9]{2,20})")
+_NAME_NOISE = re.compile(r"[\s（）()「」『』·、,，。:：\-—]+")
+
+
+def _clause_at(text: str, pos: int) -> str:
+    """返回 pos 所在的子句（复用 constraint_check 的口径）。"""
+
+    return clause_at(text, pos)
+
+
+def _identity_context(text: str, pos: int, name_spans: list[tuple[int, int, str]]) -> str:
+    """R19：取「离日期最近的项目名」附近 ±35 字上下文，覆盖「合同编号HT-001」小句。
+
+    只围绕**单个**项目名取窗口，避免把相邻另一项目的合同编号也圈进来造成
+    误判为身份冲突。中文里日期常紧挨项目名（「2025年完成A项目」），以最近项目名为锚。
+    """
+
+    # 以句子边界（。！？）为限，避免把下一句另一项目的合同编号圈进来造成假冲突。
+    sent = re.compile(r"[。！？!?]")
+    lo = 0
+    hi = len(text)
+    for m in sent.finditer(text):
+        if m.end() <= pos:
+            lo = m.end()
+        elif m.start() > pos:
+            hi = m.start()
+            break
+    return text[lo:hi]
+
+
+def _normalized_name(name: str) -> str:
+    """R19：归一化项目名（去噪声/标点，小写），用于身份比对，不单独作合并依据。"""
+
+    return _NAME_NOISE.sub("", name or "").lower()
+
+
+def _project_identity(clause: str, raw_name: str) -> tuple[str, str, str, str]:
+    """R19：从子句提取 (归一化名, 合同编号, 客户名, 身份状态)。
+
+    身份判定优先级：合同编号 > 客户+名称 > 名称。仅凭相似名称不合并；
+    有多个互相矛盾的合同编号/客户名时标 ambiguous 交上层转人工。
+    """
+
+    normalized = _normalized_name(raw_name)
+    contract_nos = set(_CONTRACT_NO_RE.findall(clause))
+    customers = set(_CUSTOMER_RE.findall(clause))
+    contract_no = next(iter(contract_nos)) if len(contract_nos) == 1 else ""
+    customer = next(iter(customers)) if len(customers) == 1 else ""
+    if len(contract_nos) > 1 or len(customers) > 1:
+        return normalized, contract_no, customer, "ambiguous"
+    if contract_no:
+        return normalized, contract_no, customer, "certain"
+    if customer and normalized:
+        return normalized, "", customer, "certain"
+    # 仅名称：有具体名称（含「A」这类标识）或唯一占位都视为可区分身份，
+    # 保证既有以 A/B/C 命名、以及无「项目」字样正文的用例口径不变。
+    # 只有「多个合同编号/客户名冲突」才是身份歧义（见上方 len>1 分支）。
+    return normalized, "", "", "certain"
+
+
 def _extract_performance_evidence(body: str, requirement_text: str = "") -> list[PerformanceEvidence]:
     """R10：抽取正文里带明确日期的**独立业绩记录**，逐条保留项目归属与出处。
 
@@ -546,59 +625,95 @@ def _extract_performance_evidence(body: str, requirement_text: str = "") -> list
       记录 ``project_type='?'`` 交由上层转人工复核。
     """
 
+    text = body or ""
+    # R19：在整段正文上按位置处理，避免标点切分把「项目」和「合同编号」拆散。
+    # 项目名捕获后剥掉日期/动词前缀（「12月完成C项目」→「C」）。
+    name_spans: list[tuple[int, int, str]] = []
+    for nm in _PROJECT_NAME_RE.finditer(text):
+        raw = (nm.group(1) or "") + (nm.group(2) or "")
+        raw = re.sub(r"^(?:20\d{2}|19\d{2})\s*年?", "", raw)
+        raw = re.sub(r"^\d{1,2}\s*月", "", raw)
+        # 「A项目2025年」捕获组可能带尾随年份，剥掉后再取动词前缀。
+        raw = re.sub(r"(?:20\d{2}|19\d{2})\s*年?\s*$", "", raw)
+        name = _PROJECT_VERB_PREFIX.sub("", raw).strip()
+        if name:
+            name_spans.append((nm.start(), nm.end(), name))
+
     seen: dict[str, PerformanceEvidence] = {}
     order = 0
-    for clause in [c.strip() for c in _CLAUSE_SPLIT.split(body or "") if c.strip()]:
+    for match in _FULL_DATE_RE.finditer(text):
+        # 日期所在子句（用于类型/日期类型判定）；上下文窗口用于身份（合同号/客户）。
+        clause = _clause_at(text, match.start())
         if not _ACHIEVEMENT_DATED_RE.search(clause):
             continue
-        name_match = _PROJECT_NAME_RE.search(clause)
-        raw_name = ""
-        if name_match:
-            raw_name = (name_match.group(1) or "") + (name_match.group(2) or "")
-        # 去掉「2025年完成A」里的年份与动词前缀，保留项目标识 A。
-        raw_name = re.sub(r"^(?:20\d{2}|19\d{2})\s*年?", "", raw_name)
-        name = _PROJECT_VERB_PREFIX.sub("", raw_name).strip()
-        # 无项目名时用「项目N」占位，保证每条独立业绩仍单独成记录。
-        if not name:
+        year, month, day = _date_parts(match)
+        precision = _date_precision(match)
+        kind = _date_kind(clause, match)
+        iso = f"{year:04d}"
+        if precision in ("month", "day"):
+            iso += f"-{month:02d}"
+        if precision == "day":
+            iso += f"-{day:02d}"
+
+        # 就近项目名：按绝对距离取（中文日期常在项目名前「2025年完成A项目」）。
+        chosen = ""
+        if name_spans:
+            chosen = min(name_spans, key=lambda sp: min(
+                abs(sp[0] - match.start()), abs(sp[1] - match.end())
+            ))[2]
+        if not chosen:
             order += 1
-            name = f"未命名项目{order}"
+            chosen = f"未命名项目{order}"
+
+        # 身份上下文：项目名附近 ±40 字，能覆盖「，合同编号HT-001」这一小句。
+        ctx = _identity_context(text, match.start(), name_spans)
+        normalized, contract_no, customer, id_status = _project_identity(ctx, chosen)
+        if contract_no:
+            key = f"contract:{contract_no}"
+        elif customer and normalized:
+            key = f"cust:{customer}:{normalized}"
+        else:
+            key = f"name:{normalized or chosen}"
+
         ptype = ""
         for candidate, hints in _PROJECT_TYPE_HINTS.items():
             if any(hint in clause for hint in hints):
                 ptype = candidate
                 break
-        for match in _FULL_DATE_RE.finditer(clause):
-            year, month, day = _date_parts(match)
-            precision = _date_precision(match)
-            kind = _date_kind(clause, match)
-            iso = f"{year:04d}"
-            if precision in ("month", "day"):
-                iso += f"-{month:02d}"
-            if precision == "day":
-                iso += f"-{day:02d}"
-            record = seen.get(name)
-            if record is None:
-                record = PerformanceEvidence(
-                    performance_id=f"PE-{len(seen) + 1:03d}",
-                    project_name=name,
-                    project_type=ptype or "?",
-                    contract_date="", start_date="", completion_date="", acceptance_date="",
-                    date_precision=precision, date_kind=kind,
-                    source_quote=clause, source_page=0, source_section="", evidence_file_id="",
-                )
-                seen[name] = record
-            # 每个日期按其类型落到对应字段；完成/验收优先，签订/开工不当完成日。
-            if kind == "contract":
-                record.contract_date = record.contract_date or iso
-            elif kind == "start":
-                record.start_date = record.start_date or iso
-            elif kind == "acceptance":
-                record.acceptance_date = record.acceptance_date or iso
-            else:  # completion / unknown —— 只有出现「完成/竣工」才算完成日
-                if kind == "completion":
-                    record.completion_date = record.completion_date or iso
-            if record.date_precision == "year" and precision != "year":
-                record.date_precision = precision
+
+        record = seen.get(key)
+        if record is None:
+            record = PerformanceEvidence(
+                performance_id=f"PE-{len(seen) + 1:03d}",
+                project_name=chosen, project_type=ptype or "?",
+                contract_date="", start_date="", completion_date="", acceptance_date="",
+                date_precision=precision, date_kind=kind,
+                source_quote=clause, source_page=0, source_section="", evidence_file_id="",
+                normalized_project_name=normalized, contract_number=contract_no,
+                customer_name=customer, identity_status=id_status,
+                source_reference_status="missing",  # 文本输入无真实页码/文件 ID，不伪造。
+            )
+            seen[key] = record
+        else:
+            if contract_no and not record.contract_number:
+                record.contract_number = contract_no
+                record.identity_status = "certain"
+            if customer and not record.customer_name:
+                record.customer_name = customer
+            if id_status == "ambiguous":
+                record.identity_status = "ambiguous"
+            if record.project_type == "?" and ptype:
+                record.project_type = ptype
+        if kind == "contract":
+            record.contract_date = record.contract_date or iso
+        elif kind == "start":
+            record.start_date = record.start_date or iso
+        elif kind == "acceptance":
+            record.acceptance_date = record.acceptance_date or iso
+        elif kind == "completion":
+            record.completion_date = record.completion_date or iso
+        if record.date_precision == "year" and precision != "year":
+            record.date_precision = precision
     return list(seen.values())
 
 
@@ -629,9 +744,13 @@ def _deadline_window_signals(
     out: dict = {
         "applicable": False, "has_deadline": deadline is not None,
         "deadline": deadline.isoformat() if deadline else "",
+        "cutoff": _cutoff_date(deadline, req_windows[0]["years"], req_windows[0]["unit"]).isoformat()
+        if (deadline and req_windows) else "",
         "records": [], "expired": 0, "valid": 0,
         "missing_deadline": False, "boundary_conflict": False,
-        "type_conflict": False, "project_type": "",
+        # R17：分别保留起始边界 / 截止边界证据，避免只看截止年而漏判起始年。
+        "boundary_start": 0, "boundary_end": 0,
+        "type_conflict": False, "identity_conflict": False, "project_type": "",
     }
     if not req_windows:
         return out
@@ -653,6 +772,11 @@ def _deadline_window_signals(
     cutoff = _cutoff_date(deadline, years, unit)
 
     for rec in records:
+        # R19：项目身份不可靠（简称/全称无法确认、多个客户/合同号冲突）→ 转人工，
+        # 不因为名称相似就把多条当同一项目累加，也不直接计入有效数量。
+        if rec.identity_status == "ambiguous":
+            out["identity_conflict"] = True
+            continue
         # R10：招标指定类型时按类型过滤；无法匹配（'?'）→ 转人工复核。
         if required_type:
             if rec.project_type == "?":
@@ -678,33 +802,42 @@ def _deadline_window_signals(
         # R12：年份/月份精度处于窗口边界年份/月份时无法精确判断 → 转人工复核，
         # 不直接计入有效数量（「2023年」不臆造成 2023-01-01）。
         if precision == "year":
-            # 年份精度按日历年计数（沿用既有「近三年」口径，cutoff 年计入）。
-            # 但完成年份 == 截止年份时无法确认是否在截止日之前 → 转人工复核，
-            # 不臆造成 1 月 1 日直接放行（R12）。
-            if y == deadline.year:
-                out["boundary_conflict"] = True
-                continue
-            if y >= cutoff.year:
-                out["valid"] += 1
-            else:
+            # R17：年份精度无法证明具体月日，起始年 / 截止年均存在边界歧义 → 转人工，
+            # 绝不臆造成 1 月 1 日后计入（「2023年」无法证明在 2023-11-22 之后）。
+            # 只有严格位于窗口内部年份（cutoff.year < y < deadline.year）才可计入。
+            if y < cutoff.year:
                 out["expired"] += 1
+            elif y == cutoff.year:
+                out["boundary_conflict"] = True
+                out["boundary_start"] += 1
+            elif y == deadline.year or y > deadline.year:
+                out["boundary_conflict"] = True
+                out["boundary_end"] += 1
+            else:
+                out["valid"] += 1
             continue
         if precision == "month":
-            if (y, m) <= (cutoff.year, cutoff.month) or (y, m) >= (deadline.year, deadline.month):
-                out["boundary_conflict"] = True
-                continue
-            if (cutoff.year, cutoff.month) < (y, m) < (deadline.year, deadline.month):
-                out["valid"] += 1
-            else:
+            # R17：月份精度起始/截止月同样有歧义；严格内部月才计入，
+            # 明确早于起始月的记过期，其余边界记人工。
+            if (y, m) < (cutoff.year, cutoff.month):
                 out["expired"] += 1
+            elif (y, m) == (cutoff.year, cutoff.month):
+                out["boundary_conflict"] = True
+                out["boundary_start"] += 1
+            elif (y, m) >= (deadline.year, deadline.month):
+                out["boundary_conflict"] = True
+                out["boundary_end"] += 1
+            else:
+                out["valid"] += 1
             continue
-        # day 精度：按日历截止日精确比较，边界含等号。
+        # day 精度：按日历截止日精确比较，边界含等号（起始日 / 截止日都计入有效）。
         if rec_date < cutoff:
             out["expired"] += 1
         elif rec_date <= deadline:
             out["valid"] += 1
         else:
             out["boundary_conflict"] = True
+            out["boundary_end"] += 1
     return out
 
 
@@ -763,9 +896,12 @@ def _decide(
             if c.kind == "numeric" and c.comparator == ">=" and c.family == "achievement":
                 need, count_idx = int(c.threshold), idx
                 break
-        if dw["missing_deadline"] or dw["boundary_conflict"] or dw.get("type_conflict"):
+        if (dw["missing_deadline"] or dw["boundary_conflict"]
+                or dw.get("type_conflict") or dw.get("identity_conflict")):
             if dw["missing_deadline"]:
                 reason = "业绩含明确日期但缺少招标截止日期，无法计算时间窗，转人工复核"
+            elif dw.get("identity_conflict"):
+                reason = "业绩项目身份无法确定（名称/客户/合同编号存在歧义），转人工复核"
             elif dw.get("type_conflict"):
                 reason = "类似项目类型无法与招标要求可靠匹配，转人工复核"
             else:
@@ -857,17 +993,25 @@ def _judge_atom(
     marker: str,
     block_level: str,
     deadline,
+    requirement_text: str = "",
 ) -> RequirementVerdict:
     """对单个原子独立执行**完整**判定（含业绩截止日期校验，R08）。
 
     与整条文本共用 :func:`_decide`，确保复合条款的每个原子都跑过硬约束 + 日期
     校验，不存在「拆成原子后绕过截止日期」的旁路。
+
+    R16：``requirement_text`` 是**原始完整招标条款**。项目类型约束（「弱电智能化
+    类似项目」等）属于整条要求，拆分后不能丢失——必须把它传给业绩日期校验，
+    否则业绩原子会丢掉类型限定、把无关项目计为有效业绩。
     """
 
     text = atom.get("text", "")
     atom_verdicts = evaluate_constraints(text, combined)
     atom_windows = extract_time_windows(text)
-    atom_deadline = _deadline_window_signals(atom_windows, combined, deadline)
+    # R16：用原始条款判断项目类型/时间窗，而不是只靠拆分后的原子文本。
+    atom_deadline = _deadline_window_signals(
+        atom_windows, combined, deadline, requirement_text or text
+    )
     atom_time_signals = _time_window_signals(atom_windows, combined)
     core = requirement_core(text)
     threshold = 0.45 if len(core) >= 8 else 1.0
@@ -939,7 +1083,8 @@ def judge(
     ]
     req_windows = extract_time_windows(text)
     time_signals = _time_window_signals(req_windows, combined)
-    deadline_window = _deadline_window_signals(req_windows, combined, deadline)
+    # R16：整条文本也用原始条款判断项目类型，保证单条与复合业绩口径一致。
+    deadline_window = _deadline_window_signals(req_windows, combined, deadline, text)
 
     # L4 语义覆盖（可插拔 matcher）+ 章节锚点
     best_ratio = 0.0
@@ -986,7 +1131,10 @@ def judge(
     # 拆分本身存疑时即便各原子看似命中也不自动判满足。
     if len(atoms) > 1:
         atom_verdicts = [
-            _judge_atom(atom, nodes, combined, matcher, req_type, marker, block_level, deadline)
+            _judge_atom(
+                atom, nodes, combined, matcher, req_type, marker, block_level,
+                deadline, requirement_text=text,
+            )
             for atom in atoms
         ]
         atom_states = [verdict.state for verdict in atom_verdicts]

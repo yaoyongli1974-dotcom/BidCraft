@@ -18,6 +18,7 @@ from bidcraft.constraint_check import (
     UNIT_COMPATIBLE,
     UNIT_INCOMPATIBLE,
     UNIT_UNKNOWN,
+    _to_base,
     constraint_blocked,
     evaluate_constraints,
     extract_constraints,
@@ -526,3 +527,83 @@ def test_float_boundary_comparison():
 
     v = evaluate_constraints("带宽不小于1Gbps", "带宽1000Mbps")[0]
     assert v.state == "satisfied"
+
+
+# =============================================================== R21：单位与主体关联边界
+def test_yuan_and_wanyuan_unit_policy():
+    """R21：元/万元未登记为金额量纲 → unknown，不自动换算（如万元≠元）。
+
+    未登记单位一律 unknown，禁止把「100万元」当作「100元」或与另一个金额单位
+    自动比较——金额单位缺失时转人工复核，而不是放行或误阻断。
+    """
+    assert unit_relation("元", "万元") == UNIT_UNKNOWN
+    assert unit_relation("元", "元") == UNIT_UNKNOWN  # 未登记单位即便字面相同也不自动兼容
+    # 金额约束不能用未登记单位做出 satisfied 的自动判定。
+    states = [state for _label, state in _states("合同金额不低于100万元", "合同金额为500万元。")]
+    assert "satisfied" not in states
+
+
+def test_month_day_duration_boundary_policy():
+    """R21：天/月/年同为时长量纲，按规则基准换算（约定，非精确日历日）。
+
+    文档口径：12月 == 1年、30天 ≈ 1月是「规则比较约定」，用于质保等时长约束；
+    具体合同日历日/截止日不得套用它（那走 verdict 的 calendar 计算）。
+    """
+    assert unit_relation("年", "月") == UNIT_COMPATIBLE
+    assert unit_relation("天", "月") == UNIT_COMPATIBLE
+    assert abs(_to_base(1, "年") - _to_base(12, "月")) < 1e-6   # 1年 == 12月
+    assert abs(_to_base(1, "月") - _to_base(30, "天")) < 1e-6   # 1月 == 30天（约定）
+    # 换算后约束可正确比较
+    assert evaluate_constraints("质保不少于1年", "质保12个月。")[0].state == "satisfied"
+
+
+def test_primary_backup_bandwidth_association():
+    """R21：主链路/备链路带宽各自关联自己的约束对象。"""
+    req = "主链路带宽不低于1000Mbps、备链路带宽不低于500Mbps"
+    constraints = extract_constraints(req)
+    assert len(constraints) == 2
+    # 每条约束携带可追溯的来源片段与对象限定。
+    assert all(item.source_span for item in constraints)
+    assert any("主链路" in item.object for item in constraints)
+    assert any("备链路" in item.object for item in constraints)
+
+
+def test_primary_link_value_not_used_for_backup():
+    """R21：主链路的数值不得被误当成备链路数值（侵略性放行防护）。"""
+    # 主链路要求 1000，正文主链路只有 300、备链路 2000 —— 不能借备链路放行主链路。
+    v = evaluate_constraints("主链路带宽不低于1000Mbps", "主链路带宽为300Mbps，备链路带宽为2000Mbps。")[0]
+    assert v.state == "violated"
+    # 备链路要求 500，正文备链路只有 300、主链路 2000 —— 不能借主链路放行备链路。
+    v2 = evaluate_constraints("备链路带宽不低于500Mbps", "主链路带宽为2000Mbps，备链路带宽为300Mbps。")[0]
+    assert v2.state == "violated"
+
+
+def test_multiple_subjects_without_punctuation():
+    """R21：无标点的多主体复合约束，局部主体各自归族不串味。"""
+    req = "业绩不少于3项且主链路带宽不低于1000Mbps"
+    constraints = extract_constraints(req)
+    families = {item.family for item in constraints}
+    assert "achievement" in families
+    assert "bandwidth" in families
+    # 带宽约束的局部主体不含「业绩」词，归族不被业绩污染。
+    bw = [c for c in constraints if c.family == "bandwidth"]
+    assert bw and all("业绩" not in c.object for c in bw)
+
+
+def test_unknown_local_family_does_not_silently_misattribute():
+    """R21：局部主体无法识别时返回不明确，不得静默套用错误主体。"""
+    req = "性能指标不低于1000Mbps"
+    # fallback family 为空，局部窗口也识别不出带宽词族 → family 不应被强行赋成 achievement。
+    cs = extract_constraints(req)
+    assert cs
+    assert all(c.family != "achievement" for c in cs)
+    states = [v.state for v in evaluate_constraints(req, "数值为500。数值为2000。")]
+    assert "satisfied" not in states
+
+
+def test_constraint_source_span_maps_to_original_text():
+    """R21：每条约束的 source_span 都能在原文中逐字定位，保证可追溯。"""
+    req = "带宽不低于1000Mbps，质保不少于1年，一级资质"
+    for item in extract_constraints(req):
+        assert item.source_span, item.label
+        assert item.source_span in req, (item.source_span, req)

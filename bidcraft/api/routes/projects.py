@@ -1,5 +1,6 @@
 """API routes: /projects (从 app.py 迁移，URL 与响应格式不变)。"""
 
+import hashlib
 import sys
 
 from fastapi import APIRouter
@@ -1309,6 +1310,10 @@ def save_chapter(ref: str, node_id: str, payload: ChapterSave) -> Any:
         if section is None:
             section = Section(node_id=node.id)
             db.add(section)
+        # R18：改动前先留存旧正文的哈希与修订号——人工确认快照要能回答
+        # 「确认时依据的是哪一版正文」。current_revision 是改动前的版本。
+        old_body_hash = hashlib.sha256((section.body or "").encode("utf-8")).hexdigest()
+        confirmed_revision = current_revision
         section.body = payload.body
         section.words = count_words(payload.body)
         section.status = "edited"
@@ -1337,7 +1342,38 @@ def save_chapter(ref: str, node_id: str, payload: ChapterSave) -> Any:
             )
         ]
         if invalidated:
+            snapshot_user = (current_user() or {}).get("username") or "system"
+            invalidated_at = clock.iso_beijing(clock.utc_now())
             for row in invalidated:
+                # R18：失效前把「原始自动判定 + 人工确认 + 依据的正文版本」完整快照
+                # 写入 Append-only 审计。普通编辑接口无法修改历史审计行；再次确认会
+                # 生成新的快照，不会覆盖这一条。与正文保存同事务，失败整体回滚。
+                snapshot = {
+                    "requirement_id": row.id,
+                    "requirement_text": row.text,
+                    "marker": row.marker or "",
+                    "original_auto_verdict": row.response_verdict or "",
+                    "original_verdict_label": row.response_verdict_label or "",
+                    "original_verdict_reason": row.response_verdict_reason or "",
+                    "original_verdict_evidence": {
+                        "source_quote": row.source_quote or "",
+                        "page": row.page or 0,
+                        "clause_no": row.clause_no or "",
+                    },
+                    "original_response_status": row.response_status or "",
+                    "original_response_note": row.response_note or "",
+                    "confirmed_by": row.responded_by or "",
+                    "confirmed_at": clock.iso_beijing(row.responded_at),
+                    "section_id": row.section_id or "",
+                    "node_id": node.id,
+                    "section_revision": confirmed_revision,
+                    "body_hash": old_body_hash,
+                    "invalidated_at": invalidated_at,
+                    "invalidated_by": snapshot_user,
+                    "invalidation_reason": "章节正文已修改，旧确认不再对应当前版本",
+                    "event": "confirmation_invalidated",
+                }
+                audit(db, project.id, "requirement.confirmation_invalidated", snapshot)
                 _apply_requirement_status(row, "pending", "", "")
                 row.node_id = None
                 row.section_id = None

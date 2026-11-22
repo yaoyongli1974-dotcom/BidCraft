@@ -340,8 +340,12 @@ _DL = date(2026, 11, 22)
 
 
 def test_performance_date_within_three_year_window():
-    """R03：明确完成日期都在近三年窗内 → 满足。"""
-    body = "2025年完成A项目。2024年完成B项目。2023年完成C项目。"
+    """R03：明确完成日期都在近三年窗内 → 满足。
+
+    R17：起始边界年为 2023（cutoff 2023-11-22），裸「2023年」属起始年边界歧义
+    要转人工；这里用「2023年12月」（晚于起始月，月精度可明确在窗内）。
+    """
+    body = "2025年完成A项目。2024年完成B项目。2023年12月完成C项目。"
     verdict = judge(_req(_T), _nodes(body), deadline=_DL)
     assert verdict.state == SATISFIED
     dw = verdict.evidence["layer4"]["deadline_window"]
@@ -384,7 +388,7 @@ def test_contract_date_not_equal_completion_date():
 
 def test_multiple_performance_records_independent_dates():
     """R03：多条业绩逐条计算，不在窗内的一条不连带否定在窗内的。"""
-    body = "2025年完成A项目。2024年完成B项目。2023年完成C项目。2020年完成D项目。"
+    body = "2025年完成A项目。2024年完成B项目。2023年12月完成C项目。2020年完成D项目。"
     verdict = judge(_req(_T), _nodes(body), deadline=_DL)
     dw = verdict.evidence["layer4"]["deadline_window"]
     assert len(dw["records"]) == 4
@@ -435,8 +439,11 @@ _DL8 = date(2026, 11, 22)
 
 
 def test_compound_achievement_uses_deadline_window():
-    """R08：复合条款的业绩原子必须按招标截止日期校验（不能再被提前 return 绕过）。"""
-    body = "2025年完成A合同复印件。2024年完成B合同复印件。2023年完成C合同复印件。"
+    """R08：复合条款的业绩原子必须按招标截止日期校验（不能再被提前 return 绕过）。
+
+    R17：起始年 2023 的裸年份日期属边界歧义，改用 2023年12月（窗内月精度）。
+    """
+    body = "2025年完成A合同复印件。2024年完成B合同复印件。2023年12月完成C合同复印件。"
     verdict = judge(_req(_T8), _nodes(body), deadline=_DL8)
     assert verdict.state == SATISFIED
     dw = verdict.evidence["layer4"]["deadline_window"]
@@ -621,9 +628,9 @@ def test_unrelated_project_type_not_counted():
 
     req = "★ 近三年不少于3项弱电智能化类似项目业绩"
     body = ("2025年完成弱电智能化项目A。2024年完成软件开发项目B。"
-            "2023年完成弱电智能化项目C。2025年完成弱电智能化项目D。")
+            "2023年12月完成弱电智能化项目C。2025年完成弱电智能化项目D。")
     sig = _deadline_window_signals(extract_time_windows(req), body, _DL10, req)
-    # 软件开发项目B 被排除；弱电3项有效 → 满足。
+    # 软件开发项目B 被排除；弱电3项有效（C 用窗内月精度避开起始年边界）→ 满足。
     assert sig["valid"] >= 3
 
 
@@ -672,3 +679,167 @@ def test_ambiguous_project_type_requires_review():
     body = "2025年完成某项目。2024年完成另一项目。2023年完成第三项目。"
     sig = _deadline_window_signals(extract_time_windows(req), body, _DL10, req)
     assert sig["type_conflict"] is True
+
+
+# =============================================================== R16：复合条款项目类型约束传递
+# 招标原文里「弱电智能化」这类项目类型是整条要求的一部分；拆成原子后不能丢失，
+# 否则软件/安防等无关项目会被计为有效业绩（错误放行）。
+_R16_REQ = "★ 近三年不少于3项弱电智能化类似项目业绩，并提供合同复印件。"
+_R16_BODY_MIXED = (
+    "2025年完成弱电智能化项目A。2024年完成软件开发项目B。"
+    "2023年完成安防监控项目C。2025年完成弱电智能化项目D。"
+)
+
+
+def test_compound_performance_preserves_required_project_type():
+    """R16：复合业绩原子仍保留原始条款的项目类型约束。"""
+    verdict = judge(_req(_R16_REQ), _nodes(_R16_BODY_MIXED), deadline=_DL10)
+    detail = verdict.evidence.get("layer5_detail", {})
+    windows = detail.get("atom_deadline_windows", {})
+    assert windows, "复合判定必须保留原子级 deadline 证据"
+    types = {w.get("project_type") for w in windows.values()}
+    assert "弱电智能化" in types, "原子级证据必须带入原始项目类型"
+
+
+def test_compound_performance_excludes_unrelated_project_type():
+    """R16：无关项目类型（软件开发/安防监控）不得计入有效业绩。"""
+    from bidcraft.verdict import _deadline_window_signals, extract_time_windows
+
+    sig = _deadline_window_signals(
+        extract_time_windows(_R16_REQ), _R16_BODY_MIXED, _DL10, _R16_REQ,
+    )
+    # 只有 2 项弱电智能化（A、D）在窗内；软件/安防各 1 项被排除。
+    assert sig["valid"] == 2, sig
+    verdict = judge(_req(_R16_REQ), _nodes(_R16_BODY_MIXED), deadline=_DL10)
+    assert verdict.state in (UNSATISFIED, PARTIAL), "有效业绩不足3项不得判满足"
+
+
+def test_compound_performance_unknown_type_requires_review():
+    """R16：项目类型无法识别时保留 type_conflict → 人工复核，不自动满足。"""
+    body = ("2025年完成某项目A。2024年完成另一项目B。2023年完成第三项目C。"
+            "并提供合同复印件。")
+    verdict = judge(_req(_R16_REQ), _nodes(body), deadline=_DL10)
+    windows = verdict.evidence["layer5_detail"]["atom_deadline_windows"]
+    assert any(w.get("type_conflict") for w in windows.values()), windows
+    assert verdict.state == REVIEW
+
+
+def test_compound_performance_type_filter_uses_original_requirement():
+    """R16：类型只在整条要求中出现、不在业绩原子文本中时也必须生效。
+
+    这条直接锁死 bug：旧实现在 _judge_atom 里只传原子文本，类型限定丢失。
+    """
+    req_text = "★ 弱电智能化项目的业绩要求：近三年不少于3项类似项目，并提供合同复印件。"
+    # 业绩原子文本（含「近三年…类似项目」）本身没有「弱电智能化」，
+    # 只有原始整条要求里才有——必须靠 requirement_text 传入才能过滤。
+    body = ("2025年完成弱电智能化项目A。2024年完成软件开发项目B。"
+            "2023年12月完成弱电智能化项目C。2025年完成弱电智能化项目D。")
+    from bidcraft.verdict import _deadline_window_signals as _dw
+    from bidcraft.verdict import extract_time_windows
+
+    sig = _dw(extract_time_windows(req_text), body, _DL10, req_text)
+    assert sig["project_type"] == "弱电智能化", sig
+    assert sig["valid"] == 3, sig  # A、C、D 三项弱电，B 软件被排除
+
+
+def test_compound_performance_all_atoms_keep_original_context():
+    """R16：每个业绩原子都带原始条款的类型与时间窗上下文。"""
+    from bidcraft.verdict import split_atoms
+
+    atoms = split_atoms(_R16_REQ)
+    assert len(atoms) > 1
+    verdict = judge(_req(_R16_REQ), _nodes(_R16_BODY_MIXED), deadline=_DL10)
+    windows = verdict.evidence["layer5_detail"]["atom_deadline_windows"]
+    # 业绩原子（带时间窗的那个）拿到类型；合同原子可能无时间窗，允许空。
+    with_type = [w for w in windows.values() if w.get("project_type")]
+    assert with_type and all(w["project_type"] == "弱电智能化" for w in with_type)
+
+
+# =============================================================== R17：年份精度起始边界
+# 截止 2026-11-22 / 近三年 → cutoff=2023-11-22。
+# 年份精度「2023年」无法证明在 2023-11-22 之后 → 起始年边界歧义，转人工，不计有效。
+_R17_CUTOFF = date(2023, 11, 22)
+
+
+def _r17_sig(body: str, req: str = _T):
+    from bidcraft.verdict import _deadline_window_signals
+
+    return _deadline_window_signals(extract_time_windows(req), body, _DL, req)
+
+
+def test_year_precision_at_cutoff_year_requires_review():
+    """R17：完成年份==起始年份（2023）→ 边界歧义转人工，不计有效。"""
+    sig = _r17_sig("2023年完成A项目。")
+    assert sig["boundary_conflict"] is True
+    assert sig["boundary_start"] >= 1
+    assert sig["valid"] == 0
+    verdict = judge(_req(_T), _nodes("2023年完成A项目。"), deadline=_DL)
+    assert verdict.state == REVIEW
+
+
+def test_year_precision_inside_window_is_valid():
+    """R17：年份严格位于窗口内部（2024/2025）→ 可计入有效。"""
+    sig = _r17_sig("2024年完成A项目。2025年完成B项目。")
+    assert sig["valid"] == 2
+    assert sig["expired"] == 0
+    assert sig["boundary_conflict"] is False
+
+
+def test_year_precision_before_cutoff_is_expired():
+    """R17：年份早于起始年（2022）→ 过期，不是边界。"""
+    sig = _r17_sig("2022年完成A项目。")
+    assert sig["expired"] >= 1
+    assert sig["valid"] == 0
+    assert sig["boundary_conflict"] is False
+
+
+def test_month_precision_at_cutoff_month_requires_review():
+    """R17：月精度恰为起始月（2023年11月）→ 边界歧义转人工。"""
+    sig = _r17_sig("2023年11月完成A项目。")
+    assert sig["boundary_conflict"] is True
+    assert sig["boundary_start"] >= 1
+    assert sig["valid"] == 0
+
+
+def test_month_precision_inside_window_is_valid():
+    """R17：月精度严格在窗内（2023年12月 > 起始月）→ 有效。"""
+    sig = _r17_sig("2023年12月完成A项目。")
+    assert sig["valid"] == 1
+    assert sig["boundary_conflict"] is False
+
+
+def test_day_precision_at_cutoff_date():
+    """R17：日精度恰好等于 cutoff（2023-11-22）→ 边界含等号，计入有效。"""
+    from bidcraft.verdict import _cutoff_date
+
+    assert _cutoff_date(_DL, 3, "年") == _R17_CUTOFF
+    sig = _r17_sig("2023年11月22日完成A项目。")
+    assert sig["valid"] == 1
+    assert sig["boundary_conflict"] is False
+
+
+def test_day_precision_at_deadline_date():
+    """R17：日精度恰好等于截止日（2026-11-22）→ 边界含等号，计入有效。"""
+    sig = _r17_sig("2026年11月22日完成A项目。")
+    assert sig["valid"] == 1
+    assert sig["boundary_conflict"] is False
+
+
+def test_boundary_conflict_prevents_auto_satisfied():
+    """R17：存在起始年边界业绩时，即使数量声称足够也不得自动满足。"""
+    # 3 项：2 项窗内年份 + 1 项起始年边界 → 不能自动 SATISFIED（边界需人工）。
+    body = "2024年完成A项目。2025年完成B项目。2023年完成C项目。"
+    verdict = judge(_req(_T), _nodes(body), deadline=_DL)
+    assert verdict.state != SATISFIED
+    assert verdict.state == REVIEW
+
+
+def test_multiple_records_with_one_boundary_conflict():
+    """R17：多条业绩里只要有一条边界歧义，就不能据其余条数自动放行。"""
+    sig = _r17_sig("2025年完成A项目。2024年完成B项目。2023年完成C项目。2020年完成D项目。")
+    assert sig["valid"] == 2          # 2025、2024
+    assert sig["boundary_start"] == 1  # 2023 起始年歧义
+    assert sig["expired"] == 1         # 2020 过期
+    assert sig["boundary_conflict"] is True
+    verdict = judge(_req(_T), _nodes("2025年完成A项目。2024年完成B项目。2023年完成C项目。2020年完成D项目。"), deadline=_DL)
+    assert verdict.state == REVIEW
