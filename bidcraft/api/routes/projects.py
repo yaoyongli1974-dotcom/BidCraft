@@ -1324,6 +1324,25 @@ def save_chapter(ref: str, node_id: str, payload: ChapterSave) -> Any:
         detail = {"heading": node.heading}
         if review_before == "review":
             detail["review_reverted"] = True
+        # R15：正文变化后，匹配到本章且已人工确认的实质性条款失效——它们是基于旧
+        # 正文确认的，必须重新判定/确认，不能让「已确认」掩盖了改动后的正文。
+        invalidated = [
+            row
+            for row in db.scalars(
+                select(Requirement).where(
+                    Requirement.project_id == project.id,
+                    Requirement.node_id == node.id,
+                    Requirement.response_status != "pending",
+                )
+            )
+        ]
+        if invalidated:
+            for row in invalidated:
+                _apply_requirement_status(row, "pending", "", "")
+                row.node_id = None
+                row.section_id = None
+                row.auto_covered = False
+            detail["requirement_confirmations_invalidated"] = [row.id for row in invalidated]
         audit(db, project.id, "chapter.save", detail)
         return _chapter_payload(db, node)
 

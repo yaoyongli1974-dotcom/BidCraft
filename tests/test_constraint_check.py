@@ -402,3 +402,127 @@ def test_verdicts_are_exposed_in_issue_evidence():
     assert constraints and constraints[0]["state"] == "violated"
     assert "1000" in constraints[0]["label"]
     assert "不符合" in issues[0].message
+
+
+# =============================================================== R11：局部主体（无标点）
+def test_family_local_scope_without_punctuation():
+    """R11：无标点的复合条款，两约束各归各族，主体不串味。"""
+    from bidcraft.constraint_check import extract_constraints
+
+    cs = extract_constraints("近三年不少于3项类似项目业绩且网络带宽不低于1000Mbps")
+    families = {c.family for c in cs}
+    assert "achievement" in families and "bandwidth" in families
+    bw = [c for c in cs if c.family == "bandwidth"]
+    assert bw and any(c.threshold == 1000 for c in bw)
+
+
+def test_achievement_and_bandwidth_without_comma():
+    """R11：业绩数量不能用于带宽判定（局部上下文隔离）。"""
+    from bidcraft.constraint_check import evaluate_constraints
+
+    body = "近三年完成三项类似项目业绩，网络带宽500Mbps。"
+    verdicts = evaluate_constraints("近三年不少于3项类似项目业绩且网络带宽不低于1000Mbps", body)
+    bw = [v for v in verdicts if v.constraint.family == "bandwidth"]
+    assert bw and any(v.state == "violated" for v in bw)
+    ach = [v for v in verdicts if v.constraint.family == "achievement"]
+    assert not any(v.state == "violated" for v in ach)
+
+
+def test_warranty_and_response_same_clause():
+    """R11：同一标点子句内的质保与响应约束各自归族。"""
+    from bidcraft.constraint_check import extract_constraints
+
+    cs = extract_constraints("质保5年并提供2小时内响应承诺")
+    families = {c.family for c in cs}
+    assert "warranty" in families and "response" in families
+
+
+def test_subject_does_not_leak_between_atoms():
+    """R11：带宽主体词不泄漏到业绩约束。"""
+    from bidcraft.constraint_check import extract_constraints
+
+    cs = extract_constraints("类似项目业绩不少于3项且带宽不低于1000Mbps")
+    ach = [c for c in cs if c.family == "achievement"]
+    assert ach and all("带宽" not in (c.object or "") for c in ach)
+
+
+def test_multiple_link_bandwidth_disambiguation():
+    """R11：主备链路多个带宽候选，按局部上下文归因。"""
+    from bidcraft.constraint_check import evaluate_constraints
+
+    verdicts = evaluate_constraints("主链路带宽不低于1000Mbps", "主链路带宽500Mbps。备链路带宽2000Mbps。")
+    assert verdicts and verdicts[0].state == "violated"  # 主链路500 < 1000，不被备链路2000替代
+
+
+def test_ambiguous_subject_returns_unclear():
+    """R11：主体关联不明确时返回 unclear 转人工复核。"""
+    from bidcraft.constraint_check import evaluate_constraints
+
+    verdicts = evaluate_constraints("性能指标不低于1000Mbps", "数值500。数值2000。")
+    # 无带宽主体词 → family 为空或无法归因，不得自动判 satisfied。
+    assert all(v.state != "satisfied" for v in verdicts)
+
+
+# =============================================================== R13：单位注册表完整性
+def test_all_registered_units_can_be_extracted():
+    """R13：每个已登记单位都能被约束方向正则正确提取。"""
+    from bidcraft.constraint_check import unit_registry_issues
+
+    assert unit_registry_issues() == []
+
+
+def test_unit_registry_has_no_duplicate_conflict():
+    """R13：单位注册表无重复键、量纲/系数一致。"""
+    from bidcraft.constraint_check import _UNIT_DIMENSIONS, _UNITS
+
+    assert len(set(_UNITS.split("|")) - {""}) >= len(_UNIT_DIMENSIONS)
+    for dim, coef in _UNIT_DIMENSIONS.values():
+        assert dim and coef > 0
+
+
+def test_storage_decimal_conversion():
+    """R13：十进制存储 1000GB == 1TB。"""
+    from bidcraft.constraint_check import evaluate_constraints
+
+    v = evaluate_constraints("存储容量不小于1000GB", "存储容量1TB")[0]
+    assert v.state == "satisfied"
+
+
+def test_storage_binary_conversion():
+    """R13：二进制存储 1TiB == 1024GiB。"""
+    from bidcraft.constraint_check import evaluate_constraints
+
+    v = evaluate_constraints("存储容量不小于1024GiB", "存储容量1TiB")[0]
+    assert v.state == "satisfied"
+
+
+def test_bandwidth_and_byte_rate_separate():
+    """R13：Mbps 与 MB/s 不同量纲，不得视为相同。"""
+    from bidcraft.constraint_check import UNIT_INCOMPATIBLE, evaluate_constraints, unit_relation
+
+    assert unit_relation("Mbps", "MB/s") == UNIT_INCOMPATIBLE
+    v = evaluate_constraints("带宽不小于1000Mbps", "带宽100MB/s")[0]
+    assert v.state in {"unclear", "absent"}
+
+
+def test_month_year_duration_conversion():
+    """R13：质保 5 年 == 60 个月（统一基准）。"""
+    from bidcraft.constraint_check import evaluate_constraints
+
+    v = evaluate_constraints("质保不少于5年", "质保60个月")[0]
+    assert v.state == "satisfied"
+
+
+def test_unknown_unit_returns_unclear():
+    """R13：未登记单位不自动兼容，转人工复核。"""
+    from bidcraft.constraint_check import UNIT_UNKNOWN, unit_relation
+
+    assert unit_relation("Mbps", "未知单位") == UNIT_UNKNOWN
+
+
+def test_float_boundary_comparison():
+    """R13：浮点换算边界不因精度误差误判。"""
+    from bidcraft.constraint_check import evaluate_constraints
+
+    v = evaluate_constraints("带宽不小于1Gbps", "带宽1000Mbps")[0]
+    assert v.state == "satisfied"

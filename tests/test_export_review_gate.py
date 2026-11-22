@@ -250,3 +250,59 @@ def test_failed_force_export_leaves_no_success_audit(actors):
     # 关键：失败后仍不得出现 export.force 成功审计。
     after = owner.get(f"/projects/{pid}/audit?limit=100").json()["items"]
     assert not any(item["action"] == "export.force" for item in after)
+
+
+def test_chapter_edit_invalidates_confirmed_requirement(actors):
+    """R15：正文修改后，基于旧正文确认的条款必须失效（退回 pending）。
+
+    确认快照仍在审计/字段中可追溯，但「已确认」不能掩盖改动后的正文——
+    否则导出会拿旧确认放行新正文。
+    """
+    from bidcraft.db import session_scope
+    from bidcraft.models import AuditLog, OutlineNode, Requirement, Section
+
+    pid = actors["project_id"]
+    with session_scope() as db:
+        node = OutlineNode(project_id=pid, heading="技术方案", position=1)
+        db.add(node)
+        db.flush()
+        db.add(Section(node_id=node.id, body="旧正文内容。", status="written", words=6,
+                       review_status="draft"))
+        db.add(
+            Requirement(
+                project_id=pid,
+                kind="substantive",
+                text="★ 投标人须提供详细的项目实施方案说明",
+                mandatory=True,
+                source_quote="投标人须提供详细的项目实施方案说明",
+                marker="★",
+                response_status="responded",  # 已人工确认
+                response_verdict="satisfied",
+                response_verdict_label="满足",
+                response_verdict_reason="旧正文已覆盖",
+                node_id=node.id,
+                auto_covered=True,
+            )
+        )
+        db.flush()
+        node_id = node.id
+
+    owner = actors["owner"]
+    saved = owner.put(
+        f"/projects/{pid}/chapters/{node_id}",
+        json={"body": "这是改写后的新正文内容，与旧确认无关。"},
+    )
+    assert saved.status_code == 200, saved.text
+
+    with session_scope() as db:
+        row = db.query(Requirement).filter_by(project_id=pid).one()
+        assert row.response_status == "pending", "确认应失效"
+        assert row.node_id is None and row.section_id is None and row.auto_covered is False
+        # 确认快照字段已被清空（失效后不再代表当前正文）
+        assert row.response_verdict == ""
+
+    # 失效动作写入审计
+    with session_scope() as db:
+        audits = [a for a in db.query(AuditLog).filter_by(project_id=pid).all()
+                  if a.action == "chapter.save" and (a.detail or {}).get("requirement_confirmations_invalidated")]
+        assert audits and audits[-1].detail["requirement_confirmations_invalidated"]

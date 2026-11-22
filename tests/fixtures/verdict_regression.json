@@ -1,0 +1,156 @@
+{
+  "_meta": {
+    "purpose": "实质性条款判定回归集（v0.22.0 / R14）。每条样本含招标要求、投标响应、标准四态判定、★标记、人工审核说明与关键证据位置。",
+    "verdict_values": ["satisfied", "unsatisfied", "partial", "review"],
+    "binary_mapping": "satisfied=正类（放行），其余=负类；FAR=fp/(fp+tn)",
+    "governance": "标准答案（expected）变更必须有明确人工审核记录，不得为提升通过率而修改。详见 docs/release-notes/v0.22.0.md。",
+    "deadline": "样本默认不传招标截止日期；带年份业绩的时间窗样本由 test_calibration 单独传 deadline。",
+    "coverage": "资质/业绩/类似项目/数量/金额/带宽/存储/质保/响应时间/交付时间/否定语义/复合条款/时间窗口/单位换算"
+  },
+  "cases": [
+    {
+      "id": "c01_bandwidth_met",
+      "requirement": "网络带宽不低于1000Mbps",
+      "body": "网络带宽为1000Mbps。",
+      "expected": "satisfied",
+      "marker": "",
+      "note": "同量纲等值，数值达标，应放行。",
+      "evidence_hint": "带宽 1000Mbps"
+    },
+    {
+      "id": "c02_bandwidth_violated",
+      "requirement": "网络带宽不低于1000Mbps",
+      "body": "网络带宽为500Mbps。",
+      "expected": "unsatisfied",
+      "marker": "▲",
+      "note": "同量纲 500<1000，硬性约束违反；▲评分相关，不得放行。",
+      "evidence_hint": "带宽 500Mbps"
+    },
+    {
+      "id": "c03_grade_violated",
+      "requirement": "具备一级资质",
+      "body": "具备二级资质。",
+      "expected": "unsatisfied",
+      "marker": "",
+      "note": "资质等级二级低于一级，违反。",
+      "evidence_hint": "二级资质"
+    },
+    {
+      "id": "c04_negation",
+      "requirement": "具备一级建造师资格",
+      "body": "我方不具备一级建造师资格。",
+      "expected": "unsatisfied",
+      "marker": "",
+      "note": "否定语义：字面包含但语义相反，不得判满足。",
+      "evidence_hint": "不具备"
+    },
+    {
+      "id": "c05_storage_decimal",
+      "requirement": "存储容量不小于1000GB",
+      "body": "存储容量为1TB。",
+      "expected": "satisfied",
+      "marker": "",
+      "note": "十进制容量换算 1TB=1000GB，等值达标。",
+      "evidence_hint": "1TB"
+    },
+    {
+      "id": "c06_byte_rate_cross_dimension",
+      "requirement": "网络带宽不低于1000Mbps",
+      "body": "网络带宽为100MB/s。",
+      "expected": "review",
+      "marker": "",
+      "note": "Mbps 与 MB/s 非同一量纲，不可直接比较，转人工复核。",
+      "evidence_hint": "100MB/s"
+    },
+    {
+      "id": "c07_duration_month_year",
+      "requirement": "质保不少于5年",
+      "body": "质保60个月。",
+      "expected": "satisfied",
+      "marker": "",
+      "note": "时间单位换算 60个月=5年，等值达标。",
+      "evidence_hint": "60个月"
+    },
+    {
+      "id": "c08_response_time_violated",
+      "requirement": "2小时内响应",
+      "body": "8小时内响应。",
+      "expected": "unsatisfied",
+      "marker": "",
+      "note": "响应时效 8h>2h，违反。",
+      "evidence_hint": "8小时"
+    },
+    {
+      "id": "c09_compound_partial",
+      "requirement": "具备一级资质，并具有三项类似项目业绩，同时提供两小时响应承诺",
+      "body": "具备一级资质。",
+      "expected": "partial",
+      "marker": "",
+      "note": "复合条款只响应一个原子，部分满足，不得整体满足。",
+      "evidence_hint": "仅一级资质"
+    },
+    {
+      "id": "c10_compound_all_met",
+      "requirement": "具备一级资质，并具有三项类似项目业绩，同时提供两小时响应承诺",
+      "body": "具备一级资质；具有三项类似项目业绩；承诺两小时内响应。",
+      "expected": "satisfied",
+      "marker": "",
+      "note": "复合条款三个原子分别满足，整体满足。",
+      "evidence_hint": "三原子均响应"
+    },
+    {
+      "id": "c11_star_bandwidth_never_pass",
+      "requirement": "网络带宽不低于1000Mbps",
+      "body": "网络带宽为500Mbps。",
+      "expected": "unsatisfied",
+      "marker": "★",
+      "note": "★ 实质性条款已知违反，严禁自动判满足（严格验收样本）。",
+      "evidence_hint": "带宽 500Mbps"
+    },
+    {
+      "id": "c12_quantity_met",
+      "requirement": "不少于3项类似项目业绩",
+      "body": "完成5项类似项目业绩。",
+      "expected": "satisfied",
+      "marker": "",
+      "note": "数量约束 5>=3，达标（无年份日期，不触发截止日期校验）。",
+      "evidence_hint": "5项"
+    },
+    {
+      "id": "c13_quantity_violated",
+      "requirement": "不少于3项类似项目业绩",
+      "body": "完成2项类似项目业绩。",
+      "expected": "unsatisfied",
+      "marker": "",
+      "note": "数量约束 2<3，违反。",
+      "evidence_hint": "2项"
+    },
+    {
+      "id": "c14_amount_unregistered_unit_review",
+      "requirement": "注册资金不低于1000万元",
+      "body": "注册资金为500万元。",
+      "expected": "review",
+      "marker": "",
+      "note": "金额单位「万元」未登记，单位无法确定→人工复核（符合 R13「单位不明确转人工」）；关键是不得自动放行。",
+      "evidence_hint": "500万元（单位未登记）"
+    },
+    {
+      "id": "c15_delivery_violated",
+      "requirement": "交付时间不超过30天",
+      "body": "交付时间为60天。",
+      "expected": "unsatisfied",
+      "marker": "",
+      "note": "交付时长 60>30 天，违反。",
+      "evidence_hint": "60天"
+    },
+    {
+      "id": "c16_general_no_evidence",
+      "requirement": "投标人须提供完整的项目实施方案",
+      "body": "我方将按规定提交相关文件。",
+      "expected": "unsatisfied",
+      "marker": "",
+      "note": "未在正文找到明确响应→不满足，不得自动认定满足。",
+      "evidence_hint": "相关文件（无实质内容）"
+    }
+  ]
+}

@@ -25,20 +25,21 @@ v0.16.0 的锚点判定只回答「条款和正文是否都出现过相同模式
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 
 # 阿拉伯数字与常见中文数字（「近三年」「六项」在招标文本里很常见）。
-_NUM = r"(?:\d+(?:\.\d+)?|[一二三四五六七八九十百]{1,3})"
+_NUM = r"(?:\d+(?:\.\d+)?|[一二两三四五六七八九十百]{1,3})"
 # 单位表按「最长优先」排列，保证 MB/s 先于 MB、GHz 先于 Hz 之类不被截断。
 _UNITS = (
     # 字节率先于存储：100MB/s 必须整体匹配为 byte_rate，不能被拆成 MB；
     # 存储容量（无 /s）与字节率是不同的量纲，绝不可互相比较。
     # 二进制容量（KiB/MiB/GiB/TiB，1024 进制）与十进制（KB/MB/GB/TB，1000 进制）
     # 分开登记，避免「1TB == 1TiB」这类错误换算。
-    r"GB/s|MB/s|KB/s|B/s|TiB|GiB|MiB|KiB|TB|GB|MB|KB|B|Gbps|Mbps|Kbps|bps|GHz|MHz|Hz|"
-    r"kV|kW|mm|cm|米|项|个|份|例|台|套|路|条|家|人|"
-    r"年|月|小时|天|分钟|V|W|A|%"
+    r"GB/s|MB/s|KB/s|B/s|TiB|GiB|MiB|KiB|TB|GB|MB|KB|B|Gbps|Mbps|Kbps|bps|GHz|MHz|KHz|Hz|"
+    r"kV|kW|mm|cm|km|米|个月|项|个|份|例|台|套|路|条|家|人|"
+    r"分钟|小时|天|day|min|年|月|m|s|V|W|A|%"
 )
 _VALUE_RE = re.compile(rf"({_NUM})\s*({_UNITS})?")
 
@@ -76,7 +77,7 @@ FAMILY_KEYWORDS = {
 def _cn_number(token: str) -> int | None:
     """把「三 / 六 / 十二 / 二十 / 一百」解析为整数；解析不了返回 None。"""
 
-    digits = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+    digits = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
               "六": 6, "七": 7, "八": 8, "九": 9}
     token = token.strip()
     if token.isdigit():
@@ -179,6 +180,7 @@ _UNIT_DIMENSIONS: dict[str, tuple[str, float]] = {
     "TiB": ("storage", 1024.0**4),
     # 频率：基准 MHz（与带宽无关）
     "Hz": ("frequency", 1 / 1_000_000),
+    "KHz": ("frequency", 1 / 1000),
     "MHz": ("frequency", 1.0),
     "GHz": ("frequency", 1000.0),
     # 计数：基准「个/项」
@@ -193,15 +195,21 @@ _UNIT_DIMENSIONS: dict[str, tuple[str, float]] = {
     "家": ("count", 1.0),
     "人": ("count", 1.0),
     # 时长：基准「月」（年=12月，质保5年 == 质保60个月）
+    "s": ("duration", 1 / (30 * 24 * 3600)),
+    "min": ("duration", 1 / (30 * 24 * 60)),
     "分钟": ("duration", 1 / (30 * 24 * 60)),
     "小时": ("duration", 1 / (30 * 24)),
     "天": ("duration", 1 / 30),
+    "day": ("duration", 1 / 30),
     "月": ("duration", 1.0),
+    "个月": ("duration", 1.0),
     "年": ("duration", 12.0),
     # 长度：基准 mm
     "mm": ("length", 1.0),
     "cm": ("length", 10.0),
+    "m": ("length", 1000.0),
     "米": ("length", 1000.0),
+    "km": ("length", 1_000_000.0),
     # 电学：各自独立量纲
     "V": ("voltage", 1.0),
     "kV": ("voltage", 1000.0),
@@ -341,7 +349,7 @@ def extract_constraints(text: str) -> list[Constraint]:
                 continue
             unit = match.group(2) or ""
             local_family = _local_family(source, match.start(), global_family)
-            clause = clause_at(source, match.start())
+            clause = _local_window(source, match.start())
             label = f"{'至少' if comparator == '>=' else '至多'} {match.group(1)}{unit}"
             constraints.append(
                 Constraint("numeric", comparator, float(value), unit, local_family, "", label,
@@ -414,14 +422,35 @@ def extract_constraints(text: str) -> list[Constraint]:
     return unique
 
 
-def _local_family(source: str, pos: int, fallback: str) -> str:
-    """R02：用约束所在的**局部子句**推断主体词族，而非整条文本。
+# R11：连接词也是约束边界，不能只按标点切。无标点的复合条款
+# 「近三年三项类似项目业绩且网络带宽不低于1000Mbps」里，带宽约束的局部
+# 范围应从「且」之前截断，否则业绩词族会污染带宽约束。
+_LOCAL_CONNECTOR = re.compile(r"并提供|并满足|并且|同时|以及|还须|均应|分别|其中|须同时|并|且|但须|但|另外|并且")
 
-    复合条款里业绩与带宽共存时，带宽约束只应继承「带宽」词族。局部子句取不到
-    词族时才退回调用方给的 fallback（质保/响应/资质等由专用模式直接指定）。
+
+def _local_window(source: str, pos: int) -> str:
+    """返回 pos 所在的局部上下文：以标点或连接词为边界（R11）。"""
+
+    start, end = _clause_bounds(source, pos)  # 标点边界
+    segment = source[start:end]
+    rel = pos - start
+    lo, hi = 0, len(segment)
+    for match in _LOCAL_CONNECTOR.finditer(segment):
+        if match.end() <= rel:
+            lo = max(lo, match.end())
+        elif match.start() >= rel:
+            hi = min(hi, match.start())
+    return segment[lo:hi]
+
+
+def _local_family(source: str, pos: int, fallback: str) -> str:
+    """R02/R11：用约束所在的**局部上下文**推断主体词族，而非整条文本。
+
+    局部边界同时考虑标点与连接词（R11），复合条款里业绩与带宽共存时各自归族；
+    取不到词族时才退回调用方给的 fallback。
     """
 
-    family = _infer_family(clause_at(source, pos))
+    family = _infer_family(_local_window(source, pos))
     return family or fallback
 
 
@@ -436,11 +465,22 @@ def _family_matches(constraint: Constraint, clause: str) -> bool:
     return any(keyword in clause for keyword in keywords)
 
 
-def _association_score(clause: str, pos: int, family: str) -> int:
+# R11：主备链路 / 主备设备对象限定词——候选必须带同一个限定词才算关联。
+_OBJECT_QUALIFIERS = ("主链路", "备链路", "主机", "备机", "主用", "备用", "主设备", "备设备")
+
+
+def _object_qualifier(text: str) -> str:
+    for token in _OBJECT_QUALIFIERS:
+        if token in (text or ""):
+            return token
+    return ""
+
+
+def _association_score(clause: str, pos: int, family: str, object_hint: str = "") -> int:
     """候选数值与约束主体（指标名 / 对象名）的上下文关联强度。
 
-    T04：不能只取第一个数值，也不能简单取最大值。一个候选若与约束讲的是同一
-    件事（同一主体词族出现在它附近的上下文窗口里），关联更强。用这个分数在
+    T04/R11：不能只取第一个数值，也不能简单取最大值。一个候选若与约束讲的是同一
+    件事（同一主体词族 + 对象限定词出现在附近上下文），关联更强。用这个分数在
     多个候选中做归因，而不是靠顺序或数值大小。
     """
 
@@ -449,7 +489,25 @@ def _association_score(clause: str, pos: int, family: str) -> int:
         return 0
     lo, hi = max(0, pos - 16), min(len(clause), pos + 16)
     window = clause[lo:hi]
-    return sum(1 for keyword in keywords if keyword in window)
+    score = sum(1 for keyword in keywords if keyword in window)
+    needed = _object_qualifier(object_hint)
+    if needed:
+        score += 10 if needed in window else -10
+    return score
+
+
+# R13：浮点换算后的数值比较容差。换算系数含 1/1000、1024**4 等，直接比较会
+# 遇到二进制浮点误差；相对容差 1e-9 足以吸收换算误差，又不会把真正不同的值判等。
+_FLOAT_REL_TOL = 1e-9
+_FLOAT_ABS_TOL = 1e-9
+
+
+def _cmp_with_tolerance(value: float, threshold: float, comparator: str) -> bool:
+    """带容差的数值比较：边界（相等）视为满足，明确的大小差异才分出胜负。"""
+
+    if math.isclose(value, threshold, rel_tol=_FLOAT_REL_TOL, abs_tol=_FLOAT_ABS_TOL):
+        return True
+    return value >= threshold if comparator == ">=" else value <= threshold
 
 
 def _evaluate_one(constraint: Constraint, clauses: list[str]) -> ConstraintVerdict:
@@ -479,7 +537,7 @@ def _evaluate_one(constraint: Constraint, clauses: list[str]) -> ConstraintVerdi
                 negated = negation_before(clause, hit.start())
                 state = "satisfied" if rank[0] <= int(constraint.threshold) else "violated"
                 candidates.append(
-                    (state, clause.strip(), _association_score(clause, hit.start(), constraint.family), negated)
+                    (state, clause.strip(), _association_score(clause, hit.start(), constraint.family, constraint.object), negated)
                 )
             continue
 
@@ -498,10 +556,12 @@ def _evaluate_one(constraint: Constraint, clauses: list[str]) -> ConstraintVerdi
             negated = negation_before(clause, hit.start())
             base = _to_base(float(value), hit.group(2) or "")
             threshold = _to_base(constraint.threshold, constraint.unit)
-            ok = base >= threshold if constraint.comparator == ">=" else base <= threshold
+            # R13：浮点换算（1TB=1000GB 等）可能产生 0.30000000000000004 之类误差，
+            # 用相对容差比较，避免边界数值被误判。
+            ok = _cmp_with_tolerance(base, threshold, constraint.comparator)
             state = "satisfied" if ok else "violated"
             candidates.append(
-                (state, clause.strip(), _association_score(clause, hit.start(), constraint.family), negated)
+                (state, clause.strip(), _association_score(clause, hit.start(), constraint.family, constraint.object), negated)
             )
 
     if candidates:
@@ -550,3 +610,20 @@ def constraint_blocked(verdicts: list[ConstraintVerdict]) -> bool:
         or (verdict.constraint.kind in ("numeric", "grade") and verdict.state == "absent")
         for verdict in verdicts
     )
+
+
+def unit_registry_issues() -> list[str]:
+    """R13：注册表完整性自检——列出「已登记但方向正则无法提取」的单位。
+
+    返回空列表表示每个已登记单位都能被 _VALUE_RE / _DIRECTION_PATTERNS 正确识别。
+    供测试与 CI 校验，防止「注册了却提取不到」（v0.21.0 R04 遗留风险）。
+    """
+
+    issues: list[str] = []
+    for unit in _UNIT_DIMENSIONS:
+        probe = f"指标不低于 1{unit}"
+        extracted = extract_constraints(probe)
+        labs = " ".join(item.label for item in extracted)
+        if unit not in labs:
+            issues.append(unit)
+    return issues

@@ -200,9 +200,13 @@ def test_split_atoms_preserves_mapping_and_flags_ambiguity():
         assert {"index", "atom_id", "text", "raw", "subjects", "constraints", "ambiguous"} <= set(atom)
         assert atom["atom_id"].startswith("A")
         assert atom["raw"]  # 映射回原文子句
-    # 含「并」的子句应被标为歧义（拆分可能相互限定）。
-    assert any(atom["ambiguous"] for atom in atoms)
-    assert atom_split_is_ambiguous(atoms) is True
+    # R09：并列连接词「并」若切出的片段各自带独立约束，属于干净拆分，
+    # 不再仅因出现连接词就标歧义（v0.21.0 的旧行为是误判来源）。
+    assert not any(atom["ambiguous"] for atom in atoms)
+    assert atom_split_is_ambiguous(atoms) is False
+    # 转折/对比连接词才真正带歧义：应转人工复核。
+    contrast = split_atoms("具备一级资质但未提供质保承诺")
+    assert atom_split_is_ambiguous(contrast) is True
     # 业绩原子的归属里应能识别出业绩主体。
     achievement = next(a for a in atoms if "业绩" in a["text"])
     assert "业绩" in achievement["subjects"]
@@ -423,3 +427,248 @@ def test_relative_window_without_dates_keeps_legacy_verdict():
     verdict = judge(_req("★ 近三年同类项目业绩不少于3项"), _nodes("近五年完成6项同类项目业绩"), deadline=_DL)
     assert verdict.state == SATISFIED
     assert verdict.evidence["layer4"]["deadline_window"]["applicable"] is False
+
+
+# =============================================================== R08：复合条款截止日期闭环
+_T8 = "★ 近三年不少于3项类似项目业绩，并提供合同复印件"
+_DL8 = date(2026, 11, 22)
+
+
+def test_compound_achievement_uses_deadline_window():
+    """R08：复合条款的业绩原子必须按招标截止日期校验（不能再被提前 return 绕过）。"""
+    body = "2025年完成A合同复印件。2024年完成B合同复印件。2023年完成C合同复印件。"
+    verdict = judge(_req(_T8), _nodes(body), deadline=_DL8)
+    assert verdict.state == SATISFIED
+    dw = verdict.evidence["layer4"]["deadline_window"]
+    assert dw["applicable"] and dw["valid"] >= 3
+
+
+def test_compound_achievement_expired_records_not_satisfied():
+    """R08：复合条款里业绩全部过期 → 不得判满足（旧代码在这里错误放行）。"""
+    body = "2020年完成A合同复印件。2019年完成B合同复印件。2018年完成C合同复印件。"
+    verdict = judge(_req(_T8), _nodes(body), deadline=_DL8)
+    assert verdict.state in {UNSATISFIED, PARTIAL}
+    assert verdict.state != SATISFIED
+    # 原子级截止日期证据不得丢失（R08-8）。
+    detail = verdict.evidence.get("layer5_detail", {})
+    assert detail.get("atom_deadline_windows")
+
+
+def test_compound_achievement_missing_deadline_review():
+    """R08：复合条款有明确业绩日期但无招标截止日期 → 人工复核。"""
+    body = "2025年完成A合同复印件。2024年完成B合同复印件。2023年完成C合同复印件。"
+    verdict = judge(_req(_T8), _nodes(body), deadline=None)
+    assert verdict.state == REVIEW
+
+
+def test_compound_achievement_and_other_atom_aggregate_correctly():
+    """R08：业绩过期 + 其它原子满足 → 整条不满足（逐原子汇总）。"""
+    body = "2020年完成A合同复印件。2019年完成B合同复印件。2018年完成C合同复印件。合同复印件已附。"
+    verdict = judge(_req(_T8), _nodes(body), deadline=_DL8)
+    assert verdict.state in {UNSATISFIED, PARTIAL}
+    assert verdict.evidence["layer2"].get("atom_states")
+
+
+def test_compound_deadline_evidence_preserved_in_layer5():
+    """R08：汇总后每个原子的 deadline_window 证据都保留。"""
+    body = "2025年完成A合同复印件。2024年完成B合同复印件。2023年完成C合同复印件。"
+    verdict = judge(_req(_T8), _nodes(body), deadline=_DL8)
+    atom_dws = verdict.evidence["layer5_detail"]["atom_deadline_windows"]
+    assert atom_dws
+    assert any(item.get("has_deadline") for item in atom_dws.values())
+
+
+# =============================================================== R09：拆分歧义分离
+def test_clear_compound_atoms_can_be_satisfied():
+    """R09：干净拆分的复合条款，三原子都响应 → 整体满足，不被强制转人工。"""
+    verdict = judge(
+        _req("具备一级资质并具有三项类似项目业绩，同时提供两小时响应承诺"),
+        _nodes("具有一级资质。完成三项类似项目业绩。承诺两小时内响应。"),
+    )
+    assert verdict.state == SATISFIED
+
+
+def test_clear_compound_atoms_do_not_force_review():
+    """R09：并列连接词切出的原子各自带约束时，ambiguous=False。"""
+    from bidcraft.verdict import atom_split_is_ambiguous
+
+    atoms = split_atoms("具备一级资质并具有三项类似项目业绩，同时提供两小时响应承诺")
+    assert all(atom["split_successful"] for atom in atoms)
+    assert all(atom["independent_constraint"] for atom in atoms)
+    assert atom_split_is_ambiguous(atoms) is False
+
+
+def test_ambiguous_connector_forces_review():
+    """R09：转折/对比连接词带歧义 → 转人工复核，不自动判满足。"""
+    from bidcraft.verdict import atom_split_is_ambiguous
+
+    atoms = split_atoms("具备一级资质但未提供质保承诺")
+    assert atom_split_is_ambiguous(atoms) is True
+    verdict = judge(_req("★ 具备一级资质但须提供质保承诺"), _nodes("具备一级资质，质保三年。"))
+    assert verdict.state == REVIEW
+
+
+def test_shared_subject_is_not_split():
+    """R09：共同修饰同一主体的补充描述不机械拆分。"""
+    atoms = split_atoms("投标人须具有一级资质并保持有效")
+    assert len(atoms) == 1
+    assert "保持有效" in atoms[0]["text"]
+
+
+def test_independent_constraints_are_split():
+    """R09：连接词后带独立约束的片段必须拆开。"""
+    atoms = split_atoms("传输带宽不小于1000Mbps且存储容量不小于1000GB")
+    assert len(atoms) == 2
+    assert "带宽" in atoms[0]["text"] and "存储" in atoms[1]["text"]
+
+
+def test_atom_source_offsets_are_exact():
+    """R09：原子偏移可精确映射回原文。"""
+    text = "具备一级资质，并具有三项类似业绩，同时提供两小时响应承诺。"
+    for atom in split_atoms(text):
+        assert text[atom["source_start"]:atom["source_end"]].strip() == atom["raw"]
+
+
+def test_atom_id_is_stable():
+    """R09：atom_id 重复运行稳定。"""
+    text = "具备一级资质并具有三项类似业绩同时提供两小时响应承诺"
+    a = [(x["atom_id"], x["text"]) for x in split_atoms(text)]
+    b = [(x["atom_id"], x["text"]) for x in split_atoms(text)]
+    assert a == b
+
+
+# =============================================================== R12：日期精度与日历边界
+def test_year_precision_not_converted_to_exact_day():
+    """R12：年份精度只记 year，不臆造成 1 月 1 日。"""
+    from bidcraft.verdict import _FULL_DATE_RE, _date_precision
+
+    match = _FULL_DATE_RE.search("2023年")
+    assert _date_precision(match) == "year"
+
+
+def test_month_precision_not_converted_to_day_precision():
+    """R12：年月精度记 month，不是 day。"""
+    from bidcraft.verdict import _FULL_DATE_RE, _date_precision
+
+    assert _date_precision(_FULL_DATE_RE.search("2023年11月")) == "month"
+    assert _date_precision(_FULL_DATE_RE.search("2023年11月22日")) == "day"
+
+
+def test_calendar_month_subtraction():
+    """R12：近 N 月按真实日历月回退，不是 N×30 天。"""
+    from bidcraft.verdict import _cutoff_date
+
+    assert _cutoff_date(date(2026, 3, 31), 1, "月") == date(2026, 2, 28)
+    assert _cutoff_date(date(2026, 11, 22), 3, "年") == date(2023, 11, 22)
+
+
+def test_month_end_boundary():
+    """R12：月末边界按日历规则处理。"""
+    from bidcraft.verdict import _cutoff_date
+
+    assert _cutoff_date(date(2024, 3, 31), 1, "月") == date(2024, 2, 29)  # 闰年 2 月
+    assert _cutoff_date(date(2026, 1, 31), 1, "月") == date(2025, 12, 31)
+
+
+def test_leap_year_deadline_boundary():
+    """R12：闰年 2 月 29 日作为截止日期可正确回退。"""
+    from bidcraft.verdict import _cutoff_date
+
+    result = _cutoff_date(date(2024, 2, 29), 1, "年")
+    assert result == date(2023, 2, 28)
+
+
+def test_year_only_boundary_requires_review():
+    """R12：完成年份等于截止年份（无法确认是否在截止日前）→ 人工复核。"""
+    body = "2026年完成A项目。2025年完成B项目。2024年完成C项目。"
+    verdict = judge(_req(_T), _nodes(body), deadline=_DL)
+    assert verdict.state == REVIEW
+
+
+def test_future_completion_date_requires_review():
+    """R12：完成日期晚于截止日期 → 口径冲突转人工复核。"""
+    body = "2027年11月22日完成A项目。2025年完成B项目。2024年完成C项目。"
+    verdict = judge(_req(_T), _nodes(body), deadline=_DL)
+    assert verdict.state == REVIEW
+
+
+def test_invalid_date_requires_review():
+    """R12：非法日期（如 2025-13-45）不臆造，转人工复核。"""
+    from bidcraft.verdict import parse_deadline
+
+    assert parse_deadline("2025年13月45日") is None
+    assert parse_deadline("不是日期") is None
+
+
+# =============================================================== R10：业绩证据归属
+_T10 = "★ 近三年不少于3项类似项目业绩"
+_DL10 = date(2026, 11, 22)
+
+
+def test_performance_records_are_independent():
+    """R10：每项业绩独立成记录，带项目名与日期精度。"""
+    from bidcraft.verdict import _extract_performance_evidence
+
+    recs = _extract_performance_evidence(
+        "2025年完成A项目。2024年完成B项目。2023年完成C项目。", _T10)
+    assert len(recs) == 3
+    assert {r.project_name for r in recs} == {"A", "B", "C"}
+
+
+def test_unrelated_project_type_not_counted():
+    """R10：招标指定类型时，不相关项目类型不计入有效业绩。"""
+    from bidcraft.verdict import _deadline_window_signals, extract_time_windows
+
+    req = "★ 近三年不少于3项弱电智能化类似项目业绩"
+    body = ("2025年完成弱电智能化项目A。2024年完成软件开发项目B。"
+            "2023年完成弱电智能化项目C。2025年完成弱电智能化项目D。")
+    sig = _deadline_window_signals(extract_time_windows(req), body, _DL10, req)
+    # 软件开发项目B 被排除；弱电3项有效 → 满足。
+    assert sig["valid"] >= 3
+
+
+def test_same_project_multiple_documents_not_double_counted():
+    """R10：同一项目的合同日期与完成日期只算一项业绩。"""
+    from bidcraft.verdict import _extract_performance_evidence
+
+    recs = _extract_performance_evidence(
+        "2025年签订A项目合同。2025年完成A项目。2024年完成A项目验收。", _T10)
+    assert len(recs) == 1
+    assert recs[0].project_name == "A"
+
+
+def test_contract_and_completion_dates_same_record():
+    """R10：签订日期与完成日期落到同一记录的不同字段。"""
+    from bidcraft.verdict import _extract_performance_evidence
+
+    recs = _extract_performance_evidence("2025年签订A项目合同。2025年完成A项目。", _T10)
+    r = recs[0]
+    assert r.contract_date and r.completion_date
+    assert r.contract_date == r.completion_date == "2025"
+
+
+def test_contract_date_not_counted_as_completion():
+    """R10：只有签订日期、无完成日期 → 口径冲突转人工复核。"""
+    body = "2025年签订A项目合同。2024年签订B项目合同。2023年签订C项目合同。"
+    verdict = judge(_req(_T10), _nodes(body), deadline=_DL10)
+    assert verdict.state == REVIEW
+
+
+def test_performance_record_has_source_provenance():
+    """R10：业绩证据保留原文出处。"""
+    from bidcraft.verdict import _extract_performance_evidence
+
+    recs = _extract_performance_evidence("2025年完成A项目，合同编号HT-001。", _T10)
+    assert recs[0].source_quote
+    as_dict_keys = set(recs[0].as_dict())
+    assert {"project_name", "date_precision", "date_kind", "source_quote"} <= as_dict_keys
+
+
+def test_ambiguous_project_type_requires_review():
+    """R10：招标指定类型但业绩项目类型无法可靠匹配 → 人工复核。"""
+    from bidcraft.verdict import _deadline_window_signals, extract_time_windows
+
+    req = "★ 近三年不少于3项弱电智能化类似项目业绩"
+    body = "2025年完成某项目。2024年完成另一项目。2023年完成第三项目。"
+    sig = _deadline_window_signals(extract_time_windows(req), body, _DL10, req)
+    assert sig["type_conflict"] is True

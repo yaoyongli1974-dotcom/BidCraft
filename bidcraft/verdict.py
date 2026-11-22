@@ -30,6 +30,7 @@ AI 语义接口（预留，不接 LLM）
 
 from __future__ import annotations
 
+import calendar
 import json
 import re
 from dataclasses import dataclass
@@ -196,25 +197,27 @@ def _connector_spans(segment: str) -> list[tuple[int, int]]:
     return kept
 
 
-def split_atoms(text: str, requirement_id: str = "") -> list[dict]:
-    """L2：把复合条款拆成原子要求（R01）。
+# R09：转折/对比连接词才天然带来「两个要求相互限定」的歧义；
+# 并列连接词（并/且/同时/以及）若切出的片段各自带独立约束，属于干净拆分。
+_CONTRAST_CONNECTOR = re.compile(r"但须|但|然而|除外|另有")
 
-    - 同时按**标点**与**连接词**切分——「具有一级资质并具有三项业绩同时提供
-      两小时响应」这种无标点复合条款也能拆开；
+
+def split_atoms(text: str, requirement_id: str = "") -> list[dict]:
+    """L2：把复合条款拆成原子要求（R01 + R09 歧义分离）。
+
+    - 同时按**标点**与**连接词**切分——无标点复合条款也能拆开；
     - 不机械切分：连接词后的片段没有独立约束/主体时（共同修饰同一主体、
-      补充说明）不拆；
-    - 每个原子保留原文偏移 ``source_start`` / ``source_end`` 与稳定编号，
-      可完整映射回原条款；``atom_id`` 按原文出现顺序生成，重复运行结果稳定；
-    - 含转折/并列连接词或无可执行约束的片段标 ``ambiguous``，供上层转人工复核。
+      补充说明）不拆，只标 ``shared_subject``；
+    - **R09**：连接词出现 ≠ 拆分歧义。只有转折/对比连接词，或「切出的片段
+      既无约束又无主体」才标歧义；干净拆分不再强制转人工复核；
+    - 每个原子保留原文偏移与稳定编号，可完整映射回原条款。
     """
 
     text = text or ""
     atoms: list[dict] = []
     for base_start, base_end, clause in _clause_spans(text):
-        # 原子句含连接词 → 即便被干净切开也标记「拆分存在潜在限定」，
-        # 供上层据此转人工复核（不武断按单原子自动下结论）。
-        clause_has_connector = bool(_ATOM_CONNECTORS.search(clause))
-        connectors = _connector_spans(clause)
+        contrast = bool(_CONTRAST_CONNECTOR.search(clause))
+        connectors = _connector_spans(clause)  # 仅保留「切得干净」的连接词边界
         if connectors:
             cuts: list[tuple[int, int]] = []
             pos = 0
@@ -232,12 +235,19 @@ def split_atoms(text: str, requirement_id: str = "") -> list[dict]:
             atom = _strip_lead(raw)
             if len(atom) < 4:
                 continue
-            # 偏移按原文绝对位置记录；atoms 切片去掉首尾空白后重新定位。
             leading = len(raw) - len(raw.lstrip())
             trailing = len(raw) - len(raw.rstrip()) if raw.strip() else 0
             abs_start = base_start + rel_start + leading
             abs_end = base_end - (len(clause) - rel_end) - trailing
             constraints = [item.label for item in extract_constraints(atom)]
+            subjects = _atom_subjects(atom)
+            independent_constraint = bool(constraints) or bool(subjects)
+            split_successful = bool(connectors)
+            # R09：歧义只来自转折连接词，或「被切开却既无约束又无主体」的片段。
+            split_ambiguous = contrast or (split_successful and not independent_constraint
+                                           and bool(_ATOM_CONNECTORS.search(raw)))
+            shared_subject = (not split_successful) and bool(_ATOM_CONNECTORS.search(clause)) \
+                and not independent_constraint
             index = len(atoms) + 1
             atoms.append(
                 {
@@ -246,27 +256,32 @@ def split_atoms(text: str, requirement_id: str = "") -> list[dict]:
                     "requirement_id": requirement_id,
                     "text": atom,
                     "raw": raw.strip(),
-                    "subjects": _atom_subjects(atom),
+                    "subjects": subjects,
                     "constraints": constraints,
                     "source_start": abs_start,
                     "source_end": abs_end,
-                    # 原片段自带连接词（可能相互限定）→ 拆分存疑。
-                    # 注意：没有可抽取的约束不代表拆分有歧义（「三项业绩」
-                    # 这类表述抽取不到数值，但语义清楚），交由 _judge_atom 处理。
-                    "ambiguous": clause_has_connector,
+                    # 兼容字段：歧义 = 真正的拆分歧义（不再是「有连接词就歧义」）。
+                    "ambiguous": split_ambiguous,
+                    "split_successful": split_successful,
+                    "split_ambiguous": split_ambiguous,
+                    "independent_constraint": independent_constraint,
+                    "shared_subject": shared_subject,
                 }
             )
     return atoms
 
 
 def atom_split_is_ambiguous(atoms: list[dict]) -> bool:
-    """拆分是否存在歧义（供上层转人工复核）。
+    """R09：只有**真正无法可靠拆分/关联**的原子才算歧义。
 
-    复合条款里只要有原子带连接词、或某原子未能抽出任何可执行约束，就认为这次
-    拆分不够可靠——交给人工确认，而不是凭机械切分自动下结论。
+    并列连接词若能干净切出各自带约束的原子，不再强制转人工复核（v0.21.0 的
+    「有连接词即歧义」是误判来源，本版分离）。转折/对比、或切出的片段既无
+    约束又无主体才转人工。
     """
 
-    return len(atoms) > 1 and any(atom.get("ambiguous") for atom in atoms)
+    return len(atoms) > 1 and any(
+        atom.get("split_ambiguous") or atom.get("ambiguous") for atom in atoms
+    )
 
 
 def extract_time_windows(text: str) -> list[dict]:
@@ -296,86 +311,141 @@ def _time_window_signals(req_windows: list[dict], body: str) -> list[dict]:
     - 同一子句里带有明确完成日期（如「2023年5月」）时，日期是更可靠的锚点，
       时间窗偏短仅作提示，不强判业绩不足；
     - 要求含时间窗，但正文里带业绩对象的子句**没有任何日期或时间窗** → 记一条
-      「缺少完成日期」的信号，转人工复核（无法计算业绩是否满足时间范围）。
+      提示（日期/证据不足，建议人工复核）。
     """
 
     signals: list[dict] = []
-    clauses = [c.strip() for c in _CLAUSE_SPLIT.split(body or "") if c.strip()]
-    achievement_clauses = [c for c in clauses if _ACHIEVEMENT_RE.search(c)]
-
-    for req in req_windows:
-        months_req = req["years"] * (12 if req["unit"] == "年" else 1)
-        window_hits: list[dict] = []
-        dated = False
-        for clause in achievement_clauses:
-            if _DATE_RE.search(clause):
-                dated = True
-            for got in extract_time_windows(clause):
-                window_hits.append({"required": req["raw"], "found": got["raw"], "clause": clause})
-
-        if not window_hits and not dated and achievement_clauses:
-            signals.append(
-                {
-                    "required": req["raw"],
-                    "found": "",
-                    "note": "业绩未注明完成日期或时间范围，无法核对，转人工复核",
-                }
-            )
+    if not req_windows:
+        return signals
+    clauses = [item.strip() for item in _CLAUSE_SPLIT.split(body or "") if item.strip()]
+    for clause in clauses:
+        if not _ACHIEVEMENT_RE.search(clause):
             continue
-
-        for hit in window_hits:
-            got = extract_time_windows(hit["clause"])[0]
-            months_got = got["years"] * (12 if got["unit"] == "年" else 1)
-            if months_got < months_req:
-                signals.append(
-                    {
-                        "required": req["raw"],
-                        "found": got["raw"],
-                        "note": (
-                            "业绩时间窗短于要求但有明确完成日期，仅提示核对"
-                            if dated
-                            else "业绩时间范围短于招标要求，建议人工确认"
-                        ),
-                    }
-                )
-                break  # 同一要求只记一条，避免长文里多处业绩重复报
+        has_date = bool(_DATE_RE.search(clause))
+        has_window = bool(_TIME_WINDOW_RE.search(clause))
+        if has_date:
+            continue
+        if has_window:
+            signals.append({"note": "业绩时间窗短于要求或证据不足，建议人工复核",
+                            "found": clause[:80]})
+        elif not any(k in clause for k in ("提供了", "具有", "完成")):
+            signals.append({"note": "业绩缺少完成日期，建议人工复核", "found": clause[:80]})
+        else:
+            signals.append({"note": "业绩缺少明确完成日期，建议人工复核", "found": clause[:80]})
     return signals
 
 
-# --------------------------------------------------------------- R03：招标截止日期时间窗
-#: 事实台账 / Project.meta 中可能承载「投标截止时间」的键（按优先级）。
-DEADLINE_KEYS = (
-    "tender_deadline",
-    "bid_deadline",
-    "bid_submission_deadline",
-    "投标截止时间",
-    "投标截止日期",
-    "递交投标文件截止时间",
-    "截止日期",
-    "deadline",
-)
-#: 业绩日期类型：必须区分签订/开工/竣工/验收，不能把签订日当作完成日。
+# --------------------------------------------------- R10 业绩证据 / R12 日期精度
+# 日期类型词（区分签订/开工/竣工/验收），顺序即优先级。
 _DATE_KIND_TOKENS = (
-    ("completion", ("竣工", "完工", "完成", "交付使用", "投入使用")),
+    ("completion", ("完成", "竣工", "完工", "交付")),
     ("acceptance", ("验收",)),
     ("contract", ("签订", "签约", "合同日期", "订立")),
-    ("start", ("开工", "动工", "开工日期")),
+    ("start", ("开工", "动工")),
 )
 # 同时覆盖「2025年」「2025年11月」「2023年11月22日」「2025-03-01」四种写法；
-# 年必须有四位，月/日可缺省（只给年份也算明确日期，默认取 1 月 1 日并留痕）。
+# 年必须有四位，月/日可缺省。R12：缺省必须保留精度，绝不臆造成 1 月 1 日。
 _FULL_DATE_RE = re.compile(
     r"(?P<year>20\d{2}|19\d{2})\s*年\s*(?:(?P<month>\d{1,2})\s*月)?\s*(?:(?P<day>\d{1,2})\s*日)?"
     r"|(?P<y2>20\d{2}|19\d{2})\s*[-/.]\s*(?P<m2>\d{1,2})\s*[-/.]\s*(?P<d2>\d{1,2})"
 )
-# 业绩对象：保留原有的同类/类似项目等精确词，同时纳入普通「项目/工程」——
-# 因为真正的日期约束在 _performance_dates 里（必须有四位年份），不会误伤「近一年培训」。
 _ACHIEVEMENT_DATED_RE = re.compile(
     r"业绩|案例|同类项目|类似项目|相近项目|合同|中标|项目|工程"
 )
+# R10：项目名 = 「XXX项目 / XXX工程」之前的修饰词，剥掉动词前缀。
+_PROJECT_NAME_RE = re.compile(r"([\u4e00-\u9fffA-Za-z0-9]{1,12})\s*(?:项目|工程)\s*([A-Za-z0-9]{1,6})?")
+_PROJECT_VERB_PREFIX = re.compile(r"^(完成|签订|中标|验收|竣工|承建|提供|实施|建设|的|了)+")
+# R10：项目类型规则（招标明确类型时按此匹配；无法匹配转人工复核）。
+_PROJECT_TYPE_HINTS = {
+    "弱电智能化": ("弱电", "智能化", "楼宇智能"),
+    "综合布线": ("综合布线", "布线"),
+    "安防监控": ("安防", "监控", "摄像"),
+    "软件开发": ("软件", "系统开发", "平台开发"),
+    "装修工程": ("装修", "装饰"),
+    "网络通信": ("网络", "通信", "交换机", "带宽"),
+}
+
+# 招标截止日期台账键（R03）：事实台账/meta 里这些 key 的值会被解析为截止日期。
+DEADLINE_KEYS = (
+    "tender_deadline", "bid_deadline", "bid_submission_deadline",
+    "投标截止时间", "截止日期", "投标截止", "递交截止时间", "开标时间",
+)
+
+
+@dataclass
+class PerformanceEvidence:
+    """R10：单条业绩证据（与 FactItem / 文档证据对齐的可追溯结构）。"""
+
+    performance_id: str
+    project_name: str
+    project_type: str
+    contract_date: str
+    start_date: str
+    completion_date: str
+    acceptance_date: str
+    date_precision: str      # year / month / day
+    date_kind: str           # completion / acceptance / contract / start / unknown
+    source_quote: str
+    source_page: int
+    source_section: str
+    evidence_file_id: str
+
+    def as_dict(self) -> dict:
+        return {
+            "performance_id": self.performance_id,
+            "project_name": self.project_name,
+            "project_type": self.project_type,
+            "contract_date": self.contract_date,
+            "start_date": self.start_date,
+            "completion_date": self.completion_date,
+            "acceptance_date": self.acceptance_date,
+            "date_precision": self.date_precision,
+            "date_kind": self.date_kind,
+            "year": self._year(),
+            "month": self._month(),
+            "day": self._day(),
+            "source_quote": self.source_quote[:200],
+            "source_page": self.source_page,
+            "source_section": self.source_section,
+            "evidence_file_id": self.evidence_file_id,
+        }
+
+    def _effective(self) -> str:
+        # 完成/验收日期才是「完成时间」；签订/开工不能当完成日。
+        return self.completion_date or self.acceptance_date or ""
+
+    def _parts(self) -> tuple[int | None, int | None, int | None]:
+        # completion_date 存的是归一化 ISO（如 '2025' / '2025-03' / '2025-03-01'），
+        # 直接拆分，不能依赖要求「年」字的 _FULL_DATE_RE。
+        text = self._effective()
+        if not text:
+            return None, None, None
+        parts = text.split("-")
+        try:
+            y = int(parts[0])
+            m = int(parts[1]) if len(parts) > 1 else None
+            d = int(parts[2]) if len(parts) > 2 else None
+            return y, m, d
+        except (ValueError, IndexError):
+            return None, None, None
+
+    def _year(self):
+        return self._parts()[0]
+
+    def _month(self):
+        return self._parts()[1]
+
+    def _day(self):
+        return self._parts()[2]
 
 
 def _date_parts(match):
-    """从 _FULL_DATE_RE 的匹配里取 (year, month, day)，缺省补 1。"""
+    """R12：从 _FULL_DATE_RE 匹配取 (year, month, day)，缺省补 1。
+
+    注意：这里的补 1 仅用于**构造 date 对象比较**；业绩证据的 ``date_precision``
+    会单独记录原始精度（year/month/day），边界判定据此转人工复核，不会把
+    「2023年」臆造成「2023-01-01」后直接计入或否决。
+    """
 
     if match.group("y2"):
         return int(match.group("y2")), int(match.group("m2")), int(match.group("d2"))
@@ -384,6 +454,16 @@ def _date_parts(match):
         int(match.group("month") or 1),
         int(match.group("day") or 1),
     )
+
+
+def _date_precision(match) -> str:
+    """R12：原始日期精度——year / month / day（不得臆造更精确的日期）。"""
+
+    if match.group("y2") or match.group("day"):
+        return "day"
+    if match.group("month"):
+        return "month"
+    return "year"
 
 
 def parse_deadline(value) -> date | None:
@@ -411,11 +491,7 @@ def parse_deadline(value) -> date | None:
 
 
 def resolve_deadline(facts, meta: dict | None = None) -> date | None:
-    """R03：从事实台账 + Project.meta 解析招标截止日期，找不到返回 None。
-
-    ``facts`` 是有 ``key``/``value`` 属性的对象序列（Fact 行）或 dict 序列。
-    按 DEADLINE_KEYS 优先级取第一个能解析出日期的值；台账优先于 meta。
-    """
+    """R03：从事实台账 + Project.meta 解析招标截止日期，找不到返回 None。"""
 
     def as_kv(item):
         if isinstance(item, dict):
@@ -452,144 +528,187 @@ def _date_kind(clause: str, date_match) -> str:
     return "unknown"
 
 
-def _performance_dates(body: str) -> list[dict]:
-    """抽取正文里带明确日期的业绩记录，逐条保留日期类型与原文出处。"""
+def _required_project_type(requirement_text: str) -> str:
+    """R10：招标条款里是否指定了类似项目类型；没指定返回空串（不做类型过滤）。"""
 
-    records: list[dict] = []
-    clauses = [c.strip() for c in _CLAUSE_SPLIT.split(body or "") if c.strip()]
-    for clause in clauses:
+    for ptype, hints in _PROJECT_TYPE_HINTS.items():
+        if any(hint in (requirement_text or "") for hint in hints):
+            return ptype
+    return ""
+
+
+def _extract_performance_evidence(body: str, requirement_text: str = "") -> list[PerformanceEvidence]:
+    """R10：抽取正文里带明确日期的**独立业绩记录**，逐条保留项目归属与出处。
+
+    - 同一项目的合同/开工/竣工/验收日期合并进一条记录，不重复计数；
+    - 签订/开工日期不写入 completion_date（不能当完成时间）；
+    - 招标指定类似项目类型时，类型不符的记录不计入；类型无法可靠匹配时，
+      记录 ``project_type='?'`` 交由上层转人工复核。
+    """
+
+    seen: dict[str, PerformanceEvidence] = {}
+    order = 0
+    for clause in [c.strip() for c in _CLAUSE_SPLIT.split(body or "") if c.strip()]:
         if not _ACHIEVEMENT_DATED_RE.search(clause):
             continue
+        name_match = _PROJECT_NAME_RE.search(clause)
+        raw_name = ""
+        if name_match:
+            raw_name = (name_match.group(1) or "") + (name_match.group(2) or "")
+        # 去掉「2025年完成A」里的年份与动词前缀，保留项目标识 A。
+        raw_name = re.sub(r"^(?:20\d{2}|19\d{2})\s*年?", "", raw_name)
+        name = _PROJECT_VERB_PREFIX.sub("", raw_name).strip()
+        # 无项目名时用「项目N」占位，保证每条独立业绩仍单独成记录。
+        if not name:
+            order += 1
+            name = f"未命名项目{order}"
+        ptype = ""
+        for candidate, hints in _PROJECT_TYPE_HINTS.items():
+            if any(hint in clause for hint in hints):
+                ptype = candidate
+                break
         for match in _FULL_DATE_RE.finditer(clause):
             year, month, day = _date_parts(match)
-            # 年份精度（「2023年」无月）单独标记：按日历年比较，不臆造具体月日。
-            precision = "year" if not (match.group("month") or match.group("m2")) else "day"
-            records.append(
-                {
-                    "year": year,
-                    "month": month,
-                    "day": day,
-                    "precision": precision,
-                    "kind": _date_kind(clause, match),
-                    "source_quote": clause[:200],
-                }
-            )
-    return records
+            precision = _date_precision(match)
+            kind = _date_kind(clause, match)
+            iso = f"{year:04d}"
+            if precision in ("month", "day"):
+                iso += f"-{month:02d}"
+            if precision == "day":
+                iso += f"-{day:02d}"
+            record = seen.get(name)
+            if record is None:
+                record = PerformanceEvidence(
+                    performance_id=f"PE-{len(seen) + 1:03d}",
+                    project_name=name,
+                    project_type=ptype or "?",
+                    contract_date="", start_date="", completion_date="", acceptance_date="",
+                    date_precision=precision, date_kind=kind,
+                    source_quote=clause, source_page=0, source_section="", evidence_file_id="",
+                )
+                seen[name] = record
+            # 每个日期按其类型落到对应字段；完成/验收优先，签订/开工不当完成日。
+            if kind == "contract":
+                record.contract_date = record.contract_date or iso
+            elif kind == "start":
+                record.start_date = record.start_date or iso
+            elif kind == "acceptance":
+                record.acceptance_date = record.acceptance_date or iso
+            else:  # completion / unknown —— 只有出现「完成/竣工」才算完成日
+                if kind == "completion":
+                    record.completion_date = record.completion_date or iso
+            if record.date_precision == "year" and precision != "year":
+                record.date_precision = precision
+    return list(seen.values())
 
 
 def _cutoff_date(deadline: date, years: int, unit: str) -> date:
-    """按招标截止日期回退时间窗：年→同年同月同日，月→按月回退。"""
+    """R12：按招标截止日期回退时间窗——**日历规则**，月份用真实日历月回退。"""
 
     if unit == "年":
-        try:
-            return deadline.replace(year=deadline.year - years)
-        except ValueError:  # 2 月 29 日
-            return deadline.replace(year=deadline.year - years, day=28)
-    # 月：按 30 天近似（仅证据/提示口径，不改变硬约束）。
-    from datetime import timedelta
-
-    return deadline - timedelta(days=years * 30)
+        total_months = years * 12
+    else:
+        total_months = years
+    month_index = deadline.year * 12 + (deadline.month - 1) - total_months
+    year, month0 = divmod(month_index, 12)
+    month = month0 + 1
+    day = min(deadline.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
 
 
 def _deadline_window_signals(
-    req_windows: list[dict], body: str, deadline: date | None
+    req_windows: list[dict], body: str, deadline: date | None, requirement_text: str = ""
 ) -> dict:
-    """R03：按招标截止日期逐条校验业绩日期。
+    """R03/R10/R12：按招标截止日期逐条校验业绩日期与项目类型。
 
-    返回 ``{applicable, has_deadline, records, expired, valid, missing_deadline,
-    boundary_conflict}``。本函数只产出结构化证据；是否升级为终态由 judge 决定。
+    返回 ``{applicable, has_deadline, deadline, records, expired, valid,
+    missing_deadline, boundary_conflict, type_conflict, ...}``；只产出结构化证据，
+    是否升级为终态由 _decide 决定。
     """
 
     out: dict = {
-        "applicable": False,
-        "has_deadline": deadline is not None,
+        "applicable": False, "has_deadline": deadline is not None,
         "deadline": deadline.isoformat() if deadline else "",
-        "records": [],
-        "expired": 0,
-        "valid": 0,
-        "missing_deadline": False,
-        "boundary_conflict": False,
+        "records": [], "expired": 0, "valid": 0,
+        "missing_deadline": False, "boundary_conflict": False,
+        "type_conflict": False, "project_type": "",
     }
     if not req_windows:
         return out
-    records = _performance_dates(body)
+    records = _extract_performance_evidence(body, requirement_text)
     if not records:
-        # 正文没有可解析的明确日期 → 沿用既有「相对时间窗只作证据」口径，
-        # 不在这里强行转 review（守住 test_time_window_is_evidence_not_violation）。
         return out
     out["applicable"] = True
-    out["records"] = records
+    out["records"] = [item.as_dict() for item in records]
     if deadline is None:
-        # 有明确业绩日期但拿不到招标截止日期 → 无法可靠计算，转人工复核。
         out["missing_deadline"] = True
         return out
-    for req in req_windows:
-        cutoff = _cutoff_date(deadline, req["years"], req["unit"])
-        for rec in records:
-            # 签订/开工日期不能等同完成日期——口径冲突，转人工。
-            if rec["kind"] in {"contract", "start"}:
+
+    required_type = _required_project_type(requirement_text)
+    out["project_type"] = required_type
+    need_cnt = max((window["years"] for window in req_windows), default=3)
+    # 时间窗「近N年」由需求里的数量约束（另在 _decide 取 need）；这里只取年份窗口。
+    years = need_cnt if False else req_windows[0]["years"]
+    unit = req_windows[0]["unit"]
+    cutoff = _cutoff_date(deadline, years, unit)
+
+    for rec in records:
+        # R10：招标指定类型时按类型过滤；无法匹配（'?'）→ 转人工复核。
+        if required_type:
+            if rec.project_type == "?":
+                out["type_conflict"] = True
+                continue
+            if rec.project_type != required_type:
+                continue
+        effective = rec._effective()
+        if not effective:
+            # 只有签订/开工日期，没有完成/验收日期 → 口径冲突转人工。
+            out["boundary_conflict"] = True
+            continue
+        y, m, d = rec._parts()
+        if y is None:
+            out["boundary_conflict"] = True
+            continue
+        precision = rec.date_precision
+        try:
+            rec_date = date(y, m or 1, d or 1)
+        except ValueError:
+            out["boundary_conflict"] = True
+            continue
+        # R12：年份/月份精度处于窗口边界年份/月份时无法精确判断 → 转人工复核，
+        # 不直接计入有效数量（「2023年」不臆造成 2023-01-01）。
+        if precision == "year":
+            # 年份精度按日历年计数（沿用既有「近三年」口径，cutoff 年计入）。
+            # 但完成年份 == 截止年份时无法确认是否在截止日之前 → 转人工复核，
+            # 不臆造成 1 月 1 日直接放行（R12）。
+            if y == deadline.year:
                 out["boundary_conflict"] = True
                 continue
-            if rec.get("precision") == "year":
-                # 只给年份：按日历年近似（cutoff.year..deadline.year）。这是
-                # 证据口径，不臆造 1 月 1 日；边界年份转人工更稳妥但仍计数。
-                if cutoff.year <= rec["year"] <= deadline.year:
-                    out["valid"] += 1
-                    rec["in_window"] = True
-                else:
-                    out["expired"] += 1
-                    rec["in_window"] = False
-                continue
-            try:
-                rec_date = date(rec["year"], rec["month"], rec["day"])
-            except ValueError:
-                out["boundary_conflict"] = True
-                continue
-            if rec_date < cutoff:
-                out["expired"] += 1
-                rec["in_window"] = False
-            elif rec_date <= deadline:
+            if y >= cutoff.year:
                 out["valid"] += 1
-                rec["in_window"] = True
             else:
-                # 完成日期晚于截止日期：数据冲突，转人工。
+                out["expired"] += 1
+            continue
+        if precision == "month":
+            if (y, m) <= (cutoff.year, cutoff.month) or (y, m) >= (deadline.year, deadline.month):
                 out["boundary_conflict"] = True
+                continue
+            if (cutoff.year, cutoff.month) < (y, m) < (deadline.year, deadline.month):
+                out["valid"] += 1
+            else:
+                out["expired"] += 1
+            continue
+        # day 精度：按日历截止日精确比较，边界含等号。
+        if rec_date < cutoff:
+            out["expired"] += 1
+        elif rec_date <= deadline:
+            out["valid"] += 1
+        else:
+            out["boundary_conflict"] = True
     return out
 
 
-def _judge_atom(
-    atom: dict,
-    nodes: list[dict],
-    combined: str,
-    matcher: SemanticMatcher,
-    req_type: str,
-) -> str:
-    """对单个原子独立执行约束判定，返回四态之一（R01）。"""
-
-    text = atom.get("text", "")
-    verdicts = evaluate_constraints(text, combined)
-    if any(item.state == "violated" for item in verdicts):
-        return UNSATISFIED
-    if any(item.state == "unclear" for item in verdicts):
-        return REVIEW
-    absent = [item for item in verdicts if item.state == "absent"]
-    satisfied = [item for item in verdicts if item.state == "satisfied"]
-    if absent:
-        # 与整条口径一致：有约束已证实、其余缺失 → 部分满足；全缺 → missing。
-        return PARTIAL if satisfied else "missing"
-    if find_covering_section(text, nodes, req_type) is not None:
-        return SATISFIED
-    best = max(
-        (matcher.coverage(text, n.get("body") or "", req_type) for n in nodes if n.get("body")),
-        default=0.0,
-    )
-    anchor = max((anchor_coverage(text, n.get("body") or "", req_type) for n in nodes), default=0.0)
-    if best > 0 or anchor > 0:
-        return REVIEW
-    return "missing"
-
-
-def _negated_in_body(verdicts: list[ConstraintVerdict]) -> bool:
+def _negated_in_body(verdicts: list) -> bool:
     """正文是否以否定句应答某条约束（举证用，不影响 state）。"""
 
     return any(
@@ -615,6 +734,166 @@ class RequirementVerdict:
         return json.dumps(self.evidence, ensure_ascii=False)
 
 
+def _decide(
+    text: str,
+    verdicts: list,
+    deadline_window: dict,
+    time_signals: list,
+    best_ratio: float,
+    anchor: float,
+    section: dict | None,
+    threshold: float,
+    marker: str,
+    block_level: str,
+    evidence: dict,
+) -> RequirementVerdict:
+    """统一 L5 判定（R08）：任意一段文本（整条 / 单个原子）→ 四态结论。
+
+    R08 关键：把「业绩按招标截止日期校验」下沉到这里，整条与每个原子走同一套
+    完整检查，复合条款不再因提前 return 而绕过截止日期校验。
+    """
+
+    dw = deadline_window
+    deadline_driven_satisfied = False
+    if dw["applicable"]:
+        need: int | None = None
+        count_idx: int | None = None
+        for idx, item in enumerate(verdicts):
+            c = item.constraint
+            if c.kind == "numeric" and c.comparator == ">=" and c.family == "achievement":
+                need, count_idx = int(c.threshold), idx
+                break
+        if dw["missing_deadline"] or dw["boundary_conflict"] or dw.get("type_conflict"):
+            if dw["missing_deadline"]:
+                reason = "业绩含明确日期但缺少招标截止日期，无法计算时间窗，转人工复核"
+            elif dw.get("type_conflict"):
+                reason = "类似项目类型无法与招标要求可靠匹配，转人工复核"
+            else:
+                reason = "业绩日期精度不足或口径冲突（签订/开工≠完成、完成日晚于截止），转人工复核"
+            evidence["layer5"] = {"state": REVIEW, "deadline_driven": True}
+            return RequirementVerdict(REVIEW, review_level(marker), reason, None, evidence)
+        if need is None:
+            evidence["layer5"] = {"state": REVIEW, "deadline_driven": True}
+            return RequirementVerdict(
+                REVIEW, review_level(marker),
+                "业绩时间窗无法与数量要求关联，转人工复核", None, evidence,
+            )
+        if dw["valid"] >= need:
+            verdicts = list(verdicts)
+            verdicts[count_idx] = ConstraintVerdict(
+                verdicts[count_idx].constraint, "satisfied",
+                f"近时间窗内有效业绩 {dw['valid']} 项，满足不少于 {need} 项",
+            )
+            deadline_driven_satisfied = True
+        else:
+            detail = (
+                f"有效业绩 {dw['valid']} 项不足 {need} 项（时间窗外 {dw['expired']} 项）"
+                if dw["valid"]
+                else f"业绩均在时间窗外，有效 0 项（过期 {dw['expired']} 项）"
+            )
+            state = PARTIAL if dw["valid"] else UNSATISFIED
+            evidence["layer5"] = {"state": state, "deadline_driven": True}
+            return RequirementVerdict(state, block_level, detail, None, evidence)
+
+    violated = [item for item in verdicts if item.state == "violated"]
+    absent = [item for item in verdicts if item.state == "absent"]
+    satisfied = [item for item in verdicts if item.state == "satisfied"]
+    if violated:
+        detail = "、".join(item.constraint.label for item in violated[:3])
+        evidence["layer5"] = {"state": UNSATISFIED}
+        return RequirementVerdict(
+            UNSATISFIED, block_level,
+            f"数值/等级/否定语义不符合要求：{detail}", None, evidence,
+        )
+    if absent:
+        missing = "、".join(item.constraint.label for item in absent[:3])
+        if satisfied:
+            evidence["layer5"] = {"state": PARTIAL}
+            return RequirementVerdict(
+                PARTIAL, block_level, f"部分约束未在正文体现：{missing}", None, evidence,
+            )
+        evidence["layer5"] = {"state": UNSATISFIED, "no_response": True}
+        return RequirementVerdict(
+            UNSATISFIED, block_level, "未在正文找到明确响应", None, evidence,
+        )
+    if section is not None or deadline_driven_satisfied:
+        evidence["layer5"] = {"state": SATISFIED}
+        reason = (
+            "业绩时间窗按招标截止日期核算，有效业绩满足数量要求"
+            if deadline_driven_satisfied
+            else "硬性约束均满足，证据充分"
+        )
+        return RequirementVerdict(SATISFIED, "", reason, section, evidence)
+
+    unclear = [item for item in verdicts if item.state == "unclear"]
+    if unclear:
+        evidence["layer5"] = {"state": REVIEW, "reason": "单位不明确或跨量纲"}
+        detail = "；".join(item.detail for item in unclear[:3])
+        return RequirementVerdict(
+            REVIEW, review_level(marker),
+            f"数值单位缺失或跨量纲，无法自动判定：{detail}，请人工复核", None, evidence,
+        )
+
+    if best_ratio > 0 or anchor > 0 or time_signals:
+        evidence["layer5"] = {"state": REVIEW}
+        reasons = ["语义相近但证据不足"]
+        if time_signals:
+            reasons.append("时间范围短于要求")
+        return RequirementVerdict(
+            REVIEW, review_level(marker), "；".join(reasons) + "，建议人工复核", None, evidence,
+        )
+    evidence["layer5"] = {"state": UNSATISFIED, "no_response": True}
+    return RequirementVerdict(
+        UNSATISFIED, block_level, "未在正文找到明确响应", None, evidence,
+    )
+
+
+def _judge_atom(
+    atom: dict,
+    nodes: list[dict],
+    combined: str,
+    matcher: SemanticMatcher,
+    req_type: str,
+    marker: str,
+    block_level: str,
+    deadline,
+) -> RequirementVerdict:
+    """对单个原子独立执行**完整**判定（含业绩截止日期校验，R08）。
+
+    与整条文本共用 :func:`_decide`，确保复合条款的每个原子都跑过硬约束 + 日期
+    校验，不存在「拆成原子后绕过截止日期」的旁路。
+    """
+
+    text = atom.get("text", "")
+    atom_verdicts = evaluate_constraints(text, combined)
+    atom_windows = extract_time_windows(text)
+    atom_deadline = _deadline_window_signals(atom_windows, combined, deadline)
+    atom_time_signals = _time_window_signals(atom_windows, combined)
+    core = requirement_core(text)
+    threshold = 0.45 if len(core) >= 8 else 1.0
+    best = 0.0
+    for node in nodes:
+        body = node.get("body") or ""
+        if body:
+            best = max(best, matcher.coverage(text, body, req_type))
+    anchor = max((anchor_coverage(text, n.get("body") or "", req_type) for n in nodes), default=0.0)
+    section = find_covering_section(text, nodes, req_type)
+    atom_evidence = {
+        "deadline_window": atom_deadline,
+        "time_signals": atom_time_signals,
+        "constraints": [item.as_dict() for item in atom_verdicts],
+    }
+    verdict = _decide(
+        text, atom_verdicts, atom_deadline, atom_time_signals, best, anchor,
+        section, threshold, marker, block_level, atom_evidence,
+    )
+    # 「原子完全没被响应」以 missing 区分于「被明确违反」：前者在其它原子命中时
+    # 聚合为 PARTIAL（部分满足），后者聚合为 UNSATISFIED；日期否决保留 UNSATISFIED。
+    if verdict.state == UNSATISFIED and atom_evidence.get("layer5", {}).get("no_response"):
+        return RequirementVerdict("missing", "", verdict.reason, None, verdict.evidence)
+    return verdict
+
+
 def judge(
     requirement,
     nodes: list[dict],
@@ -627,6 +906,9 @@ def judge(
     ``requirement`` 需提供 text / marker / source_quote，可选 page / clause_no。
     ``deadline`` 是招标截止日期（R03）；不传时时间窗沿用旧的「只作证据」口径，
     传入后对带明确完成日期的业绩逐条按截止日期校验。
+
+    R08：复合条款与单条文本共用 :func:`_decide`；每个原子独立跑完整判定（含
+    截止日期），再按汇总原则合成整条结论，杜绝「拆原子绕过时间窗」。
     """
 
     text = (getattr(requirement, "text", "") or "").strip()
@@ -657,7 +939,6 @@ def judge(
     ]
     req_windows = extract_time_windows(text)
     time_signals = _time_window_signals(req_windows, combined)
-    # R03：按招标截止日期逐条校验业绩日期（只有带明确日期的业绩才介入）。
     deadline_window = _deadline_window_signals(req_windows, combined, deadline)
 
     # L4 语义覆盖（可插拔 matcher）+ 章节锚点
@@ -701,22 +982,34 @@ def judge(
         },
     }
 
-    # R01：复合条款的原子独立判定闭环。先把每个原子对正文独立判一遍，
-    # 再按汇总原则合成整条结论；拆分本身存疑时即便各原子看似命中也不自动判满足。
-    atom_states: list[str] = []
+    # R01/R08：复合条款先对每个原子跑**完整**判定（含截止日期），再汇总；
+    # 拆分本身存疑时即便各原子看似命中也不自动判满足。
     if len(atoms) > 1:
-        atom_states = [_judge_atom(atom, nodes, combined, matcher, req_type) for atom in atoms]
+        atom_verdicts = [
+            _judge_atom(atom, nodes, combined, matcher, req_type, marker, block_level, deadline)
+            for atom in atoms
+        ]
+        atom_states = [verdict.state for verdict in atom_verdicts]
         evidence["layer2"]["atom_states"] = [
             {"atom_id": atom["atom_id"], "text": atom["text"], "state": state}
             for atom, state in zip(atoms, atom_states)
         ]
+        # R08-8：汇总时保留原子级 deadline_window 证据，不丢失。
+        evidence["layer5_detail"] = {
+            "atom_deadline_windows": {
+                atom["atom_id"]: verdict.evidence.get("deadline_window", {})
+                for atom, verdict in zip(atoms, atom_verdicts)
+            }
+        }
         split_ambiguous = atom_split_is_ambiguous(atoms)
-        # 汇总原则（任务书 R01-7）：
-        #   任一原子明确不满足 → 整条不满足；
-        #   部分满足、部分缺失 → 部分满足；
-        #   全部满足且拆分可靠 → 满足；拆分存疑 → 人工复核（不自动判满足）。
+        # 汇总原则：任一不满足 → 不满足；部分缺失 → 部分满足；拆分存疑 → 复核；
+        # 全部满足 → 满足。约束否决与日期否决优先于语义相似。
         if UNSATISFIED in atom_states:
             agg_state, agg_detail = UNSATISFIED, "复合要求中存在原子不满足"
+        elif split_ambiguous:
+            # R09：真正存在拆分歧义（转折/无法关联）→ 人工复核，优先于「部分满足」，
+            # 因为此时「哪些原子成立」本身不可靠，不能给出 PARTIAL 这种具体结论。
+            agg_state, agg_detail = REVIEW, "复合要求拆分存在歧义或关联不明确"
         elif PARTIAL in atom_states:
             agg_state, agg_detail = PARTIAL, "复合要求中部分约束缺少响应"
         elif "missing" in atom_states:
@@ -730,150 +1023,16 @@ def judge(
             agg_state, agg_detail = SATISFIED, "复合要求的全部原子均满足"
         else:  # pragma: no cover - 防御
             agg_state, agg_detail = REVIEW, "复合要求无法可靠汇总"
-
         lvl = "" if agg_state == SATISFIED else (
             review_level(marker) if agg_state == REVIEW else block_level
         )
         evidence["layer5"] = {"state": agg_state, "aggregated_from_atoms": True}
         return RequirementVerdict(agg_state, lvl, agg_detail, None, evidence)
 
-    # L5 四态判定。约束否决优先于语义相似——「1000Mbps vs 500Mbps」即便
-    # 语义完全一致也判不满足；这正是用户强调的核心原则。
-    #
-    # 分支顺序对应用户给的判定策略表：
-    #   任一硬性约束不满足        → 不满足（阻塞）
-    #   部分约束缺失（其余已满足）→ 部分满足（阻塞）
-    #   全部约束满足且证据充分    → 满足（放行）
-    #   语义不明确 / 证据不足     → 人工复核（info，不阻塞）
-    # R03：业绩时间窗按招标截止日期进入最终判定（不只是证据）。
-    # 仅当正文出现「带明确日期的业绩」时才介入；相对时间窗（近五年6项）仍走旧口径。
-    dw = deadline_window
-    deadline_driven_satisfied = False
-    if dw["applicable"]:
-        # 业绩数量约束（≥ N 项），用于把「有效业绩数」和数量要求对齐。
-        need: int | None = None
-        count_idx: int | None = None
-        for idx, item in enumerate(verdicts):
-            c = item.constraint
-            if c.kind == "numeric" and c.comparator == ">=" and c.family == "achievement":
-                need, count_idx = int(c.threshold), idx
-                break
-        if dw["missing_deadline"] or dw["boundary_conflict"]:
-            # 缺截止日期 / 日期口径冲突（签订当完成、完成日晚于截止）→ 人工复核。
-            reason = (
-                "业绩含明确日期但缺少招标截止日期，无法计算时间窗，转人工复核"
-                if dw["missing_deadline"]
-                else "业绩日期口径冲突（签订/开工日不等于完成日，或完成日晚于截止日期），转人工复核"
-            )
-            evidence["layer5"] = {"state": REVIEW, "deadline_driven": True}
-            return RequirementVerdict(REVIEW, review_level(marker), reason, None, evidence)
-        if need is None:
-            # 有时间窗业绩但抽不到数量要求 → 保守转人工。
-            evidence["layer5"] = {"state": REVIEW, "deadline_driven": True}
-            return RequirementVerdict(
-                REVIEW,
-                review_level(marker),
-                "业绩时间窗无法与数量要求关联，转人工复核",
-                None,
-                evidence,
-            )
-        # 用逐条日期核算的「有效业绩数」覆盖被年份数字污染成 unclear 的数量约束。
-        if dw["valid"] >= need:
-            verdicts = list(verdicts)
-            verdicts[count_idx] = ConstraintVerdict(
-                verdicts[count_idx].constraint,
-                "satisfied",
-                f"近时间窗内有效业绩 {dw['valid']} 项，满足不少于 {need} 项",
-            )
-            deadline_driven_satisfied = True
-        else:
-            detail = (
-                f"有效业绩 {dw['valid']} 项不足 {need} 项（时间窗外 {dw['expired']} 项）"
-                if dw["valid"]
-                else f"业绩均在时间窗外，有效 0 项（过期 {dw['expired']} 项）"
-            )
-            evidence["layer5"] = {"state": PARTIAL if dw["valid"] else UNSATISFIED, "deadline_driven": True}
-            lvl = block_level
-            return RequirementVerdict(PARTIAL if dw["valid"] else UNSATISFIED, lvl, detail, None, evidence)
-
-    violated = [item for item in verdicts if item.state == "violated"]
-    absent = [item for item in verdicts if item.state == "absent"]
-    satisfied = [item for item in verdicts if item.state == "satisfied"]
-    if violated:
-        detail = "、".join(item.constraint.label for item in violated[:3])
-        evidence["layer5"] = {"state": UNSATISFIED}
-        return RequirementVerdict(
-            UNSATISFIED,
-            block_level,
-            f"数值/等级/否定语义不符合要求：{detail}",
-            None,
-            evidence,
-        )
-    if absent:
-        # 已证实部分约束、另有约束缺失 → 部分满足（阻塞，提示具体缺哪条）；
-        # 一条都没证实 → 按既有「未响应即拦截」口径判不满足。
-        missing = "、".join(item.constraint.label for item in absent[:3])
-        if satisfied:
-            evidence["layer5"] = {"state": PARTIAL}
-            return RequirementVerdict(
-                PARTIAL,
-                block_level,
-                f"部分约束未在正文体现：{missing}",
-                None,
-                evidence,
-            )
-        evidence["layer5"] = {"state": UNSATISFIED}
-        return RequirementVerdict(
-            UNSATISFIED,
-            block_level,
-            "未在正文找到明确响应",
-            None,
-            evidence,
-        )
-    if section is not None or deadline_driven_satisfied:
-        evidence["layer5"] = {"state": SATISFIED}
-        reason = (
-            "业绩时间窗按招标截止日期核算，有效业绩满足数量要求"
-            if deadline_driven_satisfied
-            else "硬性约束均满足，证据充分"
-        )
-        return RequirementVerdict(SATISFIED, "", reason, section, evidence)
-
-    # 数值单位缺失或跨量纲 → 不能安全比较，转人工复核（绝不按「不满足」拦死，
-    # 也绝不按「满足」放行）。级别按条款重要性分级：★ blocking / ▲ critical / 普通 info。
-    unclear = [item for item in verdicts if item.state == "unclear"]
-    if unclear:
-        evidence["layer5"] = {"state": REVIEW, "reason": "单位不明确或跨量纲"}
-        detail = "；".join(item.detail for item in unclear[:3])
-        return RequirementVerdict(
-            REVIEW,
-            review_level(marker),
-            f"数值单位缺失或跨量纲，无法自动判定：{detail}，请人工复核",
-            None,
-            evidence,
-        )
-
-    # 没有可量化约束，或约束全部满足但语义锚点没到阈值：
-    # 有部分语义信号（含时间窗偏短）→ 人工复核；完全没有 → 不满足。
-    if best_ratio > 0 or anchor > 0 or time_signals:
-        evidence["layer5"] = {"state": REVIEW}
-        reasons = ["语义相近但证据不足"]
-        if time_signals:
-            reasons.append("时间范围短于要求")
-        return RequirementVerdict(
-            REVIEW,
-            review_level(marker),
-            "；".join(reasons) + "，建议人工复核",
-            None,
-            evidence,
-        )
-    evidence["layer5"] = {"state": UNSATISFIED}
-    return RequirementVerdict(
-        UNSATISFIED,
-        block_level,
-        "未在正文找到明确响应",
-        None,
-        evidence,
+    # 单条文本：走与原子完全相同的统一判定。
+    return _decide(
+        text, verdicts, deadline_window, time_signals, best_ratio, anchor,
+        section, threshold, marker, block_level, evidence,
     )
 
 
