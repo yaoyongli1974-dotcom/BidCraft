@@ -152,6 +152,8 @@ def save_ledger(db: Session, project_id: str, ledger: FactLedger) -> None:
                 mandatory=item.mandatory,
                 source_quote=item.source_quote,
                 marker=item.marker,
+                page=item.page,
+                clause_no=item.clause_no,
             )
             for item in ledger.requirements
         ]

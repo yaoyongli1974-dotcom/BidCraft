@@ -57,6 +57,9 @@ class RequirementItem(BaseModel):
     source_quote: str = ""
     # 招标文件中的 ★/▲ 标记（实质性条款的一等公民，不再折叠进 mandatory）
     marker: str = ""
+    # L1 提取证据：页码与条款编号（有则用，无则为 0 / 空串）
+    page: int = 0
+    clause_no: str = ""
 
 
 class RiskItem(BaseModel):

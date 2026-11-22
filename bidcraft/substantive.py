@@ -348,6 +348,9 @@ def requirement_issues(requirements, nodes: list[dict]) -> list[CheckResult]:
     已人工确认 responded / na 的条款不再产出问题。
     """
 
+    # 延迟导入，避免 verdict ↔ substantive 的循环依赖。
+    from .verdict import SATISFIED, judge
+
     results: list[CheckResult] = []
     # 按条文本排序，保证重复核对时编号稳定，人工处置不会被无故重开。
     # 排序即编号依据：★ 在前、▲ 次之、仅 mandatory 的在最后，同档按条文本排序。
@@ -368,36 +371,39 @@ def requirement_issues(requirements, nodes: list[dict]) -> list[CheckResult]:
             continue
         marker = getattr(requirement, "marker", "") or marker_of(text)
         req_type = classify_requirement(text)
-        if find_covering_section(text, nodes, req_type):
+
+        verdict = judge(requirement, nodes)
+        if verdict.state == SATISFIED:
+            # 五层判定确认全部硬性约束满足且证据充分——不再产出阻断问题。
             continue
-        combined = "\n".join((node.get("body") or "") for node in nodes)
-        verdicts = evaluate_constraints(text, combined)
-        violated = [item for item in verdicts if item.state == "violated"]
-        detail = ""
-        if violated:
-            detail = "（数值/等级/否定语义不符合要求）"
-        elif verdicts:
-            detail = "（部分约束未在正文体现）"
+
+        # 四态映射：满足 → 无问题；不满足/部分满足 → blocking/critical（阻塞）；
+        # 人工复核 → info（可见但不阻塞，沿用风险总览的 info 档）。
+        evidence = {
+            "requirement_id": getattr(requirement, "id", ""),
+            "marker": marker,
+            "requirement_type": req_type,
+            "keywords": requirement_keywords(text),
+            "verdict": verdict.state,
+            "verdict_label": verdict.label,
+            # 五层证据：提取 / 原子拆分 / 结构化约束 / 多维验证 / 判定。
+            "layers": verdict.evidence,
+            # 兼容键：旧前端/测试从顶层读逐条约束判定。
+            "constraints": verdict.evidence["layer4"]["constraints"],
+        }
         results.append(
             CheckResult(
                 code=f"SUB-{index:03d}",
-                level="blocking" if marker else "critical",
+                level=verdict.level or "critical",
                 category="实质性响应",
-                message=f"实质性条款未在正文找到明确响应：{text[:60]}{detail}",
+                message=f"实质性条款{verdict.label}：{text[:60]}（{verdict.reason}）",
                 location=(getattr(requirement, "source_quote", "") or "")[:255],
                 finding=text[:200],
                 recommendation=(
                     "在正文对应章节逐条响应这一条（引用条款原文，给出承诺、参数或方案），"
                     "或在风险总览里标记「已响应 / 不适用」并填写原因。"
                 ),
-                evidence={
-                    "requirement_id": getattr(requirement, "id", ""),
-                    "marker": marker,
-                    "requirement_type": req_type,
-                    "keywords": requirement_keywords(text),
-                    # 逐条约束判定让「哪条没过」直接可见，便于人工复核举证。
-                    "constraints": [item.as_dict() for item in verdicts],
-                },
+                evidence=evidence,
             )
         )
     return results

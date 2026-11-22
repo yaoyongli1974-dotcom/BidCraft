@@ -775,6 +775,21 @@ const SUBSTANTIVE_STATUS: Record<
   na: { label: '不适用', tone: 'neutral' },
 }
 
+/** 五层判定四态的徽章配色；info 档（人工复核）不阻塞，用 info 色。 */
+const VERDICT_META: Record<
+  string,
+  { label: string; tone: 'danger' | 'warn' | 'success' | 'info' }
+> = {
+  satisfied: { label: '满足', tone: 'success' },
+  unsatisfied: { label: '不满足', tone: 'danger' },
+  partial: { label: '部分满足', tone: 'warn' },
+  review: { label: '人工复核', tone: 'info' },
+}
+
+function verdictTone(value: string): 'danger' | 'warn' | 'success' | 'info' {
+  return VERDICT_META[value]?.tone || 'info'
+}
+
 function requirementMatches(item: RequirementResponse, filter: SubstantiveFilter): boolean {
   if (filter === 'all') return true
   if (filter === 'unanswered') return item.response_status === 'pending' && !item.auto_covered
@@ -986,6 +1001,15 @@ function SubstantiveSection() {
                             {item.requirement_type_label}
                           </Badge>
                         )}
+                        {item.verdict && (
+                          <Badge
+                            tone={verdictTone(item.verdict)}
+                            subtle
+                            title={item.verdict_reason || '五层判定引擎结论'}
+                          >
+                            {item.verdict_label || VERDICT_META[item.verdict]?.label || item.verdict}
+                          </Badge>
+                        )}
                         <Badge tone={statusMeta.tone} subtle>
                           {statusMeta.label}
                         </Badge>
@@ -1017,8 +1041,18 @@ function SubstantiveSection() {
                       </button>
                     )}
 
+                    {(item.page || item.clause_no) && (
+                      <p className="substantive-quote">
+                        招标定位：{item.clause_no ? `条款 ${item.clause_no}` : ''}
+                        {item.clause_no && item.page ? ' · ' : ''}
+                        {item.page ? `第 ${item.page} 页` : ''}
+                      </p>
+                    )}
                     {item.source_quote && item.source_quote !== item.text && (
                       <p className="substantive-quote">招标原文：{item.source_quote}</p>
+                    )}
+                    {item.verdict_reason && item.verdict && item.verdict !== 'satisfied' && (
+                      <p className="substantive-reason">判定说明：{item.verdict_reason}</p>
                     )}
 
                     {item.auto_covered && item.section_heading && (

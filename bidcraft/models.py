@@ -342,6 +342,9 @@ class Requirement(Base):
     source_quote: Mapped[str] = mapped_column(Text, default="")
     # ★/▲ 实质性标记：保留原文符号，供风险总览按最高优先级呈现。
     marker: Mapped[str] = mapped_column(String(8), default="")
+    # L1 条款提取证据：原文页码与条款编号（招标文件里的物理位置，供举证定位）。
+    page: Mapped[int] = mapped_column(Integer, default=0)
+    clause_no: Mapped[str] = mapped_column(String(40), default="")
     # 人工确认的响应状态：pending（未确认）/ responded（已响应）/ na（不适用）。
     response_status: Mapped[str] = mapped_column(String(16), default="pending")
     response_note: Mapped[str] = mapped_column(Text, default="")

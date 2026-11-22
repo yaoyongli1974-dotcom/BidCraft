@@ -407,6 +407,9 @@ def extract_parameters(tables: list[Table], text: str, vocab: list[str]) -> list
 
 _REQ_SECTION = re.compile(r"资格|资质|实质性|废标|否决|无效|商务要求|技术要求|符合性|评标|评审|评分")
 # ★/▲ 是招标文件里最常见的「实质性条款」标记，必须保留符号本身而不只是布尔。
+# 条款编号：1.2.3 / 第X条 / （一）/ 3.2.1 等招标文件常见写法。
+_CLAUSE_NO_RE = re.compile(r"(?:第[一二三四五六七八九十百\d]+条|\d+(?:\.\d+){1,3}|[（(][一二三四五六七八九十\d]+[)）])")
+
 _REQ_MARKER = re.compile(r"[★▲]")
 _REQ_LINE = re.compile(
     r"^(?:\d{1,2}[、.．)]|[（(]\d{1,2}[）)]|[（(][一二三四五六七八九十]{1,3}[）)]|[-*•●◆■★▲])\s*"
@@ -414,8 +417,9 @@ _REQ_LINE = re.compile(
 
 
 def extract_requirements_and_risks(
-    text: str, package: Package
+    text: str, package: Package, pages: list[str] | None = None
 ) -> tuple[list[RequirementItem], list[RiskItem]]:
+    pages = pages or [text]
     requirements: list[RequirementItem] = []
     risks: list[RiskItem] = []
     seen_req: set[str] = set()
@@ -436,6 +440,7 @@ def extract_requirements_and_risks(
                 continue
             seen_req.add(stripped)
             marker_match = _REQ_MARKER.search(stripped)
+            clause_match = _CLAUSE_NO_RE.search(stripped)
             requirements.append(
                 RequirementItem(
                     kind=kind,
@@ -444,6 +449,8 @@ def extract_requirements_and_risks(
                     # 原文行比章节标题有用：总览页要能指着这一条说「就是它没响应」。
                     source_quote=stripped[:300],
                     marker=marker_match.group(0) if marker_match else "",
+                    page=_page_for_quote(pages, stripped),
+                    clause_no=clause_match.group(0) if clause_match else "",
                 )
             )
             if len(requirements) >= 120:
@@ -505,7 +512,7 @@ def extract(
     result.scoring = extract_scoring(tables, text)
     result.materials = extract_materials(tables, text)
     result.parameters = extract_parameters(tables, text, package.parameter_vocab())
-    result.requirements, result.risks = extract_requirements_and_risks(text, package)
+    result.requirements, result.risks = extract_requirements_and_risks(text, package, pages)
     result.template_sections = extract_template_sections(text, package)
     result.stats = {
         "chars": len(text),

@@ -166,6 +166,16 @@
           "default": "",
           "title": "Marker",
           "type": "string"
+        },
+        "page": {
+          "default": 0,
+          "title": "Page",
+          "type": "integer"
+        },
+        "clause_no": {
+          "default": "",
+          "title": "Clause No",
+          "type": "string"
         }
       },
       "required": [

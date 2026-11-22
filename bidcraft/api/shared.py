@@ -138,6 +138,7 @@ from ..services.job_support import (  # noqa: F401 - 保留 api 名字空间，�
     _report_payload,
 )
 from ..substantive import REQ_TYPE_LABELS, classify_requirement  # noqa: F401,E402
+from ..verdict import judge as judge_requirement
 from ..workers import (  # noqa: F401 - 同上；测试也 monkeypatch 这些名字
     _run_batch_check_job,
     _run_batch_export_job,
@@ -489,6 +490,11 @@ def _requirement_payload(db: Session, requirement: Requirement) -> dict[str, Any
         if node is not None:
             heading = node.heading or ""
     req_type = classify_requirement(requirement.text or "")
+    # 五层判定：用大纲正文实时评估这一条的当前结论（每次读取都反映最新正文）。
+    from ..generation.outline import load_outline
+
+    nodes = load_outline(db, requirement.project_id)
+    verdict = judge_requirement(requirement, nodes)
     return {
         "id": requirement.id,
         "kind": requirement.kind,
@@ -498,6 +504,8 @@ def _requirement_payload(db: Session, requirement: Requirement) -> dict[str, Any
         "text": requirement.text,
         "mandatory": bool(requirement.mandatory),
         "source_quote": requirement.source_quote or "",
+        "page": int(requirement.page or 0),
+        "clause_no": requirement.clause_no or "",
         "response_status": requirement.response_status or "pending",
         "response_note": requirement.response_note or "",
         "responded_by": requirement.responded_by or "",
@@ -506,6 +514,11 @@ def _requirement_payload(db: Session, requirement: Requirement) -> dict[str, Any
         "node_id": node_id,
         "section_heading": heading,
         "auto_covered": bool(requirement.auto_covered),
+        "verdict": verdict.state,
+        "verdict_label": verdict.label,
+        "verdict_reason": verdict.reason,
+        "verdict_level": verdict.level,
+        "verdict_layers": verdict.evidence,
     }
 
 

@@ -622,6 +622,8 @@ export interface RiskOverview {
 
 /** 实质性条款的人工响应状态：待确认 / 已响应 / 不适用。 */
 export type RequirementResponseStatus = 'pending' | 'responded' | 'na'
+/** 五层判定四态：满足 / 不满足 / 部分满足 / 人工复核。 */
+export type RequirementVerdict = 'satisfied' | 'unsatisfied' | 'partial' | 'review'
 
 /**
  * `GET /projects/{ref}/requirements` 的一条实质性条款。
@@ -645,6 +647,15 @@ export interface RequirementResponse {
   node_id: string | null
   section_heading: string
   auto_covered: boolean
+  /** L1 提取证据：页码与条款编号。 */
+  page?: number
+  clause_no?: string
+  /** 五层判定结论。旧后端缺字段时前端按 undefined 处理，不覆盖原状态展示。 */
+  verdict?: RequirementVerdict
+  verdict_label?: string
+  verdict_reason?: string
+  verdict_level?: string
+  verdict_layers?: Record<string, unknown>
 }
 
 /** `POST /projects/{ref}/issues/bulk-status` 的响应。 */

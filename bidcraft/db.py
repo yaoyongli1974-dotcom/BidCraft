@@ -231,6 +231,8 @@ def _migrate_columns(engine) -> None:
         ],
         "requirements": [
             ("marker", "VARCHAR(8) DEFAULT ''"),
+            ("page", "INTEGER DEFAULT 0"),
+            ("clause_no", "VARCHAR(40) DEFAULT ''"),
             ("response_status", "VARCHAR(16) DEFAULT 'pending'"),
             ("response_note", "TEXT DEFAULT ''"),
             ("responded_by", "VARCHAR(80)"),

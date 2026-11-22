@@ -1,6 +1,6 @@
 import { normalizeProjectType, projectTypeLabel } from '../lib/format'
 import { ApiError, asArray, request } from '../lib/http'
-import type { AdminRulePackage, AuditEntry, AuditPage, BatchItemResult, BidPackage, BoqLedgerSummary, BoqPayload, BoqPrice, BoqQuoteVersion, BoqRow, BoqSnapshot, BoqVersionDiffChanged, BoqVersionDiffEntry, ImagePlan, ImagePlanDocument, ImagePolicy, KbDocPolicyEntry, KbDocSource, KbVectorResult, KnowledgeBase, PackageInfo, PendingApproval, Personnel, PluginCatalogEntry, PreflightItem, PreflightStatus, PriceCurrency, ProjectTemplate, Qualification, QualificationEvidence, QualificationKind, QualificationStatus, QuotaItem, QuotaProposal, QuoteApprovalRecord, QuoteVersionStatus, RequirementResponse, RequirementResponseStatus, RiskCategorySummary, RiskTierLevel, RiskTierSummary, RulePackageSummary, RulePackageValidation, TermInput, TextQaSettings, UserDoc, WechatConfig } from '../lib/types'
+import type { AdminRulePackage, AuditEntry, AuditPage, BatchItemResult, BidPackage, BoqLedgerSummary, BoqPayload, BoqPrice, BoqQuoteVersion, BoqRow, BoqSnapshot, BoqVersionDiffChanged, BoqVersionDiffEntry, ImagePlan, ImagePlanDocument, ImagePolicy, KbDocPolicyEntry, KbDocSource, KbVectorResult, KnowledgeBase, PackageInfo, PendingApproval, Personnel, PluginCatalogEntry, PreflightItem, PreflightStatus, PriceCurrency, ProjectTemplate, Qualification, QualificationEvidence, QualificationKind, QualificationStatus, QuotaItem, QuotaProposal, QuoteApprovalRecord, QuoteVersionStatus, RequirementResponse, RequirementResponseStatus, RequirementVerdict, RiskCategorySummary, RiskTierLevel, RiskTierSummary, RulePackageSummary, RulePackageValidation, TermInput, TextQaSettings, UserDoc, WechatConfig } from '../lib/types'
 import type { DeletionState } from './account'
 import type { InvoiceRequest } from './auth'
 import { normalizeBoqQuoteVersion, normalizeBoqSummary } from './boq'
@@ -580,6 +580,17 @@ export function normalizeRequirement(value: unknown): RequirementResponse | null
     node_id: asText(raw.node_id) || null,
     section_heading: asText(raw.section_heading),
     auto_covered: Boolean(raw.auto_covered),
+    page: typeof raw.page === 'number' ? raw.page : 0,
+    clause_no: asText(raw.clause_no),
+    verdict: (['satisfied', 'unsatisfied', 'partial', 'review'] as const).includes(
+      asText(raw.verdict) as 'satisfied',
+    )
+      ? (raw.verdict as RequirementVerdict)
+      : undefined,
+    verdict_label: asText(raw.verdict_label) || undefined,
+    verdict_reason: asText(raw.verdict_reason) || undefined,
+    verdict_level: asText(raw.verdict_level) || undefined,
+    verdict_layers: (raw.verdict_layers as Record<string, unknown> | undefined) || undefined,
   }
 }
 
