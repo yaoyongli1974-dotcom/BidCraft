@@ -598,3 +598,12 @@ class ChapterAssignmentUpdate(BaseModel):
 
 class SectionLockRenew(BaseModel):
     lock_token: str = Field(min_length=1, max_length=36)
+
+
+class QualityRunRequest(BaseModel):
+    note: str = ""
+
+
+class QualityFindingUpdate(BaseModel):
+    status: str = "handled"
+    note: str = ""

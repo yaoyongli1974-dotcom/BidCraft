@@ -1046,3 +1046,40 @@ class ChapterAssignment(Base):
     note: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class QualityReport(Base):
+    """投标质量评估报告快照：不可变，每次运行生成新版本。"""
+
+    __tablename__ = "quality_reports"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    report_version: Mapped[int] = mapped_column(Integer, default=1)
+    overall_score: Mapped[float] = mapped_column(Float, default=0.0)
+    grade: Mapped[str] = mapped_column(String(4), default="C")
+    verdict: Mapped[str] = mapped_column(String(20), default="warn")  # pass|warn|blocked
+    dimensions: Mapped[dict] = mapped_column(JSON, default=dict)
+    summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    risk_summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str] = mapped_column(String(80), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class QualityFinding(Base):
+    """质量问题项：从各维度聚合而来，可人工处置。"""
+
+    __tablename__ = "quality_findings"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    report_id: Mapped[str] = mapped_column(ForeignKey("quality_reports.id"), index=True)
+    category: Mapped[str] = mapped_column(String(40), default="")
+    level: Mapped[str] = mapped_column(String(20), default="major")
+    node_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    scoring_item_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    requirement_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    title: Mapped[str] = mapped_column(Text, default="")
+    description: Mapped[str] = mapped_column(Text, default="")
+    evidence: Mapped[dict] = mapped_column(JSON, default=dict)
+    recommendation: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), default="open")

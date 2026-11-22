@@ -7540,3 +7540,43 @@ button.risk-anchor:hover {
 .qual-enterprise-filter .select {
   min-width: 120px;
 }
+
+/* ---------- 质量评估中心（对标易标第四批） ---------- */
+.quality-tab { display: flex; flex-direction: column; gap: 16px; }
+.quality-note { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: var(--ink-soft); }
+.quality-note input { width: min(420px, 100%); padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; font: inherit; font-size: 13px; }
+.quality-hard-risk { display: flex; align-items: flex-start; gap: 8px; padding: 10px 14px; border: 1px solid var(--danger); border-left-width: 3px; border-radius: 8px; background: var(--danger-soft); color: var(--ink-soft); font-size: 13px; line-height: 1.5; }
+.quality-overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+.quality-panel { padding: 16px; }
+.quality-dimensions { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+.quality-dim-head { display: flex; align-items: baseline; gap: 10px; font-size: 13px; }
+.quality-dim-head strong { font-size: 15px; }
+.quality-dim-head .is-ok { color: var(--success); }
+.quality-dim-head .is-warn { color: var(--warn); }
+.quality-dim-head .is-danger { color: var(--danger); }
+.quality-dim-weight { margin-left: auto; color: var(--ink-muted); font-size: 12px; }
+.quality-dim-track { height: 6px; margin-top: 5px; border-radius: 999px; background: var(--line-soft); overflow: hidden; }
+.quality-dim-track > span { display: block; height: 100%; border-radius: 999px; }
+.quality-dim-track .is-ok { background: var(--success); }
+.quality-dim-track .is-warn { background: var(--warn); }
+.quality-dim-track .is-danger { background: var(--danger); }
+.quality-recs { display: flex; flex-direction: column; gap: 7px; margin: 10px 0 0; padding: 0; list-style: none; font-size: 13px; color: var(--ink-soft); }
+.quality-recs li { display: flex; align-items: flex-start; gap: 7px; }
+.quality-findings { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.quality-finding { padding: 12px 14px; border: 1px solid var(--line); border-left: 3px solid var(--line); border-radius: 8px; }
+.quality-finding.is-blocking, .quality-finding.is-critical { border-left-color: var(--danger); }
+.quality-finding.is-major { border-left-color: var(--warn); }
+.quality-finding-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.quality-finding-head strong { font-size: 13.5px; }
+.quality-finding-cat { color: var(--ink-muted); font-size: 12px; }
+.quality-finding-desc { margin: 8px 0 0; font-size: 12.5px; color: var(--ink-soft); line-height: 1.5; }
+.quality-finding-rec { display: flex; align-items: flex-start; gap: 6px; margin: 6px 0 0; font-size: 12.5px; color: var(--success); }
+.quality-finding-actions { display: flex; gap: 8px; margin-top: 10px; }
+.quality-history { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.quality-history-item { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; background: transparent; cursor: pointer; font: inherit; font-size: 12.5px; }
+.quality-history-item.is-active { border-color: var(--accent); background: var(--accent-soft); }
+.quality-history-item span { color: var(--ink-muted); }
+@media (max-width: 720px) {
+  .quality-overview { grid-template-columns: repeat(2, 1fr); }
+  .quality-dim-head { flex-wrap: wrap; }
+}

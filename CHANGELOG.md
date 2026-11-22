@@ -2,6 +2,10 @@
 
 按版本倒序。对外口径以 `docs/release-notes/` 下对应文件为准；本文件是仓库内的简明索引。
 
+## v0.27.0 (2026-11-23)
+
+对标易标第四批（收官）：投标质量评估中心（evaluation 模块：六维评分/硬性风险一票否决/四类覆盖聚合/风险摘要/不可变报告快照 + finding 人工处置）。新增 Alembic `0007_yibiao_batch4`（2 表，downgrade 可执行）。前端新增质量评估 tab。后端 1221 passed / 8 skipped / 前端 242 tests。
+
 ## v0.26.0 (2026-11-22)
 
 对标易标第三批：AI Agent 编排（注册表/DAG 工作流/编排器/人工审批闸门，复用任务队列与 fencing，审批不占 Job 租约；ModelClient.complete_with_tools）+ 项目协作与版本管理（章节编辑锁、修订历史与 diff/恢复、章节分工）。新增 Alembic `0006_yibiao_batch3`（6 表，downgrade 可执行）。前端新增 Agent 编排 tab 与章节协作入口。后端 1209 passed / 前端 232 tests。

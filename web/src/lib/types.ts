@@ -2110,3 +2110,52 @@ export interface RestoreRevisionInput {
   revision: number
   note: string
 }
+
+/** 质量评估维度得分（对标易标第四批）。 */
+export interface QualityDimension {
+  key: string
+  label: string
+  score: number
+  weight: number
+  weighted: number
+}
+
+/** 质量问题项（可人工处置）。 */
+export interface QualityFinding {
+  id: string
+  report_id: string
+  category: string
+  level: string
+  node_id: string | null
+  scoring_item_id: string | null
+  requirement_id: string | null
+  title: string
+  description: string
+  evidence: Record<string, unknown>
+  recommendation: string
+  status: string
+}
+
+/** 质量报告快照（不可变，每次运行版本号 +1）。 */
+export interface QualityReport {
+  id: string
+  project_id: string
+  report_version: number
+  overall_score: number
+  grade: string
+  verdict: 'pass' | 'warn' | 'blocked' | string
+  dimensions: QualityDimension[]
+  summary: {
+    coverage?: Record<string, unknown>
+    recommendations?: string[]
+    note?: string
+  }
+  risk_summary: Record<string, unknown>
+  created_by: string
+  created_at: string | null
+  findings: QualityFinding[]
+}
+
+export interface QualityRunInput {
+  note?: string
+}

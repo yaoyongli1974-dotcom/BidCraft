@@ -22,6 +22,7 @@ import {
   PenLine,
   ShieldAlert,
   ShieldCheck,
+  Gauge,
   Users,
   WifiOff,
   type LucideIcon,
@@ -271,6 +272,11 @@ export function WorkspacePage() {
       icon: Bot,
     },
     {
+      to: `${basePath}/quality`,
+      label: '质量评估',
+      icon: Gauge,
+    },
+    {
       to: `${basePath}/export`,
       label: '导出',
       icon: Download,
@@ -436,7 +442,7 @@ function WorkspaceSkeleton() {
             </div>
           </div>
           <div className="workspace-tabs">
-            {Array.from({ length: 14 }).map((_, index) => (
+            {Array.from({ length: 15 }).map((_, index) => (
               <Skeleton key={index} width={78} height={18} />
             ))}
           </div>

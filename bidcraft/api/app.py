@@ -405,6 +405,7 @@ def create_app():
             "/orchestration",
             "/agents",
             "/collaboration",
+            "/evaluation",
         )
         if not path.startswith(api_prefixes):
             return await call_next(request)
@@ -482,6 +483,9 @@ def create_app():
         enterprise as _routes_enterprise,
     )
     from .routes import (
+        evaluation as _routes_evaluation,
+    )
+    from .routes import (
         health as _routes_health,
     )
     from .routes import (
@@ -520,6 +524,7 @@ def create_app():
     app.include_router(_routes_enterprise.router)
     app.include_router(_routes_commercial.router)
     app.include_router(_routes_similarity.router)
+    app.include_router(_routes_evaluation.router)
     app.include_router(_routes_orchestration.router)
     app.include_router(_routes_collaboration.router)
 

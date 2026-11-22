@@ -58,6 +58,9 @@ const CheckTab = lazy(() =>
 const RiskTab = lazy(() =>
   import('./pages/tabs/RiskTab').then((module) => ({ default: module.RiskTab })),
 )
+const QualityTab = lazy(() =>
+  import('./pages/tabs/QualityTab').then((module) => ({ default: module.QualityTab })),
+)
 const ExportTab = lazy(() =>
   import('./pages/tabs/ExportTab').then((module) => ({ default: module.ExportTab })),
 )
@@ -120,6 +123,7 @@ export const router = createBrowserRouter([
           { path: 'commercial', element: page(<CommercialTab />, <TabFallback />) },
           { path: 'similarity', element: page(<SimilarityTab />, <TabFallback />) },
           { path: 'agents', element: page(<AgentsTab />, <TabFallback />) },
+          { path: 'quality', element: page(<QualityTab />, <TabFallback />) },
           { path: 'export', element: page(<ExportTab />, <TabFallback />) },
           { path: 'collab', element: page(<CollabTab />, <TabFallback />) },
           { path: '*', element: <NotFoundContent /> },
