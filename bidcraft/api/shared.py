@@ -510,6 +510,9 @@ def _requirement_payload(db: Session, requirement: Requirement) -> dict[str, Any
         "response_note": requirement.response_note or "",
         "responded_by": requirement.responded_by or "",
         "responded_at": clock.iso_beijing(requirement.responded_at),
+        "response_verdict": requirement.response_verdict or "",
+        "response_verdict_label": requirement.response_verdict_label or "",
+        "response_verdict_reason": requirement.response_verdict_reason or "",
         "section_id": requirement.section_id,
         "node_id": node_id,
         "section_heading": heading,
@@ -533,17 +536,35 @@ def _validate_requirement_note(status: str, note: str) -> str:
 
 
 def _apply_requirement_status(
-    requirement: Requirement, status: str, note: str, username: str
+    requirement: Requirement,
+    status: str,
+    note: str,
+    username: str,
+    verdict: dict | None = None,
 ) -> None:
+    """记录人工确认：人员 / 时间 / 原因 + 确认时的原始自动判定结果。
+
+    ``verdict`` 由调用方用当前正文算出（见 requirement_response_update 的
+    ``_verdict_snapshot``），确认后快照写入 Requirement，连同审计详情可完整追溯
+    「谁、何时、基于什么判定、为何确认」。
+    """
+
     requirement.response_status = status
     if status == "pending":
         requirement.response_note = ""
         requirement.responded_by = None
         requirement.responded_at = None
+        requirement.response_verdict = ""
+        requirement.response_verdict_label = ""
+        requirement.response_verdict_reason = ""
         return
     requirement.response_note = note
     requirement.responded_by = username or "system"
     requirement.responded_at = clock.utc_now()
+    snapshot = verdict or {}
+    requirement.response_verdict = snapshot.get("state", "")
+    requirement.response_verdict_label = snapshot.get("label", "")
+    requirement.response_verdict_reason = snapshot.get("reason", "")
 
 
 def _issue_node_map(db: Session, issues: list[Issue]) -> dict[str, tuple[str, int]]:

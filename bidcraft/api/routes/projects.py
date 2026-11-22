@@ -1663,7 +1663,21 @@ def requirement_response_update(
             raise LookupError(f"条款不存在: {req_id}")
         note = _validate_requirement_note(payload.response_status, payload.note)
         username = str((current_user() or {}).get("username") or "")
-        _apply_requirement_status(requirement, payload.response_status, note, username)
+        # 确认时快照「原始自动判定结果」，让人员/时间/原因/判定可被完整追溯。
+        snapshot: dict[str, str] = {}
+        if payload.response_status != "pending":
+            from ...verdict import judge as judge_requirement
+
+            current = judge_requirement(requirement, load_outline(db, project.id))
+            snapshot = {
+                "state": current.state,
+                "label": current.label,
+                "reason": current.reason,
+                "level": current.level,
+            }
+        _apply_requirement_status(
+            requirement, payload.response_status, note, username, verdict=snapshot
+        )
         audit(
             db,
             project.id,
@@ -1672,6 +1686,9 @@ def requirement_response_update(
                 "requirement_id": requirement.id,
                 "status": payload.response_status,
                 "note": note,
+                "verdict": snapshot.get("state", ""),
+                "verdict_label": snapshot.get("label", ""),
+                "verdict_reason": snapshot.get("reason", ""),
             },
         )
         db.flush()

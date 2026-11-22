@@ -16,6 +16,9 @@ from sqlalchemy.orm import Session
 from .audit import record_audit
 from .models import Issue, OutlineNode, Section
 
+# 被强制导出越过的「实质性条款」问题类别（SUB-* 的 category）。
+SUBSTANTIVE_ISSUE_CATEGORY = "实质性响应"
+
 #: 视为「已处置」的 Issue 状态；resolved/closed 是历史值，读侧兼容。
 ISSUE_RESOLVED_STATUSES = {"handled", "ignored", "resolved", "closed"}
 #: 受导出硬门禁约束的格式；xlsx（事实台账）不受限。
@@ -104,6 +107,37 @@ def count_open_blocking(db: Session, project_id: str) -> int:
     )
 
 
+def blocked_substantive_evidence(db: Session, project_id: str) -> list[dict[str, Any]]:
+    """返回被门禁拦住的 ★/▲ 实质性条款证据，供强制导出审计留痕。
+
+    每条给出问题编号、标记、原文、原始判定与原因。普通 blocking 风险不在此列，
+    只有 category=="实质性响应" 的才记录——这些是"未确认不得交付"的人工检查点。
+    """
+
+    result: list[dict[str, Any]] = []
+    for row in db.scalars(
+        select(Issue).where(
+            Issue.project_id == project_id,
+            Issue.level == "blocking",
+            Issue.category == SUBSTANTIVE_ISSUE_CATEGORY,
+        )
+    ):
+        if not issue_is_open(row):
+            continue
+        evidence = row.evidence or {}
+        result.append(
+            {
+                "code": row.code,
+                "marker": evidence.get("marker", ""),
+                "finding": (row.finding or "")[:200],
+                "verdict": evidence.get("verdict", ""),
+                "verdict_label": evidence.get("verdict_label", ""),
+                "verdict_reason": evidence.get("verdict_reason", ""),
+            }
+        )
+    return result
+
+
 def enforce_export_gate(
     db: Session,
     project_id: str,
@@ -152,6 +186,11 @@ def enforce_export_gate(
     }
     if source:
         detail["source"] = source
+    # 完整审计：记录被越过的实质性条款（★/▲）及其原始判定，满足
+    # 「强制导出必须有独立权限和完整审计记录」——谁、何时、越过哪些条款、原判定。
+    substantives = blocked_substantive_evidence(db, project_id)
+    if substantives:
+        detail["overridden_substantives"] = substantives
     record_audit(db, project_id, "export.force", detail)
     # 强制导出只覆盖「未处置阻断风险」；章节未确认仍然拦截——强制导出不能绕过人工检查点。
     if require_confirmed_chapters:

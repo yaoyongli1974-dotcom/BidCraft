@@ -65,6 +65,17 @@ VERDICT_LABELS = {
     REVIEW: "人工复核",
 }
 
+# 人工复核态的导出门禁级别，按条款重要性分级（用户确认的策略）：
+#   ★ 未确认不得正式交付 → blocking（可强制导出，但留完整审计）；
+#   ▲ 原则上需人工确认，但不拦交付 → critical（严重提示，非阻断）；
+#   普通条款仅提示 → info。
+def review_level(marker: str) -> str:
+    if "★" in (marker or ""):
+        return "blocking"
+    if "▲" in (marker or ""):
+        return "critical"
+    return "info"
+
 # 时间窗证据：「近 / 最近 / 过去 N 年（月）」。
 _TIME_WINDOW_RE = re.compile(rf"(?:近|最近|过去)\s*({_NUM})\s*(年|月)")
 # 原子拆分时去掉句首的 ★/▲、编号与噪声标点。
@@ -308,14 +319,35 @@ def judge(
     if section is not None:
         evidence["layer5"] = {"state": SATISFIED}
         return RequirementVerdict(SATISFIED, "", "硬性约束均满足，证据充分", section, evidence)
+
+    # 数值单位缺失或跨量纲 → 不能安全比较，转人工复核（绝不按「不满足」拦死，
+    # 也绝不按「满足」放行）。级别按条款重要性分级：★ blocking / ▲ critical / 普通 info。
+    unclear = [item for item in verdicts if item.state == "unclear"]
+    if unclear:
+        evidence["layer5"] = {"state": REVIEW, "reason": "单位不明确或跨量纲"}
+        detail = "；".join(item.detail for item in unclear[:3])
+        return RequirementVerdict(
+            REVIEW,
+            review_level(marker),
+            f"数值单位缺失或跨量纲，无法自动判定：{detail}，请人工复核",
+            None,
+            evidence,
+        )
+
     # 没有可量化约束，或约束全部满足但语义锚点没到阈值：
-    # 有部分语义信号（含时间窗偏短）→ 人工复核（info）；完全没有 → 不满足。
+    # 有部分语义信号（含时间窗偏短）→ 人工复核；完全没有 → 不满足。
     if best_ratio > 0 or anchor > 0 or time_signals:
         evidence["layer5"] = {"state": REVIEW}
         reasons = ["语义相近但证据不足"]
         if time_signals:
             reasons.append("时间范围短于要求")
-        return RequirementVerdict(REVIEW, "info", "；".join(reasons) + "，建议人工复核", None, evidence)
+        return RequirementVerdict(
+            REVIEW,
+            review_level(marker),
+            "；".join(reasons) + "，建议人工复核",
+            None,
+            evidence,
+        )
     evidence["layer5"] = {"state": UNSATISFIED}
     return RequirementVerdict(
         UNSATISFIED,

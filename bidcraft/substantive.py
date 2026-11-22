@@ -309,6 +309,9 @@ def find_covering_section(
     verdicts = evaluate_constraints(text, combined)
     if constraint_blocked(verdicts):
         return None
+    # 数值单位缺失/跨量纲无法安全比较：不自动判覆盖，交给上层转人工复核。
+    if any(item.state == "unclear" for item in verdicts):
+        return None
 
     best: tuple[float, int, dict] | None = None
     fallback: tuple[float, int, dict] | None = None
@@ -378,7 +381,8 @@ def requirement_issues(requirements, nodes: list[dict]) -> list[CheckResult]:
             continue
 
         # 四态映射：满足 → 无问题；不满足/部分满足 → blocking/critical（阻塞）；
-        # 人工复核 → info（可见但不阻塞，沿用风险总览的 info 档）。
+        # 人工复核 → 按条款重要性分级（★ blocking / ▲ critical / 普通 info，
+        # 见 verdict.review_level）——带 ★ 的实质性条款未确认不得正式交付。
         evidence = {
             "requirement_id": getattr(requirement, "id", ""),
             "marker": marker,
@@ -386,6 +390,7 @@ def requirement_issues(requirements, nodes: list[dict]) -> list[CheckResult]:
             "keywords": requirement_keywords(text),
             "verdict": verdict.state,
             "verdict_label": verdict.label,
+            "verdict_reason": verdict.reason,
             # 五层证据：提取 / 原子拆分 / 结构化约束 / 多维验证 / 判定。
             "layers": verdict.evidence,
             # 兼容键：旧前端/测试从顶层读逐条约束判定。

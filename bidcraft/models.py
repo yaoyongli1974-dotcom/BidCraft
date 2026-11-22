@@ -350,6 +350,11 @@ class Requirement(Base):
     response_note: Mapped[str] = mapped_column(Text, default="")
     responded_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
     responded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 人工确认时快照「原始自动判定结果」：人员/时间/原因见上三列，这里存判定本身，
+    # 使「谁、何时、基于什么判定、为何确认」可被完整追溯。
+    response_verdict: Mapped[str] = mapped_column(String(16), default="")
+    response_verdict_label: Mapped[str] = mapped_column(String(32), default="")
+    response_verdict_reason: Mapped[str] = mapped_column(Text, default="")
     # 自动匹配到的正文章节（section_id 对应 Section 行，node_id 对应大纲节点，供跳转）。
     section_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     node_id: Mapped[str | None] = mapped_column(String(36), nullable=True)

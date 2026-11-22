@@ -89,14 +89,25 @@ def test_state_partial_when_some_constraints_missing():
     assert "部分约束" in verdict.reason
 
 
-def test_state_review_is_info_and_non_blocking():
-    """纯语义条款只有微弱相似信号 → 人工复核，info 不阻塞导出。"""
+def test_state_review_level_by_marker():
+    """人工复核按条款重要性分级：★ blocking / ▲ critical / 普通 info。
 
-    req = _req("★ 投标人须提供详细的项目实施方案")
-    verdict = judge(req, _nodes("本项目实施方案另行编制。"))
-    assert verdict.state == REVIEW
-    assert verdict.level == "info"
-    assert "人工复核" in verdict.reason
+    用户确认的策略：★ 未确认不得正式交付；▲ 原则上需确认但不拦交付；
+    普通条款仅提示。三者都是 REVIEW 态，只是门禁级别不同。
+    """
+
+    weak_body = _nodes("本项目实施方案另行编制。")
+    star = judge(_req("★ 投标人须提供详细的项目实施方案"), weak_body)
+    assert star.state == REVIEW and star.level == "blocking"
+
+    triangle = judge(
+        _req("▲ 投标人须提供详细的项目实施方案", marker="▲"), weak_body
+    )
+    assert triangle.state == REVIEW and triangle.level == "critical"
+
+    plain = judge(_req("投标人须提供详细的项目实施方案", marker=""), weak_body)
+    assert plain.state == REVIEW and plain.level == "info"
+    assert "人工复核" in star.reason
 
 
 def test_no_marker_uses_critical_for_unsatisfied():

@@ -16,6 +16,7 @@ from bidcraft.constraint_check import (
     constraint_blocked,
     evaluate_constraints,
     extract_constraints,
+    unit_dimension,
 )
 from bidcraft.substantive import find_covering_section
 
@@ -80,6 +81,81 @@ def test_near_years_window_is_anchor_not_comparison():
     labels = [item.label for item in extract_constraints("近三年业绩不少于3项")]
     assert not any("年" in label for label in labels), labels
     assert _blocked("近三年业绩不少于3项", "近五年完成6项同类项目业绩") is False
+
+
+# -------------------------------------------------- P0：单位缺失 / 跨量纲比较
+
+
+def test_unit_compatibility_requires_explicit_same_dimension():
+    """单位缺失绝不认定量纲一致；跨量纲（带宽 vs 字节率/频率）不可比较。"""
+
+    assert unit_dimension("Mbps") == "bandwidth"
+    assert unit_dimension("Gbps") == "bandwidth"
+    assert unit_dimension("MB/s") == "byte_rate"
+    assert unit_dimension("MHz") == "frequency"
+    assert unit_dimension("") == ""
+    assert unit_dimension("未知单位") == ""
+
+
+def test_unitless_number_is_not_adopted_as_requirement_unit():
+    """P0 核心：正文裸写的「500」不能被当成 500Mbps 去和 1000Mbps 比较。
+
+    系统包含 500 台设备、带宽 1000Mbps → 可比数值只有 1000Mbps → 满足。
+    """
+
+    text = "传输带宽不小于1000Mbps"
+    body = "系统包含500台设备，带宽1000Mbps"
+    states = _states(text, body)
+    assert all(item[1] != "unclear" for item in states), states
+    assert _blocked(text, body) is False, states
+
+    # 只有裸 500（无单位）时，转人工复核而非误判为满足/违反。
+    unclear_states = _states(text, "系统吞吐为500")
+    assert any(item[1] == "unclear" for item in unclear_states), unclear_states
+    assert _blocked(text, "系统吞吐为500") is False  # unclear 不是硬伤，不走不满足拦截
+
+
+def test_cross_dimension_frequency_and_byte_rate_are_unclear_not_equal():
+    """500MHz 处理器、100MB/s 都不能和 1000Mbps 当成同一量纲比较。"""
+
+    # 带宽约束在「500MHz 处理器」子句里没有可比数值 → 不判满足/违反。
+    states = _states("带宽不小于1000Mbps", "采用500MHz处理器，带宽1000Mbps")
+    assert all(item[1] != "violated" for item in states), states
+    assert _blocked("带宽不小于1000Mbps", "采用500MHz处理器，带宽1000Mbps") is False
+
+    # 100MB/s 与 1000Mbps 不是相同量纲，不能因为「100 < 1000」判违反。
+    states2 = _states("带宽不小于1000Mbps", "接口带宽100MB/s")
+    assert any(item[1] == "unclear" for item in states2), states2
+    assert _blocked("带宽不小于1000Mbps", "接口带宽100MB/s") is False
+
+    # 量纲登记本身也必须把两者分开。
+    assert unit_dimension("Mbps") != unit_dimension("MB/s")
+    assert unit_dimension("Mbps") != unit_dimension("MHz")
+
+
+def test_mbps_and_gbps_convert_within_same_dimension():
+    """1000Mbps 与 1Gbps 同量纲，归一后相等 → 满足。"""
+
+    assert _blocked("传输带宽不小于1000Mbps", "链路带宽1Gbps") is False
+    assert all(item[1] != "unclear" for item in _states("传输带宽不小于1000Mbps", "链路带宽1Gbps"))
+
+
+def test_unclear_routes_to_review_via_judge():
+    """单位 deficiency 在五层判定里走 REVIEW，且 ★ 为 blocking。"""
+
+    from types import SimpleNamespace
+
+    from bidcraft.verdict import REVIEW, judge
+
+    req = SimpleNamespace(
+        text="★ 传输带宽不小于1000Mbps",
+        marker="★",
+        source_quote="带宽要求",
+    )
+    verdict = judge(req, [{"id": "n1", "position": 1, "body": "接口带宽100MB/s"}])
+    assert verdict.state == REVIEW
+    assert verdict.level == "blocking"
+    assert "单位" in verdict.reason or "量纲" in verdict.reason
 
 
 # ---------------------------------------------------------- 问题 2：否定语义

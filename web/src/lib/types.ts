@@ -643,6 +643,10 @@ export interface RequirementResponse {
   response_note: string
   responded_by: string
   responded_at: string | null
+  /** 人工确认时快照的原始自动判定结果。 */
+  response_verdict?: string
+  response_verdict_label?: string
+  response_verdict_reason?: string
   section_id: string | null
   node_id: string | null
   section_heading: string

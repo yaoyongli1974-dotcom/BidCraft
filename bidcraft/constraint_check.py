@@ -30,7 +30,13 @@ from dataclasses import dataclass
 
 # 阿拉伯数字与常见中文数字（「近三年」「六项」在招标文本里很常见）。
 _NUM = r"(?:\d+(?:\.\d+)?|[一二三四五六七八九十百]{1,3})"
-_VALUE_RE = re.compile(rf"({_NUM})\s*(Gbps|Mbps|MB|GB|项|个|份|例|年|月|小时|天|分钟|mm|cm|米|kV|kW|%)?")
+# 单位表按「最长优先」排列，保证 MB/s 先于 MB、GHz 先于 Hz 之类不被截断。
+_UNITS = (
+    r"GB/s|MB/s|KB/s|B/s|Gbps|Mbps|Kbps|bps|GHz|MHz|Hz|"
+    r"kV|kW|mm|cm|米|项|个|份|例|台|套|路|条|家|人|"
+    r"年|月|小时|天|分钟|V|W|%"
+)
+_VALUE_RE = re.compile(rf"({_NUM})\s*({_UNITS})?")
 
 # 句子切分：逗号也要切，否则「具备 X，但不具备 Y」会连成一句误判。
 _CLAUSE_SPLIT = re.compile(r"[，,。；;、\n！!？?：:]")
@@ -136,32 +142,88 @@ def negation_at(body: str, pos: int) -> bool:
     return negation_before(body[start:pos], pos - start)
 
 
-def _to_base(value: float, unit: str) -> float:
-    """归一到可比较的数值：带宽统一到 Mbps，年限统一到月。"""
+# 单位 → (量纲, 归一到该量纲基准的转换系数)。
+# 跨量纲**禁止比较**：带宽(Mbps) 与字节率(MB/s)、带宽(Mbps) 与频率(MHz)
+# 不是一回事，正文写「500MHz 处理器」不能拿去应答「带宽不小于1000Mbps」。
+# 换算关系从这里一处声明，不在比较逻辑里散落。
+_UNIT_DIMENSIONS: dict[str, tuple[str, float]] = {
+    # 带宽：基准 Mbps
+    "bps": ("bandwidth", 1 / 1_000_000),
+    "Kbps": ("bandwidth", 1 / 1000),
+    "Mbps": ("bandwidth", 1.0),
+    "Gbps": ("bandwidth", 1000.0),
+    # 字节率：基准 MB/s（与 bandwidth 不同量纲，8 bit = 1 byte 也不自动换算）
+    "B/s": ("byte_rate", 1 / 1_000_000),
+    "KB/s": ("byte_rate", 1 / 1000),
+    "MB/s": ("byte_rate", 1.0),
+    "GB/s": ("byte_rate", 1000.0),
+    # 频率：基准 MHz（与带宽无关）
+    "Hz": ("frequency", 1 / 1_000_000),
+    "MHz": ("frequency", 1.0),
+    "GHz": ("frequency", 1000.0),
+    # 计数：基准「个/项」
+    "项": ("count", 1.0),
+    "个": ("count", 1.0),
+    "份": ("count", 1.0),
+    "例": ("count", 1.0),
+    "台": ("count", 1.0),
+    "套": ("count", 1.0),
+    "路": ("count", 1.0),
+    "条": ("count", 1.0),
+    "家": ("count", 1.0),
+    "人": ("count", 1.0),
+    # 时长：基准「月」（年=12月，质保5年 == 质保60个月）
+    "分钟": ("duration", 1 / (30 * 24 * 60)),
+    "小时": ("duration", 1 / (30 * 24)),
+    "天": ("duration", 1 / 30),
+    "月": ("duration", 1.0),
+    "年": ("duration", 12.0),
+    # 长度：基准 mm
+    "mm": ("length", 1.0),
+    "cm": ("length", 10.0),
+    "米": ("length", 1000.0),
+    # 电学：各自独立量纲
+    "V": ("voltage", 1.0),
+    "kV": ("voltage", 1000.0),
+    "W": ("power", 1.0),
+    "kW": ("power", 1000.0),
+    "A": ("current", 1.0),
+    "%": ("percent", 1.0),
+}
 
+# 无单位数值（如「500 台设备」在带宽约束里）绝不能套用约束的单位。
+# 返回 (维度, 系数)；单位未登记时视为「不明确」而非可比较。
+def _unit_info(unit: str) -> tuple[str, float] | None:
     unit = (unit or "").strip()
-    if unit == "Gbps":
-        return value * 1000
-    if unit == "年":
-        return value * 12
-    return value
+    return _UNIT_DIMENSIONS.get(unit)
 
 
-# 同量纲单位（用于挑选正文里与约束同一维度的数值，避免拿「近三年」的
-# 「三」去应答「不少于3项业绩」这种串味匹配）。
-_UNIT_GROUPS = (
-    {"项", "个", "份", "例"},
-    {"年", "月", "小时", "天", "分钟"},
-    {"Mbps", "Gbps"},
-)
+def unit_dimension(unit: str) -> str:
+    """公开查询单位所属量纲（未登记返回空串），供测试与外部判定使用。"""
+
+    info = _unit_info(unit)
+    return info[0] if info else ""
+
+
+def _to_base(value: float, unit: str) -> float:
+    """归一到该量纲基准；未登记单位返回原值（调用方须先确认量纲一致）。"""
+
+    info = _unit_info(unit)
+    return value * info[1] if info else value
 
 
 def _unit_compatible(left: str, right: str) -> bool:
-    if not left or not right:
-        return True
-    if left == right:
-        return True
-    return any(left in group and right in group for group in _UNIT_GROUPS)
+    """只有**两边单位都明确且量纲一致**才认为可比较。
+
+    任一侧缺失 → False：正文里裸写的「500」可能是 500 台设备、500MHz 处理器，
+    不能因为约束单位是 Mbps 就把它当成 500Mbps。单位不明确交给调用方转人工复核。
+    """
+
+    left_info = _unit_info(left)
+    right_info = _unit_info(right)
+    if left_info is None or right_info is None:
+        return False
+    return left_info[0] == right_info[0]
 
 
 @dataclass(frozen=True)
@@ -184,7 +246,8 @@ class ConstraintVerdict:
     state:
       - "satisfied" 正文给出满足该约束的值；
       - "violated"  正文给出了反向的值，或肯定断言被否定词推翻；
-      - "absent"    正文根本没提这件事（无法证实，按保守口径不算覆盖）。
+      - "absent"    正文根本没提这件事（无法证实，按保守口径不算覆盖）；
+      - "unclear"   正文有数值，但单位缺失或跨量纲，无法安全比较 → 转人工复核。
     """
 
     constraint: Constraint
@@ -289,6 +352,7 @@ def _family_matches(constraint: Constraint, clause: str) -> bool:
 
 
 def _evaluate_one(constraint: Constraint, clauses: list[str]) -> ConstraintVerdict:
+    ambiguous: list[str] = []
     for clause in clauses:
         if not _family_matches(constraint, clause):
             continue
@@ -306,23 +370,37 @@ def _evaluate_one(constraint: Constraint, clauses: list[str]) -> ConstraintVerdi
             state = "satisfied" if rank[0] <= int(constraint.threshold) else "violated"
             return ConstraintVerdict(constraint, state, clause.strip())
 
-        # 数值：挑与约束同量纲的值做比较。
-        # 「近三年」是时间窗描述，不当作业绩数量——先按量纲分组筛，再回退。
+        # 数值：只拿与约束**量纲一致**的值做比较（单位缺失 / 跨量纲一律不比）。
+        # 「近三年」是时间窗描述，不当作业绩数量——先剔除，再按量纲筛。
         hits = list(_VALUE_RE.finditer(clause))
         usable = [hit for hit in hits if not (hit.start() > 0 and clause[hit.start() - 1] == "近")]
-        ordered = [hit for hit in usable if _unit_compatible(hit.group(2) or "", constraint.unit)] or usable
-        for hit in ordered:
+        compatible = [
+            hit for hit in usable if _unit_compatible(hit.group(2) or "", constraint.unit)
+        ]
+        for hit in compatible:
             value = _cn_number(hit.group(1))
             if value is None:
                 continue
             if negation_before(clause, hit.start()):
                 return ConstraintVerdict(constraint, "violated", clause.strip())
-            unit = hit.group(2) or constraint.unit
-            base = _to_base(float(value), unit)
+            base = _to_base(float(value), hit.group(2) or "")
             threshold = _to_base(constraint.threshold, constraint.unit)
             ok = base >= threshold if constraint.comparator == ">=" else base <= threshold
             return ConstraintVerdict(constraint, "satisfied" if ok else "violated", clause.strip())
 
+        # 正文有数值，但单位缺失或与约束不同量纲：不足以判定，记下来转人工复核。
+        # 关键：这些值绝不拿来和约束阈值比较（避免「500台设备」被当成 500Mbps）。
+        for hit in usable:
+            value = _cn_number(hit.group(1))
+            if value is None:
+                continue
+            ambiguous.append(f"{value}{hit.group(2) or '（无单位）'}")
+
+    if ambiguous:
+        # 兼容的数值已在上面 return；走到这里说明没有任何可比数值，只有歧义项。
+        return ConstraintVerdict(
+            constraint, "unclear", f"数值单位缺失或与约束量纲不同：{'、'.join(ambiguous[:3])}"
+        )
     return ConstraintVerdict(constraint, "absent", "")
 
 
@@ -337,7 +415,12 @@ def evaluate_constraints(text: str, body: str) -> list[ConstraintVerdict]:
 
 
 def constraint_blocked(verdicts: list[ConstraintVerdict]) -> bool:
-    """是否存在硬伤：任一约束被违反，或存在量化约束但没被证实。"""
+    """是否存在硬伤：任一约束被违反，或存在量化约束但没被证实。
+
+    ``unclear``（单位缺失/跨量纲）刻意**不算**硬伤——它不该被当成「不满足」
+    直接拦死，而是让上层（verdict）走人工复核；但它同样不能算「已证实满足」，
+    所以调用方（coverage_ratio / find_covering_section）不会因它放行。
+    """
 
     return any(
         verdict.state == "violated"
