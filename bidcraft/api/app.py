@@ -5,6 +5,12 @@ cookie sessions and role-based access control; there is no telemetry. Bind to
 127.0.0.1 for single-user mode, or put it behind TLS and your own network
 controls when serving a team."""
 
+import ipaddress
+import uuid
+from collections import defaultdict, deque
+from threading import Lock
+
+from ..config import configure_logging, reset_request_id, set_request_id
 from .shared import (  # noqa: F401 - 门面：保持 api.<name> 名字空间与 monkeypatch 语义
     BATCH_STALE_SECONDS,
     BOQ_UPLOAD_SUFFIXES,
@@ -311,6 +317,8 @@ dist = Path(__file__).resolve().parent.parent / "web_dist"
 
 
 def create_app():
+    # 基础日志先于启动校验配置，确保 prod 校验失败的原因也被记录。
+    configure_logging()
     try:
         from fastapi import FastAPI, HTTPException, Request
         from fastapi.responses import FileResponse, JSONResponse
@@ -365,6 +373,135 @@ def create_app():
         @app.get("/openapi.json", include_in_schema=False)
         def docs_disabled() -> None:
             raise HTTPException(status_code=404, detail="接口文档已关闭")
+
+    # ---- 边缘防护：请求 id → 客户端 IP / CSRF / 限流 → 鉴权 → 审计 → 安全头 ----
+    # 每个 create_app() 持有独立计数器：测试可反复建 app，进程重启即重置；
+    # 多 worker 下只是"尽力而为"的进程内限流，生产仍应在反代层再限一次。
+
+    _login_test_paths = frozenset({"/auth/login"})
+    _sensitive_paths = frozenset(
+        {
+            "/auth/register",
+            "/auth/password",
+            "/auth/password/reset",
+            "/auth/reset-password",
+            "/auth/forgot-password",
+            "/billing/redeem",
+            "/admin/wechat/test",
+        }
+    )
+    _model_test_re = re.compile(r"^/admin/(?:models|kbs|plugins)/[^/]+/test$")
+    _rate_buckets: dict[tuple[str, str], deque[float]] = defaultdict(deque)
+    _rate_lock = Lock()
+
+    def _client_address(request: Request) -> str:
+        """信任反代时取 X-Forwarded-For 最左值，否则取直连地址。"""
+
+        if settings.trust_proxy:
+            forwarded = request.headers.get("x-forwarded-for", "")
+            if forwarded:
+                candidate = forwarded.split(",", 1)[0].strip()
+                if candidate and len(candidate) <= 64 and not any(
+                    char in candidate for char in "\r\n"
+                ):
+                    try:
+                        ipaddress.ip_address(candidate)
+                    except ValueError:
+                        pass  # 非法值不采信，退回直连地址
+                    else:
+                        return candidate
+        return request.client.host if request.client else ""
+
+    def _rate_kind(path: str) -> str | None:
+        if path in _login_test_paths:
+            return "login"
+        if path in _sensitive_paths or _model_test_re.match(path):
+            return "sensitive"
+        return None
+
+    def _rate_check(bucket: str, key: str, limit: int) -> bool:
+        now = time.monotonic()
+        window = settings.rate_limit_window_seconds
+        with _rate_lock:
+            queue = _rate_buckets[(bucket, key)]
+            while queue and queue[0] <= now - window:
+                queue.popleft()
+            if len(queue) >= limit:
+                return False
+            queue.append(now)
+            if len(_rate_buckets) > 1000:  # 防止长期运行后 key 无限增长
+                for name, values in list(_rate_buckets.items()):
+                    if not values:
+                        _rate_buckets.pop(name, None)
+            return True
+
+    @app.middleware("http")
+    async def request_id(request: Request, call_next):
+        raw = (
+            request.headers.get("x-request-id")
+            or request.headers.get("x-correlation-id")
+            or uuid.uuid4().hex
+        )
+        # 仅允许可安全回显的 ASCII 字符，避免响应头注入。
+        rid = "".join(char for char in raw[:128] if 33 <= ord(char) <= 126) or uuid.uuid4().hex
+        request.state.request_id = rid
+        token = set_request_id(rid)
+        try:
+            response = await call_next(request)
+            response.headers.setdefault("X-Request-ID", rid)
+            return response
+        finally:
+            reset_request_id(token)
+
+    @app.middleware("http")
+    async def edge_guard(request: Request, call_next):
+        path = request.url.path
+        ip = _client_address(request)
+        if request.client is not None and ip != request.client.host:
+            # 同步 scope，后续路由里的 request.client.host 也拿到真实来源 IP。
+            request.scope["client"] = (ip, request.client.port)
+
+        # Cookie 会话下的状态变更请求：无 Origin 头（普通脚本/curl/TestClient）放行；
+        # 显式 Origin 必须同源；Sec-Fetch-Site 只接受 same-origin/none。
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.headers.get("cookie"):
+            origin = request.headers.get("origin")
+            if origin:
+                scheme = request.url.scheme
+                host = request.url.netloc
+                if settings.trust_proxy:
+                    scheme = request.headers.get("x-forwarded-proto", scheme).split(",", 1)[0].strip()
+                    host = request.headers.get("x-forwarded-host", host).split(",", 1)[0].strip()
+                expected = f"{scheme}://{host}".rstrip("/").lower()
+                if origin.rstrip("/").lower() != expected:
+                    return JSONResponse(status_code=403, content={"detail": "跨站请求被拒绝"})
+            else:
+                site = (request.headers.get("sec-fetch-site") or "").strip().lower()
+                if site and site not in {"same-origin", "none"}:
+                    return JSONResponse(status_code=403, content={"detail": "跨站请求被拒绝"})
+
+        if settings.rate_limit_enabled:
+            kind = _rate_kind(path)
+            if kind == "login":
+                ip_limit = settings.rate_limit_login_ip
+                global_limit = settings.rate_limit_login_global
+            elif kind == "sensitive":
+                ip_limit = settings.rate_limit_sensitive_ip
+                global_limit = settings.rate_limit_sensitive_global
+            else:
+                ip_limit = global_limit = 0
+            if ip_limit:
+                checks = (
+                    (kind, ip or "unknown", ip_limit),
+                    (f"{kind}-global", "*", global_limit),
+                )
+                for bucket, key, limit in checks:
+                    if not _rate_check(bucket, key, limit):
+                        return JSONResponse(
+                            status_code=429,
+                            content={"detail": "请求过于频繁，请稍后再试"},
+                            headers={"Retry-After": str(settings.rate_limit_window_seconds)},
+                        )
+        return await call_next(request)
 
     @app.middleware("http")
     async def auth_guard(request: Request, call_next):
@@ -433,17 +570,48 @@ def create_app():
             reset_current_user(token)
 
     @app.middleware("http")
+    async def auth_audit(request: Request, call_next):
+        """补齐退出/改密这两个原本无审计行的身份操作（口令绝不入审计）。"""
+
+        response = await call_next(request)
+        action = None
+        if request.url.path == "/auth/password" and response.status_code < 400:
+            action = "auth.password_change"
+        if action:
+            actor = getattr(request.state, "user", None)
+            try:
+                with session_scope() as db:
+                    record_audit(
+                        db,
+                        None,
+                        action,
+                        {"username": (actor or {}).get("username", "")},
+                        actor=actor,
+                    )
+            except Exception:  # noqa: BLE001 - 审计失败不影响已完成的改密
+                logger.warning("审计写入失败 action=%s", action, exc_info=True)
+        return response
+
+    @app.middleware("http")
     async def security_headers(request: Request, call_next):
         response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
+        # SPA 依赖 React 内联 style 属性与 Vite 运行时注入，style-src 保留
+        # 'unsafe-inline'；脚本仍只允许 'self'，不引入 remote code execution。
         response.headers.setdefault(
             "Content-Security-Policy",
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; "
             "object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
         )
+        # 纵深防御：禁用敏感浏览器能力，并阻止跨站把本站作为弹窗/子资源嵌入。
+        response.headers.setdefault(
+            "Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()"
+        )
+        response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+        response.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
         if settings.secure_cookie:
             response.headers.setdefault(
                 "Strict-Transport-Security", "max-age=31536000; includeSubDomains"

@@ -204,7 +204,7 @@ export function PendingApprovals() {
 
           <div className="pending-dropdown-foot">
             <ClipboardCheck size={11} aria-hidden />
-            点击跳转到项目的清单对齐页签，在版本面板中审批
+            点击跳转到项目的清单对齐页签，在版本面板中审批；Agent 工作流审批在项目「Agent 工作流」页签处理（提交人不能自审）
           </div>
         </div>
       )}

@@ -1,5 +1,6 @@
 """API routes: /jobs (从 app.py 迁移，URL 与响应格式不变)。"""
 
+import asyncio
 import sys
 
 from fastapi import APIRouter
@@ -18,7 +19,7 @@ def job_status(job_id: str) -> dict[str, Any]:
 
 
 @router.get("/jobs/{job_id}/events")
-def job_events(job_id: str, request: Request, after: int = 0) -> StreamingResponse:
+async def job_events(job_id: str, request: Request, after: int = 0) -> StreamingResponse:
     """Resumable Server-Sent Events for one generation job.
 
     The browser sends ``Last-Event-ID`` automatically when EventSource
@@ -34,13 +35,17 @@ def job_events(job_id: str, request: Request, after: int = 0) -> StreamingRespon
         job = _job(db, job_id)
         snapshot = jobs.job_payload(job)
 
-    def event_stream():
+    async def event_stream():
         cursor = last_id
         last_ping = time.monotonic()
         terminal = False
         yield "retry: 3000\n\n"
         yield jobs.sse_frame(None, "snapshot", snapshot)
         while True:
+            # 客户端断开（标签页关闭/导航离开）后立即停止轮询；旧版同步生成器
+            # 会一直查库直到任务进入终态，长任务期间白白占用连接与 worker。
+            if await request.is_disconnected():
+                break
             rows = jobs.events_since(job_id, cursor, limit=200)
             with session_scope() as db:
                 current = db.get(Job, job_id)
@@ -53,11 +58,11 @@ def job_events(job_id: str, request: Request, after: int = 0) -> StreamingRespon
                     terminal = True
             if terminal or (current.status in jobs.TERMINAL_STATUSES and not rows):
                 break
-            if not rows:
-                if time.monotonic() - last_ping >= 15:
-                    yield ": ping\n\n"
-                    last_ping = time.monotonic()
-                time.sleep(0.25)
+            if not rows and time.monotonic() - last_ping >= 15:
+                yield ": ping\n\n"
+                last_ping = time.monotonic()
+            # 非阻塞、有上限的等待，既避免忙轮询也保持事件循环可响应断开。
+            await asyncio.sleep(0.25)
 
     return StreamingResponse(
         event_stream(),

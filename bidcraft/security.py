@@ -74,22 +74,40 @@ def _key_path() -> Path:
     return settings.home / "secret.key"
 
 
-def _fernet() -> Fernet:
+def _fernet_key() -> bytes:
+    """Fernet 密钥字节串。
+
+    默认来自 ``BIDCRAFT_HOME/secret.key``（0600）。多实例 PostgreSQL 部署没有共享
+    文件卷时，统一设置 ``BIDCRAFT_SECRET_KEY``（32 字节密钥的 base64 编码）即可让
+    所有进程共用同一把主密钥；否则加密数据/签名状态在实例间互不相认。
+    """
+
+    env_key = (settings.secret_key or "").strip()
+    if env_key:
+        try:
+            decoded = base64.urlsafe_b64decode(env_key.encode("ascii"))
+        except (ValueError, UnicodeEncodeError) as exc:
+            raise ValueError("BIDCRAFT_SECRET_KEY 必须是 32 字节 Fernet 密钥的 base64 编码") from exc
+        if len(decoded) != 32:
+            raise ValueError("BIDCRAFT_SECRET_KEY 必须是 32 字节 Fernet 密钥的 base64 编码")
+        return env_key.encode("ascii")
     path = _key_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
-        raw = path.read_bytes().strip()
-    else:
-        raw = Fernet.generate_key()
-        # O_EXCL avoids two workers racing to create different keys.
-        try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            raw = path.read_bytes().strip()
-        else:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(raw)
-    return Fernet(raw)
+        return path.read_bytes().strip()
+    raw = Fernet.generate_key()
+    # O_EXCL avoids two workers racing to create different keys.
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return path.read_bytes().strip()
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(raw)
+    return raw
+
+
+def _fernet() -> Fernet:
+    return Fernet(_fernet_key())
 
 
 def encrypt_secret(value: str) -> str:
@@ -108,8 +126,7 @@ def decrypt_secret(value: str) -> str:
 
 
 def _signing_key() -> bytes:
-    raw = _key_path().read_bytes().strip()
-    return hashlib.sha256(raw).digest()
+    return hashlib.sha256(_fernet_key()).digest()
 
 
 def sign_state(payload: dict, ttl_seconds: int = 600) -> str:

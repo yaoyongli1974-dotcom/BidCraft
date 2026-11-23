@@ -61,6 +61,7 @@ export function normalizeQualityReport(value: unknown): QualityReport | null {
 
 export function normalizeQualityFinding(value: unknown): QualityFinding {
   const raw = asRecord(value)
+  const evidence = asRecord(raw.evidence)
   return {
     id: String(raw.id || ''),
     report_id: String(raw.report_id || ''),
@@ -71,9 +72,13 @@ export function normalizeQualityFinding(value: unknown): QualityFinding {
     requirement_id: raw.requirement_id ? String(raw.requirement_id) : null,
     title: String(raw.title || ''),
     description: String(raw.description || ''),
-    evidence: asRecord(raw.evidence),
+    evidence,
     recommendation: String(raw.recommendation || ''),
     status: String(raw.status || 'open'),
+    resolution_note: String(
+      raw.resolution_note ?? evidence.resolution_note ?? '',
+    ),
+    resolved_by: String(raw.resolved_by ?? evidence.resolved_by ?? ''),
   }
 }
 
@@ -115,11 +120,6 @@ export async function listEvaluationReports(ref: string, limit = 20): Promise<Qu
   return Array.isArray(data)
     ? data.map(normalizeQualityReport).filter(Boolean) as QualityReport[]
     : []
-}
-
-export async function getEvaluationReport(ref: string, reportId: string): Promise<QualityReport | null> {
-  const data = await request<unknown>(`${projectBase(ref)}/evaluation/reports/${encodeURIComponent(reportId)}`)
-  return normalizeQualityReport(data)
 }
 
 export async function getEvaluationFindings(ref: string, reportId: string): Promise<QualityFinding[]> {

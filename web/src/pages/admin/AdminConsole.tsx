@@ -1,6 +1,7 @@
 import { useRef, useState, type KeyboardEvent } from 'react'
 import { Link } from 'react-router-dom'
 import {
+  Activity,
   ArrowLeft,
   BookMarked,
   BookOpen,
@@ -33,6 +34,7 @@ import { AdminTextQaTab } from './AdminTextQaTab'
 import { AdminRulePackagesTab } from './AdminRulePackagesTab'
 import { AdminUsersTab } from './AdminUsersTab'
 import { AdminBillingTab } from './AdminBillingTab'
+import { AdminHealthTab } from './AdminHealthTab'
 import { AdminAuditTab } from './AdminAuditTab'
 import { AdminPluginsTab } from './AdminPluginsTab'
 import { AdminWechatTab } from './AdminWechatTab'
@@ -49,6 +51,7 @@ type AdminTab =
   | 'billing'
   | 'wechat'
   | 'plugins'
+  | 'health'
 
 interface AdminTabDef {
   id: AdminTab
@@ -124,6 +127,12 @@ const ADMIN_TABS: AdminTabDef[] = [
     icon: MessageCircle,
     description: '扫码登录的 AppID、密钥、回调地址与模拟模式',
   },
+  {
+    id: 'health',
+    label: '运行状态',
+    icon: Activity,
+    description: '完整健康检查与质量指标口径：版本、模型、磁盘、开关',
+  },
 ]
 
 export function AdminConsole() {
@@ -171,6 +180,7 @@ function AdminWorkspace() {
     billing: undefined,
     wechat: undefined,
     plugins: undefined,
+    health: undefined,
   }
   const currentTab = ADMIN_TABS.find((item) => item.id === tab) || ADMIN_TABS[0]
 
@@ -373,6 +383,7 @@ function AdminWorkspace() {
         {tab === 'billing' && <AdminBillingTab />}
         {tab === 'plugins' && <AdminPluginsTab />}
         {tab === 'wechat' && <AdminWechatTab />}
+        {tab === 'health' && <AdminHealthTab />}
       </div>
     </div>
   )

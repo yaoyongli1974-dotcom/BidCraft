@@ -101,10 +101,11 @@ bidcraft serve --open               # http://127.0.0.1:8000
 ```
 
 浏览器客户端覆盖：项目列表 → 招标文件上传/解析 → 事实台账校订 → 大纲编排 →
-逐章生成/编辑 → 合规核对 → 清单对齐 → DOCX/PDF/XLSX 导出。模型不可用时所有按钮仍可走
+逐章生成/编辑 → 合规核对 → 清单对齐 → DOCX/PDF/XLSX 导出；并覆盖企业知识库 2.0、
+商务标自动编制、多维查重、Agent 编排、章节协作与质量评估中心。模型不可用时所有按钮仍可走
 确定性草稿，界面会明确提示。
 
-依赖已锁定在根目录 `uv.lock`（49 个包）。复现同一环境用：
+依赖已锁定在根目录 `uv.lock`（80 个包）。复现同一环境用：
 
 ```bash
 uv sync --frozen --extra api --extra dev   # 或在已激活的 venv 内 uv sync --frozen
@@ -281,9 +282,9 @@ export BIDCRAFT_WECHAT_PAY_MOCK=1         # 本地演示支付
 | 数据库迁移 | ✅ | 引入 Alembic：旧库由 create_all+补列收敛后 stamp 基线，新增/改类型/重命名/索引走幂等 revision；跨进程迁移锁避免 serve/CLI/MCP 并发跑 DDL |
 | 报价金额精度 | ✅ | 统一金额服务内部 Decimal + ROUND_HALF_UP，消除浮点累计误差，JSON/API/Excel 出口仍 float 保持契约；报价版本冻结不可变计算依据（数量/税率/币种/汇率/系数）供审计与复算 |
 | 关联数据清理 | ✅ | 项目删除集中清理全部关联行（含此前漏掉的引用/包件/报价版本）；孤儿引用只读检测与可选清理（`bidcraft db-orphans`）；审计 user_id 悬挂留存供注销追责 |
-| API 架构收尾 | ✅ | `api/app.py` 瘦身为门面与组装器（1933→793 行）：71 个请求模型外迁 `api/schemas.py`、helper/常量/重导出下沉 `api/shared.py`；12 个路由模块改为单向依赖 `schemas`/`shared`，不再反向 import `app`；门面保留全部导出名与对象同一性（runner/helper 与 workers/services 同源），monkeypatch 与运行期查找语义不变 |
+| API 架构收尾 | ✅ | `api/app.py` 瘦身为门面与组装器（1933→793 行）：71 个请求模型外迁 `api/schemas.py`、helper/常量/重导出下沉 `api/shared.py`；18 个路由模块改为单向依赖 `schemas`/`shared`，不再反向 import `app`；门面保留全部导出名与对象同一性（runner/helper 与 workers/services 同源），monkeypatch 与运行期查找语义不变 |
 | 前端分层 | ✅ | `web/src/api/` 按业务域拆 14 个模块，传输与统一错误在 `lib/http.ts`；`hooks/watchJob.ts` 统一任务进度（SSE + 断线轮询兜底）、`lib/permissions.ts` 统一权限能力、`lib/format.ts`/`lib/queryCache.ts` 复用；无 Redux、无页面结构改动，SSE 断线续传保留 |
-| 架构分层 | ✅ | API 按业务域拆为 12 个路由模块（`bidcraft/api/routes/`），耗时任务剥离到 `bidcraft/workers/`，共享逻辑在 `bidcraft/services/`；配置启动校验区分 dev/test/prod；URL、请求响应与业务函数完全不变 |
+| 架构分层 | ✅ | API 按业务域拆为 18 个路由模块（`bidcraft/api/routes/`），耗时任务剥离到 `bidcraft/workers/`，共享逻辑在 `bidcraft/services/`；配置启动校验区分 dev/test/prod；URL、请求响应与业务函数完全不变 |
 | 五层判定引擎 | ✅ | 提取/原子拆分/结构化约束/多维验证/四态判定五层：满足·不满足·部分满足·人工复核；数值等级时间由规则引擎判定、语义层可插拔；不满足与部分满足阻塞；人工复核按重要性分级——★ blocking（未确认不得交付，强制导出须独立授权 + 完整审计）、▲ critical、普通 info；确认「已响应/不适用」时快照原始判定与人员/时间/原因入审计；逐层证据写入 issue 与接口 | 
 | 实质性条款约束比较 | ✅ | 把 ★/▲ 条款拆成多条可比较约束：数值方向（≥/≤/等级序/质保时长，中文数字也识别）、否定语义（「不具备」不算响应、否定不跨句）、复合条款逐条判定；单位缺失不认定量纲一致、登记明确换算（Mbps↔Gbps、年↔月等）、禁止跨量纲比较，单位不明确转人工复核；判定写入核对问题的 evidence 可举证 |
 | 判定边界加固（v0.23.0） | ✅ | 复合条款拆分后携带完整原始要求做项目类型过滤；年份精度起始/截止边界转人工、日精度按真实日历；正文修改使确认失效时以 append-only 审计保留完整判定与人工确认快照（含正文版本/哈希/操作人）；业绩证据关联项目身份（合同编号/归一化名/客户）与来源状态、冲突转人工不伪造溯源；26 条判定回归集逐样本驱动时间窗，FAR=0 |
@@ -330,6 +331,14 @@ export BIDCRAFT_WECHAT_PAY_MOCK=1         # 本地演示支付
 | 报价审批流 | ✅ | 版本状态机（草稿→待审→已定稿/已驳回），成员提交审批、负责人定稿/驳回、可撤销定稿并重新提交；同包件至多一个定稿，定稿新版自动退回旧版；双版本（含当前清单）并排审阅视图；**项目审批链**（负责人配置 ≤5 级有序审批人，每级 1–5 人、会签 all/或签 any，逐级通过、末级定稿，越级 403，超管可代审；空链回退负责人单级）；审批级可设**金额门槛**（报价总额达到才需该级审批，低价自动跳过）；审计 `quote.submit/approve/reject/unapprove`；顶栏「待我审批」跨项目待办（数量徽标 + 只读面板，点击直达项目清单页签，60s 轮询）；审批级可按**包件 / 币种**白名单限定生效范围（与金额门槛组合，未命中自动跳过） |
 | 微信开放平台管理 | ✅ | 管理控制台配置 AppID/AppSecret（加密存库不回显）、回调地址、启用与模拟模式、连通性测试；保存即热生效，登录页自动出现扫码入口 |
 | 企业术语库 | ✅ | 管理端维护「禁用表述 / 建议替换」术语；项目核对自动产出 `TERM-###` 问题（禁用词 major、替换建议 minor，含原文证据与建议） |
+| 企业知识库 2.0 | ✅ | 企业空间与成员、企业共享资质/人员/业绩、`KbDocument` 增量索引；检索按素材可信度分级注入 |
+| 商务标自动编制 | ✅ | 按 approved 报价版本确定性汇编商务标，复用审批链，XLSX/DOCX 导出；送审可选 `require_complete` 完整性硬门禁 |
+| 多维查重 | ✅ | 文本/结构/语义/图片四维相似度：命中落库、报告导出与人工复核；可选 LLM 语义匹配器（`BIDCRAFT_VERDICT_LLM=1`，失败自动回退规则匹配） |
+| Agent 编排与人工审批 | ✅ | 注册表 + DAG 工作流 + Worker 执行 + 审批闸门；内置标准/全流程/投标三种编排，审批需项目写权限且提交人不得自审（超管可代审） |
+| 章节协作 | ✅ | 章节编辑锁与乐观锁、修订历史 diff/恢复、负责人确认/锁定与章节分工 |
+| 质量评估中心 | ✅ | 六维评分、硬性风险一票否决、不可变报告快照与问题人工处置；支持同步运行与 `run-async` 后台任务，历史报告点击后按需加载 findings，处置意见/处置人留痕并可重新打开 |
+| `.bidplugin` 签名验签 | ✅ | 插件包可选 Ed25519 签名（默认兼容未签名，可强制验签），导入时校验完整性并写审计 |
+| 管理端运行状态 | ✅ | 超管页读取完整 `/admin/health`（版本/模型/磁盘/开关）；人工修改率、问题密度、清单匹配率按项目口径展示，不引用未经测量的数字 |
 
 未做（按评估建议留到完整版）：插件远程市场自动安装与系统级隔离（受控本地插件包导入/导出已支持；无容器/网络隔离）、真实招标件的持续回归基线扩充。
 
@@ -448,7 +457,7 @@ DOCX 图注编号与版心宽度、批量生成默认风格尺寸；`tests/test_
 覆盖项目复制的全量深拷贝、外键重映射、可选清单/配图、排除项与失败清理；`tests/test_project_templates.py`
 覆盖模板标记权限、模板列表与从模板创建（含非成员实例化与失败清理）；
 `tests/test_vip.py`、`tests/test_subaccounts.py`、`tests/test_jobqueue.py` 覆盖 VIP 授权/续期/折扣、
-子账号共享计费与权限隔离、优先级队列调度、审批条件分支；`tests/test_user_docs.py` 覆盖个人文档上传/索引、列表/下载/删除、跨用户隔离与检索防泄漏、审计；`tests/test_client.py`、`tests/test_desktop.py` 覆盖客户端登录/Cookie 复用、文档与原件上传、下载、网关反代与 Cookie 透传、静态/SPA 回退、令牌门禁与本地文件桥；`tests/test_offline_cache.py`、`tests/test_qtshell.py` 覆盖只读离线缓存回放与淘汰、Qt 外壳版本比较/桥接注入脚本/导航映射/设置键、Qt 缺失回退与原生页面辅助函数；`tests/test_qualifications.py` 覆盖资质台账 CRUD 与归属隔离、证据上传/下载/删除与越界防护、按开标日的自查判定与汇总、审计；`tests/test_personnel.py` 覆盖人员台账 CRUD 与归属隔离、字段校验、在建锁定、审计与知识库文档元数据接口；`tests/test_textqa.py` 覆盖错别字/重复标点规则、截止/截至语境、跨章节一致性、段落重复与核对集成；`tests/test_mineru.py` 覆盖 MinerU 响应映射、表格还原、异常回退与内置链优先级；`tests/test_dedup.py` 覆盖跨文件/同文件重复、阈值与截断、docx 跳过、CLI 行为；`tests/test_invoices.py` 覆盖注册同意留痕、开票申请/开具/下载/驳回、备份保留与注销清理；`tests/test_clock.py` 覆盖北京日历日判定、带时区的时间戳序列化与对账单按日归档；`tests/test_desktop_recipe.py` 守住桌面端归档后的冻结配方（desktop/build extra、uv.lock 锁定、构建脚本查齐四依赖、CI 仅手动触发且默认不重新附加 Release）；`tests/test_risk_overview.py` 覆盖风险总览四档聚合、问题锚定章节、处置状态跨核对保留、忽略必填原因、批量处置，以及 HTTP/MCP/CLI/批量导出四条路径的交付门禁与强制导出留痕；`tests/test_substantive.py` 覆盖 ★/▲ 标记与原文行保留、3-gram 覆盖判定、人工确认「已响应 / 不适用」留痕、编号稳定与未响应条款拦截导出；`tests/test_provenance.py` 覆盖正文数字边界匹配、短值与通用值忽略、引用落库含出处页码、改值后章节标记需复核、恢复原值清除、viewer 可读与越权隔离，以及全书重扫幂等、多章聚合计数、事实删除后标记 stale、跨项目引用隔离；`tests/test_substantive_types.py`（10 例：四类条款分类、改写响应锚点覆盖、中文/阿拉伯数字、正文凭空数字不算响应、通用条款回退 3-gram、接口类型字段）；`tests/test_error_detail.py` 守住对外错误响应不回传内部路径与原始异常文本（已知领域异常保持可读、未知异常只回安全文案）；`tests/test_postgres_support.py` 覆盖方言识别、连接串归一与脱敏、引擎参数、补列跳过、认领语句跨方言编译与 PG 备份校验；`tests/test_postgres_integration.py`（需 `BIDCRAFT_TEST_PG_URL`，opt-in）对真实 PostgreSQL 验证建表/迁移、CRUD、并发认领、fencing、导出门禁、外键删除、咨询锁与备份；`tests/test_chapter_review.py` 覆盖章节复核四态流转与权限、冻结后拒绝改写与重生成、待复核改写自动退回、撤回/解锁原因校验、导出只认已确认章节与强制导出被拦；`tests/test_quote_service.py` 不加载 FastAPI 直接测报价 Service（单/多包件改价、审计身份、异常上抛），覆盖多包件命令行改价 bug 回归；`tests/test_registration_consent.py` 覆盖注册同意缺省/显式 False 拒绝、显式 True 记录条款版本与同意时间、旧客户端缺同意被拒；`tests/test_authorization.py` 脱离 FastAPI 验证统一资源授权入口（项目/成员/超管可见性与写/所有者动作、任务按 project_id 与 owner_id 归属、批量项目过滤含成员角色一致性修复、节点跨项目隔离，`tests/test_jobqueue.py` 覆盖 DB 驱动队列的原子认领、租约心跳、重排队、背压，以及 fencing 令牌（认领刷新、关键写入令牌校验、启动恢复只收过期租约、心跳随令牌失效退出）、reaper 改为独立常驻线程（队列繁忙时也能按时回收过期租约）、API/Worker 可分离部署（`BIDCRAFT_EMBEDDED_WORKERS=0` + `bidcraft worker`），`tests/test_api_package.py` 锁定 API 分层结构（路由不反向依赖 app 门面、88 个模型只在 schemas、246 条路由不变量），`tests/test_constraint_check.py`（48 例：数值方向与等级比较、中文数字、否定语义与跨句边界、复合条款拆分与跨章响应、单位量纲三态（兼容/不可兼容/未知）与存储量纲、裸数值不套用、跨量纲不比较、多候选关联、Mbps↔Gbps 归一、约束判定写入 issue.evidence 供举证），`tests/test_verdict.py`（76 例：五层四态判定、核心原则「语义相似不等于满足」、L1 页码/条款号、L2 原子拆分、L3 结构化字段、时间窗只作证据、matcher 可插拔、复核分级 ★blocking/▲critical/普通info）；`tests/test_verdict_api.py`（6 例：接口五层字段、★/▲ 复核分级、确认时快照原始判定、强制导出审计越过条款、不满足阻塞导出），当前全量 **1221**）。
+子账号共享计费与权限隔离、优先级队列调度、审批条件分支；`tests/test_user_docs.py` 覆盖个人文档上传/索引、列表/下载/删除、跨用户隔离与检索防泄漏、审计；`tests/test_client.py`、`tests/test_desktop.py` 覆盖客户端登录/Cookie 复用、文档与原件上传、下载、网关反代与 Cookie 透传、静态/SPA 回退、令牌门禁与本地文件桥；`tests/test_offline_cache.py`、`tests/test_qtshell.py` 覆盖只读离线缓存回放与淘汰、Qt 外壳版本比较/桥接注入脚本/导航映射/设置键、Qt 缺失回退与原生页面辅助函数；`tests/test_qualifications.py` 覆盖资质台账 CRUD 与归属隔离、证据上传/下载/删除与越界防护、按开标日的自查判定与汇总、审计；`tests/test_personnel.py` 覆盖人员台账 CRUD 与归属隔离、字段校验、在建锁定、审计与知识库文档元数据接口；`tests/test_textqa.py` 覆盖错别字/重复标点规则、截止/截至语境、跨章节一致性、段落重复与核对集成；`tests/test_mineru.py` 覆盖 MinerU 响应映射、表格还原、异常回退与内置链优先级；`tests/test_dedup.py` 覆盖跨文件/同文件重复、阈值与截断、docx 跳过、CLI 行为；`tests/test_invoices.py` 覆盖注册同意留痕、开票申请/开具/下载/驳回、备份保留与注销清理；`tests/test_clock.py` 覆盖北京日历日判定、带时区的时间戳序列化与对账单按日归档；`tests/test_desktop_recipe.py` 守住桌面端归档后的冻结配方（desktop/build extra、uv.lock 锁定、构建脚本查齐四依赖、CI 仅手动触发且默认不重新附加 Release）；`tests/test_risk_overview.py` 覆盖风险总览四档聚合、问题锚定章节、处置状态跨核对保留、忽略必填原因、批量处置，以及 HTTP/MCP/CLI/批量导出四条路径的交付门禁与强制导出留痕；`tests/test_substantive.py` 覆盖 ★/▲ 标记与原文行保留、3-gram 覆盖判定、人工确认「已响应 / 不适用」留痕、编号稳定与未响应条款拦截导出；`tests/test_provenance.py` 覆盖正文数字边界匹配、短值与通用值忽略、引用落库含出处页码、改值后章节标记需复核、恢复原值清除、viewer 可读与越权隔离，以及全书重扫幂等、多章聚合计数、事实删除后标记 stale、跨项目引用隔离；`tests/test_substantive_types.py`（10 例：四类条款分类、改写响应锚点覆盖、中文/阿拉伯数字、正文凭空数字不算响应、通用条款回退 3-gram、接口类型字段）；`tests/test_error_detail.py` 守住对外错误响应不回传内部路径与原始异常文本（已知领域异常保持可读、未知异常只回安全文案）；`tests/test_postgres_support.py` 覆盖方言识别、连接串归一与脱敏、引擎参数、补列跳过、认领语句跨方言编译与 PG 备份校验；`tests/test_postgres_integration.py`（需 `BIDCRAFT_TEST_PG_URL`，opt-in）对真实 PostgreSQL 验证建表/迁移、CRUD、并发认领、fencing、导出门禁、外键删除、咨询锁与备份；`tests/test_chapter_review.py` 覆盖章节复核四态流转与权限、冻结后拒绝改写与重生成、待复核改写自动退回、撤回/解锁原因校验、导出只认已确认章节与强制导出被拦；`tests/test_quote_service.py` 不加载 FastAPI 直接测报价 Service（单/多包件改价、审计身份、异常上抛），覆盖多包件命令行改价 bug 回归；`tests/test_registration_consent.py` 覆盖注册同意缺省/显式 False 拒绝、显式 True 记录条款版本与同意时间、旧客户端缺同意被拒；`tests/test_authorization.py` 脱离 FastAPI 验证统一资源授权入口（项目/成员/超管可见性与写/所有者动作、任务按 project_id 与 owner_id 归属、批量项目过滤含成员角色一致性修复、节点跨项目隔离，`tests/test_jobqueue.py` 覆盖 DB 驱动队列的原子认领、租约心跳、重排队、背压，以及 fencing 令牌（认领刷新、关键写入令牌校验、启动恢复只收过期租约、心跳随令牌失效退出）、reaper 改为独立常驻线程（队列繁忙时也能按时回收过期租约）、API/Worker 可分离部署（`BIDCRAFT_EMBEDDED_WORKERS=0` + `bidcraft worker`），`tests/test_api_package.py` 锁定 API 分层结构（路由不反向依赖 app 门面、88 个模型只在 schemas、246 条路由不变量），`tests/test_constraint_check.py`（48 例：数值方向与等级比较、中文数字、否定语义与跨句边界、复合条款拆分与跨章响应、单位量纲三态（兼容/不可兼容/未知）与存储量纲、裸数值不套用、跨量纲不比较、多候选关联、Mbps↔Gbps 归一、约束判定写入 issue.evidence 供举证），`tests/test_verdict.py`（76 例：五层四态判定、核心原则「语义相似不等于满足」、L1 页码/条款号、L2 原子拆分、L3 结构化字段、时间窗只作证据、matcher 可插拔、复核分级 ★blocking/▲critical/普通info）；`tests/test_verdict_api.py`（6 例：接口五层字段、★/▲ 复核分级、确认时快照原始判定、强制导出审计越过条款、不满足阻塞导出），当前全量 **1300+**）。
 
 前端验证：`cd web && npm run lint && npm test && npm run build`（ESLint + 191 个单元测试 +
 TypeScript 编译 + Vite 产物输出到 `bidcraft/web_dist`），随后 `bidcraft serve --open` 做浏览器全流程验收。

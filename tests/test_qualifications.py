@@ -364,8 +364,11 @@ def test_preflight_deadline_changes_status(db):
 
 
 def test_preflight_defaults_to_today_and_rejects_bad_date(db):
+    from bidcraft import clock
+
     owner, _user = _client("qualtoday")
-    today = date.today()
+    # 后端按北京时间判定到期日（容器 UTC 时 date.today() 会差一天）
+    today = clock.today()
     _create(
         owner,
         kind="safety",

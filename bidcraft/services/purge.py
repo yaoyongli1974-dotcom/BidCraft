@@ -10,6 +10,8 @@
 留存红线：
 - ``AuditLog.user_id`` 故意允许悬挂（``account.purge`` 在删除用户后写入该 id
   作为追责依据），因此**永不**按 user_id 清理审计，也不给它加外键。
+- ``AuditLog.project_id`` 同样不随项目删除而丢失：删除项目时只把该列置空
+  （审计行仍全局可查），既不按 project_id 清理，也不纳入孤儿清理规则。
 - ``BoqQuoteVersion`` 报价/审批历史：随项目显式删除（否则无项目可读、必成孤
   儿），但删除前由调用方写入审计；不做静默级联。
 """
@@ -18,7 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from ..models import (
@@ -105,10 +107,12 @@ def project_child_counts(db: Session, project_id: str) -> dict[str, int]:
 
 
 def delete_project_rows(db: Session, project_id: str) -> dict[str, int]:
-    """显式删除项目的全部关联行，返回各表删除条数（含审计）。
+    """显式删除项目的全部关联行，返回各表删除条数。
 
     不删除 ``Project`` 本体（由调用方决定何时 ``db.delete(project)``），
-    也不碰 ``AuditLog.user_id``（留存红线）。
+    也不碰 ``AuditLog.user_id``（留存红线）。审计行只解绑 ``project_id``：
+    行本身与其 action/detail 全部保留，仍可在 ``/admin/audit`` 全局查询。
+    ``removed["audit_logs"]`` 为被解绑的审计条数（兼容旧调用方的计数口径）。
     """
     removed: dict[str, int] = {}
     node_ids = list(
@@ -126,9 +130,15 @@ def delete_project_rows(db: Session, project_id: str) -> dict[str, int]:
     removed["project_members"] = db.execute(
         delete(ProjectMember).where(ProjectMember.project_id == project_id)
     ).rowcount or 0
-    removed["audit_logs"] = db.execute(
-        delete(AuditLog).where(AuditLog.project_id == project_id)
-    ).rowcount or 0
+    # 留存红线：审计行永不随项目删除；只把外键解绑，项目维度过滤自然不再命中。
+    detached = (
+        db.execute(
+            update(AuditLog).where(AuditLog.project_id == project_id).values(project_id=None)
+        ).rowcount
+        or 0
+    )
+    removed["audit_logs"] = detached
+    removed["audit_logs_detached"] = detached
     return removed
 
 
@@ -177,7 +187,8 @@ def delete_user_rows(db: Session, user_id: str) -> dict[str, int]:
 
 # ------------------------------------------------------------------ 孤儿检测
 
-#: (子表, 子表字段, 父表, 父表字段)。AuditLog.user_id 刻意排除（留存红线）。
+#: (子表, 子表字段, 父表, 父表字段)。审计的两个字段都刻意排除：user_id 可悬挂，
+#: project_id 在删项目时置空；两者都不允许被 clean_orphans 清理（留存红线）。
 ORPHAN_RULES = (
     (Section, "node_id", OutlineNode, "id"),
     (FactCitation, "node_id", OutlineNode, "id"),
@@ -190,7 +201,6 @@ ORPHAN_RULES = (
     (BoqSnapshot, "source_file_id", SourceFile, "id"),
     (Fact, "source_file_id", SourceFile, "id"),
     (Job, "project_id", Project, "id"),
-    (AuditLog, "project_id", Project, "id"),
 )
 
 

@@ -186,7 +186,8 @@ async def wechat_notify(request: Request):
             return JSONResponse(
                 status_code=404, content={"code": "FAIL", "message": "订单不存在"}
             )
-        amount = (data.get("amount") or {}).get("total")
+        raw_amount = data.get("amount")
+        amount = raw_amount.get("total") if isinstance(raw_amount, dict) else raw_amount
         if amount is not None and int(amount) != order.amount_cents:
             return JSONResponse(
                 status_code=400, content={"code": "FAIL", "message": "金额不一致"}
@@ -197,6 +198,18 @@ async def wechat_notify(request: Request):
                 order,
                 transaction_id=data.get("transaction_id", ""),
                 provider="wechat",
+            )
+            audit(
+                db,
+                None,
+                "billing.payment.notify",
+                {
+                    "order_id": order.id,
+                    "out_trade_no": order.out_trade_no,
+                    "amount_cents": order.amount_cents,
+                    "transaction_id": data.get("transaction_id", ""),
+                    "provider": "wechat",
+                },
             )
     return {"code": "SUCCESS", "message": "成功"}
 

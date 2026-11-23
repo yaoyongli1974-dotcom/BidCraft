@@ -37,7 +37,13 @@ def _http_error(exc: Exception) -> HTTPException:
         return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, LookupError):
         return HTTPException(status_code=404, detail=str(exc))
-    return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, ValueError):
+        return HTTPException(status_code=400, detail=str(exc))
+    # 未预期异常按 500 处理并留日志，避免把服务端故障伪装成客户端错误。
+    import logging
+
+    logging.getLogger("bidcraft.api.commercial").exception("未处理的商务标错误", exc_info=exc)
+    return HTTPException(status_code=500, detail="服务器内部错误")
 
 
 @router.get("/projects/{ref}/commercial")
@@ -179,6 +185,7 @@ def commercial_export(
     fmt = (format or "xlsx").strip().lower()
     if fmt not in {"xlsx", "docx"}:
         raise HTTPException(status_code=400, detail="format 只能是 xlsx 或 docx")
+    # 1) 短事务：鉴权 + 硬门禁 + 取渲染所需的只读快照。
     with session_scope() as db:
         project, role = _project(db, ref)
         _require_write(role)
@@ -193,22 +200,31 @@ def commercial_export(
             enforce_export_gate(db, project.id, gate_fmt)
         except ExportGateError as exc:
             raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
-        output = settings.project_dir(project.id) / "output" / f"commercial-{doc.id}.{fmt}"
-        if fmt == "xlsx":
-            from ...export.commercial_xlsx import export_commercial_xlsx
-
-            path = export_commercial_xlsx(output, payload)
-        else:
-            from ...export.commercial_docx import export_commercial_docx
-
-            path = export_commercial_docx(output, payload)
+        project_id = project.id
+        doc_id_value = doc.id
+        doc_name = doc.name
+        quote_version_id = doc.quote_version_id
+        output = settings.project_dir(project_id) / "output" / f"commercial-{doc_id_value}.{fmt}"
         safe = re.sub(r'[\\/:*?"<>|]', "", project.name).strip() or "BidCraft"
+    # 2) 文件渲染（xlsx/docx 可能涉及大量单元格/图片）在事务外执行。
+    if fmt == "xlsx":
+        from ...export.commercial_xlsx import export_commercial_xlsx
+
+        path = export_commercial_xlsx(output, payload)
+    else:
+        from ...export.commercial_docx import export_commercial_docx
+
+        path = export_commercial_docx(output, payload)
+    # 3) 渲染成功后再写审计，与原"同事务提交"语义一致（失败不留痕）。
+    with session_scope() as db:
         audit(
             db,
-            project.id,
+            project_id,
             "commercial.export",
-            {"doc_id": doc.id, "format": fmt, "quote_version_id": doc.quote_version_id},
+            {
+                "doc_id": doc_id_value,
+                "format": fmt,
+                "quote_version_id": quote_version_id,
+            },
         )
-        return FileResponse(
-            path, filename=f"{safe[:60]}-{doc.name[:40] or '商务标'}.{fmt}"
-        )
+    return FileResponse(path, filename=f"{safe[:60]}-{doc_name[:40] or '商务标'}.{fmt}")

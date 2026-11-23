@@ -34,8 +34,25 @@
 该门禁与质量评估相互独立：即使关闭门禁，不完整的商务标仍会在评估报告中计入
 `commercial` 维度得分与 major finding。
 
+## 报告与问题处置接口
+
+| 入口 | 返回 | 说明 |
+| --- | --- | --- |
+| `GET /projects/{ref}/evaluation` | 最新报告（含 findings） | 页面初始真相源 |
+| `GET /projects/{ref}/evaluation/reports?limit=20` | 历史报告列表 | 快照不可变；为控制体积，列表不含 findings |
+| `GET /projects/{ref}/evaluation/reports/{report_id}` | 单份报告（含 findings） | 按需读取详情 |
+| `GET /projects/{ref}/evaluation/reports/{report_id}/findings` | 问题清单 | 前端选中历史报告时调用，避免空问题列表 |
+| `PATCH /projects/{ref}/evaluation/findings/{finding_id}` | 更新后的问题 | 请求体 `{status, note?}`；`note` 与操作人写入 `evidence.resolution_note` / `evidence.resolved_by`，不改写报告快照 |
+
+处置状态支持 `handled` / `ignored`，也支持 `open`（重新打开）；每次处置都写审计并
+保留意见与处置人，历史报告的 findings 同样可处置，处置结果回写在同一份快照的 finding 上。
+
 ## 前端
 
-质量评估页保留「运行评估」（同步），新增「后台评估」按钮：提交后通过 `watchJob`
-轮询任务进度，完成后自动刷新最新报告。报告六维中的「商务完整性」得分直接反映真实
-必填项完成率，问题清单中的商务完整性 finding 可正常标记处置。
+质量评估页保留「运行评估」（同步），「后台评估」按钮：提交后通过 `watchJob`
+轮询任务进度（含进度百分比、完成自动刷新、失败提示）。报告六维中的「商务完整性」得分
+直接反映真实必填项完成率，问题清单中的商务完整性 finding 可正常标记处置。
+
+历史报告区点击任意版本会按需调用 findings 详情接口（列表接口不返回 findings，
+直接切换会显示空问题列表）。问题卡片可填写处置意见，标记已处置/忽略后展示处置人与
+意见，并可「重新打开」。

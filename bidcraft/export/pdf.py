@@ -133,7 +133,13 @@ def export_pdf(
     timeout: int = 240,
     update_toc: bool = True,
 ) -> Path:
-    """Convert an existing DOCX to PDF using headless LibreOffice."""
+    """Convert an existing DOCX to PDF using headless LibreOffice.
+
+    This can block for up to ``timeout`` seconds (UNO field refresh plus the
+    plain ``--convert-to`` fallback).  Callers from request handlers MUST run
+    it *outside* any open database transaction/session so a slow conversion
+    never holds a DB connection or write lock.
+    """
     source = Path(docx_path)
     if not source.exists():
         raise PdfExportError(f"DOCX 不存在: {source}")

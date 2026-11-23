@@ -19,9 +19,11 @@ sudo mkdir -p /opt/bidcraft/data /opt/bidcraft/compose
 sudo chown -R 10001:10001 /opt/bidcraft/data
 sudo cp deploy/docker-compose.yml /opt/bidcraft/compose/
 # 参考 .env.example 创建 /opt/bidcraft/compose/.env（chmod 600）：
-#   BIDCRAFT_ADMIN_PASSWORD=<强密码>   首次启动创建 admin，之后改它不会重置密码
+#   BIDCRAFT_ADMIN_PASSWORD=<至少 12 位强密码>  首次启动创建 admin，之后改它不会重置密码
+#     prod 会拒绝 change-me / admin123 / password 等占位口令，留空也会阻止启动
 #   BIDCRAFT_SECURE_COOKIE=1           仅 HTTP 访问时临时设 0（见下）
 #   BIDCRAFT_DB_URL=（可选）postgresql://user:pass@host:5432/db   详见 docs/postgresql.md
+#   BIDCRAFT_TRUST_PROXY=1             仅在确实位于 1Panel/OpenResty 反代之后开启
 cd /opt/bidcraft/compose && sudo docker compose up -d
 ```
 
@@ -56,7 +58,9 @@ HTTP-01 验证无法通过。备案完成后：
   curl -s -b /tmp/bc.cookie http://127.0.0.1:8000/admin/health
   rm -f /tmp/bc.cookie
   ```
-- 日志：`docker logs bidcraft`；站点访问日志在 1Panel 网站目录 `log/`
+- 日志：`docker logs bidcraft`（应用日志为 `时间 级别 logger [req=请求ID] 消息`，
+  可用 `BIDCRAFT_LOG_FORMAT=json` 切成单行 JSON 便于采集；级别由 `BIDCRAFT_LOG_LEVEL`
+  控制）。响应会回显 `X-Request-ID`，用它把前端报错与服务端日志对上。
 - 备份：`/opt/bidcraft/data`（业务数据）+ `/opt/bidcraft/compose/.env`（管理员密码）
 - 升级：构建新镜像 → load → 改 compose 的 image 标签 → `docker compose up -d`
 - 重启持久化：docker/1panel 服务均 enabled；容器 restart=unless-stopped/always
@@ -64,10 +68,19 @@ HTTP-01 验证无法通过。备案完成后：
 ### 5.1 API 与 Worker 分离部署（可选，v0.12.0+）
 
 默认镜像入口是单进程（`bidcraft serve`，API + worker 同进程），适合小规模使用。
-需要让 API 可独立重启/扩容时，把两者拆成两个进程组，共用同一个 `BIDCRAFT_HOME` 数据卷：
+需要让 API 可独立重启/扩容时，把两者拆成两个进程组，共用同一个 `BIDCRAFT_HOME` 数据卷。
+
+> [!WARNING]
+> **SQLite 绝不能配 `--workers 4` 或多实例。** 默认 `BIDCRAFT_DB_URL` 是 SQLite，
+> 数据库层是**单写者**（WAL 只放宽读写并发，写事务仍串行且只有 30s busy timeout）。
+> 多 worker/多容器共享 SQLite 文件会出现 `database is locked`、写丢失与迁移竞争。
+> **只要 `--workers > 1` 或起了多个 API/Worker 容器，就必须在 `.env` 配置
+> `BIDCRAFT_DB_URL` 指向同一个 PostgreSQL 实例**（详见 `docs/postgresql.md`）。
+> 单机单进程部署继续用默认 SQLite 即可，无需改动。
 
 ```bash
 # API 进程：只入队，不执行任务、不做启动恢复
+# 注意：下面 --workers 4 只在 BIDCRAFT_DB_URL=postgresql://... 时允许！
 BIDCRAFT_EMBEDDED_WORKERS=0 uvicorn bidcraft.api:app --host 0.0.0.0 --port 8000 --workers 4
 
 # Worker 进程：认领并执行任务（可起多个，各自原子认领）
@@ -83,7 +96,30 @@ bidcraft worker
 - 仍不需要 Redis；Worker 发现新任务有最多 5 秒的轮询延迟。
 - PostgreSQL 可选（v0.18.0+）：多机部署时在 `.env` 设置 `BIDCRAFT_DB_URL`，
   所有进程指向同一个 PG 库，不再要求共享文件卷；详见 `docs/postgresql.md`。
+- **多实例必须在所有进程共用同一把 Fernet 主密钥**：要么共享挂载同一个
+  `BIDCRAFT_HOME/secret.key`（0600），要么统一设置 `BIDCRAFT_SECRET_KEY`
+  （32 字节密钥的 base64）。否则 A 实例加密的 API Key、微信配置或签名 state
+  在 B 实例上无法解密，表现为"密钥丢失/微信回调校验失败"。
 - 继续使用单进程镜像时无需任何改动（默认 `BIDCRAFT_EMBEDDED_WORKERS=1`）。
+
+### 5.2 备份与恢复演练（必做）
+
+除了整目录备份，系统内置一致性备份命令（不要直接 `cp` 运行中的 SQLite 文件）：
+
+```bash
+bidcraft backup                    # 生成 BIDCRAFT_HOME/backups/bidcraft-<时间>.zip
+bidcraft backup --list             # 列出已有备份
+bidcraft backup-verify <备份.zip>  # 校验完整性（SQLite integrity_check / PG 建表+数据行）
+```
+
+PostgreSQL 备份走 `pg_dump`（需安装 `postgresql-client`），SQLite 走在线备份 API；
+zip 内含 `secret.key`（存在时）与 `manifest.json`。恢复步骤：**停服 → 解压 →
+把 `bidcraft.db`（或 PG 的 `dump.sql`）与 `secret.key` 放回 → 启动**。命令不会自动
+覆盖线上数据。
+
+**恢复演练**：每季度（或每次大版本升级前）在独立的临时目录/临时 PG 库上做一次
+完整 restore + `bidcraft backup-verify` + 登录与一条项目冒烟检查，记录耗时与结果。
+没演练过的备份不算备份。详见 `docs/architecture.md`「备份与恢复」与 `docs/postgresql.md`。
 
 ## 6. 上线前的暴露面收紧（v0.6.3+ 内置，0.7.0 增补 `/admin/health`）
 
@@ -92,14 +128,28 @@ bidcraft worker
 | `/docs`、`/redoc`、`/openapi.json` | **404** | 由 `BIDCRAFT_DOCS_ENABLED=0` 控制；仅排障时临时置 1 并重启 |
 | `/health` | 最小字段 | 只返回 `status` 与前端必需字段，不含版本、绝对路径、库内计数；Docker HEALTHCHECK 仍可用 |
 | `/admin/health` | 超级管理员 | 完整运行状态（版本、uptime、Python/平台、DB 大小与磁盘余量、模型/知识库/用户计数、开关项）；匿名 401、普通成员 403，不会落到公开探活里 |
-| 安全响应头 | 全站注入 | `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`、CSP（`default-src 'self'`、`frame-ancestors 'none'`、`object-src 'none'`）、HTTPS 下加 HSTS |
+| 安全响应头 | 全站注入 | `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`、CSP（`default-src 'self'`、`frame-ancestors 'none'`、`object-src 'none'`）、`Permissions-Policy`、`Cross-Origin-Opener-Policy: same-origin`、`Cross-Origin-Resource-Policy: same-origin`、HTTPS 下加 HSTS；每响应带回显的 `X-Request-ID` |
+| CSRF 纵深防御 | 带 Cookie 的状态变更请求 | `POST/PUT/PATCH/DELETE` 且带 Cookie 时：显式 `Origin` 必须同源；`Sec-Fetch-Site` 为 `cross-site`/`same-site` 一律 403；不带这两个头的普通脚本/curl 保持兼容。不要依赖它替代反代层 CSRF/WAF |
+| 敏感端点限流 | 进程内滑动窗口 | 登录（用户名维度 8 次/5min 之外）再按 IP + 全局限流；注册、改密/重置、兑换码、模型/知识库/插件测试同样限流。默认见下；多 worker 只在反代层补充限流 |
 
 `.env` 追加：
 
 ```bash
 BIDCRAFT_DOCS_ENABLED=0
 # 私有化部署排查问题时可临时设 1，用完改回
+BIDCRAFT_RATE_LIMIT=1
+BIDCRAFT_RATE_WINDOW_SECONDS=300
+BIDCRAFT_RATE_LOGIN_IP=60          # 登录：每 IP
+BIDCRAFT_RATE_LOGIN_GLOBAL=1000    # 登录：每进程
+BIDCRAFT_RATE_SENSITIVE_IP=30      # 注册/改密/兑换/模型测试：每 IP
+BIDCRAFT_RATE_SENSITIVE_GLOBAL=300
+BIDCRAFT_TRUST_PROXY=1             # 仅当确实位于反代之后；用 X-Forwarded-For 记真实 IP
+BIDCRAFT_LOG_LEVEL=INFO            # text | json 由 BIDCRAFT_LOG_FORMAT 控制
 ```
+
+限流是**进程内**计数器：重启清零、多 worker 各算各的，且只覆盖认证敏感端点。
+公网部署仍须在 OpenResty/1Panel 层配置全局速率限制与 WAF；`BIDCRAFT_TRUST_PROXY`
+只在请求确实经过你控制的反代时开启，直连时开启会让客户端伪造 IP 绕过限流。
 
 ## 7. OpenResty：80 只做跳转，并补齐响应头
 

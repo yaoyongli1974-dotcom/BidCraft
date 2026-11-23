@@ -1,0 +1,35 @@
+version: 2
+updates:
+  # Python 依赖：本仓库用 uv + uv.lock（CI 用 uv sync --frozen），
+  # 因此用 uv ecosystem 才能同步更新 pyproject.toml 与 uv.lock，避免锁定失效。
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+
+  # 前端依赖（web/package.json + package-lock.json）
+  - package-ecosystem: "npm"
+    directory: "/web"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+
+  # GitHub Actions 版本升级（含第三方 action 的 pinned tag）
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5

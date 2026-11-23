@@ -49,6 +49,14 @@ function statusMeta(status: string): { label: string; tone: Tone } {
 }
 
 const TERMINAL = new Set(['done', 'failed', 'cancelled'])
+/** 后端 resume_workflow 仅在失败重试 / 审批闸门后可以继续推进。 */
+const RESUMABLE = new Set(['failed', 'waiting_approval'])
+/** planner.build_workflow 接受的可以直接启动的类型（custom 需提供 tasks，界面不开放）。 */
+const WORKFLOW_TYPES = [
+  { value: 'standard', label: '标准编排' },
+  { value: 'full', label: '全流程编排' },
+  { value: 'bid', label: '投标编排' },
+]
 
 function statLine(run: WorkflowRun): string {
   const stats = run.stats || {}
@@ -76,6 +84,9 @@ export function AgentsTab() {
   const [detail, setDetail] = useState<WorkflowRun | null>(null)
   const [tasks, setTasks] = useState<WorkflowTask[]>([])
   const [actionError, setActionError] = useState<string | null>(null)
+  const [detailError, setDetailError] = useState<string | null>(null)
+  const [detailNonce, setDetailNonce] = useState(0)
+  const [reviewNotes, setReviewNotes] = useState<Record<string, string>>({})
 
   const workflows = workflowsQuery.data || []
   const approvals = approvalsQuery.data || []
@@ -95,9 +106,14 @@ export function AgentsTab() {
     if (!selected) {
       setDetail(null)
       setTasks([])
+      setDetailError(null)
       return
     }
     let cancelled = false
+    // 切换运行或重试时先清空旧详情，避免加载失败后出现永久骨架屏。
+    setDetail(null)
+    setTasks([])
+    setDetailError(null)
     const load = async () => {
       try {
         const [run, taskList] = await Promise.all([
@@ -108,14 +124,17 @@ export function AgentsTab() {
         setDetail(run)
         setTasks(taskList)
       } catch (error) {
-        if (!cancelled) setActionError(messageOf(error))
+        if (cancelled) return
+        setDetail(null)
+        setTasks([])
+        setDetailError(messageOf(error))
       }
     }
     void load()
     return () => {
       cancelled = true
     }
-  }, [ref, selected])
+  }, [ref, selected, detailNonce])
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -150,7 +169,12 @@ export function AgentsTab() {
       toast.success(action === 'cancel' ? '已取消工作流' : '已恢复工作流', runId)
       await workflowsQuery.refresh()
       if (selectedId === runId) {
-        setDetail(await getWorkflow(ref, runId))
+        try {
+          setDetail(await getWorkflow(ref, runId))
+        } catch (error) {
+          setDetail(null)
+          setDetailError(messageOf(error))
+        }
       }
     } catch (error) {
       setActionError(messageOf(error))
@@ -161,11 +185,20 @@ export function AgentsTab() {
     if (readOnly) return
     setActionError(null)
     try {
-      await reviewWorkflowApproval(ref, approval.id, { decision })
+      await reviewWorkflowApproval(ref, approval.id, {
+        decision,
+        note: (reviewNotes[approval.id] || '').trim(),
+      })
       toast.success(decision === 'approve' ? '已通过审批' : '已驳回', approval.approval_type)
+      setReviewNotes((current) => ({ ...current, [approval.id]: '' }))
       await Promise.all([approvalsQuery.refresh(), workflowsQuery.refresh()])
       if (selectedId && detail) {
-        setDetail(await getWorkflow(ref, detail.id))
+        try {
+          setDetail(await getWorkflow(ref, detail.id))
+        } catch (error) {
+          setDetail(null)
+          setDetailError(messageOf(error))
+        }
       }
     } catch (error) {
       setActionError(messageOf(error))
@@ -173,6 +206,7 @@ export function AgentsTab() {
   }
 
   const pendingApprovals = approvals.filter((item) => item.status === 'pending')
+  const processedApprovals = approvals.filter((item) => item.status !== 'pending')
 
   return (
     <div className="tab-content agents-tab">
@@ -260,11 +294,17 @@ export function AgentsTab() {
               </label>
               <label>
                 <span>工作流类型</span>
-                <input
+                <select
+                  aria-label="工作流类型"
                   value={workflowType}
                   onChange={(event) => setWorkflowType(event.target.value)}
                   disabled={readOnly || creating}
-                />
+                >
+                  {WORKFLOW_TYPES.map((item) => (
+                    <option key={item.value} value={item.value}>{item.label}</option>
+                  ))}
+                </select>
+                <p className="field-hint">仅支持标准 / 全流程 / 投标三种内置编排；自定义类型需通过 API 提供任务列表。</p>
               </label>
               <Button
                 type="submit"
@@ -327,36 +367,59 @@ export function AgentsTab() {
             </div>
             {approvalsQuery.loading ? (
               <Skeleton height={60} />
-            ) : pendingApprovals.length === 0 ? (
+            ) : approvals.length === 0 ? (
               <EmptyState icon={CheckCircle2} title="无待审批项" description="工作流到达审批闸门时会出现在这里。" />
             ) : (
               <div className="approval-list">
-                {pendingApprovals.map((approval) => (
+                {[...pendingApprovals, ...processedApprovals].map((approval) => (
                   <div key={approval.id} className="approval-item">
                     <div className="approval-main">
                       <strong>{approval.approval_type}</strong>
                       <small>{approval.run_id || ''}</small>
+                      <small>提交人：{approval.submitted_by || '—'}</small>
+                      {approval.status !== 'pending' && (
+                        <small>
+                          审批人：{approval.reviewed_by || '—'}
+                          {approval.review_note ? ` · 意见：${approval.review_note}` : ''}
+                        </small>
+                      )}
                     </div>
-                    <div className="approval-actions">
-                      <Button
-                        variant="primary"
-                        size="sm"
-                        icon={<CheckCircle2 size={13} />}
-                        disabled={readOnly}
-                        onClick={() => void review(approval, 'approve')}
-                      >
-                        通过
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        icon={<XCircle size={13} />}
-                        disabled={readOnly}
-                        onClick={() => void review(approval, 'reject')}
-                      >
-                        驳回
-                      </Button>
-                    </div>
+                    {approval.status === 'pending' ? (
+                      <div className="approval-actions">
+                        <input
+                          className="input input--sm"
+                          aria-label={`审批意见：${approval.approval_type}`}
+                          placeholder="审批意见（可选）"
+                          value={reviewNotes[approval.id] || ''}
+                          onChange={(event) =>
+                            setReviewNotes((current) => ({ ...current, [approval.id]: event.target.value }))
+                          }
+                          disabled={readOnly}
+                        />
+                        <Button
+                          variant="primary"
+                          size="sm"
+                          icon={<CheckCircle2 size={13} />}
+                          disabled={readOnly}
+                          onClick={() => void review(approval, 'approve')}
+                        >
+                          通过
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          icon={<XCircle size={13} />}
+                          disabled={readOnly}
+                          onClick={() => void review(approval, 'reject')}
+                        >
+                          驳回
+                        </Button>
+                      </div>
+                    ) : (
+                      <Badge tone={approval.status === 'approved' ? 'success' : 'danger'} subtle>
+                        {approval.status === 'approved' ? '已通过' : '已驳回'}
+                      </Badge>
+                    )}
                   </div>
                 ))}
               </div>
@@ -369,15 +432,42 @@ export function AgentsTab() {
                 <div className="eyebrow">运行详情</div>
                 <h3>{selected ? selected.goal || selected.id : '未选择工作流'}</h3>
               </div>
-              {selected && !TERMINAL.has(selected.status) && (
+              {selected && (
                 <div className="agents-detail-actions">
-                  <Button variant="ghost" size="sm" disabled={readOnly} onClick={() => void act(selected.id, 'resume')}>恢复</Button>
-                  <Button variant="ghost" size="sm" icon={<CircleSlash size={13} />} disabled={readOnly} onClick={() => void act(selected.id, 'cancel')}>取消</Button>
+                  {RESUMABLE.has(selected.status) && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={readOnly || (selected.status === 'waiting_approval' && pendingApprovals.length > 0)}
+                      title={selected.status === 'waiting_approval' && pendingApprovals.length > 0
+                        ? '请先处理待审批项后再恢复'
+                        : undefined}
+                      onClick={() => void act(selected.id, 'resume')}
+                    >
+                      恢复
+                    </Button>
+                  )}
+                  {selected.status !== 'done' && selected.status !== 'cancelled' && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      icon={<CircleSlash size={13} />}
+                      disabled={readOnly}
+                      onClick={() => void act(selected.id, 'cancel')}
+                    >
+                      取消
+                    </Button>
+                  )}
                 </div>
               )}
             </div>
             {!selected ? (
               <EmptyState icon={Play} title="选择左侧工作流" description="点击一个运行实例查看任务时间线。" />
+            ) : detailError ? (
+              <ErrorState
+                message={`运行详情加载失败：${detailError}`}
+                onRetry={() => setDetailNonce((value) => value + 1)}
+              />
             ) : detail === null ? (
               <Skeleton height={160} />
             ) : (

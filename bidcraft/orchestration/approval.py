@@ -44,6 +44,23 @@ def _check_permission(db: Session, run: WorkflowRun, actor: dict[str, Any]) -> s
     return role
 
 
+def _check_separation(
+    approval: WorkflowApproval, actor: dict[str, Any], role: str
+) -> None:
+    """审批人不得是提交人（四眼原则）。
+
+    ``submitted_by`` 为空时视为历史数据/系统触发，无从判定提交人，跳过；
+    超级管理员沿用报价审批链的「可代审」口径（effective role ``admin``）。
+    """
+
+    if role == "admin":
+        return
+    requester = str(approval.submitted_by or "").strip()
+    reviewer = str(actor.get("username") or "").strip()
+    if requester and requester == reviewer:
+        raise ApprovalError("不能审批自己提交的审批项，请由其他有权限的成员处理")
+
+
 def _pending_approval(
     db: Session, run_id: str, task_id: str | None
 ) -> WorkflowApproval | None:
@@ -122,6 +139,7 @@ def approve_task(
     run = _run(db, approval.run_id)
     resolved = _resolve_actor(actor)
     role = _check_permission(db, run, resolved)
+    _check_separation(approval, resolved, role)
     if approval.status != "pending":
         raise ApprovalError("该审批已处理")
     reviewer_name = reviewer or str(resolved.get("username") or "")
@@ -188,6 +206,7 @@ def reject_task(
     run = _run(db, approval.run_id)
     resolved = _resolve_actor(actor)
     role = _check_permission(db, run, resolved)
+    _check_separation(approval, resolved, role)
     if approval.status != "pending":
         raise ApprovalError("该审批已处理")
     approval.status = "rejected"

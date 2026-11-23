@@ -28,7 +28,7 @@
 | C7 可插拔 Agent / API | ✅ | `generation/agent.py`、`bidcraft/api.py`、`bidcraft/mcp.py` | OpenAI 兼容端点；FastAPI + 后台生成任务；MCP stdio 服务 |
 | C8 行业包 | ✅ 8 个行业包 + 通用基包 | `bidcraft/resources/packages/*.yaml` | 弱电（综合布线/安防/BA）+ 消防、安装、土建、暖通、装修；管理员可在 `/admin` 维护 YAML 覆盖包 |
 | 规则包管理 | ✅ | `rules/store.py`、`/admin/rule-packages`、`web/` | 超级管理员创建/修改/隐藏/恢复规则包；新建时可填写名称、唯一包名并选择工程类型；内置包只读，用户覆盖写入 `BIDCRAFT_HOME/packages`；保存前校验继承、字段、大纲与核对表达式 |
-| C9 回归/部署 | ✅ 基本 | `tests/`、`Dockerfile`、`web/` | 1221 个测试；Docker 多阶段构建 Web（含 OCR 依赖）；本地/局域网两种部署 |
+| C9 回归/部署 | ✅ 基本 | `tests/`、`Dockerfile`、`web/` | 1300+ 个测试（前端 262 tests，typecheck 通过）；Docker 多阶段构建 Web（含 OCR 依赖）；本地/局域网两种部署 |
 | SSE 流式进度 | ✅ | `bidcraft/jobs.py`、`/jobs/{id}/events`、`web/` | 章节/逐字事件持久化；Last-Event-ID 断线续传；SSE 失败回退轮询；刷新后重新挂接任务 |
 | Excel 清单双向对齐 | ✅ | `boq.py`、`export/boq_xlsx.py`、`/projects/{ref}/boq`、`web/` | 清单导入与表头识别、材料模糊匹配、缺项/多项/数量·单位·规格差异、差异回写、响应表导出 |
 | 清单报价 | ✅ | `boq.py`、`/projects/{ref}/boq/price`、`export/boq_xlsx.py`、`web/` | 逐行单价录入/清除、按清单数量计算合价、已报价/未报价/缺数量统计、报价汇总与响应表价格列；不自动生成价格 |
@@ -59,6 +59,13 @@
 | VIP 会员 | ✅ | `billing.py`、`/admin/users/{id}/vip`、`/billing/vip/orders`、`web/` | 超管授予/续期/清除 VIP、自助购买 VIP 套餐（月/季/年，mock 续期不加点）；按章扣点享 VIP 折扣（vip_discount 0.1–1）；VIP 后台任务排队优先 |
 | 子账号共享计费 | ✅ | `accounts.py`、`/account/sub-accounts`、`web/` | VIP 主账号自助创建子账号（sub_account_limit 上限），子账号共享主账号点数余额、不可单独充值/兑换/购买；删除子账号项目自动移交主账号 |
 | 优先级任务队列 | ✅ | `jobqueue.py`、`jobs.py`、`web/` | 后台任务由 `jobs` 表驱动（worker 原子认领 + 租约心跳 + fencing 令牌），章节幂等账本 + 心跳中止 + 优雅退出，VIP=0 优先，并发 `BIDCRAFT_MAX_JOBS`（默认 2，1–8）；job payload 回显 priority/queue_position |
+| 企业知识库 2.0 | ✅ | `enterprise/`、`models.KbDocument`、`/enterprise`、`web/EnterpriseTab` | 企业空间与成员、企业共享资质/人员/业绩；文档增量索引与可信度分级检索 |
+| 商务标自动编制 | ✅ | `commercial.py`、`/projects/{ref}/commercial`、`web/CommercialTab` | 基于 approved 报价版本确定性汇编，复用审批链与 XLSX/DOCX 导出；`submit_commercial` 可选 `require_complete` 完整性硬门禁（默认关闭，前端勾选开启） |
+| 多维查重 | ✅ | `similarity/`、`/projects/{ref}/similarity`、`web/SimilarityTab` | 文本/结构/语义/图片四维相似度、命中落库与人工复核；可选 LLM 语义匹配器 `verdict_llm.py`（`BIDCRAFT_VERDICT_LLM=1`，失败/超预算回退规则判定，LLM 不能单独放行 SATISFIED） |
+| Agent 编排 | ✅ | `orchestration/`、`/projects/{ref}/workflows`、`web/tabs/AgentsTab` | 注册表 + DAG 工作流 + 人工审批闸门；仅标准/全流程/投标三种类型可直接从界面启动（custom 需 API 提供 tasks）；恢复仅用于失败重试/审批后；审批要求项目写权限 + 提交人不得自审（超管代审除外），审批意见落 `review_note` |
+| 章节协作 | ✅ | `collaboration/`、`web/components/ChapterCollab` | 章节锁/乐观锁、修订 diff/恢复、负责人确认/锁定与章节分工 |
+| 质量评估中心 | ✅ | `evaluation/`、`/projects/{ref}/evaluation`、`web/tabs/QualityTab` | 六维评分与硬性风险一票否决、不可变报告快照 + finding 人工处置；`run` 同步与 `run-async` 后台任务（SSE/轮询）；历史报告点击时按需取 findings；处置意见/处置人写入 evidence 并可重新打开 |
+| 插件包签名与运营可观测 | ✅ | `plugin_pack.py`、`/admin/health`、`web/admin/AdminHealthTab` | `.bidplugin` 可选 Ed25519 签名验签（默认兼容未签名）；超管页读取完整健康检查，人工修改率/问题密度/清单匹配率按项目口径展示 |
 
 ## 已覆盖的 P0
 

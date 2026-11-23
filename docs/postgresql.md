@@ -63,6 +63,29 @@ BidCraft 默认使用 SQLite（WAL 模式），适合单进程/单机部署。�
 `bidcraft backup-verify <zip>` 两种格式都能校验：SQLite 跑完整性检查，PG 解析
 SQL 中的建表与数据行。恢复 PG 备份时用 `psql` 导入 `dump.sql`，再放回 `secret.key`。
 
+## 多实例的 secret.key（关键）
+
+模型/知识库 API Key 由 `BIDCRAFT_HOME/secret.key`（0600）加密，微信 state 签名也由它
+派生。SQLite 单机共享一个数据目录，天然只有一个 `secret.key`；PostgreSQL 多机部署
+**通常没有共享文件卷**，各实例各自首次启动会生成**不同的**密钥，导致一台机器加密的
+数据另一台无法解密（表现为 API Key 失效、微信回调 state 校验失败）。
+
+两种做法任选其一，并保证所有 API / Worker 进程一致：
+
+1. **共享文件**：把同一个 `secret.key` 通过配置管理/只读卷下发到每台机器的
+   `BIDCRAFT_HOME`，权限 0600，且纳入备份（与数据库同等重要）。
+2. **环境变量（推荐给容器）**：设置 `BIDCRAFT_SECRET_KEY` 为 32 字节 Fernet 密钥的
+   base64 编码（例如 `python -c "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())"`），
+   所有实例用同一个值。设置后优先于 `secret.key` 文件；格式错误会在启动配置校验中报错。
+
+```bash
+export BIDCRAFT_SECRET_KEY='<所有实例完全相同的 Fernet key>'
+```
+
+注意：更换密钥会使旧密文无法解密，需要重新录入相关 API Key；请勿在升级时随意轮换。
+生产环境若使用 PostgreSQL 而未设置 `BIDCRAFT_SECRET_KEY`，启动日志会提示共享
+`secret.key`。同样地，多 worker/多实例请给反代层加全局限流（应用内限流是进程级的）。
+
 ## 已知限制
 
 - 没有提供 SQLite → PostgreSQL 的自动数据迁移工具。已有数据请用

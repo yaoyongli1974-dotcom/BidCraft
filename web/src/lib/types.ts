@@ -981,6 +981,57 @@ export interface CreditAdjustResult {
   transactions: CreditTransaction[]
 }
 
+/** 开票申请（管理员开具/驳回，文件由管理员上传）。 */
+export interface InvoiceRequest {
+  id: string
+  user_id: string
+  username?: string
+  title: string
+  tax_no: string
+  email: string
+  amount_cents: number
+  note?: string
+  status: 'requested' | 'issued' | 'rejected' | string
+  status_label?: string
+  invoice_no?: string
+  reject_reason?: string
+  has_file?: boolean
+  issued_at?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+/** `/admin/health` 的完整运行状态（仅超级管理员可读）。 */
+export interface AdminHealth {
+  status: string
+  version: string
+  started_at: string | null
+  uptime_seconds: number
+  python: string
+  platform: string
+  home: string
+  db_size_bytes: number
+  disk_free_bytes: number
+  web_ready: boolean
+  offline: boolean
+  docs_enabled: boolean
+  health_public: boolean
+  secure_cookie: boolean
+  model_configured: boolean
+  model_label: string
+  embedding_configured: boolean
+  embedding_model: string
+  models: number
+  knowledge_bases: number
+  users: number
+  auth_required: boolean
+  registration: boolean
+  wechat_login: boolean
+  wechat_pay: boolean
+  /** 后端未来可按项目聚合的运营指标；未返回时前端显示「暂无全局聚合」。 */
+  metrics?: Partial<Record<'manual_edit_rate' | 'issue_density' | 'boq_match_rate', number | string>>
+}
+
 
 export interface ImageAsset {
   id: string
@@ -2145,6 +2196,9 @@ export interface QualityFinding {
   evidence: Record<string, unknown>
   recommendation: string
   status: string
+  /** 人工处置意见与处置人（后端写入 evidence，这里展开便于展示）。 */
+  resolution_note?: string
+  resolved_by?: string
 }
 
 /** 质量报告快照（不可变，每次运行版本号 +1）。 */

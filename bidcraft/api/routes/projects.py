@@ -4,6 +4,7 @@ import hashlib
 import sys
 
 from fastapi import APIRouter
+from sqlalchemy import case, or_
 
 _core = sys.modules['bidcraft.api.app']  # 运行期查找，保持 monkeypatch 生效
 
@@ -111,6 +112,7 @@ from ..shared import (  # noqa: F401
     _project,
     _project_payload,
     _project_stats,
+    _project_stats_batch,
     _report_payload,
     _require_owner,
     _require_write,
@@ -139,7 +141,6 @@ from ..shared import (  # noqa: F401
     count_words,
     create_project,
     current_user,
-    datetime,
     delete,
     duplicate_project,
     enforce_export_gate,
@@ -155,10 +156,13 @@ from ..shared import (  # noqa: F401
     load_outline,
     load_package,
     math,
+    parse_documents,
     parse_project,
+    persist_parse,
     profile,
     provenance,
     re,
+    read_parse_inputs,
     save_outline,
     scoring,
     select,
@@ -189,40 +193,42 @@ def projects(limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
             rows = list(
                 db.scalars(
                     select(Project)
-                    .order_by(Project.updated_at.desc())
+                    .order_by(Project.updated_at.desc(), Project.id)
                     .limit(capped)
                     .offset(start)
                 )
             )
-            return [
-                _project_payload(item, _project_stats(db, item.id), "admin")
-                for item in rows
-            ]
+            stats = _project_stats_batch(db, [item.id for item in rows])
+            return [_project_payload(item, stats[item.id], "admin") for item in rows]
+        user_id = user.get("id")
         memberships = {
             row.project_id: row.role
             for row in db.scalars(
-                select(ProjectMember).where(ProjectMember.user_id == user.get("id"))
+                select(ProjectMember).where(ProjectMember.user_id == user_id)
             )
         }
-        visible: dict[str, tuple[Project, str]] = {
-            item.id: (item, "owner")
-            for item in db.scalars(
-                select(Project).where(Project.owner_id == user.get("id"))
-            )
-        }
+        # 可见性过滤、排序、分页全部下推到 SQL：旧实现把所有可见项目读入
+        # Python 再 sort/slice，项目数量增长时内存与延迟线性膨胀。
+        visible_filter = [Project.owner_id == user_id]
         if memberships:
-            for item in db.scalars(
-                select(Project).where(Project.id.in_(list(memberships)))
-            ):
-                visible.setdefault(item.id, (item, memberships[item.id]))
-        ordered = sorted(
-            visible.values(),
-            key=lambda pair: pair[0].updated_at or datetime.min,
-            reverse=True,
+            visible_filter.append(Project.id.in_(list(memberships)))
+        rows = list(
+            db.scalars(
+                select(Project)
+                .where(or_(*visible_filter))
+                .order_by(Project.updated_at.desc(), Project.id)
+                .limit(capped)
+                .offset(start)
+            )
         )
+        stats = _project_stats_batch(db, [item.id for item in rows])
         return [
-            _project_payload(item, _project_stats(db, item.id), role)
-            for item, role in ordered[start : start + capped]
+            _project_payload(
+                item,
+                stats[item.id],
+                "owner" if item.owner_id == user_id else memberships.get(item.id, "owner"),
+            )
+            for item in rows
         ]
 
 
@@ -1159,13 +1165,23 @@ def source_file(ref: str, source_id: str) -> FileResponse:
 
 @router.post("/projects/{ref}/parse")
 def reparse(ref: str) -> dict[str, Any]:
+    # 重解析会做 OCR/文档抽取（秒级到分钟级），拆成"短读事务 → 纯解析 →
+    # 短写事务"三段，避免整段时间占用数据库写连接；响应结构与原来一致。
     with session_scope() as db:
         project, _role = _project(db, ref)
         _require_write(_role)
+        project_id = project.id
         try:
-            ledger, info = parse_project(db, project.id)
+            package_name, source_specs = read_parse_inputs(db, project_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        ledger, info, updates = parse_documents(package_name, source_specs)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    with session_scope() as db:
+        persist_parse(db, project_id, ledger, updates)
+        project = db.get(Project, project_id)
         audit(db, project.id, "parse.run", {"notes": len(info["notes"])})
         return {
             "project": _project_payload(project, _project_stats(db, project.id)),
@@ -1509,10 +1525,14 @@ def review_chapter(ref: str, node_id: str, payload: ChapterReview) -> dict[str, 
 
 @router.post("/projects/{ref}/chapters/{node_id}/generate")
 def generate_chapter(ref: str, node_id: str) -> dict[str, Any]:
+    # 1) 短事务：鉴权 + 门禁 + 扣费。扣费不再与耗时数十秒的模型调用共处一个
+    #    长事务（原实现一旦网络抖动就会长时间持有计费行与 DB 连接）。
     with session_scope() as db:
         project, _role = _project(db, ref)
         _require_write(_role)
         node = _node(db, project.id, node_id)
+        node_id_value = node.id
+        heading = node.heading
         existing = db.scalar(select(Section).where(Section.node_id == node.id))
         if existing is not None and (existing.review_status or "draft") in {
             "confirmed",
@@ -1535,31 +1555,50 @@ def generate_chapter(ref: str, node_id: str) -> dict[str, Any]:
             )
         try:
             charged = billing.charge_chapters(
-                db, user, 1, project_id=project.id, note=f"生成本章：{node.heading}"
+                db, user, 1, project_id=project.id, note=f"生成本章：{heading}"
             )
         except billing.InsufficientCredits as exc:
             raise HTTPException(status_code=402, detail=str(exc)) from exc
-        report = generate_document(
-            db,
-            project.id,
-            client,
-            ledger,
-            package,
-            only_node=node.id,
-            knowledge_provider=_knowledge_provider(db, user.id),
-        )
+        project_id = project.id
+    # 2) 模型调用。generate_document 需要可写 Session 落地章节（writer.py 直接
+    #    写 Section/OutlineNode 并 flush），且 before/after_chapter 钩子也接收
+    #    该 Session；在不动 writer.py 的前提下无法把 HTTP 模型调用再挪出会话，
+    #    因此采用"窄事务"：此会话只覆盖章节写入，不含扣费/退款/审计。
+    try:
+        with session_scope() as gen_db:
+            report = generate_document(
+                gen_db,
+                project_id,
+                client,
+                ledger,
+                package,
+                only_node=node_id_value,
+                knowledge_provider=_knowledge_provider(gen_db, user.id),
+            )
+    except Exception:
+        # 原实现里模型调用抛错会回滚整个事务（含扣费）；扣费已提前提交，必须
+        # 显式退还，保持净额与原错误行为一致。
+        with session_scope() as refund_db:
+            billing.refund_chapters(refund_db, user, charged, project_id=project_id)
+        raise
+    # 3) 短写事务：未写出章节退还、状态、溯源与审计。
+    with session_scope() as db:
         if charged and not report.written:
-            billing.refund_chapters(db, user, charged, project_id=project.id)
+            billing.refund_chapters(db, user, charged, project_id=project_id)
+        project = db.get(Project, project_id)
         project.status = "drafting"
         db.flush()
-        provenance.refresh_node(db, project.id, node.id)
-        audit(db, project.id, "chapter.generate", {"heading": node.heading})
-        return _report_payload(report)
+        provenance.refresh_node(db, project_id, node_id_value)
+        audit(db, project_id, "chapter.generate", {"heading": heading})
+    return _report_payload(report)
 
 
 @router.post("/projects/{ref}/write")
 def write(ref: str) -> dict[str, Any]:
     """Synchronous generation kept for CLI parity and small integrations."""
+    # 与 generate_chapter 同样拆成"短计费事务 → 窄生成会话 → 短收尾事务"。
+    # writer.generate_document 必须拿到可写 Session 才能落地章节（见该函数
+    # 注释），所以 HTTP 模型调用无法完全脱离会话，但计费已不再处于长事务中。
     with session_scope() as db:
         project, _role = _project(db, ref)
         _require_write(_role)
@@ -1585,22 +1624,32 @@ def write(ref: str) -> dict[str, Any]:
             )
         except billing.InsufficientCredits as exc:
             raise HTTPException(status_code=402, detail=str(exc)) from exc
-        report = generate_document(
-            db,
-            project.id,
-            client,
-            ledger,
-            package,
-            knowledge_provider=_knowledge_provider(db, user.id),
-        )
+        project_id = project.id
+    try:
+        with session_scope() as gen_db:
+            report = generate_document(
+                gen_db,
+                project_id,
+                client,
+                ledger,
+                package,
+                knowledge_provider=_knowledge_provider(gen_db, user.id),
+            )
+    except Exception:
+        # 扣费已提前提交；模型调用失败时显式退还，等价于原来的整事务回滚。
+        with session_scope() as refund_db:
+            billing.refund_chapters(refund_db, user, charged, project_id=project_id)
+        raise
+    with session_scope() as db:
         if charged and count > len(report.written):
             unit = charged // count if count else 0
             billing.refund_chapters(
                 db, user, unit * (count - len(report.written)), project_id=project.id
             )
+        project = db.get(Project, project_id)
         project.status = "drafting"
         db.flush()
-        return _report_payload(report)
+    return _report_payload(report)
 
 
 @router.post("/projects/{ref}/generate", status_code=202)
@@ -1707,11 +1756,22 @@ def issues(ref: str, limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
     capped, start = _page_bounds(limit, offset)
     with session_scope() as db:
         project, _role = _project(db, ref)
-        rows = list(
-            db.scalars(select(Issue).where(Issue.project_id == project.id))
+        # 严重度排序与分页下推到 SQL（Issue.id 作为稳定的次级键），不再把
+        # 项目下的全部问题行读进 Python 再 sort/slice。
+        severity = case(
+            {level: rank for level, rank in SEVERITY_ORDER.items()},
+            value=Issue.level,
+            else_=9,
         )
-        rows.sort(key=lambda row: SEVERITY_ORDER.get(row.level, 9))
-        page = rows[start : start + capped]
+        page = list(
+            db.scalars(
+                select(Issue)
+                .where(Issue.project_id == project.id)
+                .order_by(severity, Issue.id)
+                .limit(capped)
+                .offset(start)
+            )
+        )
         node_map = _issue_node_map(db, page)
         return [_issue_payload(row, node_map) for row in page]
 
@@ -1904,6 +1964,7 @@ def export_template_set(ref: str, payload: ExportTemplateUpdate) -> dict[str, An
 @router.post("/projects/{ref}/export")
 def export(ref: str, payload: ExportRequest) -> FileResponse:
     fmt = payload.format.lower()
+    # 1) 短事务：鉴权 + 硬门禁 + 取渲染所需的只读快照。
     with session_scope() as db:
         project, role = _project(db, ref)
         _require_write(role)
@@ -1925,51 +1986,59 @@ def export(ref: str, payload: ExportRequest) -> FileResponse:
         nodes = load_outline(db, project.id)
         if fmt != "xlsx" and (not nodes or not any(node.get("body") for node in nodes)):
             raise HTTPException(status_code=409, detail="还没有正文，请先生成或编写章节")
-        output_dir = settings.project_dir(project.id) / "output"
-        audit(db, project.id, "export.run", {"format": fmt})
-        if fmt == "docx":
-            from ...export import templates as export_templates
+        project_id = project.id
+        project_name = project.name
+        output_dir = settings.project_dir(project_id) / "output"
+        from ...export import templates as export_templates
 
-            path = export_docx(
-                output_dir / "bid.docx",
-                ledger,
-                nodes,
-                image_resolver=images.url_resolver(project.id),
-                image_policy=images.get_policy(project),
-                template=export_templates.load(project),
-            )
-        elif fmt in {"md", "markdown"}:
-            path = export_markdown(output_dir / "bid.md", ledger, nodes)
-        elif fmt == "xlsx":
-            from ...export.xlsx import export_xlsx
+        image_resolver = images.url_resolver(project_id)
+        image_policy = images.get_policy(project)
+        template = export_templates.load(project)
+    # 2) DOCX 渲染与 PDF 的 LibreOffice/UNO 转换（超时可达 240s）在事务外执行，
+    #    避免长时间占用数据库连接/写事务；失败时与原实现一样不写审计。
+    if fmt == "docx":
+        path = export_docx(
+            output_dir / "bid.docx",
+            ledger,
+            nodes,
+            image_resolver=image_resolver,
+            image_policy=image_policy,
+            template=template,
+        )
+    elif fmt in {"md", "markdown"}:
+        path = export_markdown(output_dir / "bid.md", ledger, nodes)
+    elif fmt == "xlsx":
+        from ...export.xlsx import export_xlsx
 
-            path = export_xlsx(output_dir / "bid.xlsx", ledger)
-        elif fmt == "pdf":
-            from ...export import templates as export_templates
-            from ...export.pdf import PdfExportError, export_pdf
+        path = export_xlsx(output_dir / "bid.xlsx", ledger)
+    elif fmt == "pdf":
+        from ...export.pdf import PdfExportError, export_pdf
 
-            docx_path = export_docx(
-                output_dir / "bid.docx",
-                ledger,
-                nodes,
-                image_resolver=images.url_resolver(project.id),
-                image_policy=images.get_policy(project),
-                template=export_templates.load(project),
-            )
-            try:
-                path = export_pdf(docx_path)
-            except PdfExportError as exc:
-                raise HTTPException(status_code=500, detail=str(exc)) from exc
-        else:
-            raise HTTPException(status_code=400, detail="format 只能是 docx/md/pdf/xlsx")
-        safe = re.sub(r'[\\/:*?"<>|]', "", project.name).strip() or "BidCraft"
-        label = {
-            "docx": "投标文件",
-            "pdf": "投标文件",
-            "md": "投标文件",
-            "xlsx": "事实台账",
-        }[fmt if fmt != "markdown" else "md"]
-        return FileResponse(path, filename=f"{safe[:60]}-{label}{path.suffix}")
+        docx_path = export_docx(
+            output_dir / "bid.docx",
+            ledger,
+            nodes,
+            image_resolver=image_resolver,
+            image_policy=image_policy,
+            template=template,
+        )
+        try:
+            path = export_pdf(docx_path)
+        except PdfExportError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+    else:
+        raise HTTPException(status_code=400, detail="format 只能是 docx/md/pdf/xlsx")
+    safe = re.sub(r'[\\/:*?"<>|]', "", project_name).strip() or "BidCraft"
+    label = {
+        "docx": "投标文件",
+        "pdf": "投标文件",
+        "md": "投标文件",
+        "xlsx": "事实台账",
+    }[fmt if fmt != "markdown" else "md"]
+    # 3) 渲染成功后再写审计（与原"同事务提交"的语义一致：失败不留痕）。
+    with session_scope() as db:
+        audit(db, project_id, "export.run", {"format": fmt})
+    return FileResponse(path, filename=f"{safe[:60]}-{label}{path.suffix}")
 
 
 @router.get("/projects/{ref}/packages")

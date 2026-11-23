@@ -14,7 +14,7 @@ from bidcraft.config import settings
 from bidcraft.db import get_engine, init_db, reset_engine_for_tests
 
 #: 当前 alembic head（新增 revision 时同步这里）。
-HEAD = "0007_yibiao_batch4"
+HEAD = "0008_job_queue_indexes"
 
 
 def _version() -> list[str]:
@@ -117,3 +117,33 @@ def test_migrations_follow_runtime_home(tmp_path, monkeypatch):
             ).fetchall() == [(HEAD,)]
     finally:
         reset_engine_for_tests("sqlite+pysqlite:///:memory:")
+
+
+def test_job_queue_indexes_created_and_reversible(db):
+    """0008 建立队列热路径索引，降级后必须干净移除。"""
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+
+    from bidcraft.migrations import __file__ as migrations_init
+
+    engine = get_engine()
+    expected = {"ix_jobs_status", "ix_jobs_status_priority_created"}
+
+    def indexes():
+        with engine.connect() as connection:
+            return {idx["name"] for idx in inspect(connection).get_indexes("jobs")}
+
+    assert expected <= indexes()
+    cfg = Config()
+    cfg.set_main_option("script_location", str(Path(migrations_init).parent))
+    cfg.set_main_option(
+        "sqlalchemy.url",
+        engine.url.render_as_string(hide_password=False).replace("%", "%%"),
+    )
+    command.downgrade(cfg, "0007_yibiao_batch4")
+    assert not (expected & indexes())
+    command.upgrade(cfg, "head")
+    assert expected <= indexes()
+    assert _version() == [HEAD]

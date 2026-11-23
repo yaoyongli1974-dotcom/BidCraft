@@ -244,8 +244,8 @@ export function exportCommercialDoc(
   format: CommercialExportFormat,
 ): Promise<{ blob: Blob; filename: string }> {
   return requestBlob(
-    `/projects/${encodeURIComponent(ref)}/commercial/${encodeURIComponent(docId)}/export`,
-    { method: 'POST', body: JSON.stringify({ format }) },
+    `/projects/${encodeURIComponent(ref)}/commercial/${encodeURIComponent(docId)}/export?format=${encodeURIComponent(format)}`,
+    { method: 'POST' },
     `商务标.${format}`,
   )
 }

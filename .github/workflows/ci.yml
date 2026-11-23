@@ -130,3 +130,56 @@ jobs:
           assert failures == 0, f"PG 集成测试失败 {failures} 项"
           print(f"PG integration OK: {tests} tests, 0 skipped")
           PY
+
+  # ---------------------------------------------------------------------------
+  # 以下安全作业为初期"建议性"检查：工具/漏洞库可能临时不可用或报出历史告警，
+  # 先设 continue-on-error: true，不阻塞主分支。待基线清理完成后改为强制检查。
+  # ---------------------------------------------------------------------------
+  security-dependency-audit:
+    name: security (dependency audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+      - name: Export locked Python requirements
+        run: uv export --frozen --format requirements-txt --no-emit-project --extra api --extra postgres -o /tmp/bc-requirements.txt
+      - name: pip-audit (Python)
+        run: uvx --from pip-audit pip-audit -r /tmp/bc-requirements.txt --progress-spinner off
+      - name: npm audit (frontend, lockfile only)
+        working-directory: web
+        run: npm audit --package-lock-only --audit-level=high
+
+  security-sast:
+    name: security (bandit SAST)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Bandit (medium+ severity)
+        run: uvx --from bandit bandit -q -ll -r bidcraft
+
+  security-secret-scan:
+    name: security (secret scanning)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # gitleaks 需要完整历史
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}

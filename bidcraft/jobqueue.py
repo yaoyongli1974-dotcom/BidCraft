@@ -303,13 +303,18 @@ def check_backpressure(db, owner_id: str = "") -> str | None:
     except (TypeError, ValueError):
         user_cap = 10
     if user_cap > 0 and owner_id:
-        rows = db.scalars(
-            select(Job.payload).where(Job.status == "queued")
-        ).all()
-        mine = sum(
-            1 for payload in rows if (payload or {}).get("owner_id") == owner_id
+        # 直接在 SQL 里按 JSON 字段计数：旧实现把所有 queued 行的 payload 读进
+        # Python 再过滤，队列越大开销越高。as_string() 在 SQLite(->> 等价的
+        # JSON_EXTRACT) 与 PostgreSQL(->>) 上都能编译，语义与原 dict.get 一致。
+        mine = db.scalar(
+            select(func.count())
+            .select_from(Job)
+            .where(
+                Job.status == "queued",
+                Job.payload["owner_id"].as_string() == owner_id,
+            )
         )
-        if mine >= user_cap:
+        if int(mine or 0) >= user_cap:
             return f"您的排队任务已达上限（{user_cap}），请等待现有任务完成"
     return None
 

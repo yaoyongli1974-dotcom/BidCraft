@@ -9,6 +9,7 @@ import {
 } from 'lucide-react'
 import { useWorkspace } from '../useWorkspace'
 import {
+  getEvaluationFindings,
   getLatestEvaluation,
   listEvaluationReports,
   runEvaluation,
@@ -79,30 +80,57 @@ function FindingCard({
 }: {
   finding: QualityFinding
   canWrite: boolean
-  onUpdate: (finding: QualityFinding, status: string) => void
+  onUpdate: (finding: QualityFinding, status: string, note?: string) => void
 }) {
+  const [note, setNote] = useState('')
+  const isOpen = finding.status === 'open'
+  const commit = (status: string) => {
+    onUpdate(finding, status, note.trim() || undefined)
+    setNote('')
+  }
   return (
     <article className={className('quality-finding', `is-${finding.level}`)}>
       <div className="quality-finding-head">
         <Badge tone={LEVEL_TONE[finding.level] || 'neutral'} subtle>{finding.level}</Badge>
         <strong>{finding.title}</strong>
         <span className="quality-finding-cat">{finding.category}</span>
-        <Badge tone={finding.status === 'open' ? 'warn' : 'success'} subtle>
-          {finding.status === 'open' ? '待处置' : finding.status}
+        <Badge tone={isOpen ? 'warn' : 'success'} subtle>
+          {isOpen ? '待处置' : finding.status}
         </Badge>
       </div>
       {finding.description && <p className="quality-finding-desc">{finding.description}</p>}
       {finding.recommendation && (
         <p className="quality-finding-rec"><CheckCircle2 size={13} /> {finding.recommendation}</p>
       )}
-      {canWrite && finding.status === 'open' && (
+      {!isOpen && (finding.resolution_note || finding.resolved_by) && (
+        <p className="quality-finding-resolution">
+          处置人：{finding.resolved_by || '—'}
+          {finding.resolution_note ? ` · 意见：${finding.resolution_note}` : ''}
+        </p>
+      )}
+      {canWrite && (
         <div className="quality-finding-actions">
-          <Button variant="secondary" size="sm" onClick={() => onUpdate(finding, 'handled')}>
-            标记已处置
-          </Button>
-          <Button variant="ghost" size="sm" onClick={() => onUpdate(finding, 'ignored')}>
-            忽略
-          </Button>
+          <input
+            className="input input--sm"
+            aria-label={`处置意见：${finding.title}`}
+            placeholder="填写处置意见（可选）"
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+          />
+          {isOpen ? (
+            <>
+              <Button variant="secondary" size="sm" onClick={() => commit('handled')}>
+                标记已处置
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => commit('ignored')}>
+                忽略
+              </Button>
+            </>
+          ) : (
+            <Button variant="secondary" size="sm" onClick={() => commit('open')}>
+              重新打开
+            </Button>
+          )}
         </div>
       )}
     </article>
@@ -117,6 +145,8 @@ export function QualityTab() {
   const watchRef = useRef<(() => void) | null>(null)
   const [report, setReport] = useState<QualityReport | null>(null)
   const [note, setNote] = useState('')
+  const [historyLoadingId, setHistoryLoadingId] = useState<string | null>(null)
+  const [historyError, setHistoryError] = useState<string | null>(null)
 
   useEffect(() => () => watchRef.current?.(), [])
 
@@ -188,9 +218,13 @@ export function QualityTab() {
     }
   }
 
-  const handleUpdate = async (finding: QualityFinding, status: string) => {
+  const handleUpdate = async (finding: QualityFinding, status: string, note?: string) => {
     try {
-      const updated = await updateQualityFinding(ref, finding.id, { status })
+      const updated = await updateQualityFinding(
+        ref,
+        finding.id,
+        { status, ...(note ? { note } : {}) },
+      )
       setReport((prev) =>
         prev
           ? { ...prev, findings: prev.findings.map((f) => (f.id === updated.id ? updated : f)) }
@@ -199,6 +233,21 @@ export function QualityTab() {
       toast.success('质量问题已更新')
     } catch (error) {
       toast.error(messageOf(error))
+    }
+  }
+
+  /** 列表接口不返回 findings（快照列表很大），选中历史报告时按需取详情。 */
+  const selectReport = async (item: QualityReport) => {
+    if (item.id === report?.id) return
+    setHistoryError(null)
+    setHistoryLoadingId(item.id)
+    try {
+      const findings = await getEvaluationFindings(ref, item.id)
+      setReport({ ...item, findings })
+    } catch (error) {
+      setHistoryError(messageOf(error))
+    } finally {
+      setHistoryLoadingId(null)
     }
   }
 
@@ -314,7 +363,12 @@ export function QualityTab() {
             ) : (
               <div className="quality-findings">
                 {findings.map((f) => (
-                  <FindingCard key={f.id} finding={f} canWrite={canWrite} onUpdate={(item, status) => void handleUpdate(item, status)} />
+                  <FindingCard
+                    key={f.id}
+                    finding={f}
+                    canWrite={canWrite}
+                    onUpdate={(item, status, note) => void handleUpdate(item, status, note)}
+                  />
                 ))}
               </div>
             )}
@@ -330,15 +384,22 @@ export function QualityTab() {
               <button
                 key={r.id}
                 type="button"
-                className={className('quality-history-item', r.report_version === report?.report_version && 'is-active')}
-                onClick={() => setReport(r)}
+                className={className('quality-history-item', r.id === report?.id && 'is-active')}
+                disabled={historyLoadingId !== null}
+                onClick={() => void selectReport(r)}
               >
                 <strong>v{r.report_version}</strong>
                 <span>{r.overall_score.toFixed(1)} 分</span>
                 <Badge tone={VERDICT_META[r.verdict]?.tone || 'warn'} subtle>{r.grade}</Badge>
+                {historyLoadingId === r.id && <span className="subtle">加载中…</span>}
               </button>
             ))}
           </div>
+          {historyError && (
+            <div className="inline-error" role="alert">
+              历史报告详情加载失败：{historyError}
+            </div>
+          )}
         </section>
       )}
     </div>

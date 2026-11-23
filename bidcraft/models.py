@@ -9,6 +9,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -451,11 +452,16 @@ class Delivery(Base):
 
 class Job(Base):
     __tablename__ = "jobs"
+    # 队列扫描/背压查询的热路径：单列 status 供计数与过滤，(status, priority,
+    # created_at) 复合索引供 worker 按优先级顺序认领（与 position() 的排序一致）。
+    __table_args__ = (
+        Index("ix_jobs_status_priority_created", "status", "priority", "created_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     project_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     kind: Mapped[str] = mapped_column(String(24), nullable=False)
-    status: Mapped[str] = mapped_column(String(20), default="queued")
+    status: Mapped[str] = mapped_column(String(20), default="queued", index=True)
     progress: Mapped[int] = mapped_column(Integer, default=0)
     message: Mapped[str] = mapped_column(Text, default="")
     payload: Mapped[dict] = mapped_column(JSON, default=dict)

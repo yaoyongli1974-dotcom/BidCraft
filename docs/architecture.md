@@ -187,7 +187,7 @@ SSE 不可用时回退到约 1.6 秒一次的任务轮询。刷新页面后通�
 |---|---|
 | 认证 | `POST /auth/login`、`POST /auth/logout`、`GET /auth/me`、`POST /auth/password` |
 | 管理 | `/admin/models`、`/admin/kbs`、`/admin/users`、`/admin/rule-packages`（含校验/隐藏/恢复）、`/admin/quotas`（CRUD/搜索/匹配测试）、`/admin/plugins`（CRUD/测试/预设目录/`.bidplugin` 包导入导出）、`/admin/terms`（CRUD/搜索/启停）、`/admin/textqa`（错别字词库）、自助 `/my/qualifications` 与 `/my/preflight`、`/admin/kbs/{id}/docs`（文档元数据与可信度判定）、`/admin/wechat`（读取/保存/连通性测试）、`/admin/users/{id}/vip`（VIP 授予/续期/清除，days=0 清除），仅超级管理员；自助计费路由 `/billing/vip/orders`（VIP 套餐购买，续期不加点）、`/account/sub-accounts`（子账号 CRUD，登录主账号自助）；个人文档路由 `/my/docs`（上传→个人 KB→索引 job、列表/下载/删除，登录用户自助） |
-| 元信息 | `GET /health`（公开最小化）、`GET /admin/health`（超管完整运行状态）、`GET /packages`、`GET /docs` |
+| 元信息 | `GET /health`（**始终公开可达**，默认只返回探活/前端必需字段）、`GET /admin/health`（超管完整运行状态）、`GET /packages`、`GET /docs`。`BIDCRAFT_HEALTH_PUBLIC=minimal/public`（默认）时 `/health` 不返回版本、绝对路径、模型名与库内计数；设为其它值（内网/私有模式）才附带这些敏感字段，完整状态仍应走 `/admin/health` |
 | 项目 | `GET/POST /projects`、`GET/PATCH/DELETE /projects/{ref}`（PATCH 改名称/标段/审批链/模板标记）、`POST /projects/{ref}/duplicate`（复制为新项目：原件/台账/大纲/正文必选，清单报价与配图可选，版本与审批记录不复制）、`GET /projects/templates`（模板列表，登录即可）、`POST /projects/templates/{id}/instantiate`（从模板创建，无需成员身份） |
 | 来源 | `GET /projects/{ref}/sources`、`POST /projects/{ref}/sources`、`POST /projects/{ref}/parse` |
 | 台账 | `GET /projects/{ref}/ledger`、`PATCH /projects/{ref}/facts/{key}` |
@@ -220,8 +220,9 @@ SSE 不可用时回退到约 1.6 秒一次的任务轮询。刷新页面后通�
   乐观锁：PUT 带 `base_revision` 且与服务端不一致时返回 409（附当前 revision/正文），
   前端可载入最新或强制覆盖；不带 `base_revision` 保持旧行为。
 - 项目访问按 owner/成员(editor/viewer)/super_admin 判定；写操作要求 editor 及以上，
-  成员管理与删除项目仅 owner/super_admin。操作审计写 `audit_logs`（项目级与全局），
-  删除项目级联清理成员与审计行。
+  成员管理与删除项目仅 owner/super_admin。操作审计写 `audit_logs`（项目级与全局）；
+  删除项目只清理成员与业务子表，**审计行不删除**——只把 `audit_logs.project_id` 置空，
+  行仍可从 `/admin/audit` 全局检索，也不会被孤儿清理误删。
 - 生成期间的事实台账以任务启动时快照为准；修改台账后建议重新生成受影响章节。
 - 知识库检索按章节标题/意图查询，失败时静默跳过，不阻断生成。
 - 向量检索为可选增强：`resolve_embedding_endpoint` 取启用的 embedding 模型（offline 时关闭）；
@@ -278,9 +279,25 @@ SSE 不可用时回退到约 1.6 秒一次的任务轮询。刷新页面后通�
 - 上传文件名只取 basename，存储路径由服务端生成；图片上传另校验 10MB 上限与真实类型。
 - 密码使用 scrypt 加盐哈希；会话为随机 256 位令牌，数据库只存 SHA-256 摘要；
   Cookie 为 HttpOnly + SameSite=Lax，HTTPS 下应设 `BIDCRAFT_SECURE_COOKIE=1`。
-- 登录失败按用户名限速（8 次/5 分钟）；修改密码或停用用户会吊销其会话。
+- 登录失败按用户名限速（8 次/5 分钟）；在此之外，登录/注册/改密/重置/兑换码/
+  模型·知识库·插件测试还有**进程内 IP + 全局滑动窗口限流**（默认 300 秒窗口，
+  阈值见 `BIDCRAFT_RATE_*`），多 worker 需在反代层再限一次。反代后可开启
+  `BIDCRAFT_TRUST_PROXY=1`，用 `X-Forwarded-For` 记录真实来源 IP（直连时保持关闭）。
+- 带 Cookie 的状态变更（`POST/PUT/PATCH/DELETE`）有 CSRF 纵深防御：显式 `Origin`
+  必须同源，`Sec-Fetch-Site` 仅接受 `same-origin`/`none`；不带这两个头的普通
+  脚本/curl 不受影响。响应统一带 `X-Request-ID`（回显客户端值或生成 UUID）与
+  `X-Content-Type-Options`、`X-Frame-Options`、`Referrer-Policy`、CSP、
+  `Permissions-Policy`、`Cross-Origin-Opener-Policy`、`Cross-Origin-Resource-Policy`。
+- 基础日志由 `BIDCRAFT_LOG_LEVEL` / `BIDCRAFT_LOG_FORMAT`（text/json）控制，
+  每条日志带 `request_id`，可用响应头里的 `X-Request-ID` 串起一次请求的全链路。
+- 身份相关操作（登录成功/失败/锁死、注册、退出、改密，以及管理端用户的
+  创建/更新/改角色/改口令/停用/删除）均写 `audit_logs`，detail 中**只记字段名、
+  角色变化与来源 IP，绝不写口令或会话令牌**。审计写入失败只记 warning，不阻断主流程。
 - 模型/知识库 API Key 使用 `BIDCRAFT_HOME/secret.key`（0600）做 Fernet 加密，
   管理 API 只返回 `has_api_key`。请把该文件纳入备份并限制目录权限。
+  **PostgreSQL 多实例无共享卷时必须共享同一个 `secret.key`，或所有实例统一设置
+  `BIDCRAFT_SECRET_KEY`**（32 字节 Fernet 密钥的 base64），否则跨实例无法解密；
+  详见 `docs/postgresql.md`。
 - 公网部署仍建议在反向代理层增加 TLS、来源限制、请求体大小与速率限制。
 - 事实台账、原件、导出件均在本地文件系统；备份见「局域网模式 › 备份与恢复」，
   删除由运维控制。

@@ -13,9 +13,16 @@ import {
   Wallet,
 } from 'lucide-react'
 import { useQuery } from '../../lib/hooks'
-import { generateRedeemCodes, getAdminBilling, saveAdminBilling } from '../../api/billing'
+import {
+  generateRedeemCodes,
+  getAdminBilling,
+  issueAdminInvoice,
+  listAdminInvoices,
+  rejectAdminInvoice,
+  saveAdminBilling,
+} from '../../api/billing'
 import { messageOf } from '../../lib/http'
-import type { BillingPackage, VipPackage } from '../../lib/types'
+import type { BillingPackage, InvoiceRequest, VipPackage } from '../../lib/types'
 import {
   formatCents,
   formatDate,
@@ -73,6 +80,7 @@ function toVipDraft(pkg: VipPackage): VipPackageDraft {
 export function AdminBillingTab() {
   const toast = useToast()
   const query = useQuery('admin:billing', getAdminBilling)
+  const invoicesQuery = useQuery('admin:invoices', () => listAdminInvoices())
   const data = query.data
   const [signup, setSignup] = useState('5')
   const [chapterCost, setChapterCost] = useState('1')
@@ -90,6 +98,14 @@ export function AdminBillingTab() {
   const [codeError, setCodeError] = useState<string | null>(null)
   const [generatedCodes, setGeneratedCodes] = useState<string[]>([])
   const settingsInitialized = useRef(false)
+
+  // 开票处置：选中申请后填写发票号 + 上传文件，或填写驳回原因。
+  const [invoiceAction, setInvoiceAction] = useState<{ id: string; mode: 'issue' | 'reject' } | null>(null)
+  const [invoiceNo, setInvoiceNo] = useState('')
+  const [invoiceFile, setInvoiceFile] = useState<File | null>(null)
+  const [rejectReason, setRejectReason] = useState('')
+  const [invoiceBusy, setInvoiceBusy] = useState(false)
+  const [invoiceError, setInvoiceError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!data || settingsInitialized.current) return
@@ -261,6 +277,45 @@ export function AdminBillingTab() {
       toast.success('已复制兑换码', `${generatedCodes.length} 个`)
     } catch {
       toast.error('复制失败', '浏览器未授权剪贴板访问，请手动选择文本复制。')
+    }
+  }
+
+  const startInvoiceAction = (row: InvoiceRequest, mode: 'issue' | 'reject') => {
+    setInvoiceAction({ id: row.id, mode })
+    setInvoiceNo('')
+    setInvoiceFile(null)
+    setRejectReason('')
+    setInvoiceError(null)
+  }
+
+  const submitInvoiceAction = async () => {
+    if (!invoiceAction || invoiceBusy) return
+    setInvoiceError(null)
+    if (invoiceAction.mode === 'issue' && (!invoiceNo.trim() || !invoiceFile)) {
+      setInvoiceError('请填写发票号并选择 PDF / PNG / JPG 发票文件。')
+      return
+    }
+    if (invoiceAction.mode === 'reject' && !rejectReason.trim()) {
+      setInvoiceError('请填写驳回原因。')
+      return
+    }
+    setInvoiceBusy(true)
+    try {
+      if (invoiceAction.mode === 'issue') {
+        await issueAdminInvoice(invoiceAction.id, invoiceNo.trim(), invoiceFile!)
+        toast.success('发票已开具')
+      } else {
+        await rejectAdminInvoice(invoiceAction.id, rejectReason.trim())
+        toast.success('开票申请已驳回')
+      }
+      setInvoiceAction(null)
+      invoicesQuery.refresh()
+    } catch (error) {
+      const message = messageOf(error)
+      setInvoiceError(message)
+      toast.error('开票处置失败', message)
+    } finally {
+      setInvoiceBusy(false)
     }
   }
 
@@ -744,6 +799,116 @@ export function AdminBillingTab() {
                   })}
                 </tbody>
               </table>
+            </div>
+          )}
+        </section>
+
+        <section className="admin-billing-card">
+          <div className="admin-billing-card-head">
+            <div>
+              <div className="eyebrow">发票</div>
+              <h3>开票申请</h3>
+            </div>
+            <button type="button" className="text-btn" onClick={invoicesQuery.refresh} disabled={invoicesQuery.refreshing}>
+              <RefreshCw size={13} className={invoicesQuery.refreshing ? 'spin' : undefined} />
+              刷新
+            </button>
+          </div>
+          {invoicesQuery.error && <ErrorState message={invoicesQuery.error} onRetry={invoicesQuery.refresh} />}
+          {(invoicesQuery.data || []).length === 0 ? (
+            <div className="admin-billing-empty">还没有开票申请。</div>
+          ) : (
+            <div className="admin-billing-table-wrap">
+              <table className="admin-data-table">
+                <thead>
+                  <tr>
+                    <th>申请人</th>
+                    <th>抬头</th>
+                    <th>金额</th>
+                    <th>状态</th>
+                    <th>发票号</th>
+                    <th>提交时间</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(invoicesQuery.data || []).map((row) => (
+                    <tr key={row.id}>
+                      <td>{row.username || shortId(row.user_id, 8)}</td>
+                      <td title={row.tax_no}>{row.title}</td>
+                      <td>{formatCents(row.amount_cents)}</td>
+                      <td>
+                        <Badge tone={row.status === 'issued' ? 'success' : row.status === 'rejected' ? 'danger' : 'warn'} subtle>
+                          {row.status_label || row.status}
+                        </Badge>
+                      </td>
+                      <td className="mono">{row.invoice_no || '—'}</td>
+                      <td>{formatDate(row.created_at, false)}</td>
+                      <td>
+                        {row.status === 'requested' && (
+                          <div className="admin-billing-invoice-actions">
+                            <button type="button" className="text-btn" onClick={() => startInvoiceAction(row, 'issue')}>
+                              开具
+                            </button>
+                            <button type="button" className="text-btn" onClick={() => startInvoiceAction(row, 'reject')}>
+                              驳回
+                            </button>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {invoiceAction && (
+            <div className="admin-billing-invoice-form">
+              <strong>{invoiceAction.mode === 'issue' ? '开具发票' : '驳回开票申请'}</strong>
+              {invoiceAction.mode === 'issue' ? (
+                <>
+                  <label>
+                    <span>发票号</span>
+                    <input
+                      className="input input--sm"
+                      aria-label="发票号"
+                      value={invoiceNo}
+                      onChange={(event) => setInvoiceNo(event.target.value)}
+                      placeholder="例如：FP-2026-001"
+                    />
+                  </label>
+                  <label>
+                    <span>发票文件（PDF / PNG / JPG，≤10MB）</span>
+                    <input
+                      type="file"
+                      aria-label="发票文件"
+                      accept=".pdf,.png,.jpg,.jpeg"
+                      onChange={(event) => setInvoiceFile(event.target.files?.[0] || null)}
+                    />
+                  </label>
+                </>
+              ) : (
+                <label>
+                  <span>驳回原因</span>
+                  <input
+                    className="input input--sm"
+                    aria-label="驳回原因"
+                    value={rejectReason}
+                    onChange={(event) => setRejectReason(event.target.value)}
+                    placeholder="请说明驳回原因"
+                  />
+                </label>
+              )}
+              {invoiceError && <div className="billing-inline-error" role="alert">{invoiceError}</div>}
+              <div className="admin-billing-actions">
+                <Button variant="primary" size="sm" loading={invoiceBusy} onClick={() => void submitInvoiceAction()}>
+                  {invoiceAction.mode === 'issue' ? '确认开具' : '确认驳回'}
+                </Button>
+                <Button variant="ghost" size="sm" disabled={invoiceBusy} onClick={() => setInvoiceAction(null)}>
+                  取消
+                </Button>
+              </div>
             </div>
           )}
         </section>

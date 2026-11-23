@@ -1,5 +1,5 @@
-import { jsonBody, request } from '../lib/http'
-import type { AdminBillingData, AdminBillingSettings, BillingData, CreditAdjustResult, MockPayResult, RechargeOrder, RedeemResult, SubAccount, SubAccountInput, User } from '../lib/types'
+import { jsonBody, request, uploadForm } from '../lib/http'
+import type { AdminBillingData, AdminBillingSettings, BillingData, CreditAdjustResult, InvoiceRequest, MockPayResult, RechargeOrder, RedeemResult, SubAccount, SubAccountInput, User } from '../lib/types'
 import { wechatLoginUrl } from './auth'
 
 // ---------------------------------------------------------------- billing domain
@@ -51,6 +51,34 @@ export const grantUserVip = (userId: string, days: number, note = '') =>
 
 export const createVipOrder = (packageId: string) =>
   request<RechargeOrder>('/billing/vip/orders', jsonBody({ package_id: packageId }))
+
+// ---------------------------------------------------------------- admin invoices
+
+/** 管理员查看开票申请；后端支持 status=requested/issued/rejected。 */
+export const listAdminInvoices = (status = '') =>
+  request<InvoiceRequest[]>(`/admin/invoices${status ? `?status=${encodeURIComponent(status)}` : ''}`)
+
+/** 开具发票：上传 PDF/图片文件并填写发票号（同一路径，multipart）。 */
+export const issueAdminInvoice = (
+  invoiceId: string,
+  invoiceNo: string,
+  file: File,
+) => {
+  const form = new FormData()
+  form.append('invoice_no', invoiceNo)
+  form.append('file', file)
+  return uploadForm<InvoiceRequest>(
+    `/admin/invoices/${encodeURIComponent(invoiceId)}/issue`,
+    form,
+  )
+}
+
+/** 驳回开票申请，reason 会展示给用户。 */
+export const rejectAdminInvoice = (invoiceId: string, reason: string) =>
+  request<InvoiceRequest>(
+    `/admin/invoices/${encodeURIComponent(invoiceId)}/reject`,
+    jsonBody({ reason }),
+  )
 
 export const getSubAccounts = () => request<SubAccount[]>('/account/sub-accounts')
 

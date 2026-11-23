@@ -9,7 +9,9 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 
+from .audit import record_audit
 from .config import settings
+from .context import current_user
 from .models import AuthSession, LoginRateLimit, Project, User, utcnow
 from .security import hash_password, new_session_token, token_hash, verify_password
 
@@ -33,6 +35,31 @@ ROLE_HINTS = {
 
 _FAILURE_WINDOW = 300.0
 _FAILURE_LIMIT = 8
+
+
+def _audit_event(db, action: str, detail: dict | None = None, *, actor: dict | None = None) -> None:
+    """尽力写一条审计；审计故障不应阻断登录/退出等主流程。
+
+    口令、会话令牌与 API Key 永不进入 detail。失败事件用独立已提交会话写入，
+    因为调用方的请求会话在抛异常时会回滚。
+    """
+
+    try:
+        record_audit(db, None, action, detail or {}, actor=actor)
+    except Exception:  # noqa: BLE001 - audit must never break authentication
+        logger.warning("审计写入失败 action=%s", action, exc_info=True)
+
+
+def _user_actor(user: User) -> dict:
+    return {
+        "id": user.id,
+        "username": user.username,
+        "display_name": user.display_name or user.username,
+    }
+
+
+def _login_actor(username: str) -> dict:
+    return {"id": None, "username": username[:80], "display_name": username[:80]}
 
 
 def user_payload(user: User) -> dict:
@@ -164,6 +191,12 @@ def register_user(
     db.add(user)
     db.flush()
     signup_grant(db, user)
+    _audit_event(
+        db,
+        "auth.register",
+        {"username": username, "external": bool(is_external)},
+        actor=_user_actor(user),
+    )
     return user
 
 
@@ -242,15 +275,36 @@ def login(db, username: str, password: str, *, user_agent: str = "", ip: str = "
         purge_expired_rate_limits(limits)
         blocked = _failure_count(limits, key) >= _FAILURE_LIMIT
     if blocked:
+        with session_scope() as limits:
+            _audit_event(
+                limits,
+                "auth.login_locked",
+                {"username": key, "ip": ip[:64]},
+                actor=_login_actor(key),
+            )
         raise PermissionError("尝试次数过多，请 5 分钟后再试")
     user = db.scalar(select(User).where(func.lower(User.username) == key).limit(1))
     if user is None or not user.active or not verify_password(password, user.password_hash):
+        reason = "inactive_user" if user is not None and not user.active else "bad_credentials"
         with session_scope() as limits:
             _record_failure(limits, key)
+            _audit_event(
+                limits,
+                "auth.login_failed",
+                {"username": key, "ip": ip[:64], "reason": reason},
+                actor=_login_actor(key),
+            )
         raise PermissionError("用户名或密码不正确")
     with session_scope() as limits:
         clear_rate_limit(limits, key)
-    return user, create_session(db, user, user_agent=user_agent, ip=ip)
+    token = create_session(db, user, user_agent=user_agent, ip=ip)
+    _audit_event(
+        db,
+        "auth.login",
+        {"username": user.username, "ip": ip[:64]},
+        actor=_user_actor(user),
+    )
+    return user, token
 
 
 def resolve_session(db, token: str | None) -> User | None:
@@ -271,6 +325,12 @@ def revoke_session(db, token: str | None) -> None:
     row = db.scalar(select(AuthSession).where(AuthSession.token_hash == token_hash(token)))
     if row is not None:
         row.revoked = True
+        _audit_event(
+            db,
+            "auth.logout",
+            {"session_id": row.id, "user_id": row.user_id},
+            actor=current_user() or None,
+        )
 
 
 def revoke_user_sessions(db, user_id: str, *, keep: str | None = None) -> None:

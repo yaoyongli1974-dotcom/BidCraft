@@ -132,15 +132,6 @@ export async function listAgents(signal?: AbortSignal): Promise<AgentInfo[]> {
   return mapList(data, ['agents', 'items'], normalizeAgent)
 }
 
-export async function getAgent(agentType: string, signal?: AbortSignal): Promise<AgentInfo> {
-  const data = await request<unknown>(`/agents/${encodeURIComponent(agentType)}`, undefined, signal)
-  const agent = normalizeAgent(unwrap(data, ['agent']))
-  if (!agent) {
-    throw new ApiError(500, null, '服务端返回的 Agent 信息无法识别，请刷新后重试。')
-  }
-  return agent
-}
-
 export async function listWorkflows(ref: string, signal?: AbortSignal): Promise<WorkflowRun[]> {
   const data = await request<unknown>(projectPath(ref, '/workflows'), undefined, signal)
   return mapList(data, ['workflows', 'runs', 'items'], normalizeWorkflowRun)

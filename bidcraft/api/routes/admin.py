@@ -899,6 +899,12 @@ def create_user(payload: UserCreate, request: Request) -> dict[str, Any]:
         )
         db.add(row)
         db.flush()
+        audit(
+            db,
+            None,
+            "admin.user.create",
+            {"user_id": row.id, "username": row.username, "role": row.role},
+        )
         return auth.user_payload(row)
 
 
@@ -933,12 +939,43 @@ def update_user(user_id: str, payload: UserUpdate, request: Request) -> dict[str
             )
             if not others:
                 raise HTTPException(status_code=400, detail="至少保留一个启用的超级管理员")
+        old_role = row.role
+        changed: list[str] = []
+        if password:
+            changed.append("password")
+        for key, value in data.items():
+            if getattr(row, key, None) != value:
+                changed.append(key)
         if password:
             row.password_hash = hash_password(password)
             auth.revoke_user_sessions(db, row.id)
         for key, value in data.items():
             setattr(row, key, value)
         db.flush()
+        # 审计只记字段名与角色变化，绝不写 password / password_hash。
+        if changed:
+            audit(
+                db,
+                None,
+                "admin.user.update",
+                {"user_id": row.id, "username": row.username, "fields": sorted(changed)},
+            )
+        if "role" in changed:
+            audit(
+                db,
+                None,
+                "admin.user.role",
+                {"user_id": row.id, "username": row.username, "from": old_role, "to": row.role},
+            )
+        if password:
+            audit(db, None, "admin.user.password", {"user_id": row.id, "username": row.username})
+        if "active" in changed:
+            audit(
+                db,
+                None,
+                "admin.user.deactivate" if not row.active else "admin.user.activate",
+                {"user_id": row.id, "username": row.username, "active": bool(row.active)},
+            )
         return auth.user_payload(row)
 
 
@@ -965,6 +1002,12 @@ def delete_user(user_id: str, request: Request) -> dict[str, Any]:
                 raise HTTPException(status_code=400, detail="至少保留一个启用的超级管理员")
         from ...services.purge import delete_user_rows
 
+        audit(
+            db,
+            None,
+            "admin.user.delete",
+            {"user_id": row.id, "username": row.username, "role": row.role},
+        )
         # 与账户注销共用同一套关联清理：PostgreSQL 强制外键时漏表会直接失败。
         delete_user_rows(db, row.id)
         db.delete(row)

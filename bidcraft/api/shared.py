@@ -23,6 +23,8 @@ from fastapi import File, Form, HTTPException, Request, Response, UploadFile  # 
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse  # noqa: F401,E402
 from pydantic import BaseModel, Field
 from sqlalchemy import (
+    and_,  # noqa: F401,E402
+    case,  # noqa: F401,E402
     delete,  # noqa: F401,E402
     func,
     select,
@@ -115,7 +117,15 @@ from ..models import (  # noqa: F401,E402
     TermItem,
     User,
 )
-from ..pipeline import add_source, check_project, create_project, parse_project  # noqa: F401,E402
+from ..pipeline import (  # noqa: F401,E402
+    add_source,
+    check_project,
+    create_project,
+    parse_documents,
+    parse_project,
+    persist_parse,
+    read_parse_inputs,
+)
 from ..rules import store as package_store
 from ..rules.engine import ledger_gate  # noqa: F401,E402
 from ..rules.loader import (  # noqa: F401,E402
@@ -421,6 +431,94 @@ def _project_stats(db, project_id: str) -> dict[str, Any]:
         "written": written or 0,
         "issues_open": issues_open or 0,
     }
+
+
+_PROJECT_STAT_KEYS = (
+    "sources",
+    "facts_total",
+    "facts_filled",
+    "missing_required",
+    "outline",
+    "written",
+    "issues_open",
+)
+
+
+def _project_stats_batch(db, project_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """批量版 :func:`_project_stats`：任意数量的项目固定发起 5 条聚合查询。
+
+    每条查询按 ``project_id`` 分组，缺行的项目补 0，因此返回结构与单项目版
+    完全一致；列表接口不再按行调用 7 次 COUNT（N+1）。
+    """
+
+    ids = list(dict.fromkeys(str(pid) for pid in project_ids if pid))
+    stats = {pid: {key: 0 for key in _PROJECT_STAT_KEYS} for pid in ids}
+    if not ids:
+        return stats
+
+    def apply(rows, *keys: str) -> None:
+        for row in rows:
+            target = stats.get(str(row[0]))
+            if target is None:
+                continue
+            for key, value in zip(keys, row[1:], strict=True):
+                target[key] = int(value or 0)
+
+    apply(
+        db.execute(
+            select(SourceFile.project_id, func.count())
+            .where(
+                SourceFile.project_id.in_(ids),
+                SourceFile.role.in_(TENDER_SOURCE_ROLES),
+            )
+            .group_by(SourceFile.project_id)
+        ).all(),
+        "sources",
+    )
+    # 三个事实统计共用一次 GROUP BY，用条件聚合替代三条独立 COUNT。
+    apply(
+        db.execute(
+            select(
+                Fact.project_id,
+                func.count(),
+                func.sum(case((Fact.value != "", 1), else_=0)),
+                func.sum(
+                    case((and_(Fact.required.is_(True), Fact.value == ""), 1), else_=0)
+                ),
+            )
+            .where(Fact.project_id.in_(ids))
+            .group_by(Fact.project_id)
+        ).all(),
+        "facts_total",
+        "facts_filled",
+        "missing_required",
+    )
+    apply(
+        db.execute(
+            select(OutlineNode.project_id, func.count())
+            .where(OutlineNode.project_id.in_(ids))
+            .group_by(OutlineNode.project_id)
+        ).all(),
+        "outline",
+    )
+    apply(
+        db.execute(
+            select(OutlineNode.project_id, func.count())
+            .join(Section, Section.node_id == OutlineNode.id)
+            .where(OutlineNode.project_id.in_(ids), Section.words > 0)
+            .group_by(OutlineNode.project_id)
+        ).all(),
+        "written",
+    )
+    apply(
+        db.execute(
+            select(Issue.project_id, func.count())
+            .where(Issue.project_id.in_(ids), Issue.status == "open")
+            .group_by(Issue.project_id)
+        ).all(),
+        "issues_open",
+    )
+    return stats
 
 
 def _package_usage(db) -> dict[str, int]:
