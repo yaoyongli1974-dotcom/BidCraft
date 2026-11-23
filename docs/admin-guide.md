@@ -209,13 +209,16 @@ Content-Type: application/json
   工作目录（结束后删除）；越界或非法值入库时回退默认，不报错。
 - `BIDCRAFT_PLUGIN_TIMEOUT` 控制单次请求超时（秒，默认 20，范围 5–120）；首次下载慢时可调大。
 - **插件包导入/导出**：每行「导出包」下载 `<名称>.bidplugin.zip`（内含 `manifest.json`，
-  含全部配置与环境变量，**注意 env 为明文**）；工具栏「导入插件包」上传校验后创建新插件
-  （201）或对同名插件覆盖升级（200），导入记审计 `plugin.import`。
+  含全部配置、作用域与环境变量，**注意 env 为明文**）；工具栏「导入插件包」上传校验后创建新插件
+  （201）或对同名插件覆盖升级（200），导入记审计 `plugin.import`。包可用可选 Ed25519 签名：
+  导出端配 `BIDCRAFT_PLUGIN_SIGNING_KEY` 即自动签名，导入端配 `BIDCRAFT_PLUGIN_TRUSTED_KEYS`
+  验签；需要强制验签时设 `BIDCRAFT_PLUGIN_REQUIRE_SIGNATURE=1` 或导入请求带
+  `?require_signature=true`（有签名但无信任公钥会拒绝导入）。
 - 聚合规则：本征 6 个工具在前，插件工具命名为 `{插件}__{工具}`；单个插件握手失败只会在
   服务端 stderr 打一行警告并跳过，不影响其他工具；`--readonly` 的 MCP 端点拒绝所有插件工具。
 - **安全提示**：插件以 BidCraft 进程的操作系统用户身份运行本机子进程，或向管理员填写的 URL
-  发请求，**没有沙箱隔离**。只配置可信插件；插件 `env` 明文存库，不要放长期密钥。
-  细节与排错见 [`docs/plugins.md`](plugins.md)。
+  发请求；已有应用层资源限制、HTTP 出站地址防护与作用域隔离，但**没有容器/系统级隔离**。
+  只配置可信插件；插件 `env` 明文存库，不要放长期密钥。细节与排错见 [`docs/plugins.md`](plugins.md)。
 
 ## 回归校准
 

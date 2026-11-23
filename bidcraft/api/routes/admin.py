@@ -703,6 +703,7 @@ async def import_plugin_package(
     response: Response,
     file: UploadFile = File(...),
     on_conflict: str = "replace",
+    require_signature: bool | None = None,
 ) -> dict[str, Any]:
     """导入插件包：新建 201，同名升级 200，skip 冲突 409。"""
     require_super(request)
@@ -713,7 +714,9 @@ async def import_plugin_package(
     if len(data) > plugin_pack.MAX_PACKAGE_BYTES:
         raise HTTPException(status_code=400, detail="插件包过大（超过 5MB）")
     try:
-        manifest = plugin_pack.parse_package(data)
+        manifest = plugin_pack.parse_package(
+            data, require_signature=require_signature
+        )
         with session_scope() as db:
             row, created = plugin_pack.apply_manifest(
                 db, manifest, on_conflict=on_conflict
@@ -729,6 +732,7 @@ async def import_plugin_package(
                     "transport": row.transport,
                     "created": created,
                     "updated": not created,
+                    "signed": plugin_pack.SIGNATURE_KEY in manifest,
                 },
             )
     except plugin_pack.PluginPackConflict as exc:

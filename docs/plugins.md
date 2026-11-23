@@ -82,13 +82,33 @@ curl -b cookie.txt -X POST http://127.0.0.1:8000/admin/plugins \
 ## 插件包（.bidplugin）
 
 导出/导入使用 zip 包，固定含 `manifest.json`（`format="bidcraft-plugin"`、`version=1`）：
-name/transport/command/args/env/url/enabled/tool_allowlist/mem_limit_mb/cpu_seconds。
+name/transport/command/args/env/url/enabled/tool_allowlist/mem_limit_mb/cpu_seconds/
+scope/owner_id/allow_private_net。
 
 - 包 ≤5MB；manifest 非法（format/transport/缺 name/超限等）→ 400；导入端校验比在线表单
   更紧且**拒绝而非截断**（args ≤20 项/每项 ≤200、env ≤40 键/键 ≤60/值 ≤200、
   allowlist ≤200 项/每项 ≤120、command/url ≤500）；仅资源限制走 clamp。
 - 同名默认 `on_conflict=replace` 覆盖升级（enabled=True 时清零失败计数）；`skip` 冲突 409。
 - **env 随包明文导出**：分享前检查并剔除密钥；导入后建议重新「测试」确认连通性。
+- `scope=owner` 的包必须带 `owner_id`（且用户存在）；导入后作用域/归属/内网放行开关
+  随包恢复，仍受页面同样的安全校验。
+
+### 可选 Ed25519 签名验签
+
+包内 `manifest.json` 可含 `signature` 字段（`alg=ed25519`、`key_id`、base64 `value`）。
+签名对象是**规范化后的 manifest 去掉 `signature`**（`sort_keys`、无空白、UTF-8），
+因此导出时的缩进/换行差异不影响验签。
+
+| 环境变量 | 用途 |
+|---|---|
+| `BIDCRAFT_PLUGIN_SIGNING_KEY` | 导出端私钥（PEM 文本或 PEM 文件路径）；也可放在 `settings.home/plugin-signing-key.pem` |
+| `BIDCRAFT_PLUGIN_TRUSTED_KEYS` | 导入端信任的公钥（PEM/base64，逗号分隔）；也可放在 `settings.home/plugin-trusted-keys.json`（字符串数组） |
+| `BIDCRAFT_PLUGIN_REQUIRE_SIGNATURE` | 1/true/yes/on 时默认强制验签；未配置时接受未签名包 |
+
+- 未配置私钥时导出**不签名**（保持兼容）；配置了私钥才写 `signature`。
+- 包里有签名但导入端**没有信任公钥** → 拒绝（fail closed）；签名不匹配或字段非法 → 400。
+- 未签名包默认接受；强制时可通过导入接口 query `require_signature=true`（或上面的环境变量）
+  拒绝。私钥建议独立生成并轮换，不要复用 `secret.key`。
 
 ## 聚合行为
 
@@ -136,6 +156,8 @@ name/transport/command/args/env/url/enabled/tool_allowlist/mem_limit_mb/cpu_seco
   （仅本机可信调用者使用）。`plugin.call` 审计记录真实调用用户名与项目 id。
 - `--readonly` 的 MCP 端点不暴露任何插件写工具，适合把 BidCraft 交给不可信客户端。
 - 插件的 `env` 以明文存库（仅超管可见），不要在其中保存长期密钥。
+- `.bidplugin` 可选 Ed25519 签名：信任链由部署方通过公钥名单管理，验签失败即拒绝导入；
+  未签名包默认接受，建议在内网/生产开启 `BIDCRAFT_PLUGIN_REQUIRE_SIGNATURE=1`。
 - 不引入自动安装、远程市场拉取或遥测：配置即代码，全部留在本机 SQLite。
 
 ## 配置示例
@@ -162,6 +184,7 @@ export BIDCRAFT_PLUGIN_TIMEOUT=45
 | `插件 X 提前退出（退出码 N）` | 在终端手工执行 `command + args` 看 stderr |
 | 工具列表里没有插件工具 | 检查 `enabled`、`tool_allowlist`、`scope`，以及后端 stderr 的“已跳过”警告 |
 | `插件 X 的 url 指向本机/私网地址` | 确认 URL；可信内网插件由超管设置 `allow_private_net: true` |
+| 导入报「签名校验失败」/「信任」 | 检查 `BIDCRAFT_PLUGIN_TRUSTED_KEYS` 是否配置对应公钥；包被改动需重新导出签名 |
 
 ## 验证
 
@@ -172,4 +195,6 @@ MCP 聚合（前缀、allowlist、失败跳过、只读拒绝、调用路由）�
 `tests/test_plugin_sandbox.py` 覆盖资源限制 clamp 与 preexec 沙箱、临时目录清理；
 `tests/test_plugin_pack.py` 覆盖插件包导出/导入/升级/skip 冲突/非法包校验/审计；
 `tests/test_plugin_isolation.py` 覆盖出站地址防护（IP/本机/元数据/DNS/放行开关）、
-作用域可见性、个人插件 API 校验、MCP 过滤与审计归属。测试不依赖 `npx`/`uvx`。
+作用域可见性、个人插件 API 校验、MCP 过滤与审计归属；
+`tests/test_plugin_pack_signature.py` 覆盖 Ed25519 签名/验签、篡改拒绝、无信任公钥
+fail-closed、强制验签与作用域字段往返。测试不依赖 `npx`/`uvx`。
