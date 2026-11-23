@@ -492,13 +492,19 @@ def is_substantive(requirement) -> bool:
     return bool(getattr(requirement, "marker", "")) or bool(getattr(requirement, "mandatory", False))
 
 
-def requirement_issues(requirements, nodes: list[dict], deadline=None) -> list[CheckResult]:
+def requirement_issues(
+    requirements,
+    nodes: list[dict],
+    deadline=None,
+    matcher=None,
+) -> list[CheckResult]:
     """未响应的实质性条款 → 核对问题。
 
     ★/▲ 条款判为 blocking（最高优先级，直接进导出门禁）；仅 mandatory 的判为 critical。
     已人工确认 responded / na 的条款不再产出问题。
     ``deadline`` 是招标截止日期（R03），由 pipeline 从事实台账/meta 解析后传入；
     不传时业绩时间窗沿用「只作证据」的旧口径，保持向后兼容。
+    ``matcher`` 为可选的语义匹配器（见 verdict.SemanticMatcher）；不传时沿用规则匹配。
     """
 
     # 延迟导入，避免 verdict ↔ substantive 的循环依赖。
@@ -525,7 +531,7 @@ def requirement_issues(requirements, nodes: list[dict], deadline=None) -> list[C
         marker = getattr(requirement, "marker", "") or marker_of(text)
         req_type = classify_requirement(text)
 
-        verdict = judge(requirement, nodes, deadline=deadline)
+        verdict = judge(requirement, nodes, deadline=deadline, matcher=matcher)
         if verdict.state == SATISFIED:
             # 五层判定确认全部硬性约束满足且证据充分——不再产出阻断问题。
             continue

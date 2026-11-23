@@ -109,6 +109,9 @@ class Settings:
         default_factory=lambda: float(os.getenv("BIDCRAFT_PLUGIN_TIMEOUT", "20"))
     )
     offline: bool = field(default_factory=lambda: _bool("BIDCRAFT_OFFLINE"))
+    #: 实质性条款判定是否启用 LLM 语义匹配；默认关闭，完全走本地规则。
+    #: 关闭/模型不可用时自动回退 RuleSemanticMatcher，数字与等级仍由约束层裁决。
+    verdict_llm: bool = field(default_factory=lambda: _bool("BIDCRAFT_VERDICT_LLM"))
     admin_username: str = field(default_factory=lambda: os.getenv("BIDCRAFT_ADMIN_USER", "admin"))
     admin_password: str = field(default_factory=lambda: os.getenv("BIDCRAFT_ADMIN_PASSWORD", ""))
     session_days: int = field(

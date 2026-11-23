@@ -282,9 +282,14 @@ def check_project(db: Session, project_id: str) -> tuple[list, dict]:
     # R03：招标截止日期是业绩时间窗的校验基准——优先 facts 台账，meta 兜底；
     # 拿不到时 judge 会把带明确日期的业绩转人工复核，绝不用服务器当前时间。
     from .verdict import resolve_deadline
+    from .verdict_llm import build_verdict_matcher
 
     deadline = resolve_deadline(ledger.facts, project.meta)
-    all_results.extend(substantive.requirement_issues(requirements, nodes, deadline=deadline))
+    # 可选 LLM 语义层：默认关闭或模型不可用时自动回退规则，语义分不替代硬约束。
+    matcher = build_verdict_matcher(db)
+    all_results.extend(
+        substantive.requirement_issues(requirements, nodes, deadline=deadline, matcher=matcher)
+    )
     results = [result for result in all_results if not result.passed]
     anchors = [
         {

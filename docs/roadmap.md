@@ -89,6 +89,8 @@
    `submit_commercial` 已提供可选完整性硬门禁（`require_complete=True`，前端为「严格校验完整性」勾选框），
    默认关闭以保持旧行为；如需强制，可在部署侧约定送审一律传 `require_complete: true`。
 3. 插件远程市场：受控的自动安装与升级流程（远程源校验、依赖声明与回滚），以及容器/网络级隔离；`.bidplugin` 签名验签已完成。
-4. **实质性条款语义增强（已完成主体）**：条款类型（资质/业绩/参数/承诺）结构化规则、金融数字与同义词归一、
+4. **实质性条款语义增强（已完成）**：条款类型（资质/业绩/参数/承诺）结构化规则、金融数字与同义词归一、
    证据可审计、评分办法分值→章节篇幅分配均已落地（`bidcraft/substantive.py`、`constraint_check.py`、
-   `generation/outline.py`）。剩余方向：引入可选 LLM 语义匹配器替换默认规则匹配器，并用真实件基线验证召回。
+   `generation/outline.py`）。可选 LLM 语义匹配器 `verdict_llm.py` 已实现（`BIDCRAFT_VERDICT_LLM=1`
+   启用，默认规则匹配；调用失败/无模型/超预算自动回退，LLM 不能单独放行 SATISFIED）。
+   剩余方向：用用户提供的真实招标文件基线验证召回。
