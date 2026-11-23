@@ -50,7 +50,7 @@ jobs:
           path: dist/*.rpm
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/') && inputs.attach_to_release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/*.deb
@@ -81,7 +81,7 @@ jobs:
           path: dist/*.zip
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/') && inputs.attach_to_release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*.zip
 
@@ -109,6 +109,6 @@ jobs:
           path: dist/*.zip
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/') && inputs.attach_to_release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*.zip
