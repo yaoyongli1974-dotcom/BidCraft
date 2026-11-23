@@ -1,4 +1,4 @@
 """BidCraft: 弱电行业投标文件生成内核。"""
 
-__version__ = "0.27.0"
+__version__ = "0.28.0"
 __all__ = ["__version__"]

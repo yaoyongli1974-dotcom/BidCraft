@@ -2,6 +2,17 @@
 
 按版本倒序。对外口径以 `docs/release-notes/` 下对应文件为准；本文件是仓库内的简明索引。
 
+## v0.28.0 (2026-11-23)
+
+v0.27.0 之后的能力收口与质量加固，对外说明见 [docs/release-notes/v0.28.0.md](docs/release-notes/v0.28.0.md)。
+
+- 真实件基线工具（指纹核对/基线目录/CLI）与实质性条款同义/财务大写数字容错。
+- 插件出站地址防护、scope 归属隔离、审计归属与可选 Ed25519 签名验签。
+- 评估异步 `run-async`、商务完整性联动与可选送审硬门禁；历史报告 findings 按需加载。
+- 可选 LLM 语义匹配器（`BIDCRAFT_VERDICT_LLM=1`），带缓存、预算与自动回退。
+- 三方分析的全量遗留问题修复（性能/安全/产品文档）；新增 Alembic `0008_job_queue_indexes`。
+- 后端 1323 passed / 11 skipped；前端 30 files / 262 tests；ruff 全绿。
+
 ## v0.27.0 (2026-11-23)
 
 对标易标第四批（收官）：投标质量评估中心（evaluation 模块：六维评分/硬性风险一票否决/四类覆盖聚合/风险摘要/不可变报告快照 + finding 人工处置）。新增 Alembic `0007_yibiao_batch4`（2 表，downgrade 可执行）。前端新增质量评估 tab。
