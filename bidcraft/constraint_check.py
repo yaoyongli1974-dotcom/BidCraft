@@ -30,7 +30,8 @@ import re
 from dataclasses import dataclass
 
 # 阿拉伯数字与常见中文数字（「近三年」「六项」在招标文本里很常见）。
-_NUM = r"(?:\d+(?:\.\d+)?|[一二两三四五六七八九十百]{1,3})"
+# 合同/业绩正文常写大写数字（壹、贰、叁…）或〇，扩展同义数字识别以容忍改写。
+_NUM = r"(?:\d+(?:\.\d+)?|[零〇一二两三四五六七八九十百壹贰叁肆伍陆柒捌玖拾]{1,3})"
 # 单位表按「最长优先」排列，保证 MB/s 先于 MB、GHz 先于 Hz 之类不被截断。
 _UNITS = (
     # 字节率先于存储：100MB/s 必须整体匹配为 byte_rate，不能被拆成 MB；
@@ -57,15 +58,20 @@ _GRADE_SCALES = (
     ("特级", "一级", "二级", "三级"),
     ("甲级", "乙级", "丙级"),
 )
-_GRADE_RE = re.compile(r"特级|一级|二级|三级|甲级|乙级|丙级")
+_GRADE_RE = re.compile(r"特级|一级|二级|三级|甲级|乙级|丙级|壹级|贰级|叁级")
+# 大写数字等级 → 规范等级，保证「壹级资质」与「一级资质」按同一等级序比较。
+_GRADE_ALIASES = {"壹级": "一级", "贰级": "二级", "叁级": "三级"}
 
 # 主体词族：正文里的数值/等级必须与条款讲的是同一件事才算数。
 FAMILY_KEYWORDS = {
     # 「项目」是宽泛词，但业绩约束必须靠它才能识别「相近项目 / 类似项目」这类改写。
     # 不会误伤「42 个机柜」：那个子句里既没有「项目」也没有「业绩」。
-    "achievement": ("业绩", "案例", "同类项目", "类似项目", "相近项目", "项目", "合同", "中标"),
+    "achievement": (
+        "业绩", "案例", "同类项目", "类似项目", "相近项目",
+        "同类工程", "类似工程", "相近工程", "项目", "工程", "合同", "中标",
+    ),
     "qualification": ("资质", "资格", "建造师", "证书", "执照", "认证", "等级"),
-    "response": ("响应", "到场", "到达", "回复", "服务"),
+    "response": ("响应", "应答", "到场", "到达", "回复", "服务"),
     "warranty": ("质保", "保修", "质量保证", "免费"),
     "bandwidth": ("带宽", "速率", "吞吐", "链路", "传输"),
     # R02/R04：存储容量独立成族，避免「1000GB 存储」被归到带宽主体。
@@ -75,10 +81,12 @@ FAMILY_KEYWORDS = {
 
 
 def _cn_number(token: str) -> int | None:
-    """把「三 / 六 / 十二 / 二十 / 一百」解析为整数；解析不了返回 None。"""
+    """把「三 / 六 / 十二 / 二十 / 一百 / 叁 / 伍」解析为整数；解析不了返回 None。"""
 
     digits = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
-              "六": 6, "七": 7, "八": 8, "九": 9}
+              "六": 6, "七": 7, "八": 8, "九": 9,
+              "壹": 1, "贰": 2, "叁": 3, "肆": 4, "伍": 5,
+              "陆": 6, "柒": 7, "捌": 8, "玖": 9, "零": 0, "〇": 0}
     token = token.strip()
     if token.isdigit():
         return int(token)
@@ -104,6 +112,7 @@ def _cn_number(token: str) -> int | None:
 
 
 def _grade_rank(grade: str) -> tuple[int, int] | None:
+    grade = _GRADE_ALIASES.get(grade, grade)
     for scale in _GRADE_SCALES:
         if grade in scale:
             return (scale.index(grade), len(scale))
@@ -377,7 +386,7 @@ def extract_constraints(text: str) -> list[Constraint]:
 
     # N 小时内响应 / 响应时间不超过 N 小时 = 至多 N 小时（越短越好）。
     for match in re.finditer(
-        r"(" + _NUM + r")\s*小时\s*(?:内|以内)?[^，。；]{0,6}(?:响应|到场|到达|回复)", source
+        r"(" + _NUM + r")\s*小时\s*(?:内|以内)?[^，。；]{0,6}(?:响应|应答|到场|到达|回复)", source
     ):
         value = _cn_number(match.group(1))
         if value is not None:
@@ -388,7 +397,7 @@ def extract_constraints(text: str) -> list[Constraint]:
                            source_span=_source_span(source, match.start(), len(match.group(0))))
             )
     for match in re.finditer(
-        r"(?:响应|到场|到达)\s*(?:时间)?\s*(?:不超过|小于等于|≤)?\s*(" + _NUM + r")\s*小时", source
+        r"(?:响应|应答|到场|到达)\s*(?:时间)?\s*(?:不超过|小于等于|≤)?\s*(" + _NUM + r")\s*小时", source
     ):
         value = _cn_number(match.group(1))
         if value is not None:

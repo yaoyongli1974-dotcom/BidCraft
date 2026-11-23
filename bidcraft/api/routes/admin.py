@@ -86,6 +86,7 @@ from ..shared import (  # noqa: F401
     plugin_items,
     plugin_name,
     plugin_pack,
+    plugin_scope,
     plugin_transport,
     plugin_validate,
     plugins,
@@ -500,13 +501,21 @@ def create_plugin(payload: PluginCreate, request: Request) -> dict[str, Any]:
     transport = plugin_transport(payload.transport)
     command = (payload.command or "").strip()[:500]
     url = (payload.url or "").strip()[:500]
-    plugin_validate(transport, command, url)
+    scope = plugin_scope(payload.scope)
+    owner_id = plugins.plugin_owner_id(payload.owner_id) if scope == "owner" else ""
+    allow_private_net = bool(payload.allow_private_net)
+    plugin_validate(transport, command, url, allow_private_net=allow_private_net)
     args = plugin_items(payload.args, field="args")
     env = plugin_env(payload.env)
     allowlist = plugin_items(payload.tool_allowlist, field="tool_allowlist", limits=200)
     with session_scope() as db:
         if db.scalar(select(Plugin).where(Plugin.name == name)):
             raise HTTPException(status_code=409, detail="插件名称已存在")
+        if scope == "owner":
+            if not owner_id:
+                raise HTTPException(status_code=400, detail="个人插件必须指定 owner_id")
+            if db.get(User, owner_id) is None:
+                raise HTTPException(status_code=400, detail="owner_id 对应的用户不存在")
         row = Plugin(
             name=name,
             transport=transport,
@@ -518,6 +527,9 @@ def create_plugin(payload: PluginCreate, request: Request) -> dict[str, Any]:
             tool_allowlist=allowlist,
             mem_limit_mb=plugins.clamp_mem_limit(payload.mem_limit_mb),
             cpu_seconds=plugins.clamp_cpu_seconds(payload.cpu_seconds),
+            scope=scope,
+            owner_id=owner_id or None,
+            allow_private_net=allow_private_net,
         )
         db.add(row)
         db.flush()
@@ -578,7 +590,35 @@ def update_plugin(
         if data.get("cpu_seconds") is not None:
             row.cpu_seconds = plugins.clamp_cpu_seconds(data["cpu_seconds"])
             changed.append("cpu_seconds")
-        plugin_validate(row.transport, row.command or "", row.url or "")
+        scope = (
+            plugin_scope(data["scope"])
+            if data.get("scope") is not None
+            else plugin_scope(row.scope)
+        )
+        owner_id = (
+            plugins.plugin_owner_id(data["owner_id"])
+            if data.get("owner_id") is not None
+            else plugins.plugin_owner_id(row.owner_id)
+        )
+        if scope == "global":
+            owner_id = ""
+        elif not owner_id:
+            raise HTTPException(status_code=400, detail="个人插件必须指定 owner_id")
+        elif db.get(User, owner_id) is None:
+            raise HTTPException(status_code=400, detail="owner_id 对应的用户不存在")
+        if scope != row.scope or owner_id != (row.owner_id or ""):
+            row.scope = scope
+            row.owner_id = owner_id or None
+            changed.extend(["scope", "owner_id"])
+        if data.get("allow_private_net") is not None:
+            row.allow_private_net = bool(data["allow_private_net"])
+            changed.append("allow_private_net")
+        plugin_validate(
+            row.transport,
+            row.command or "",
+            row.url or "",
+            allow_private_net=bool(row.allow_private_net),
+        )
         db.flush()
         audit(
             db,

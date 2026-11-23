@@ -318,8 +318,10 @@ def _call_tool(name: str, args: dict[str, Any], *, readonly: bool) -> Any:
         return handlers[name](db, args)
 
 
-def _enabled_plugins() -> list[plugins.PluginRef]:
-    """读取启用的插件；插件表/配置读失败不得让 MCP 服务不可用。"""
+def _enabled_plugins(
+    *, user_id: str | None = None, is_super_admin: bool = False
+) -> list[plugins.PluginRef]:
+    """读取当前身份可见的启用插件；读失败不得让 MCP 服务不可用。"""
     try:
         with session_scope() as db:
             rows = list(
@@ -327,16 +329,22 @@ def _enabled_plugins() -> list[plugins.PluginRef]:
                     select(Plugin).where(Plugin.enabled.is_(True)).order_by(Plugin.name)
                 )
             )
-            return [plugins.snapshot(row) for row in rows]
+            return [
+                plugins.snapshot(row)
+                for row in rows
+                if plugins.visible_to(row, user_id=user_id, is_super_admin=is_super_admin)
+            ]
     except Exception:  # noqa: BLE001 - 例如尚未 init_db 的临时环境
         return []
 
 
-def _plugin_tools() -> list[dict[str, Any]]:
-    """聚合启用插件的工具：stdio/http 握手失败只警告并跳过。"""
+def _plugin_tools(
+    *, user_id: str | None = None, is_super_admin: bool = False
+) -> list[dict[str, Any]]:
+    """聚合可见插件的工具：stdio/http 握手失败只警告并跳过。"""
     merged: list[dict[str, Any]] = []
     seen = set(_TOOL_NAMES)
-    for plugin in _enabled_plugins():
+    for plugin in _enabled_plugins(user_id=user_id, is_super_admin=is_super_admin):
         try:
             tools = plugins.list_tools(plugin)
         except plugins.PluginError as exc:
@@ -362,15 +370,19 @@ def _plugin_tools() -> list[dict[str, Any]]:
     return merged
 
 
-def _plugin_target(name: str) -> tuple[plugins.PluginRef, str] | None:
-    """把 ``{plugin}__{tool}`` 解析成插件与工具名；不是插件工具则返回 None。"""
+def _plugin_target(
+    name: str, *, user_id: str | None = None, is_super_admin: bool = False
+) -> tuple[plugins.PluginRef, str] | None:
+    """把 ``{plugin}__{tool}`` 解析成可见插件与工具名；越权按未知工具处理。"""
     prefix, sep, tool = name.partition("__")
     if not sep or not prefix or not tool:
         return None
     try:
         with session_scope() as db:
             row = db.scalar(select(Plugin).where(Plugin.name == prefix))
-            if row is None:
+            if row is None or not plugins.visible_to(
+                row, user_id=user_id, is_super_admin=is_super_admin
+            ):
                 return None
             return plugins.snapshot(row), tool
     except Exception:  # noqa: BLE001 - 读不到配置时按未知工具处理
@@ -397,6 +409,8 @@ def _call_plugin_tool(
     arguments: dict[str, Any],
     *,
     readonly: bool,
+    username: str | None = None,
+    project_id: str | None = None,
 ) -> dict[str, Any]:
     full_name = f"{plugin.name}__{tool_name}"
     if readonly:
@@ -420,11 +434,21 @@ def _call_plugin_tool(
     from .db import session_scope
 
     with session_scope() as db:
-        plugins.record_call(db, plugin.id, tool_name, ok)
+        plugins.record_call(
+            db, plugin.id, tool_name, ok, username=username, project_id=project_id
+        )
     return payload
 
 
-def _handle_tools_call(params: Any, *, readonly: bool) -> dict[str, Any]:
+def _handle_tools_call(
+    params: Any,
+    *,
+    readonly: bool,
+    user_id: str | None = None,
+    is_super_admin: bool = False,
+    username: str | None = None,
+    project_id: str | None = None,
+) -> dict[str, Any]:
     if not isinstance(params, dict):
         return _tool_error_text("tools/call 参数必须是对象")
     name = params.get("name")
@@ -436,10 +460,19 @@ def _handle_tools_call(params: Any, *, readonly: bool) -> dict[str, Any]:
     if not isinstance(arguments, dict):
         return _tool_error_text("tools/call 的 arguments 必须是对象")
     if name not in _TOOL_NAMES:
-        target = _plugin_target(name)
+        target = _plugin_target(
+            name, user_id=user_id, is_super_admin=is_super_admin
+        )
         if target is not None:
             plugin, tool_name = target
-            return _call_plugin_tool(plugin, tool_name, arguments, readonly=readonly)
+            return _call_plugin_tool(
+                plugin,
+                tool_name,
+                arguments,
+                readonly=readonly,
+                username=username,
+                project_id=project_id,
+            )
     try:
         payload = _call_tool(name, arguments, readonly=readonly)
     except ToolError as exc:
@@ -451,7 +484,15 @@ def _handle_tools_call(params: Any, *, readonly: bool) -> dict[str, Any]:
     return _tool_content(payload)
 
 
-def handle_message(msg: dict, *, readonly: bool = False) -> dict | None:
+def handle_message(
+    msg: dict,
+    *,
+    readonly: bool = False,
+    user_id: str | None = None,
+    is_super_admin: bool = False,
+    username: str | None = None,
+    project_id: str | None = None,
+) -> dict | None:
     """处理单条 JSON-RPC 消息；notification 返回 None。"""
     if not isinstance(msg, dict):
         return _error(None, -32600, "无效请求：消息必须是 JSON 对象")
@@ -479,16 +520,39 @@ def handle_message(msg: dict, *, readonly: bool = False) -> dict | None:
     if method == "ping":
         return _result(request_id, {})
     if method == "tools/list":
-        return _result(request_id, {"tools": [*TOOL_SPECS, *_plugin_tools()]})
+        return _result(
+            request_id,
+            {
+                "tools": [
+                    *TOOL_SPECS,
+                    *_plugin_tools(user_id=user_id, is_super_admin=is_super_admin),
+                ]
+            },
+        )
     if method == "tools/call":
         return _result(
             request_id,
-            _handle_tools_call(msg.get("params"), readonly=readonly),
+            _handle_tools_call(
+                msg.get("params"),
+                readonly=readonly,
+                user_id=user_id,
+                is_super_admin=is_super_admin,
+                username=username,
+                project_id=project_id,
+            ),
         )
     return _error(request_id, -32601, f"未知方法: {method}")
 
 
-def handle_line(line: str, *, readonly: bool = False) -> dict | None:
+def handle_line(
+    line: str,
+    *,
+    readonly: bool = False,
+    user_id: str | None = None,
+    is_super_admin: bool = False,
+    username: str | None = None,
+    project_id: str | None = None,
+) -> dict | None:
     """解析并处理一行输入；JSON 解析失败返回 -32700 错误响应。"""
     text = (line or "").strip()
     if not text:
@@ -497,15 +561,36 @@ def handle_line(line: str, *, readonly: bool = False) -> dict | None:
         msg = json.loads(text)
     except json.JSONDecodeError:
         return _error(None, -32700, "JSON 解析失败")
-    return handle_message(msg, readonly=readonly)
+    return handle_message(
+        msg,
+        readonly=readonly,
+        user_id=user_id,
+        is_super_admin=is_super_admin,
+        username=username,
+        project_id=project_id,
+    )
 
 
-def serve_stdio(readonly: bool = False) -> None:
-    """初始化数据库，然后逐行处理 stdin；EOF 时退出。"""
+def serve_stdio(
+    readonly: bool = False,
+    *,
+    plugin_owner: str | None = None,
+    plugin_all: bool = False,
+) -> None:
+    """初始化数据库，然后逐行处理 stdin；EOF 时退出。
+
+    本地 MCP 默认只暴露全局插件；``--plugin-owner`` 指定归属用户后可看到其
+    个人插件，``--plugin-all`` 按超管视角暴露全部（仅本机可信调用者使用）。
+    """
     init_db()
+    identity = {
+        "user_id": plugin_owner,
+        "is_super_admin": plugin_all,
+        "username": plugin_owner or "mcp-local",
+    }
     for line in sys.stdin:
         try:
-            response = handle_line(line, readonly=readonly)
+            response = handle_line(line, readonly=readonly, **identity)
         except Exception as exc:  # noqa: BLE001 - 单行失败不退出循环
             response = _error(None, -32603, f"内部错误：{exc}")
         if response is None:

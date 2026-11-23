@@ -49,6 +49,9 @@ stdio 插件子进程受资源限制：内存上限（`mem_limit_mb`，64–4096
 | `url` | http 端点（必须以 `http://` 或 `https://` 开头） |
 | `enabled` | 关闭后不出现在 `tools/list`，调用返回“已禁用” |
 | `tool_allowlist` | 空 = 该插件全部工具；非空 = 只暴露/允许列出的工具名 |
+| `scope` | `global`（默认，所有调用者可见）或 `owner`（仅归属用户与超管可见） |
+| `owner_id` | `scope=owner` 时的归属用户 id；`global` 时自动清空 |
+| `allow_private_net` | HTTP 插件是否允许访问本机/私网地址，默认 `false`，需超管显式开启 |
 | `last_test_at/ok/message` | 最近一次“测试连接”的结果 |
 
 ## 管理 API（仅超级管理员）
@@ -121,6 +124,16 @@ name/transport/command/args/env/url/enabled/tool_allowlist/mem_limit_mb/cpu_seco
 - 子进程 `stderr` 丢弃，`stdout` 只按 JSON-RPC 解析；混入的日志行会被忽略。
 - 只有超级管理员能增删改插件；普通用户既看不到 `/admin/plugins`，也无法通过
   MCP 端点绕过 allowlist。
+- **HTTP 出站防护（SSRF）**：`url` 必须是 `http/https`、带主机名且不含 userinfo；
+  IP 字面量必须是中国公网以外的全局地址，`localhost` 与云元数据主机名一律拒绝；
+  普通域名在**保存时与每次调用时**都做解析校验，任一解析结果为私网地址即拒绝。
+  可信内网插件由超管显式设置 `allow_private_net: true` 放行。该防护在应用层，
+  DNS 解析失败时放行（由部署方网络出站规则兜底），也无法彻底阻止 DNS 重绑定竞态；
+  高安全场景应在容器/防火墙层再做网络隔离（见 roadmap）。
+- **作用域隔离**：`scope=owner` 的个人插件只有归属用户和超管在 Web/API 中可见可调用；
+  本地 `bidcraft mcp` 不携带用户身份，默认只暴露 `global` 插件。可用
+  `--plugin-owner <用户id>` 以指定用户视角启动，或 `--plugin-all` 按超管视角暴露全部
+  （仅本机可信调用者使用）。`plugin.call` 审计记录真实调用用户名与项目 id。
 - `--readonly` 的 MCP 端点不暴露任何插件写工具，适合把 BidCraft 交给不可信客户端。
 - 插件的 `env` 以明文存库（仅超管可见），不要在其中保存长期密钥。
 - 不引入自动安装、远程市场拉取或遥测：配置即代码，全部留在本机 SQLite。
@@ -147,7 +160,8 @@ export BIDCRAFT_PLUGIN_TIMEOUT=45
 | `插件 X 启动失败：...` | `command` 不在 PATH / 不可执行；stdio 插件用绝对路径更稳 |
 | `插件 X 响应超时` | 首次 `npx`/`uvx` 下载慢；调大 `BIDCRAFT_PLUGIN_TIMEOUT` 或预装 |
 | `插件 X 提前退出（退出码 N）` | 在终端手工执行 `command + args` 看 stderr |
-| 工具列表里没有插件工具 | 检查 `enabled`、`tool_allowlist`，以及后端 stderr 的“已跳过”警告 |
+| 工具列表里没有插件工具 | 检查 `enabled`、`tool_allowlist`、`scope`，以及后端 stderr 的“已跳过”警告 |
+| `插件 X 的 url 指向本机/私网地址` | 确认 URL；可信内网插件由超管设置 `allow_private_net: true` |
 
 ## 验证
 
@@ -156,5 +170,6 @@ export BIDCRAFT_PLUGIN_TIMEOUT=45
 管理 API CRUD/409/400/403/test 写 `last_test_*`/catalog/审计、
 MCP 聚合（前缀、allowlist、失败跳过、只读拒绝、调用路由）。
 `tests/test_plugin_sandbox.py` 覆盖资源限制 clamp 与 preexec 沙箱、临时目录清理；
-`tests/test_plugin_pack.py` 覆盖插件包导出/导入/升级/skip 冲突/非法包校验/审计。
-测试不依赖 `npx`/`uvx`。
+`tests/test_plugin_pack.py` 覆盖插件包导出/导入/升级/skip 冲突/非法包校验/审计；
+`tests/test_plugin_isolation.py` 覆盖出站地址防护（IP/本机/元数据/DNS/放行开关）、
+作用域可见性、个人插件 API 校验、MCP 过滤与审计归属。测试不依赖 `npx`/`uvx`。

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Activity,
   AlertTriangle,
@@ -12,8 +12,10 @@ import {
   getLatestEvaluation,
   listEvaluationReports,
   runEvaluation,
+  runEvaluationAsync,
   updateQualityFinding,
 } from '../../api/evaluation'
+import { watchJob } from '../../hooks/watchJob'
 import { messageOf } from '../../lib/http'
 import type { QualityDimension, QualityFinding, QualityReport } from '../../lib/types'
 import { className, formatRelative } from '../../lib/format'
@@ -111,8 +113,12 @@ export function QualityTab() {
   const { ref, canWrite } = useWorkspace()
   const toast = useToast()
   const [running, setRunning] = useState(false)
+  const [jobProgress, setJobProgress] = useState<number | null>(null)
+  const watchRef = useRef<(() => void) | null>(null)
   const [report, setReport] = useState<QualityReport | null>(null)
   const [note, setNote] = useState('')
+
+  useEffect(() => () => watchRef.current?.(), [])
 
   const latestQuery = useQuery(`quality-latest:${ref}`, () => getLatestEvaluation(ref))
   const reportsQuery = useQuery(`quality-reports:${ref}`, () => listEvaluationReports(ref))
@@ -135,6 +141,50 @@ export function QualityTab() {
       toast.error(messageOf(error))
     } finally {
       setRunning(false)
+    }
+  }
+
+  const handleRunAsync = async () => {
+    setRunning(true)
+    setJobProgress(0)
+    try {
+      const { job_id: jobId } = await runEvaluationAsync(ref, { note })
+      toast.info('质量评估已提交后台任务')
+      watchRef.current?.()
+      watchRef.current = watchJob(jobId, {
+        onUpdate: (data) => setJobProgress(data.progress ?? 0),
+        onDone: async () => {
+          watchRef.current = null
+          setRunning(false)
+          setJobProgress(null)
+          try {
+            const latest = await getLatestEvaluation(ref)
+            if (latest) setReport(latest)
+            toast.success(
+              latest ? `已生成质量报告 v${latest.report_version}` : '后台质量评估已完成',
+            )
+            await Promise.all([latestQuery.refresh(), reportsQuery.refresh()])
+          } catch (error) {
+            toast.error(messageOf(error))
+          }
+        },
+        onFailed: (job) => {
+          watchRef.current = null
+          setRunning(false)
+          setJobProgress(null)
+          toast.error(job.error || job.message || '质量评估任务失败')
+        },
+        onPollError: (message) => {
+          watchRef.current = null
+          setRunning(false)
+          setJobProgress(null)
+          toast.error(message)
+        },
+      })
+    } catch (error) {
+      setRunning(false)
+      setJobProgress(null)
+      toast.error(messageOf(error))
     }
   }
 
@@ -162,17 +212,29 @@ export function QualityTab() {
         title="质量评估"
         description="整合规则核对、实质性响应、评分覆盖、证据追溯与章节确认，生成可审计的质量报告。硬性风险一票否决，质量分不替代评标得分。"
         actions={
-          <Button
-            variant="primary"
-            size="sm"
-            icon={<RefreshCw size={14} />}
-            loading={running}
-            disabled={!canWrite}
-            title={!canWrite ? '只读成员不能运行评估' : undefined}
-            onClick={() => void handleRun()}
-          >
-            运行评估
-          </Button>
+          <>
+            <Button
+              variant="primary"
+              size="sm"
+              icon={<RefreshCw size={14} />}
+              loading={running && jobProgress === null}
+              disabled={!canWrite || running}
+              title={!canWrite ? '只读成员不能运行评估' : undefined}
+              onClick={() => void handleRun()}
+            >
+              运行评估
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<Activity size={14} />}
+              disabled={!canWrite || running}
+              title="后台生成报告，适合数据量大时使用"
+              onClick={() => void handleRunAsync()}
+            >
+              后台评估
+            </Button>
+          </>
         }
       />
 
@@ -185,6 +247,10 @@ export function QualityTab() {
           disabled={!canWrite}
         />
       </label>
+
+      {jobProgress !== null && (
+        <p className="subtle" role="status">后台评估进行中：{jobProgress}%</p>
+      )}
 
       {hardRisk && (
         <div className="quality-hard-risk" role="alert">

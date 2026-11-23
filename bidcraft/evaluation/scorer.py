@@ -43,6 +43,7 @@ def calculate_dimension_scores(
     risks: dict[str, Any],
     *,
     weights: dict[str, float] | None = None,
+    commercial_info: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """计算六维得分（0-100）。缺失维度按 0 处理，不因证据不足给高分。"""
 
@@ -67,8 +68,12 @@ def calculate_dimension_scores(
         "scoring": scoring.get("covered_ratio", 0.0) * 100.0,
         # 技术内容质量：来源追溯无 stale + 章节确认
         "technical": (evidence.get("ratio", 0.0) * 60.0 + chapter.get("ratio", 0.0) * 40.0),
-        # 商务完整性：暂无独立维度，用事实台账核对失败数反向衡量
-        "commercial": max(0.0, 100.0 - by_level.get("major", 0) * 10.0),
+        # 商务完整性：有商务标文档时按真实必填项完成率，否则退回 major 数代理
+        "commercial": (
+            float(commercial_info.get("ratio", 0.0)) * 100.0
+            if commercial_info
+            else max(0.0, 100.0 - by_level.get("major", 0) * 10.0)
+        ),
         # 文档交付质量：章节确认率
         "delivery": chapter.get("ratio", 0.0) * 100.0,
     }
@@ -118,9 +123,12 @@ def evaluate_project_quality(
     risks: dict[str, Any],
     *,
     weights: dict[str, float] | None = None,
+    commercial_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """一步完成六维 + 综合判定。"""
 
-    dims = calculate_dimension_scores(coverage, risks, weights=weights)
+    dims = calculate_dimension_scores(
+        coverage, risks, weights=weights, commercial_info=commercial_info
+    )
     summary = calculate_overall_quality(dims, risks.get("risk_summary", {}))
     return {"dimensions": dims, **summary}

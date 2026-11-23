@@ -183,7 +183,7 @@ describe('CommercialTab', () => {
     fireEvent.click(screen.getByRole('button', { name: '确认提交审批' }))
 
     await waitFor(() =>
-      expect(submitCommercialDoc).toHaveBeenCalledWith('p1', 'c1', '请审批终版报价'),
+      expect(submitCommercialDoc).toHaveBeenCalledWith('p1', 'c1', '请审批终版报价', false),
     )
   })
 

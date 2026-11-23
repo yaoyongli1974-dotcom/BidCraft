@@ -24,6 +24,11 @@ const TRANSPORT_ITEMS = [
   { id: 'http', label: 'HTTP 端点' },
 ]
 
+const SCOPE_ITEMS = [
+  { id: 'global', label: '全局 · 所有成员可用' },
+  { id: 'owner', label: '个人 · 仅归属用户可用' },
+]
+
 const FIELD_MAX = { name: 60, command: 500, url: 500 } as const
 
 /** 参数框接受两种写法：JSON 数组，或一行一个参数。空行忽略。 */
@@ -115,6 +120,9 @@ export function AdminPluginModal({
   const [allowlistText, setAllowlistText] = useState('')
   const [memLimitText, setMemLimitText] = useState(String(PLUGIN_MEM_LIMIT.default))
   const [cpuSecondsText, setCpuSecondsText] = useState(String(PLUGIN_CPU_SECONDS.default))
+  const [scope, setScope] = useState<'global' | 'owner'>('global')
+  const [ownerIdText, setOwnerIdText] = useState('')
+  const [allowPrivateNet, setAllowPrivateNet] = useState(false)
   const [enabled, setEnabled] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -143,6 +151,9 @@ export function AdminPluginModal({
       setAllowlistText(plugin.tool_allowlist.join(', '))
       setMemLimitText(String(plugin.mem_limit_mb ?? PLUGIN_MEM_LIMIT.default))
       setCpuSecondsText(String(plugin.cpu_seconds ?? PLUGIN_CPU_SECONDS.default))
+      setScope(plugin.scope === 'owner' ? 'owner' : 'global')
+      setOwnerIdText(plugin.owner_id ?? '')
+      setAllowPrivateNet(Boolean(plugin.allow_private_net))
       setEnabled(plugin.enabled)
     } else {
       setName('')
@@ -154,6 +165,9 @@ export function AdminPluginModal({
       setAllowlistText('')
       setMemLimitText(String(PLUGIN_MEM_LIMIT.default))
       setCpuSecondsText(String(PLUGIN_CPU_SECONDS.default))
+      setScope('global')
+      setOwnerIdText('')
+      setAllowPrivateNet(false)
       setEnabled(true)
     }
   }, [open, state])
@@ -175,8 +189,10 @@ export function AdminPluginModal({
   const cpuSeconds = parseLimit(cpuSecondsText, PLUGIN_CPU_SECONDS.min, PLUGIN_CPU_SECONDS.max)
   const memLimitInvalid = memLimitText.trim() !== '' && memLimit === null
   const cpuSecondsInvalid = cpuSecondsText.trim() !== '' && cpuSeconds === null
+  const ownerMissing = scope === 'owner' && !ownerIdText.trim()
   const canSubmit =
     !nameMissing &&
+    !ownerMissing &&
     !commandMissing &&
     !urlMissing &&
     !urlInvalid &&
@@ -236,6 +252,10 @@ export function AdminPluginModal({
       setError(`CPU 时间需要是 ${PLUGIN_CPU_SECONDS.min}–${PLUGIN_CPU_SECONDS.max} 之间的整数。`)
       return
     }
+    if (ownerMissing) {
+      setError('个人插件需要填写归属用户 id。')
+      return
+    }
 
     const payload: PluginInput = {
       name: name.trim(),
@@ -244,7 +264,10 @@ export function AdminPluginModal({
       tool_allowlist: allowlist,
       mem_limit_mb: memLimit ?? PLUGIN_MEM_LIMIT.default,
       cpu_seconds: cpuSeconds ?? PLUGIN_CPU_SECONDS.default,
+      scope,
     }
+    if (scope === 'owner') payload.owner_id = ownerIdText.trim()
+    if (transport === 'http') payload.allow_private_net = allowPrivateNet
     if (transport === 'stdio') {
       payload.command = command.trim()
       payload.args = parsedArgs.args
@@ -424,6 +447,54 @@ export function AdminPluginModal({
               stdio 会为每次调用启动一个本机子进程；HTTP 则向固定地址发送 JSON-RPC 请求。
             </p>
           </div>
+
+          <div className="form-field admin-form-span">
+            <span className="plugin-form-label">可见范围</span>
+            <AdminSegment
+              label="选择插件的可见范围"
+              value={scope}
+              onChange={(value) => setScope(value === 'owner' ? 'owner' : 'global')}
+              items={SCOPE_ITEMS}
+            />
+            {scope === 'owner' ? (
+              <>
+                <input
+                  id="plugin-owner-id"
+                  className={className('input', 'input--mono', touched && ownerMissing && 'input--error')}
+                  value={ownerIdText}
+                  onChange={(event) => setOwnerIdText(event.target.value)}
+                  placeholder="用户 id"
+                  autoComplete="off"
+                  disabled={saving}
+                />
+                <p className="field-hint">
+                  个人插件仅归属用户与超级管理员可见可调用；用户 id 可在「用户管理」中查看。
+                </p>
+                {touched && ownerMissing && (
+                  <span className="field-error">请填写归属用户 id。</span>
+                )}
+              </>
+            ) : (
+              <p className="field-hint">全局插件对所有成员可见；本地 MCP 默认只暴露全局插件。</p>
+            )}
+          </div>
+
+          {transport === 'http' && (
+            <label className="admin-check admin-form-span">
+              <input
+                type="checkbox"
+                checked={allowPrivateNet}
+                onChange={(event) => setAllowPrivateNet(event.target.checked)}
+                disabled={saving}
+              />
+              <span>
+                <strong>允许访问本机 / 内网地址</strong>
+                <small>
+                  默认关闭；仅对可信内网 MCP 端点开启，开启后将跳过 SSRF 地址校验。
+                </small>
+              </span>
+            </label>
+          )}
 
           {transport === 'stdio' ? (
             <>

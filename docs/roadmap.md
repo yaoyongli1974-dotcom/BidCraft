@@ -70,17 +70,25 @@
 
 ## 明确未做（按优先级）
 
-1. **插件远程市场自动安装与系统级隔离**：`.bidplugin` 本地插件包导入/导出与同名覆盖升级已支持；
-   但仍在服务端操作系统用户下运行，未做容器或网络级隔离，也没有从远程市场自动安装的流程。
-2. **真实招标件持续回归基线扩充**：基线保存/比对工具链已建（`--save-baseline/--compare-baseline`，
-   仿真夹具基线已入库并做门禁），但真实件仍需用户自行提供并持续积累。
+1. **插件远程市场自动安装与系统级隔离**：应用层的沙箱、HTTP 出站地址防护与作用域隔离已完成
+   （见 `docs/plugins.md`：资源限制、SSRF 防护、`scope/owner_id/allow_private_net`、审计归属）；
+   但插件仍在服务端操作系统用户下运行，未做容器或网络级隔离，也没有从远程市场自动安装的流程。
+   `.bidplugin` 包仍只校验格式，未做签名验签。
+2. **真实招标件持续回归基线扩充**：基线工具链已完善（`--save-baseline/--compare-baseline` 外，
+   新增 `--label/--note/--manifest/--baseline-index`、`baselines` 目录命令、指纹核对与目录索引，
+   见 `docs/calibration.md`），仿真夹具基线已入库并做门禁；真实件仍需用户自行提供并持续积累。
 
 ## 建议的下一迭代
 
-1. 用真实招标件跑 `bidcraft calibrate --save-baseline`，积累真实件基线后以 `--compare-baseline`
-   做回归门禁，按字段命中率与别名缺口扩充 `FIELD_ALIAS_AUGMENT`。
-2. 报价与文档进阶：审批链已支持多级流转、并行会签/或签、金额门槛与包件/币种条件分支，后续可做规则命中条件与真实招标件回归基线扩充。
-3. 插件远程市场：受控的自动安装与升级流程（远程源校验、依赖声明与回滚）。
-4. **实质性条款判定的语义增强**：当前用字符 3-gram 覆盖率做保守判定，改写幅度大的响应可能被判未响应
-   （人工可确认，但会增加复核量）；后续可引入条款类型的结构化规则（资质/业绩/参数/承诺），
-   并把评分办法的分值绑定到章节篇幅分配。
+1. 用真实招标件跑 `bidcraft calibrate --save-baseline --label ... --manifest`，把聚合基线（不含原文）
+   与指纹清单纳入版本库，积累后以 `--compare-baseline` / `bidcraft baselines --verify` 做回归门禁，
+   按字段命中率与别名缺口扩充 `FIELD_ALIAS_AUGMENT`。
+2. 报价与文档进阶：审批链已支持多级流转、并行会签/或签、金额门槛与包件/币种条件分支，后续可做规则命中条件；
+   商务完整性已与质量评估联动——报告读取最新 `CommercialDoc` 的真实必填项完成率计入 `commercial`
+   维度并生成 major finding；同步 `evaluation/run` 保留，长报表可用 `evaluation/run-async` 后台生成。
+   `submit_commercial` 已提供可选完整性硬门禁（`require_complete=True`，前端为「严格校验完整性」勾选框），
+   默认关闭以保持旧行为；如需强制，可在部署侧约定送审一律传 `require_complete: true`。
+3. 插件远程市场：受控的自动安装与升级流程（远程源校验、依赖声明与回滚），以及 `.bidplugin` 签名验签与容器隔离。
+4. **实质性条款语义增强（已完成主体）**：条款类型（资质/业绩/参数/承诺）结构化规则、金融数字与同义词归一、
+   证据可审计、评分办法分值→章节篇幅分配均已落地（`bidcraft/substantive.py`、`constraint_check.py`、
+   `generation/outline.py`）。剩余方向：引入可选 LLM 语义匹配器替换默认规则匹配器，并用真实件基线验证召回。

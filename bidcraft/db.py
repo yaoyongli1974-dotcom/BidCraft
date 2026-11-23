@@ -220,6 +220,9 @@ def _migrate_columns(engine) -> None:
             ("auto_disabled", "BOOLEAN DEFAULT 0"),
             ("mem_limit_mb", "INTEGER DEFAULT 512"),
             ("cpu_seconds", "INTEGER DEFAULT 10"),
+            ("scope", "VARCHAR(10) DEFAULT 'global'"),
+            ("owner_id", "VARCHAR(36)"),
+            ("allow_private_net", "BOOLEAN DEFAULT 0"),
         ],
         "scoring_items": [
             ("actual_score", "FLOAT"),

@@ -16,9 +16,22 @@ from ...evaluation import (  # noqa: F401
     report_payload,
     update_finding,
 )
-from ...models import QualityFinding  # noqa: F401
+from ...models import Job, QualityFinding  # noqa: F401
 from ..schemas import QualityFindingUpdate, QualityRunRequest  # noqa: F401
-from ..shared import Any, _project, audit, current_user, session_scope  # noqa: F401
+from ..shared import (  # noqa: F401
+    BATCH_STALE_SECONDS,
+    Any,
+    HTTPException,
+    User,
+    _cancel_stale_jobs,
+    _project,
+    audit,
+    billing,
+    current_user,
+    jobqueue,
+    jobs,
+    session_scope,
+)
 
 router = APIRouter()
 
@@ -40,6 +53,57 @@ def evaluation_run(ref: str, payload: QualityRunRequest) -> dict[str, Any]:
         )
         audit(db, project.id, "quality.run.http", {"report_id": report.id, "version": report.report_version})
         return report_payload(report, findings=[])
+
+
+@router.post("/projects/{ref}/evaluation/run-async", status_code=202)
+def evaluation_run_async(ref: str, payload: QualityRunRequest) -> dict[str, Any]:
+    """后台生成质量报告；返回 job_id，用 /jobs/{id} 或 SSE 跟踪进度。"""
+    from ..shared import _require_write
+
+    with session_scope() as db:
+        project, role = _project(db, ref)
+        _require_write(role)
+        if _cancel_stale_jobs(
+            db,
+            ["evaluation"],
+            BATCH_STALE_SECONDS,
+            project_id=project.id,
+            stale_message="质量评估任务超时中断，已允许重新提交",
+        ) is not None:
+            raise HTTPException(status_code=409, detail="已有质量评估任务在运行")
+        user = current_user() or {}
+        error = jobqueue.check_backpressure(db, user.get("id") or "")
+        if error:
+            raise HTTPException(status_code=429, detail=error)
+        note = payload.note or ""
+        job = Job(
+            project_id=project.id,
+            kind="evaluation",
+            status="queued",
+            message="质量评估排队中…",
+            payload={
+                "owner_id": user.get("id") or "",
+                "note": note,
+                "created_by": _actor(),
+            },
+        )
+        db.add(job)
+        db.flush()
+        job_id = job.id
+        owner_row = db.get(User, user.get("id") or "")
+        job.priority = billing.queue_priority(db, owner_row) if owner_row else 1
+        priority = job.priority
+        jobs.publish_event(job_id, "queued", jobs.job_payload(job), db=db)
+        audit(db, project.id, "quality.run.async", {"job_id": job_id, "note": note})
+    from ..shared import _run_evaluation_job
+
+    jobqueue.submit(
+        _run_evaluation_job,
+        (job_id, project.id, note, _actor()),
+        priority=priority,
+        job_id=job_id,
+    )
+    return {"job_id": job_id}
 
 
 @router.get("/projects/{ref}/evaluation")

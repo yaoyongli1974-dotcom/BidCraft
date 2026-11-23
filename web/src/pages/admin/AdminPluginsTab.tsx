@@ -513,6 +513,18 @@ export function AdminPluginsTab() {
                           {plugin.mem_limit_mb} MB · {plugin.cpu_seconds} 秒
                         </span>
                         <span>
+                          <span className="admin-meta-label">范围</span>
+                          {plugin.scope === 'owner'
+                            ? `个人 · ${plugin.owner_id || '未指定'}`
+                            : '全局'}
+                        </span>
+                        {plugin.transport === 'http' && plugin.allow_private_net && (
+                          <span title="已跳过 SSRF 地址校验">
+                            <span className="admin-meta-label">出站</span>
+                            允许内网
+                          </span>
+                        )}
+                        <span>
                           <span className="admin-meta-label">更新</span>
                           {formatRelative(plugin.updated_at)}
                         </span>

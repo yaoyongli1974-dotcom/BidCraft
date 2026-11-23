@@ -129,6 +129,7 @@ def commercial_submit(
                 actor_id=str(user.get("id") or ""),
                 role=role,
                 is_super=user.get("role") == auth.ROLE_SUPER_ADMIN,
+                require_complete=bool(data.require_complete),
             )
         except Exception as exc:  # noqa: BLE001
             raise _http_error(exc) from exc

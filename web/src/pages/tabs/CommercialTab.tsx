@@ -74,6 +74,7 @@ export function CommercialTab() {
     action: NoteAction
   } | null>(null)
   const [note, setNote] = useState('')
+  const [requireComplete, setRequireComplete] = useState(false)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [exporting, setExporting] = useState<string | null>(null)
 
@@ -125,6 +126,7 @@ export function CommercialTab() {
     doc: CommercialDoc,
     action: CommercialAction,
     message?: string,
+    strictComplete = false,
   ) => {
     if (!canWrite || busyId) return
     if (action !== 'submit' && !canReview) return
@@ -132,7 +134,7 @@ export function CommercialTab() {
     try {
       const next =
         action === 'submit'
-          ? await submitCommercialDoc(ref, doc.id, message)
+          ? await submitCommercialDoc(ref, doc.id, message, strictComplete)
           : action === 'approve'
             ? await reviewCommercialDoc(ref, doc.id, 'approve', message)
             : action === 'reject'
@@ -157,14 +159,16 @@ export function CommercialTab() {
     if (!canWrite) return
     if (action === 'reject' && !canReview) return
     setNote('')
+    setRequireComplete(false)
     setNoteTarget({ doc, action })
   }
 
   const submitNote = async () => {
     if (!noteTarget) return
     const target = noteTarget
+    const strictComplete = target.action === 'submit' && requireComplete
     setNoteTarget(null)
-    await runAction(target.doc, target.action, note.trim() || undefined)
+    await runAction(target.doc, target.action, note.trim() || undefined, strictComplete)
   }
 
   const remove = async (doc: CommercialDoc) => {
@@ -437,6 +441,23 @@ export function CommercialTab() {
             onChange={(event) => setNote(event.target.value)}
           />
         </label>
+        {noteTarget?.action === 'submit' && (
+          <div className="form-field">
+            <div className="admin-check-row">
+              <label className="admin-check">
+                <input
+                  type="checkbox"
+                  checked={requireComplete}
+                  onChange={(event) => setRequireComplete(event.target.checked)}
+                />
+                <span>
+                  <strong>严格校验完整性</strong>
+                  <small>必填项未填齐时拒绝送审（质量评估仍会记录完整性风险）</small>
+                </span>
+              </label>
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   )

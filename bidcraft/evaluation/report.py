@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from .. import clock
 from ..audit import record_audit
 from ..models import QualityFinding, QualityReport
+from .commercial import collect_commercial_completeness
 from .coverage import (
     calculate_chapter_coverage,
     calculate_evidence_coverage,
@@ -45,9 +46,12 @@ def build_quality_report(
     created_by: str = "",
     note: str = "",
     weights: dict[str, float] | None = None,
+    commercial_info: dict[str, Any] | None = None,
 ) -> QualityReport:
     """生成并落库一份质量报告（含 finding 明细）。与调用方同事务。"""
 
+    if commercial_info is None:
+        commercial_info = collect_commercial_completeness(db, project_id)
     coverage = {
         "requirement": calculate_requirement_coverage(db, project_id),
         "scoring": calculate_scoring_coverage(db, project_id),
@@ -56,11 +60,20 @@ def build_quality_report(
     }
     risks = collect_project_risks(db, project_id)
     risk_summary = calculate_risk_summary(risks)
+    if commercial_info is not None:
+        # 商务标必填项未完成计入 major，既反映在结论也进入 finding 清单。
+        risk_summary = dict(risk_summary)
+        by_level = dict(risk_summary.get("by_level") or {})
+        if not commercial_info.get("ok"):
+            by_level["major"] = int(by_level.get("major") or 0) + 1
+        risk_summary["by_level"] = by_level
+        risk_summary["commercial_incomplete"] = not commercial_info.get("ok")
     quality = evaluate_project_quality(
         {"requirement": coverage["requirement"], "scoring": coverage["scoring"],
          "evidence": coverage["evidence"], "chapter": coverage["chapter"]},
         {**risks, "risk_summary": risk_summary},
         weights=weights,
+        commercial_info=commercial_info,
     )
 
     findings = classify_quality_risks(risks)
@@ -81,6 +94,33 @@ def build_quality_report(
                 "evidence": {"stale": coverage["evidence"]["stale"]},
             }
         )
+    if commercial_info is not None and not commercial_info.get("ok"):
+        missing = commercial_info.get("missing") or []
+        labels = "、".join(str(item.get("label") or item.get("field") or "") for item in missing[:6])
+        findings.append(
+            {
+                "category": "商务完整性",
+                "level": "major",
+                "node_id": None,
+                "requirement_id": None,
+                "scoring_item_id": None,
+                "title": "商务标必填项未完成",
+                "description": (
+                    f"已检查 {commercial_info.get('checked', 0)} 项，"
+                    f"缺失 {len(missing)} 项：{labels or '详见商务标校验详情'}"
+                ),
+                "recommendation": "补齐商务标必填字段、确认已审批报价版本与分项报价明细后重新评估",
+                "evidence": commercial_info,
+            }
+        )
+
+    summary: dict[str, Any] = {
+        "coverage": coverage,
+        "recommendations": build_risk_recommendations(risk_summary),
+        "note": note,
+    }
+    if commercial_info is not None:
+        summary["commercial"] = commercial_info
 
     report = QualityReport(
         project_id=project_id,
@@ -89,11 +129,7 @@ def build_quality_report(
         grade=quality["grade"],
         verdict=quality["verdict"],
         dimensions=quality["dimensions"],
-        summary={
-            "coverage": coverage,
-            "recommendations": build_risk_recommendations(risk_summary),
-            "note": note,
-        },
+        summary=summary,
         risk_summary=risk_summary,
         created_by=created_by or "system",
         created_at=clock.utc_now(),

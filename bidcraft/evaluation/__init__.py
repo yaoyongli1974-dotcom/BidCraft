@@ -5,6 +5,7 @@
 现有权威组件的结果。
 """
 
+from .commercial import collect_commercial_completeness
 from .coverage import (
     calculate_chapter_coverage,
     calculate_evidence_coverage,
@@ -44,6 +45,7 @@ __all__ = [
     "calculate_risk_summary",
     "calculate_scoring_coverage",
     "classify_quality_risks",
+    "collect_commercial_completeness",
     "collect_project_risks",
     "evaluate_project_quality",
     "finding_payload",

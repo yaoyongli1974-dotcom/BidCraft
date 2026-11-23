@@ -208,9 +208,12 @@ export function submitCommercialDoc(
   ref: string,
   docId: string,
   note?: string,
+  requireComplete = false,
 ): Promise<CommercialDoc> {
   const trimmed = (note || '').trim()
-  return action(ref, docId, 'submit', trimmed ? { note: trimmed } : {})
+  const body: Record<string, unknown> = trimmed ? { note: trimmed } : {}
+  if (requireComplete) body.require_complete = true
+  return action(ref, docId, 'submit', body)
 }
 
 export function reviewCommercialDoc(

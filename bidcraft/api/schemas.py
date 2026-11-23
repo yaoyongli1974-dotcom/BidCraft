@@ -472,6 +472,10 @@ class PluginCreate(BaseModel):
     # 轻量沙箱：越界/非法由 plugins.clamp_* 回退默认值，不返回 400。
     mem_limit_mb: int | None = None
     cpu_seconds: int | None = None
+    # 作用域隔离：owner 必须带 owner_id；http 私网访问需显式 allow_private_net。
+    scope: str | None = None
+    owner_id: str | None = None
+    allow_private_net: bool = False
 
 
 class PluginUpdate(BaseModel):
@@ -485,6 +489,9 @@ class PluginUpdate(BaseModel):
     tool_allowlist: list[str] | str | None = None
     mem_limit_mb: int | None = None
     cpu_seconds: int | None = None
+    scope: str | None = None
+    owner_id: str | None = None
+    allow_private_net: bool | None = None
 
 
 class TextQaUpdate(BaseModel):
@@ -565,6 +572,8 @@ class CommercialDocUpdate(BaseModel):
 class CommercialReview(BaseModel):
     action: str = "submit"
     note: str = ""
+    #: 提交时是否强制校验商务标必填项完整性（默认关闭，保持既有行为）。
+    require_complete: bool = False
 
 # ---- 对标易标第三批：Agent 编排 + 协作 ----
 class WorkflowCreate(BaseModel):

@@ -14,6 +14,7 @@ from bidcraft.substantive import (
     REQ_TYPE_PARAMETER,
     REQ_TYPE_QUALIFICATION,
     anchor_coverage,
+    anchor_evidence,
     classify_requirement,
     coverage_ratio,
     find_covering_section,
@@ -126,3 +127,50 @@ def test_requirement_payload_exposes_type(db):
 
     assert payload["requirement_type"] == REQ_TYPE_QUALIFICATION
     assert payload["requirement_type_label"] == "资质资格"
+
+
+# ------------------------------------------------------- 语义增强：深度改写容忍
+
+
+def test_financial_numeral_and_synonym_qualification_is_covered():
+    """「一级资质证书」写成「壹级资格」仍算响应（大写数字 + 同义词）。"""
+
+    text = "★ 投标人须具备建筑智能化工程专业承包一级资质证书"
+    body = "我司持有建筑智能化工程专业承包壹级资格，证书见附件。"
+    assert anchor_coverage(text, body, REQ_TYPE_QUALIFICATION) == 1.0
+    assert coverage_ratio(text, body, REQ_TYPE_QUALIFICATION) >= 0.45
+
+
+def test_financial_numeral_and_synonym_achievement_is_covered():
+    """「近三年…3项」写成「近伍年…叁项相近工程」仍算响应。"""
+
+    text = "★ 近三年同类业绩不少于3项"
+    body = "我单位近伍年完成叁项相近工程。"
+    assert anchor_coverage(text, body, REQ_TYPE_ACHIEVEMENT) == 1.0
+    assert coverage_ratio(text, body, REQ_TYPE_ACHIEVEMENT) >= 0.45
+
+
+def test_synonym_hit_is_auditable():
+    """语义扩展命中要留下证据，便于人工核对「为什么算/不算响应」。"""
+
+    text = "★ 投标人须具备建筑智能化工程专业承包一级资质证书"
+    body = "我司持有建筑智能化工程专业承包壹级资格，证书见附件。"
+    evidence = anchor_evidence(text, body, REQ_TYPE_QUALIFICATION)
+    assert any(item["via"] == "synonym" and item["variant"] == "壹级" for item in evidence)
+
+
+def test_negated_synonym_is_still_not_covered():
+    """语义扩展不能越过否定句：「不具备壹级建造师资格」不是响应。"""
+
+    text = "★ 项目经理须具备一级建造师执业资格"
+    body = "拟派项目经理不具备壹级建造师执业资格。"
+    assert anchor_coverage(text, body, REQ_TYPE_QUALIFICATION) == 0.0
+    assert coverage_ratio(text, body, REQ_TYPE_QUALIFICATION) == 0.0
+
+
+def test_response_synonym_satisfies_numeric_constraint():
+    """「2小时响应」写成「1小时内应答」仍算满足响应时限约束。"""
+
+    text = "▲ 中标人须提供2小时响应的售后服务承诺"
+    body = "我方保证1小时内应答，并提供保修服务。"
+    assert coverage_ratio(text, body, REQ_TYPE_COMMITMENT) >= 0.45

@@ -13,6 +13,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from ..auth import ROLE_SUPER_ADMIN
+from ..context import current_user
 from ..models import Project
 
 logger = logging.getLogger("bidcraft.orchestration.registry")
@@ -240,13 +242,26 @@ def validate_agent_config(config: dict[str, Any] | None) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # 工具注册表：薄包装 mcp / plugins，不重写沙箱、allowlist 与审计
 # --------------------------------------------------------------------------- #
+def _plugin_identity() -> dict[str, Any]:
+    """从请求上下文提取插件可见性与审计归属；无上下文时只见全局插件。"""
+    user = current_user() or {}
+    return {
+        "user_id": str(user.get("id") or "") or None,
+        "is_super_admin": user.get("role") == ROLE_SUPER_ADMIN,
+        "username": str(user.get("username") or "") or None,
+    }
+
+
 def list_tools() -> list[dict[str, Any]]:
     """Return built-in MCP tools plus enabled plugin tools."""
 
     from .. import mcp
 
+    identity = _plugin_identity()
     try:
-        plugin_tools = mcp._plugin_tools()
+        plugin_tools = mcp._plugin_tools(
+            user_id=identity["user_id"], is_super_admin=identity["is_super_admin"]
+        )
     except Exception:  # noqa: BLE001 - plugin discovery must not break listing
         plugin_tools = []
     return [*mcp.TOOL_SPECS, *plugin_tools]
@@ -258,10 +273,15 @@ def call_tool(name: str, arguments: dict[str, Any] | None = None, *, readonly: b
     from .. import mcp
 
     args = dict(arguments or {})
-    target = mcp._plugin_target(name)
+    identity = _plugin_identity()
+    target = mcp._plugin_target(
+        name, user_id=identity["user_id"], is_super_admin=identity["is_super_admin"]
+    )
     if target is not None:
         plugin, tool_name = target
-        return mcp._call_plugin_tool(plugin, tool_name, args, readonly=readonly)
+        return mcp._call_plugin_tool(
+            plugin, tool_name, args, readonly=readonly, username=identity["username"]
+        )
     return mcp._call_tool(name, args, readonly=readonly)
 
 

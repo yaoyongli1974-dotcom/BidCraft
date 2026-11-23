@@ -16,10 +16,12 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import queue
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -29,6 +31,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Self
+from urllib.parse import urlsplit
 
 import httpx
 from httpx import HTTPError
@@ -50,6 +53,17 @@ MEM_LIMIT_RANGE = (64, 4096)
 CPU_SECONDS_RANGE = (1, 120)
 DEFAULT_MEM_LIMIT_MB = 512
 DEFAULT_CPU_SECONDS = 10
+#: 作用域：global 对所有调用者可见；owner 只对指定用户与个人可见。
+PLUGIN_SCOPE_GLOBAL = "global"
+PLUGIN_SCOPE_OWNER = "owner"
+PLUGIN_SCOPES = (PLUGIN_SCOPE_GLOBAL, PLUGIN_SCOPE_OWNER)
+#: 出站防护：本机/元数据地址默认拒绝，需超管显式打开 allow_private_net。
+_LOCAL_HOSTS = frozenset({"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"})
+_METADATA_HOSTS = frozenset(
+    {"metadata", "metadata.google.internal", "instance-data", "metadata.goog"}
+)
+#: 保留测试域不需要解析（永远不会解析成公网地址），避免离线环境 DNS 阻塞。
+_SKIP_RESOLVE_SUFFIXES = (".example", ".test", ".invalid")
 #: 子进程只用最小环境变量，避免把数据库、模型密钥等传给第三方插件。
 _FALLBACK_PATH = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 _IS_POSIX = os.name == "posix"
@@ -128,6 +142,77 @@ def clamp_cpu_seconds(value: Any) -> int:
     return _clamp_int(value, CPU_SECONDS_RANGE, DEFAULT_CPU_SECONDS)
 
 
+def plugin_scope(value: Any, *, default: str = PLUGIN_SCOPE_GLOBAL) -> str:
+    """规范化插件作用域；非法值抛 ``ValueError``（API 转 400）。"""
+    scope = str(value or default).strip().lower()
+    if scope not in PLUGIN_SCOPES:
+        raise ValueError(f"scope 只能是 {'/'.join(PLUGIN_SCOPES)}")
+    return scope
+
+
+def plugin_owner_id(value: Any) -> str:
+    """个人插件的归属用户 id；空字符串表示无归属。"""
+    return str(value or "").strip()[:36]
+
+
+def _resolve_hosts(host: str) -> list[str]:
+    """解析域名返回 IP 字符串列表；解析失败返回空列表。
+
+    解析失败（离线部署/DNS 不可用）时放行，由部署方的网络出站规则兜底；
+    应用层无法可靠阻止 DNS 重绑定，这一点在文档中明确说明。
+    """
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return []
+    return list({str(item[4][0]) for item in infos})
+
+
+def plugin_url_allowed(
+    url: str, *, allow_private_net: bool = False, resolve: bool = True
+) -> bool:
+    """HTTP 插件出站地址是否安全（SSRF 基础防护）。
+
+    * 仅允许 ``http/https``，且必须带主机名，禁止 URL 内嵌用户名密码；
+    * IP 字面量必须是中国公网以外的全局地址（``ipaddress.is_global``），
+      loopback/私网/链路本地/保留地址默认拒绝；
+    * ``localhost`` 与云元数据主机名一律拒绝；
+    * 普通域名在调用前解析，任一解析结果为非全局地址即拒绝（防 DNS 重绑定）；
+      保留测试域（``.example/.test/.invalid``）跳过解析，避免离线环境阻塞。
+
+    ``allow_private_net=True`` 是超管对可信内网插件的显式放行，会跳过上述
+    地址判定（仍要求 scheme/主机名/无 userinfo）。
+    """
+    try:
+        parsed = urlsplit(str(url or "").strip())
+    except ValueError:
+        return False
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False
+    if parsed.username or parsed.password:
+        return False
+    if allow_private_net:
+        return True
+    host = parsed.hostname.strip().lower()
+    if host in _LOCAL_HOSTS or host in _METADATA_HOSTS or host.endswith(".localhost"):
+        return False
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        return bool(literal.is_global)
+    if resolve and not host.endswith(_SKIP_RESOLVE_SUFFIXES):
+        for address in _resolve_hosts(host):
+            try:
+                resolved = ipaddress.ip_address(address)
+            except ValueError:
+                continue
+            if not resolved.is_global:
+                return False
+    return True
+
+
 def _apply_limits(mem_mb: int, cpu_s: int) -> Callable[[], None]:
     """返回供 ``Popen(preexec_fn=...)`` 使用的子进程预执行钩子（POSIX）。
 
@@ -170,6 +255,9 @@ class PluginRef:
     tool_allowlist: list[str] = field(default_factory=list)
     mem_limit_mb: int = DEFAULT_MEM_LIMIT_MB
     cpu_seconds: int = DEFAULT_CPU_SECONDS
+    scope: str = PLUGIN_SCOPE_GLOBAL
+    owner_id: str = ""
+    allow_private_net: bool = False
 
 
 def snapshot(plugin: Any) -> PluginRef:
@@ -192,7 +280,24 @@ def snapshot(plugin: Any) -> PluginRef:
         ],
         mem_limit_mb=clamp_mem_limit(getattr(plugin, "mem_limit_mb", None)),
         cpu_seconds=clamp_cpu_seconds(getattr(plugin, "cpu_seconds", None)),
+        scope=plugin_scope(getattr(plugin, "scope", None)),
+        owner_id=plugin_owner_id(getattr(plugin, "owner_id", None)),
+        allow_private_net=bool(getattr(plugin, "allow_private_net", False)),
     )
+
+
+def visible_to(
+    plugin: Any, *, user_id: str | None = None, is_super_admin: bool = False
+) -> bool:
+    """作用域可见性：全局插件对所有调用者可见；个人插件仅归属者与超管可见。
+
+    本地 MCP 不携带用户身份（``user_id=None``），因此默认只暴露全局插件，
+    避免个人插件被本机任意调用者触发。
+    """
+    ref = snapshot(plugin)
+    if ref.scope == PLUGIN_SCOPE_GLOBAL or is_super_admin:
+        return True
+    return bool(user_id) and bool(ref.owner_id) and ref.owner_id == user_id
 
 
 def allows(plugin: Any, tool_name: str) -> bool:
@@ -223,7 +328,9 @@ def plugin_transport(value: Any, *, default: str = "stdio") -> str:
     return transport
 
 
-def plugin_validate(transport: str, command: str, url: str) -> None:
+def plugin_validate(
+    transport: str, command: str, url: str, *, allow_private_net: bool = False
+) -> None:
     if transport == "stdio" and not command:
         raise ValueError("stdio 插件必须填写 command")
     if transport == "http":
@@ -231,6 +338,11 @@ def plugin_validate(transport: str, command: str, url: str) -> None:
             raise ValueError("http 插件必须填写 url")
         if not url.startswith(("http://", "https://")):
             raise ValueError("插件 url 必须以 http:// 或 https:// 开头")
+        if not plugin_url_allowed(url, allow_private_net=allow_private_net):
+            raise ValueError(
+                "插件 url 指向本机/私网/元数据地址，已拒绝；"
+                "如为可信内网插件，请显式开启 allow_private_net"
+            )
 
 
 def plugin_items(
@@ -306,6 +418,9 @@ def plugin_payload(row: Any) -> dict[str, Any]:
         "auto_disabled": bool(getattr(row, "auto_disabled", False)),
         "mem_limit_mb": ref.mem_limit_mb,
         "cpu_seconds": ref.cpu_seconds,
+        "scope": ref.scope,
+        "owner_id": ref.owner_id,
+        "allow_private_net": ref.allow_private_net,
         "created_at": _iso(getattr(row, "created_at", None)),
         "updated_at": _iso(getattr(row, "updated_at", None)),
     }
@@ -555,6 +670,9 @@ class _StdioSession:
 
 def _http_post(plugin: PluginRef, message: dict[str, Any]) -> dict[str, Any] | None:
     """POST 一条 JSON-RPC；通知没有响应体时返回 None。"""
+    # 每次调用重新校验出站地址：防止配置后 DNS 被改指向内网（重绑定）。
+    if not plugin_url_allowed(plugin.url, allow_private_net=plugin.allow_private_net):
+        raise PluginError(f"插件 {plugin.name} 的 url 指向本机/私网地址，已拒绝出站访问")
     try:
         response = httpx.post(plugin.url, json=message, timeout=timeout_seconds())
     except HTTPError as exc:
@@ -692,21 +810,40 @@ def reset_guard(db: Any, row: Any) -> None:
     db.flush()
 
 
-def record_call(db: Any, plugin_id: str, tool: str, ok: bool) -> None:
-    """MCP 聚合调用后落库失败计数并写审计（独立短事务由调用方提供）。"""
+def record_call(
+    db: Any,
+    plugin_id: str,
+    tool: str,
+    ok: bool,
+    *,
+    username: str | None = None,
+    project_id: str | None = None,
+) -> None:
+    """MCP 聚合调用后落库失败计数并写审计（独立短事务由调用方提供）。
+
+    ``username`` / ``project_id`` 来自真实调用上下文；缺省保持旧行为的
+    ``system`` 占位，兼容本地 MCP 与既有测试。
+    """
     from .models import AuditLog, Plugin
 
     row = db.get(Plugin, plugin_id)
     if row is None:
         return
     record_outcome(db, row, ok)
+    actor = str(username or "").strip() or "system"
     db.add(
         AuditLog(
-            project_id=None,
-            username="system",
-            display_name="system",
+            project_id=project_id,
+            username=actor,
+            display_name=actor,
             action="plugin.call",
-            detail={"plugin": row.name, "tool": tool, "ok": ok},
+            detail={
+                "plugin": row.name,
+                "tool": tool,
+                "ok": ok,
+                "scope": row.scope,
+                "owner_id": row.owner_id or "",
+            },
         )
     )
     db.flush()

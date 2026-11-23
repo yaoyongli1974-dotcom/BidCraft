@@ -117,12 +117,24 @@ CLI 会额外打印汇总表、每文件一行和字段命中 Top 10；`--output
 把一次校准的目录级聚合存为基线，之后随时比对回归：
 
 ```bash
-# 保存基线（只存 schema/saved_at/aggregate，不含逐文件明细）
-bidcraft calibrate <真实件目录> --save-baseline baselines/real-2026-11.json
+# 保存基线（schema/saved_at/aggregate + 可选溯源元数据，不含正文）
+bidcraft calibrate <真实件目录> \
+  --save-baseline baselines/real-2026-11.json \
+  --label real-2026-11 --note "第 3 批公开招标文件" \
+  --baseline-index baselines/index.json
 
 # 比对（可与保存同时使用：先比对定退出码，再覆盖保存）
 bidcraft calibrate <真实件目录> --compare-baseline baselines/real-2026-11.json
+
+# 也支持用索引里的标签比对，无需记长路径
+bidcraft calibrate <真实件目录> \
+  --baseline-index baselines/index.json --compare-baseline real-2026-11
 ```
+
+`--label` / `--note` 写入基线的 `provenance`，`--manifest`（默认开启）会为每份
+真实件记录**相对路径 + sha256 + 字节数**，用于确认基线到底基于哪些件、后来有没有
+被换过；`--no-manifest` 可关闭。清单**不含任何招标文件正文**。不传这些选项时
+基线 payload 与旧版完全一致（schema 仍为 1，旧基线照常可读）。
 
 判定规则（相对基线）：
 
@@ -133,8 +145,29 @@ bidcraft calibrate <真实件目录> --compare-baseline baselines/real-2026-11.j
 - 新增命中 key、命中率上升、材料行均值上升 → 记为改进（不阻断）。
 
 退出码：**0** 无回归（或仅保存）；**1** 有回归（终端红色列出回归项，绿色列出改进项）；
-**2** 基线文件缺失或 schema 无效。基线只含聚合数字，不含文件内容，可安全提交；
-真实件本身仍不要入库。仿真夹具基线见 `tests/fixtures/regression/baseline.json`。
+**2** 基线文件缺失或 schema 无效。基线只含聚合数字与文件指纹，不含文件内容，可安全提交；
+真实件本身仍不要入库（仓库已忽略 `real-tenders/`）。仿真夹具基线见
+`tests/fixtures/regression/baseline.json`。
+
+## 真实件基线与指纹核对
+
+索引只保存「标签 → 基线文件路径」的映射，不复制基线内容，更不保存招标文件正文：
+
+```bash
+# 列出已登记基线（索引不可能存在时展示空提示）
+bidcraft baselines --list --index baselines/index.json
+
+# 把已有基线补登记进索引
+bidcraft baselines --add baselines/real-2026-11.json --label real-2026-11
+
+# 核对这批真实件是否被替换/移除（默认在当前目录下按清单里的相对路径找）
+bidcraft baselines --verify real-2026-11 --root /data/tenders/2026-11
+```
+
+`--verify` 逐文件比较 sha256 与字节数：全部一致 exit 0；有文件变更或缺失 exit 1；
+标签不存在/基线无效 exit 2。没有指纹清单的旧基线会提示无法核对而不是误报通过。
+CI 可把「比对无回归」和「指纹一致」做成两道独立门禁：前者盯解析能力退化，后者盯
+样本集是否被悄悄换掉。详细约定见 `baselines/README.md`。
 
 运行内置回归：
 

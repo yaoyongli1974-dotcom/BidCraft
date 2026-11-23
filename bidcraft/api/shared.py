@@ -143,6 +143,7 @@ from ..verdict import judge as judge_requirement
 from ..workers import (  # noqa: F401 - 同上；测试也 monkeypatch 这些名字
     _run_batch_check_job,
     _run_batch_export_job,
+    _run_evaluation_job,
     _run_generation_job,
     _run_image_batch_job,
     _run_kb_reindex_job,
@@ -890,9 +891,20 @@ def plugin_transport(value: str | None, *, default: str = "stdio") -> str:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-def plugin_validate(transport: str, command: str, url: str) -> None:
+def plugin_validate(
+    transport: str, command: str, url: str, *, allow_private_net: bool = False
+) -> None:
     try:
-        plugins.plugin_validate(transport, command, url)
+        plugins.plugin_validate(
+            transport, command, url, allow_private_net=allow_private_net
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def plugin_scope(value: str | None) -> str:
+    try:
+        return plugins.plugin_scope(value)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1294,6 +1306,7 @@ __all__ = [
     '_rule_package_admin_payload',
     '_run_batch_check_job',
     '_run_batch_export_job',
+    '_run_evaluation_job',
     '_run_generation_job',
     '_run_image_batch_job',
     '_run_kb_reindex_job',

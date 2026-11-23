@@ -201,6 +201,7 @@ _API_RUNNER_NAMES = {
     "images": "_run_image_batch_job",
     "kb_reindex": "_run_kb_reindex_job",
     "agent": "_run_agent_job",
+    "evaluation": "_run_evaluation_job",
 }
 
 
@@ -623,6 +624,13 @@ def _rebuild_args(job: Job) -> tuple:
         return (job.id, payload.get("kb_id") or "")
     if kind == "agent":
         return (job.id, payload.get("run_id") or "")
+    if kind == "evaluation":
+        return (
+            job.id,
+            project_id,
+            str(payload.get("note") or ""),
+            str(payload.get("created_by") or ""),
+        )
     return (job.id,)
 
 

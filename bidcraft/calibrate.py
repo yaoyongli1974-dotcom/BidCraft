@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from datetime import UTC, datetime
@@ -265,19 +266,227 @@ def calibrate_dir(path: str | Path, recursive: bool = False) -> dict[str, Any]:
 BASELINE_SCHEMA = 1
 
 
-def save_baseline(report: dict[str, Any], path: str | Path) -> Path:
-    """保存回归基线：只存 aggregate（不含 root/per_file），保证跨机器可比。"""
+def _sha256_of_file(path: Path) -> tuple[str, int]:
+    """返回文件 sha256 与字节数；只读，不把内容带进基线。"""
+
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
+
+
+def file_manifest(report: dict[str, Any]) -> list[dict[str, Any]]:
+    """为由真实招标文件生成的报告生成文件指纹清单。
+
+    只记录相对路径 + sha256 + 字节数，**从不记录正文**；文件缺失时仍留条目并
+    标记 missing，便于日后核对「这份基线到底用了哪些件、文件是否被换过」。
+    """
+
+    root = Path(report.get("root", "")).expanduser() if report.get("root") else None
+    entries: list[dict[str, Any]] = []
+    for item in report.get("per_file", []):
+        relative = str(item.get("file", ""))
+        candidate = Path(relative)
+        if root is not None and not candidate.is_absolute():
+            candidate = root / candidate
+        entry: dict[str, Any] = {
+            "file": relative,
+            "sha256": None,
+            "size": None,
+            "missing": True,
+        }
+        if candidate.is_file():
+            sha256, size = _sha256_of_file(candidate)
+            entry.update({"sha256": sha256, "size": size, "missing": False})
+        entries.append(entry)
+    return entries
+
+
+def save_baseline(
+    report: dict[str, Any],
+    path: str | Path,
+    *,
+    label: str | None = None,
+    note: str | None = None,
+    manifest: list[dict[str, Any]] | bool | None = None,
+) -> Path:
+    """保存回归基线：只存 aggregate（不含 root/per_file），保证跨机器可比。
+
+    ``label``/``note``/``manifest`` 是可选的**溯源元数据**，放在 ``provenance``
+    下；不传时 payload 与旧版逐字节兼容（schema 仍为 1）。``manifest=True``
+    时自动按报告生成文件指纹清单；真实件正文永不写入基线。
+    """
+
     target = Path(path).expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
+    payload: dict[str, Any] = {
         "schema": BASELINE_SCHEMA,
         "saved_at": datetime.now(UTC).isoformat(),
         "aggregate": report["aggregate"],
     }
+    provenance: dict[str, Any] = {}
+    if label:
+        provenance["label"] = label
+    if note:
+        provenance["note"] = note
+    if manifest is True:
+        manifest = file_manifest(report)
+    if manifest:
+        provenance["file_manifest"] = manifest
+    if provenance:
+        payload["provenance"] = provenance
     target.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     return target
+
+
+def verify_baseline(
+    baseline_path: str | Path, *, root: str | Path | None = None
+) -> dict[str, Any]:
+    """按基线里的指纹清单核对真实件是否被替换/移除（不比对 aggregate）。"""
+
+    data = load_baseline(baseline_path)
+    manifest = (data.get("provenance") or {}).get("file_manifest") or []
+    base_root = Path(root).expanduser() if root is not None else None
+    checks: list[dict[str, Any]] = []
+    for entry in manifest:
+        relative = str(entry.get("file", ""))
+        candidate = Path(relative)
+        if base_root is not None and not candidate.is_absolute():
+            candidate = base_root / candidate
+        missing = not candidate.is_file()
+        actual_sha = actual_size = None
+        if not missing:
+            actual_sha, actual_size = _sha256_of_file(candidate)
+        ok = (
+            not missing
+            and actual_sha == entry.get("sha256")
+            and actual_size == entry.get("size")
+        )
+        checks.append(
+            {
+                "file": relative,
+                "ok": ok,
+                "missing": missing,
+                "expected_sha256": entry.get("sha256"),
+                "actual_sha256": actual_sha,
+                "expected_size": entry.get("size"),
+                "actual_size": actual_size,
+            }
+        )
+    return {
+        "ok": all(item["ok"] for item in checks),
+        "has_manifest": bool(manifest),
+        "label": (data.get("provenance") or {}).get("label"),
+        "files": checks,
+    }
+
+
+# ------------------------------------------------------- 真实件基线目录索引
+# 索引只存「标签 → 基线文件路径」的映射，绝不复制基线内容或招标文件正文。
+BASELINE_INDEX_SCHEMA = 1
+
+
+def load_index(path: str | Path) -> dict[str, Any]:
+    """读取基线索引；文件不存在时返回空索引，方便首次登记。"""
+
+    target = Path(path).expanduser()
+    if not target.exists():
+        return {"schema": BASELINE_INDEX_SCHEMA, "entries": []}
+    data = json.loads(target.read_text(encoding="utf-8"))
+    schema = data.get("schema")
+    if schema != BASELINE_INDEX_SCHEMA:
+        raise ValueError(f"不支持的基线索引 schema：{schema!r}（期望 {BASELINE_INDEX_SCHEMA}）")
+    if not isinstance(data.get("entries"), list):
+        # noqa: TRY004 - 这是 JSON 内容错误，不是函数参数类型错误
+        raise ValueError("基线索引 entries 必须是列表")  # noqa: TRY004
+    return data
+
+
+def save_index(index: dict[str, Any], path: str | Path) -> Path:
+    target = Path(path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return target
+
+
+def _relative_to_base(path: Path, base: Path) -> str:
+    try:
+        return path.resolve().relative_to(base.resolve()).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def index_add(
+    index_path: str | Path, baseline_path: str | Path, *, label: str | None = None
+) -> dict[str, Any]:
+    """校验并登记一份基线，返回登记条目（重复登记按 id 覆盖）。"""
+
+    target = Path(baseline_path).expanduser()
+    if not target.is_file():
+        raise FileNotFoundError(f"基线文件不存在：{target}")
+    baseline = load_baseline(target)  # 顺带校验 schema
+    digest, size = _sha256_of_file(target)
+    entry_id = digest[:12]
+    index_file = Path(index_path).expanduser()
+    index = load_index(index_file)
+    entries = index["entries"]
+    stored_path = _relative_to_base(target, index_file.parent)
+    existing = next((item for item in entries if item.get("id") == entry_id), None)
+    if existing is None:
+        existing = {
+            "id": entry_id,
+            "label": label or (baseline.get("provenance") or {}).get("label") or target.stem,
+            "path": stored_path,
+            "saved_at": baseline.get("saved_at"),
+            "sha256": digest,
+            "size": size,
+        }
+        entries.append(existing)
+    else:
+        existing.update(
+            {
+                "label": label or existing.get("label"),
+                "path": stored_path,
+                "sha256": digest,
+                "size": size,
+            }
+        )
+    entries.sort(key=lambda item: (item.get("label", ""), item.get("id", "")))
+    save_index(index, index_file)
+    return dict(existing)
+
+
+def resolve_baseline(index_path: str | Path, reference: str) -> Path:
+    """按 label / id（含前缀）/ 路径解析基线文件位置。"""
+
+    index = load_index(index_path)
+    index_file = Path(index_path).expanduser()
+    matches: list[Path] = []
+    for entry in index.get("entries", []):
+        label = str(entry.get("label", ""))
+        entry_id = str(entry.get("id", ""))
+        path = Path(str(entry.get("path", ""))).expanduser()
+        if not path.is_absolute():
+            path = index_file.parent / path
+        if (
+            reference in (label, entry_id)
+            or (len(reference) >= 4 and entry_id.startswith(reference))
+            or reference == str(entry.get("path"))
+        ):
+            matches.append(path)
+    unique = list(dict.fromkeys(matches))
+    if not unique:
+        raise KeyError(f"索引里找不到基线：{reference}")
+    if len(unique) > 1:
+        raise ValueError(f"基线标识不唯一：{reference}")
+    return unique[0]
 
 
 def load_baseline(path: str | Path) -> dict[str, Any]:

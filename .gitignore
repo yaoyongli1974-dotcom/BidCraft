@@ -16,3 +16,5 @@ web/dist/
 bidcraft/web_dist/
 .opencode/
 build/
+# 真实招标文件含商业信息，绝不入库；基线（仅聚合数字+文件指纹）可提交。
+real-tenders/

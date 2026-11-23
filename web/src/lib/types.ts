@@ -1590,6 +1590,12 @@ export interface Plugin {
   mem_limit_mb: number
   /** stdio 子进程 CPU 时间上限（秒），范围 1–120，缺省 10。 */
   cpu_seconds: number
+  /** global = 所有调用者可见；owner = 仅归属用户与超管可见。 */
+  scope?: 'global' | 'owner' | string
+  /** scope=owner 时的归属用户 id。 */
+  owner_id?: string | null
+  /** HTTP 插件是否允许访问本机/私网地址（默认 false）。 */
+  allow_private_net?: boolean
   last_test_at?: string | null
   last_test_ok?: boolean | null
   last_test_message?: string
@@ -1617,6 +1623,11 @@ export interface PluginInput {
   mem_limit_mb?: number
   /** CPU 时间上限（秒），1–120；省略时后端使用默认值 10。 */
   cpu_seconds?: number
+  /** 个人插件需同时提交 owner_id；global 时忽略 owner_id。 */
+  scope?: 'global' | 'owner' | string
+  owner_id?: string | null
+  /** 仅 HTTP 插件：可信内网端点需显式开启，默认 false。 */
+  allow_private_net?: boolean
 }
 
 /** `POST /admin/plugins/{id}/test` 的结果；失败时 ok=false 但仍返回说明。 */
@@ -2149,6 +2160,15 @@ export interface QualityReport {
     coverage?: Record<string, unknown>
     recommendations?: string[]
     note?: string
+    commercial?: {
+      ok: boolean
+      ratio: number
+      missing: Array<{ section: string; field: string; label: string }>
+      checked: number
+      doc_id: string
+      doc_status: string
+      source: string
+    }
   }
   risk_summary: Record<string, unknown>
   created_by: string

@@ -13,6 +13,27 @@ export function normalizeQualityReport(value: unknown): QualityReport | null {
   const raw = asRecord(value)
   if (!raw.id) return null
   const summary = asRecord(raw.summary)
+  const commercialRaw = asRecord(summary.commercial)
+  const commercial = Object.keys(commercialRaw).length
+    ? {
+        ok: Boolean(commercialRaw.ok),
+        ratio: Number(commercialRaw.ratio || 0),
+        missing: Array.isArray(commercialRaw.missing)
+          ? commercialRaw.missing.map((item) => {
+              const row = asRecord(item)
+              return {
+                section: String(row.section || ''),
+                field: String(row.field || ''),
+                label: String(row.label || ''),
+              }
+            })
+          : [],
+        checked: Number(commercialRaw.checked || 0),
+        doc_id: String(commercialRaw.doc_id || ''),
+        doc_status: String(commercialRaw.doc_status || ''),
+        source: String(commercialRaw.source || ''),
+      }
+    : undefined
   return {
     id: String(raw.id),
     project_id: String(raw.project_id || ''),
@@ -27,6 +48,7 @@ export function normalizeQualityReport(value: unknown): QualityReport | null {
         ? summary.recommendations.map(String)
         : [],
       note: String(summary.note || ''),
+      commercial,
     },
     risk_summary: asRecord(raw.risk_summary),
     created_by: String(raw.created_by || ''),
@@ -67,6 +89,20 @@ export async function runEvaluation(ref: string, input: QualityRunInput = {}): P
   const report = normalizeQualityReport(data)
   if (!report) throw new Error('质量报告响应无效')
   return report
+}
+
+/** 提交后台质量评估任务；用 watchJob(job_id) 跟踪进度与终态。 */
+export async function runEvaluationAsync(
+  ref: string,
+  input: QualityRunInput = {},
+): Promise<{ job_id: string }> {
+  const data = await request<{ job_id?: unknown }>(
+    `${projectBase(ref)}/evaluation/run-async`,
+    { method: 'POST', body: JSON.stringify(input) },
+  )
+  const jobId = data && data.job_id ? String(data.job_id) : ''
+  if (!jobId) throw new Error('后台评估任务响应无效')
+  return { job_id: jobId }
 }
 
 export async function getLatestEvaluation(ref: string): Promise<QualityReport | null> {

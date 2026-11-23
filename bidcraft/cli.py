@@ -85,6 +85,12 @@ def mcp(
     readonly: bool = typer.Option(
         False, "--readonly/--no-readonly", help="只读模式：禁用核对与导出"
     ),
+    plugin_owner: str | None = typer.Option(
+        None, "--plugin-owner", help="可见的个人插件归属用户 id（默认仅全局插件）"
+    ),
+    plugin_all: bool = typer.Option(
+        False, "--plugin-all", help="按超管视角暴露全部插件（仅本机可信调用者使用）"
+    ),
 ) -> None:
     """启动 MCP stdio 服务（供 Claude/Cursor 等客户端接入）。"""
     from . import mcp as mcp_server
@@ -95,7 +101,9 @@ def mcp(
         file=sys.stderr,
         flush=True,
     )
-    mcp_server.serve_stdio(readonly=readonly)
+    mcp_server.serve_stdio(
+        readonly=readonly, plugin_owner=plugin_owner, plugin_all=plugin_all
+    )
 
 
 @app.command()
@@ -177,11 +185,19 @@ def calibrate(
         None, "--save-baseline", help="保存回归基线 JSON（仅 aggregate，跨机器可比）"
     ),
     compare_baseline: Path | None = typer.Option(
-        None, "--compare-baseline", help="与回归基线比对（有回归 exit 1，基线缺失 exit 2）"
+        None, "--compare-baseline", help="与回归基线比对（路径或索引标签，有回归 exit 1，基线缺失 exit 2）"
+    ),
+    label: str | None = typer.Option(None, "--label", help="基线标签（真实件批次名，写入溯源元数据）"),
+    note: str | None = typer.Option(None, "--note", help="基线备注（仅溯源，不写招标文件正文）"),
+    manifest: bool = typer.Option(
+        True, "--manifest/--no-manifest", help="记录文件指纹清单（sha256/大小，不含正文）"
+    ),
+    baseline_index: Path | None = typer.Option(
+        None, "--baseline-index", help="保存基线后登记到此索引（便于按标签比对）"
     ),
 ) -> None:
     """对真实招标文件目录做解析/字段回归校准（只读，不写数据库）。"""
-    from .calibrate import calibrate_dir, render_report
+    from .calibrate import calibrate_dir, index_add, render_report, resolve_baseline
     from .calibrate import compare_baseline as compare_baseline_report
     from .calibrate import save_baseline as save_baseline_file
 
@@ -220,11 +236,21 @@ def calibrate(
         console.print(f"[green]报告已写入[/green] {output}")
 
     exit_code = 0
-    if compare_baseline is not None:
+    compare_target: Path | None = compare_baseline
+    if (
+        compare_target is not None
+        and not compare_target.exists()
+        and baseline_index is not None
+    ):
         try:
-            comparison = compare_baseline_report(report, compare_baseline)
+            compare_target = resolve_baseline(baseline_index, str(compare_target))
+        except (KeyError, ValueError):
+            pass  # 保持原路径，下面的 FileNotFoundError 会给出「基线文件不存在」
+    if compare_target is not None:
+        try:
+            comparison = compare_baseline_report(report, compare_target)
         except FileNotFoundError:
-            console.print(f"[red]基线文件不存在：{compare_baseline}[/red]")
+            console.print(f"[red]基线文件不存在：{compare_target}[/red]")
             raise typer.Exit(2) from None
         except ValueError as exc:
             console.print(f"[red]基线文件无效：{exc}[/red]")
@@ -262,11 +288,108 @@ def calibrate(
             exit_code = 1
 
     if save_baseline is not None:
-        saved = save_baseline_file(report, save_baseline)
+        saved = save_baseline_file(
+            report,
+            save_baseline,
+            label=label,
+            note=note,
+            manifest=manifest,
+        )
         console.print(f"[green]基线已保存[/green] {saved}")
+        if label:
+            console.print(f"[dim]溯源标签：{label}[/dim]")
+        if baseline_index is not None:
+            entry = index_add(baseline_index, saved, label=label)
+            console.print(
+                f"[green]基线已登记[/green] {baseline_index} · {entry['id']} · {entry['label']}"
+            )
 
     if exit_code:
         raise typer.Exit(exit_code)
+
+
+@app.command("baselines")
+def baselines_cmd(
+    index: Path = typer.Option(
+        Path("baselines/index.json"), "--index", help="真实件基线索引路径"
+    ),
+    list_items: bool = typer.Option(False, "--list", help="列出已登记的基线"),
+    add: Path | None = typer.Option(None, "--add", help="登记一份已有的基线 JSON"),
+    label: str | None = typer.Option(None, "--label", help="登记时指定标签"),
+    verify: str | None = typer.Option(None, "--verify", help="按标签/id 核对真实件指纹"),
+    root: Path | None = typer.Option(
+        None, "--root", help="核对指纹时真实件所在目录（默认用当前目录）"
+    ),
+) -> None:
+    """管理真实招标文件回归基线（索引里只有标签与路径，没有正文）。"""
+    from .calibrate import index_add, load_index, resolve_baseline, verify_baseline
+
+    if add is not None:
+        try:
+            entry = index_add(index, add, label=label)
+        except FileNotFoundError:
+            console.print(f"[red]基线文件不存在：{add}[/red]")
+            raise typer.Exit(2) from None
+        except ValueError as exc:
+            console.print(f"[red]基线文件无效：{exc}[/red]")
+            raise typer.Exit(2) from None
+        console.print(
+            f"[green]基线已登记[/green] {index} · {entry['id']} · {entry['label']}"
+        )
+        return
+
+    if verify is not None:
+        try:
+            baseline_path = resolve_baseline(index, verify)
+            result = verify_baseline(baseline_path, root=root)
+        except (KeyError, ValueError) as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(2) from None
+        if not result["has_manifest"]:
+            console.print("[yellow]该基线没有文件指纹清单，无法核对真实件。[/yellow]")
+            return
+        table = Table(title=f"真实件指纹核对：{verify}")
+        table.add_column("文件", overflow="fold")
+        table.add_column("结果")
+        table.add_column("说明", overflow="fold")
+        for item in result["files"]:
+            if item["ok"]:
+                status, detail = "[green]一致[/green]", "-"
+            elif item["missing"]:
+                status, detail = "[red]缺失[/red]", "文件不存在"
+            else:
+                status, detail = "[red]变更[/red]", (
+                    f"期望 {str(item['expected_sha256'])[:12]}… / "
+                    f"实际 {str(item['actual_sha256'])[:12]}…"
+                )
+            table.add_row(item["file"], status, detail)
+        console.print(table)
+        if result["ok"]:
+            console.print("[green]真实件指纹全部一致[/green]")
+        else:
+            console.print("[red]真实件已变更或缺失，请确认后重建基线[/red]")
+            raise typer.Exit(1)
+        return
+
+    entries = load_index(index).get("entries", [])
+    if not entries:
+        console.print(f"[yellow]索引为空：{index}[/yellow]（用 --add 或 calibrate --baseline-index 登记）")
+        return
+    table = Table(title="真实件回归基线")
+    table.add_column("标签")
+    table.add_column("ID")
+    table.add_column("路径", overflow="fold")
+    table.add_column("保存时间")
+    for entry in entries:
+        table.add_row(
+            str(entry.get("label", "")),
+            str(entry.get("id", "")),
+            str(entry.get("path", "")),
+            str(entry.get("saved_at", "")),
+        )
+    console.print(table)
+    if not list_items:
+        console.print("[dim]默认展示列表；可用 --add 登记、--verify 核对真实件。[/dim]")
 
 
 @app.command("packages")

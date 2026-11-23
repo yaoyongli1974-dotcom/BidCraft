@@ -679,6 +679,11 @@ class Plugin(Base):
     #: 轻量沙箱参数：stdio 子进程的地址空间上限（MB）与 CPU 时间上限（秒）。
     mem_limit_mb: Mapped[int] = mapped_column(Integer, default=512)
     cpu_seconds: Mapped[int] = mapped_column(Integer, default=10)
+    #: 作用域：global=全局；owner=仅归属用户与超管可见/可调用。
+    scope: Mapped[str] = mapped_column(String(10), default="global")
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    #: HTTP 插件是否允许访问本机/私网地址（超管显式开启，默认关闭）。
+    allow_private_net: Mapped[bool] = mapped_column(Boolean, default=False)
     last_test_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_test_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     last_test_message: Mapped[str] = mapped_column(Text, default="")

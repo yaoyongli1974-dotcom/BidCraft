@@ -1088,8 +1088,13 @@ def submit_commercial(
     actor_id: str = "",
     role: str = "",
     is_super: bool = False,
+    require_complete: bool = False,
 ) -> dict[str, Any]:
-    """draft|rejected → submitted，提交前按当前已审批报价重新汇编。"""
+    """draft|rejected → submitted，提交前按当前已审批报价重新汇编。
+
+    ``require_complete=True`` 时额外执行完整性硬门槛：必填项未填齐不得送审；
+    缺省 False 保持既有行为（完整性仅作为提示）。
+    """
     doc = get_commercial(db, project, doc_id)
     if doc is None:
         raise LookupError("商务标不存在")
@@ -1110,6 +1115,12 @@ def submit_commercial(
     if not validation.get("ok"):
         detail = "；".join(validation.get("errors") or []) or "一致性校验未通过"
         raise CommercialConflictError(f"商务标一致性校验未通过：{detail}")
+    if require_complete:
+        completeness = payload.get("completeness") or validation.get("completeness") or {}
+        if not completeness.get("ok", True):
+            missing = completeness.get("missing") or []
+            detail = "；".join(str(item) for item in missing[:8]) or "存在未填必填项"
+            raise CommercialConflictError(f"商务标完整性校验未通过：{detail}")
     doc.sections = payload.get("sections") or {}
     doc.quote_version_id = (payload.get("quote") or {}).get("version_id")
     blob = _validation_blob(payload)

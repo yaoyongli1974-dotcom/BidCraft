@@ -161,7 +161,8 @@ _TYPE_SIGNALS: dict[str, tuple[str, ...]] = {
 # 锚点用正则以容忍改写：数值可变（3 项 → 5 项）、同义可换（类似 → 同类），
 # 但模式本身必须具体，不能是「项目」「要求」这种满篇都是的词。
 # 招标文本里「近三年」「不少于六项」和「近 3 年」「≥3 项」都常见，锚点两种数字都认。
-_CN_NUM = r"(?:\d+|[一二三四五六七八九十百]{1,3})"
+# 合同/业绩文本里大写数字（壹、贰、叁…）很常见，旧口径只认小写中文与阿拉伯数字。
+_CN_NUM = r"(?:\d+|[零〇一二三四五六七八九十百壹贰叁肆伍陆柒捌玖拾]{1,3})"
 
 _TYPE_ANCHORS: dict[str, tuple[str, ...]] = {
     REQ_TYPE_QUALIFICATION: (
@@ -185,6 +186,162 @@ _TYPE_ANCHORS: dict[str, tuple[str, ...]] = {
         rf"{_CN_NUM}\s*(?:小时|天|年|分钟)[^，。；]{{0,10}}(?:内|响应|到场|质保|保修)",
     ),
 }
+
+
+# ------------------------------------------------------- 同义改写等价类（语义增强）
+# 结构化锚点比 3-gram 更容忍改写，但仍只认固定词形：正文把「同类项目」写成
+# 「相近工程」、「一级资质」写成「壹级资格」时依然会误判未响应。这里给每类条款
+# 一组**等价写法**，只扩展「条款自身真实命中的锚点片段」，正文里凭空出现的同义词
+# 不会变成锚点；每条命中仍走否定句检查，「不具备 X」不算「具备 X」。
+_SYNONYM_GROUPS: dict[str, tuple[tuple[str, ...], ...]] = {
+    REQ_TYPE_QUALIFICATION: (
+        ("资质", "资格"),
+        ("证书", "资格证", "资质证书", "执业证书"),
+        ("执业", "注册"),
+        ("建造师", "注册建造师"),
+        ("一级", "壹级", "I级", "1级"),
+        ("二级", "贰级", "II级", "2级"),
+        ("三级", "叁级", "III级", "3级"),
+        ("甲级", "甲"),
+        ("乙级", "乙"),
+    ),
+    REQ_TYPE_ACHIEVEMENT: (
+        ("同类", "相近", "类似", "相同"),
+        ("项目", "工程", "案例"),
+        ("业绩", "项目业绩", "案例", "工程", "工程业绩"),
+        ("完成", "承建", "实施", "竣工"),
+        ("合同", "合同复印件", "成交通知书", "中标通知书"),
+    ),
+    REQ_TYPE_PARAMETER: (
+        ("不小于", "不低于", "≥", "大于等于"),
+        ("不大于", "不高于", "≤", "小于等于"),
+        ("带宽", "传输带宽", "速率"),
+        ("容量", "存储容量"),
+    ),
+    REQ_TYPE_COMMITMENT: (
+        ("承诺", "保证"),
+        ("质保", "保修", "质量保证"),
+        ("售后", "售后服务"),
+        ("响应", "应答", "回复"),
+        ("到场", "到达现场"),
+        ("免费", "无偿"),
+    ),
+}
+
+# 中文小写 / 大写 / 阿拉伯数字互认（「近伍年」「3 项」「叁项」）。
+_DIGIT_CANONICAL = {
+    "零": "0", "〇": "0", "一": "1", "二": "2", "三": "3", "四": "4",
+    "五": "5", "六": "6", "七": "7", "八": "8", "九": "9",
+    "壹": "1", "贰": "2", "叁": "3", "肆": "4", "伍": "5",
+    "陆": "6", "柒": "7", "捌": "8", "玖": "9",
+    "0": "0", "1": "1", "2": "2", "3": "3", "4": "4",
+    "5": "5", "6": "6", "7": "7", "8": "8", "9": "9",
+}
+_CN_NUM_RE = re.compile(r"[零〇一二三四五六七八九十百壹贰叁肆伍陆柒捌玖拾]{1,3}|\d{1,3}")
+_FINANCIAL_DIGITS = ("零", "壹", "贰", "叁", "肆", "伍", "陆", "柒", "捌", "玖", "拾")
+_CN_LOWER_DIGITS = ("零", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十")
+
+
+def _number_variants(token: str) -> set[str]:
+    """把一个数字写法展开为阿拉伯/中文小写/大写三种等价写法。"""
+
+    canonical = "".join(_DIGIT_CANONICAL.get(char, char) for char in token)
+    if not canonical.isdigit():
+        return {token}
+    value = int(canonical)
+    variants = {token, canonical}
+    if 0 <= value <= 10:
+        variants.add(_CN_LOWER_DIGITS[value])
+        variants.add(_FINANCIAL_DIGITS[value])
+    return variants
+
+
+def _expand_anchor_variants(anchor: str, req_type: str) -> set[str]:
+    """只扩展条款里真实出现的锚点片段，不凭空造锚点。"""
+
+    variants = {anchor, re.sub(r"\s+", "", anchor)}
+    for group in _SYNONYM_GROUPS.get(req_type, ()):
+        for token in tuple(group):
+            if token not in anchor:
+                continue
+            for alternative in group:
+                for base in tuple(variants):
+                    variants.add(base.replace(token, alternative))
+    for token in set(_CN_NUM_RE.findall(anchor)):
+        for alternative in _number_variants(token):
+            for base in tuple(variants):
+                variants.add(base.replace(token, alternative))
+    # 英文/数字大小写不敏感（ISO9001、Mbps 等）。
+    variants.update(value.lower() for value in tuple(variants))
+    return {value.strip() for value in variants if value.strip()}
+
+
+def _requirement_anchors(text: str, pattern: str) -> list[str]:
+    return list(dict.fromkeys(
+        match.group(0).strip()
+        for match in re.finditer(pattern, text or "")
+        if match.group(0).strip()
+    ))
+
+
+def _anchor_hits(text: str, body: str, req_type: str) -> tuple[list[str], list[dict]]:
+    """返回（条款相关锚点模式, 正文里的肯定命中证据）。
+
+    先按旧口径用模式直接匹配正文（保证既有判定不变），再对条款自身命中的
+    锚点片段做同义/数字等价扩展；两种路径都必须落在肯定句里。
+    """
+
+    if not body or req_type == REQ_TYPE_GENERAL:
+        return [], []
+    relevant = type_anchor_patterns(text, req_type)
+    if not relevant:
+        return [], []
+    hits: list[dict] = []
+    for pattern in relevant:
+        found: dict | None = None
+        for match in re.finditer(pattern, body):
+            if _match_is_affirmative(body, match):
+                found = {
+                    "pattern": pattern,
+                    "anchor": match.group(0),
+                    "variant": match.group(0),
+                    "position": match.start(),
+                    "via": "pattern",
+                }
+                break
+        if found is None:
+            for anchor in _requirement_anchors(text, pattern):
+                for variant in sorted(
+                    _expand_anchor_variants(anchor, req_type), key=len, reverse=True
+                ):
+                    start = 0
+                    while True:
+                        position = body.find(variant, start)
+                        if position < 0:
+                            break
+                        if not negation_at(body, position):
+                            found = {
+                                "pattern": pattern,
+                                "anchor": anchor,
+                                "variant": variant,
+                                "position": position,
+                                "via": "synonym",
+                            }
+                            break
+                        start = position + 1
+                    if found is not None:
+                        break
+                if found is not None:
+                    break
+        if found is not None:
+            hits.append(found)
+    return relevant, hits
+
+
+def anchor_evidence(text: str, body: str, req_type: str) -> list[dict]:
+    """锚点/同义命中的可举证片段（供核对问题 evidence 使用）。"""
+
+    return _anchor_hits(text, body, req_type)[1]
 
 
 def classify_requirement(text: str) -> str:
@@ -221,22 +378,13 @@ def _match_is_affirmative(body: str, match: re.Match) -> bool:
 def anchor_coverage(text: str, body: str, req_type: str) -> float:
     """结构化锚点命中率（0–1）；无相关锚点时返回 0，回退到 3-gram 判定。
 
-    否定句里的锚点不算命中：正文写「不具备一级建造师资格」时，「一级建造师」
-    这个锚点即使字面出现，也不是对「须具备一级建造师资格」的响应。
+    除旧口径的模式匹配外，还支持「条款自身锚点」的同义/数字等价改写；
+    否定句里的命中一律不算——正文写「不具备一级建造师资格」时，即便锚点
+    字面出现，也不是对「须具备一级建造师资格」的响应。
     """
 
-    if not body or req_type == REQ_TYPE_GENERAL:
-        return 0.0
-    relevant = type_anchor_patterns(text, req_type)
-    if not relevant:
-        return 0.0
-    hit = 0
-    for pattern in relevant:
-        for match in re.finditer(pattern, body):
-            if _match_is_affirmative(body, match):
-                hit += 1
-                break
-    return hit / len(relevant)
+    patterns, hits = _anchor_hits(text, body, req_type)
+    return len(hits) / len(patterns) if patterns else 0.0
 
 
 # 中文没有词边界，逐字比较会把「改写过但意思到了」的响应判成未响应；
@@ -390,6 +538,12 @@ def requirement_issues(requirements, nodes: list[dict], deadline=None) -> list[C
             "marker": marker,
             "requirement_type": req_type,
             "keywords": requirement_keywords(text),
+            # 语义层证据：锚点/同义改写命中片段，让「为什么不算响应」可举证。
+            "semantic_matches": anchor_evidence(
+                text,
+                "\n".join((node.get("body") or "") for node in nodes),
+                req_type,
+            )[:10],
             "verdict": verdict.state,
             "verdict_label": verdict.label,
             "verdict_reason": verdict.reason,

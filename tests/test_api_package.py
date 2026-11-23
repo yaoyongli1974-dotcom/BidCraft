@@ -43,7 +43,7 @@ def test_domain_routers_are_importable_and_populated():
         enterprise, evaluation, health, jobs, legal, my, packages, projects, similarity,
         orchestration, collaboration,
     ]
-    assert sum(len(mod.router.routes) for mod in modules) == 246
+    assert sum(len(mod.router.routes) for mod in modules) == 247
 
 
 def test_route_modules_do_not_import_api_module_through_package():
