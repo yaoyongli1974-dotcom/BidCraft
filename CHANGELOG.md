@@ -2,6 +2,18 @@
 
 按版本倒序。对外口径以 `docs/release-notes/` 下对应文件为准；本文件是仓库内的简明索引。
 
+## v0.30.0 (2026-11-24)
+
+十阶段质量治理收官，对外说明见 [docs/release-notes/v0.30.0.md](docs/release-notes/v0.30.0.md)，逐阶段证据与最终验收矩阵见 `docs/development/BIDCRAFT_V030_*.md`。
+
+- CI 拆分为 lint/tests/web/PG/DOCX/Docker/安全共 9 个 job，真实 PG 数据边界与并发压测、CJK 严格渲染门禁、JUnit 报告与失败摘要；字体与 gitleaks 误报按精确方式修复，不放宽门禁。
+- 依赖安全：Vite 8 / Vitest 5 / Router 7 等已评估升级，npm audit 14→0；Bandit 全树扫描 + 按文件行号的精确豁免。
+- 账务与任务队列：新增 Alembic `0011_stage3_accounting`；同步生成心跳、按已写章节差额退款、DB 条件认领、fence 清除与 worker 幂等/中止检查点。
+- DOCX 表格分类与资源上限；4 个合成回归 fixture + 值/表格/材料基线门禁；质量指标入库、`judge_for_project` N+1 消除。
+- 前端查重契约与统计口径修复、跨项目工作流审批入口、KB 文档/检索预览；统一任务日志字段与 10 项全局指标，新增 `/health/live`、`/health/ready`。
+- 容器内置 pg_dump、健康检查与 CPU/PID/cap 加固（不加 env_file），CI 增加镜像构建与 Alembic preflight。
+- 后端 1620 passed / 16 skipped；前端 39 files / 319 tests；远端 CI 9/9 成功。
+
 ## v0.29.0 (2026-11-24)
 
 对标易标专项改造（八批）收官，对外说明见 [docs/release-notes/v0.29.0.md](docs/release-notes/v0.29.0.md)，逐批证据见 [docs/development/BIDCRAFT_YIBIAO_REFACTOR_REPORT.md](docs/development/BIDCRAFT_YIBIAO_REFACTOR_REPORT.md)。
