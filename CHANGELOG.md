@@ -2,6 +2,15 @@
 
 按版本倒序。对外口径以 `docs/release-notes/` 下对应文件为准；本文件是仓库内的简明索引。
 
+## v0.31.1 (2026-11-24)
+
+并发可靠性热修复，对外说明见 [docs/release-notes/v0.31.1.md](docs/release-notes/v0.31.1.md)，逐阶段证据见 `docs/development/BIDCRAFT_V0311_*.md`。
+
+- 修复生成租约心跳调用缺陷，续租走独立事务并在失效/连续失败时中止 worker 与同步生成。
+- Reaper 重试上限处使用扫描时点租约判定，100 轮竞争不误杀活跃任务；过期生成租约统一清理。
+- 章节级 fencing 短事务写入：旧 worker 不能写正文或记完成账；动态矩阵覆盖全部 8 类 runner。
+- 账务终态幂等修复与四类竞争场景回归；判定一致率支持真实应答文本，未标注时明示未测量。
+
 ## v0.31.0 (2026-11-24)
 
 并发可靠性、账务一致性与真实投标质量治理专项收官，对外说明见 [docs/release-notes/v0.31.0.md](docs/release-notes/v0.31.0.md)，逐阶段证据与最终验收矩阵见 `docs/development/BIDCRAFT_V031_*.md`。
