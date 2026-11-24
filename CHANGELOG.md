@@ -2,6 +2,16 @@
 
 按版本倒序。对外口径以 `docs/release-notes/` 下对应文件为准；本文件是仓库内的简明索引。
 
+## v0.28.1 (2026-11-23)
+
+v0.28.0 之后的第二轮质量加固与运维补齐，对外说明见 [docs/release-notes/v0.28.1.md](docs/release-notes/v0.28.1.md)。
+
+- 新增 Alembic `0009_v028_schema_parity`，补齐插件/需求列与 `jobs.owner_id` 索引回填、pending_charges 表；PG 旧 schema 升级路径有 opt-in 测试。
+- 扣费对账闭环：TTL 配置、周期扫描与 `bidcraft reconcile-charges` CLI；VIP 非整除退款精度修正。
+- 审批通过真正续跑工作流、同步评估返回完整 findings；限流 TTL+LRU、CSRF 代理配置、备份哈希清单与恢复演练、nginx 限流示例。
+- 前端 6 个真实全局指标键与状态中文映射、插件 scope 往返、导出模板 UI；新 CLI/环境变量与文档同步。
+- 后端 1361 passed / 13 skipped；前端 33 files / 282 tests；ruff 全绿。
+
 ## v0.28.0 (2026-11-23)
 
 v0.27.0 之后的能力收口与质量加固，对外说明见 [docs/release-notes/v0.28.0.md](docs/release-notes/v0.28.0.md)。
