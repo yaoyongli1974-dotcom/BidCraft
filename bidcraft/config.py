@@ -282,9 +282,9 @@ class Settings:
     job_max_attempts: int = field(
         default_factory=lambda: int(os.getenv("BIDCRAFT_JOB_MAX_ATTEMPTS", "3"))
     )
-    # 崩溃窗口未结扣费的对账 TTL：只有 pending 超过此时长、且项目没有在途任务时才退还，
-    # 避免长耗时生成被误退后白做。启动恢复、worker reaper 周期扫描与
-    # `bidcraft reconcile-charges` 都使用此值。
+    # 崩溃窗口未结扣费的对账 TTL：按 marker.updated_at（同步生成由 heartbeat 续期）
+    # 判定，只有停止心跳且超过此时长的 pending 才退还；不再按项目级在途任务误判。
+    # 启动恢复、worker reaper 周期扫描与 `bidcraft reconcile-charges` 都使用此值。
     pending_charge_ttl_seconds: int = field(
         default_factory=lambda: int(
             os.getenv("BIDCRAFT_PENDING_CHARGE_TTL", str(DEFAULT_PENDING_CHARGE_TTL_SECONDS))

@@ -230,6 +230,7 @@ def test_pending_charge_settles_once_and_reconciles_crash(db):
         assert jobqueue.reconcile_pending_charges(older_than_seconds=600, db=session) == 0
         marker = session.get(PendingCharge, marker_id)
         marker.created_at = utc_now() - timedelta(hours=2)
+        marker.updated_at = utc_now() - timedelta(hours=2)  # 心跳已停止
         session.flush()
 
     assert jobqueue.reconcile_pending_charges(older_than_seconds=60) == 1

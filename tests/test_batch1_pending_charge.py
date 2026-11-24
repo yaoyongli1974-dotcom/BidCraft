@@ -28,12 +28,19 @@ def _user(db, username: str, *, credits: int = 20, parent=None) -> User:
 
 def _old_marker(db, user: User, *, credits: int = 4, chapters: int = 2) -> str:
     marker_id = jobqueue.begin_pending_charge(db, user, "p-live", credits, chapters)
-    db.get(PendingCharge, marker_id).created_at = utc_now() - timedelta(days=1)
+    marker = db.get(PendingCharge, marker_id)
+    # 心跳以 updated_at 为准；陈旧 marker 必须连心跳也停止。
+    marker.created_at = utc_now() - timedelta(days=1)
+    marker.updated_at = utc_now() - timedelta(days=1)
     db.flush()
     return marker_id
 
 
-def test_reconcile_skips_marker_while_project_has_live_job(db):
+def test_reconcile_ignores_unrelated_live_job(db):
+    """旧语义按项目级 live job 阻塞；新语义只认本笔扣费的心跳。
+
+    同项目上的无关任务不应阻止一笔已经停止心跳的 marker 被对账退款。
+    """
     with session_scope() as session:
         user = _user(session, "b1-live")
         marker_id = _old_marker(session, user)
@@ -41,10 +48,10 @@ def test_reconcile_skips_marker_while_project_has_live_job(db):
         session.add(job)
         user_id = user.id
 
-    assert jobqueue.reconcile_pending_charges(older_than_seconds=0) == 0
+    assert jobqueue.reconcile_pending_charges(older_than_seconds=0) == 1
     with session_scope() as session:
-        assert session.get(PendingCharge, marker_id).status == "pending"
-        assert session.get(User, user_id).credits == 20
+        assert session.get(PendingCharge, marker_id).status == "refunded"
+        assert session.get(User, user_id).credits == 24
 
 
 def test_reconcile_refunds_after_live_job_finishes(db):
@@ -74,6 +81,7 @@ def test_reconcile_refunds_parent_after_sub_account_deleted(db):
         marker = session.get(PendingCharge, marker_id)
         assert marker.billing_account_id == parent.id
         marker.created_at = utc_now() - timedelta(days=1)
+        marker.updated_at = utc_now() - timedelta(days=1)
         session.flush()
         parent_id, sub_id = parent.id, sub.id
 
@@ -100,6 +108,7 @@ def test_reconcile_refuses_to_clear_when_no_payable_account(db):
             chapters=2,
             status="pending",
             created_at=utc_now() - timedelta(days=1),
+            updated_at=utc_now() - timedelta(days=1),
         )
         session.add(marker)
 

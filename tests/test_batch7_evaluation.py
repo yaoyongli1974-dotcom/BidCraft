@@ -165,6 +165,16 @@ def test_async_evaluation_retry_creates_exactly_one_report(monkeypatch):
         with session_scope() as sess:
             assert sess.get(Job, job_id).status == "failed"
 
+    # _fail_job 清除 fencing token 防止僵死 worker 覆盖失败状态；真实重试必须先
+    # 重新入队并认领拿到新 token，不能在旧的 claim_context 里直接重跑。
+    with session_scope() as sess:
+        requeued = sess.get(Job, job_id)
+        requeued.status = "queued"
+        requeued.attempts = 0
+        sess.flush()
+    claimed = jobqueue.claim_next()
+    assert claimed is not None and claimed.id == job_id
+    with jobqueue.claim_context(claimed.claim_token or ""):
         # Requeue/replay the same Job: it must finish the existing report.
         evaluation_worker._run_evaluation_job(job_id, project_id, "retry", "tester")
 

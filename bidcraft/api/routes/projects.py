@@ -1575,8 +1575,11 @@ def generate_chapter(ref: str, node_id: str) -> dict[str, Any]:
     #    写 Section/OutlineNode 并 flush），且 before/after_chapter 钩子也接收
     #    该 Session；在不动 writer.py 的前提下无法把 HTTP 模型调用再挪出会话，
     #    因此采用"窄事务"：此会话只覆盖章节写入，不含扣费/退款/审计。
+    #    同步路径没有 Job 行，长任务靠 heartbeat 续 marker 的 updated_at，避免
+    #    TTL 对账把仍在运行的生成误判为崩溃并提前全额退款。
+    settled = False
     try:
-        with session_scope() as gen_db:
+        with jobqueue.pending_charge_heartbeat(pending_id), session_scope() as gen_db:
             report = generate_document(
                 gen_db,
                 project_id,
@@ -1586,20 +1589,24 @@ def generate_chapter(ref: str, node_id: str) -> dict[str, Any]:
                 only_node=node_id_value,
                 knowledge_provider=_knowledge_provider(gen_db, user.id),
             )
-    except Exception:
+    except BaseException:
         # 原实现里模型调用抛错会回滚整个事务（含扣费）；扣费已提前提交，必须
-        # 显式退还，保持净额与原错误行为一致。结算与清 marker 同事务，重复
-        # 调用也不会二次退款。
-        with session_scope() as refund_db:
-            jobqueue.settle_pending_charge(
-                refund_db, pending_id, user, project_id, 1, 0
-            )
+        # 显式退还，保持净额与原错误行为一致。BaseException（Ctrl-C/SIGTERM）
+        # 同样会走到这里；settled 保证后续正常结算不会二次退款。
+        if not settled:
+            settled = True
+            with session_scope() as refund_db:
+                jobqueue.settle_pending_charge(
+                    refund_db, pending_id, user, project_id, 1, 0
+                )
         raise
     # 3) 短写事务：未写出章节退还、状态、溯源与审计。
     with session_scope() as db:
-        jobqueue.settle_pending_charge(
-            db, pending_id, user, project_id, 1, len(report.written or [])
-        )
+        if not settled:
+            settled = True
+            jobqueue.settle_pending_charge(
+                db, pending_id, user, project_id, 1, len(report.written or [])
+            )
         project = db.get(Project, project_id)
         project.status = "drafting"
         db.flush()
@@ -1643,8 +1650,9 @@ def write(ref: str) -> dict[str, Any]:
             db, user, project.id, charged, count, note="同步生成全书正文"
         )
         project_id = project.id
+    settled = False
     try:
-        with session_scope() as gen_db:
+        with jobqueue.pending_charge_heartbeat(pending_id), session_scope() as gen_db:
             report = generate_document(
                 gen_db,
                 project_id,
@@ -1653,17 +1661,22 @@ def write(ref: str) -> dict[str, Any]:
                 package,
                 knowledge_provider=_knowledge_provider(gen_db, user.id),
             )
-    except Exception:
-        # 扣费已提前提交；模型调用失败时显式退还，等价于原来的整事务回滚。
-        with session_scope() as refund_db:
-            jobqueue.settle_pending_charge(
-                refund_db, pending_id, user, project_id, count, 0
-            )
+    except BaseException:
+        # 扣费已提前提交；模型调用失败（含 BaseException）时显式退还，等价于
+        # 原来的整事务回滚。settled 防住后续正常结算的重复退款。
+        if not settled:
+            settled = True
+            with session_scope() as refund_db:
+                jobqueue.settle_pending_charge(
+                    refund_db, pending_id, user, project_id, count, 0
+                )
         raise
     with session_scope() as db:
-        jobqueue.settle_pending_charge(
-            db, pending_id, user, project_id, count, len(report.written or [])
-        )
+        if not settled:
+            settled = True
+            jobqueue.settle_pending_charge(
+                db, pending_id, user, project_id, count, len(report.written or [])
+            )
         project = db.get(Project, project_id)
         project.status = "drafting"
         db.flush()

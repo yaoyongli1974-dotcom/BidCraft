@@ -27,13 +27,54 @@ logger = logging.getLogger("bidcraft.api")
 
 
 def _fail_job(db: Session, job: Job, message: str, error: str | None = None) -> None:
-    """Mark a job failed and publish the matching SSE event."""
+    """Mark a job failed and publish the matching SSE event.
+
+    A charged ``generate`` job is refunded in this same transaction, before the
+    failed event is published.  The refund helper is idempotent (claim ledger in
+    the DB), so the reaper, startup recovery and a retrying worker can all call
+    this without ever refunding twice.  Uncharged job kinds are a no-op.
+    """
+
+    from .. import jobqueue
 
     detail = error or message
+    refunded = 0
+    refund_error: str | None = None
+    try:
+        # Savepoint keeps the caller's transaction usable if the refund fails
+        # mid-write, so failure bookkeeping still commits in that case.
+        with db.begin_nested():
+            refunded = int(jobqueue.refund_charged_job(db, job) or 0)
+    except Exception as exc:  # noqa: BLE001 - 退款失败不能阻断失败落库与事件
+        refund_error = str(exc) or exc.__class__.__name__
+        logger.exception("失败任务计费退还失败 job=%s", job.id)
+
     job.status = "failed"
     job.message = message
     job.result = {"error": detail}
-    jobs.publish_event(job.id, "failed", {**jobs.job_payload(job), "error": detail}, db=db)
+    # Fence out a hung worker: its fenced_job() lookup compares the claim token,
+    # so once cleared (and the lease dropped) it can no longer overwrite this
+    # failed row with a late "done" write or event.
+    job.claim_token = None
+    job.lease_expires_at = None
+    job.claimed_at = None
+    job.worker_id = None
+    job.heartbeat_at = None
+    event_detail: dict[str, Any] = {**jobs.job_payload(job), "error": detail}
+    if refunded:
+        event_detail["refunded_credits"] = refunded
+    jobs.publish_event(job.id, "failed", event_detail, db=db)
+    if refund_error is not None:
+        jobs.publish_event(
+            job.id,
+            "refund_failed",
+            {
+                "job_id": job.id,
+                "error": refund_error,
+                "message": "失败任务计费退还失败，请人工对账",
+            },
+            db=db,
+        )
     db.flush()
 
 

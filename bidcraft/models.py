@@ -484,6 +484,9 @@ class Job(Base):
     # fencing token：每次认领刷新。worker 的关键写操作必须校验当前令牌，
     # 租约过期/被回收后旧 worker 令牌失效，写操作与心跳都会被拒（至少一次执行）。
     claim_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # Stage 3: DB 层的退款认领标记，跨进程/跨线程条件 UPDATE 的唯一凭据。
+    # payload['refunded'] 只作向后兼容的日志标记，不再作为幂等真相。
+    refund_claimed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
@@ -544,7 +547,10 @@ class PendingCharge(Base):
     ``pending → cleared`` (chapter written, no refund due) or
     ``pending → refunded`` (operation aborted / reconciled).  A process that
     dies in between leaves the row ``pending``; ``reconcile_pending_charges``
-    refunds rows older than its TTL at startup or on demand.
+    refunds rows whose ``updated_at`` (charge-scoped heartbeat) is older than
+    its TTL at startup or on demand.  ``sections_at_charge`` is the persisted
+    section count at debit time, so the reconciler only refunds chapters
+    written *after* the charge.
 
     No foreign keys: this is a short-lived bookkeeping row and must not break
     account deletion or the append-only credit ledger on PostgreSQL.
@@ -559,6 +565,9 @@ class PendingCharge(Base):
     project_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     credits: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     chapters: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    #: 扣费瞬间该项目已落库的章节数（baseline）。对账时只退 baseline 之后新增章节
+    #: 对应的点数，避免把扣费前就存在的章节误算成"已完成工作"。
+    sections_at_charge: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     note: Mapped[str] = mapped_column(Text, default="")
     refunded_credits: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

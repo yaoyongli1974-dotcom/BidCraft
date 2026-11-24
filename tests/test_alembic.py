@@ -14,7 +14,7 @@ from bidcraft.config import settings
 from bidcraft.db import get_engine, init_db, reset_engine_for_tests
 
 #: 当前 alembic head（新增 revision 时同步这里）。
-HEAD = "0010_batch1_billing_reliability"
+HEAD = "0011_stage3_accounting"
 
 
 def _version() -> list[str]:
@@ -219,7 +219,7 @@ def test_0010_backfills_owner_from_user_id_and_project(tmp_path, monkeypatch):
     from alembic.config import Config
 
     from bidcraft.migrations import __file__ as migrations_init
-    from bidcraft.models import Job, Project
+    from bidcraft.models import Project
 
     home = tmp_path / ".bidcraft"
     home.mkdir(parents=True, exist_ok=True)
@@ -244,22 +244,29 @@ def test_0010_backfills_owner_from_user_id_and_project(tmp_path, monkeypatch):
                     id="p-legacy", name="老项目", owner_id="u-from-project"
                 )
             )
-            connection.execute(
-                Job.__table__.insert().values(
-                    id="legacy-user-id",
-                    kind="generate",
-                    status="queued",
-                    payload={"user_id": "u-from-payload"},
-                )
+            # 显式列名写入"老行"：此时库还停在 0008，模型里新增的
+            # refund_claimed 列并不存在，不能用 Job.__table__.insert()。
+            legacy_job_sql = (
+                "INSERT INTO jobs (id, project_id, kind, status, progress, message, "
+                "payload, result, priority, attempts, max_attempts, created_at, updated_at) "
+                "VALUES (:id, :project_id, 'generate', 'queued', 0, '', :payload, '{}', "
+                "1, 0, 3, '2020-01-01 00:00:00', '2020-01-01 00:00:00')"
             )
             connection.execute(
-                Job.__table__.insert().values(
-                    id="legacy-project-owner",
-                    kind="generate",
-                    status="queued",
-                    project_id="p-legacy",
-                    payload={},
-                )
+                text(legacy_job_sql),
+                {
+                    "id": "legacy-user-id",
+                    "project_id": None,
+                    "payload": '{"user_id": "u-from-payload"}',
+                },
+            )
+            connection.execute(
+                text(legacy_job_sql),
+                {
+                    "id": "legacy-project-owner",
+                    "project_id": "p-legacy",
+                    "payload": "{}",
+                },
             )
 
         command.upgrade(cfg, "head")
@@ -270,6 +277,83 @@ def test_0010_backfills_owner_from_user_id_and_project(tmp_path, monkeypatch):
         assert owners["legacy-user-id"] == "u-from-payload"
         assert owners["legacy-project-owner"] == "u-from-project"
         assert version == HEAD
+    finally:
+        # 回到一个可用的文件库：内存库每连接独立，后续直接 import api/app 的
+        # 测试会在 init_db() 里让 Alembic 连到空库而报 NoSuchTableError。
+        scratch = tmp_path / ".bidcraft" / "after.sqlite"
+        scratch.parent.mkdir(parents=True, exist_ok=True)
+        reset_engine_for_tests(f"sqlite+pysqlite:///{scratch}")
+        init_db()
+
+
+def test_0011_stage3_accounting_columns_are_reversible(tmp_path, monkeypatch):
+    """0011 的两列必须可降级移除、再升级恢复，且重复执行依然幂等。"""
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+
+    from bidcraft.migrations import __file__ as migrations_init
+    from bidcraft.models import Job, PendingCharge
+
+    home = tmp_path / ".bidcraft"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(settings, "home", home)
+    db_file = home / "stage3.sqlite"
+    reset_engine_for_tests(f"sqlite+pysqlite:///{db_file}")
+    try:
+        init_db()
+        engine = get_engine()
+
+        def columns(table: str) -> set[str]:
+            with engine.connect() as connection:
+                return {column["name"] for column in inspect(connection).get_columns(table)}
+
+        # create_all 已按当前模型建出列；此时 revision 的 upgrade 必须是空操作。
+        assert "sections_at_charge" in columns("pending_charges")
+        assert "refund_claimed" in columns("jobs")
+
+        cfg = Config()
+        cfg.set_main_option("script_location", str(Path(migrations_init).parent))
+        cfg.set_main_option(
+            "sqlalchemy.url",
+            engine.url.render_as_string(hide_password=False).replace("%", "%%"),
+        )
+
+        command.downgrade(cfg, "0010_batch1_billing_reliability")
+        assert "sections_at_charge" not in columns("pending_charges")
+        assert "refund_claimed" not in columns("jobs")
+
+        command.upgrade(cfg, "head")
+        assert "sections_at_charge" in columns("pending_charges")
+        assert "refund_claimed" in columns("jobs")
+
+        with engine.begin() as connection:
+            connection.execute(
+                Job.__table__.insert().values(
+                    id="stage3-job", kind="generate", status="queued"
+                )
+            )
+            connection.execute(
+                PendingCharge.__table__.insert().values(
+                    id="stage3-marker", user_id="u", project_id="p", credits=1, chapters=1
+                )
+            )
+
+        with sqlite3.connect(db_file) as conn:
+            assert conn.execute(
+                "SELECT refund_claimed FROM jobs WHERE id = 'stage3-job'"
+            ).fetchone() == (0,)
+            assert conn.execute(
+                "SELECT sections_at_charge FROM pending_charges WHERE id = 'stage3-marker'"
+            ).fetchone() == (0,)
+
+        # 再次 init_db + upgrade 都不得因列已存在而报错。
+        init_db()
+        command.upgrade(cfg, "head")
+        assert "sections_at_charge" in columns("pending_charges")
+        assert "refund_claimed" in columns("jobs")
+        assert _version() == [HEAD]
     finally:
         # 回到一个可用的文件库：内存库每连接独立，后续直接 import api/app 的
         # 测试会在 init_db() 里让 Alembic 连到空库而报 NoSuchTableError。

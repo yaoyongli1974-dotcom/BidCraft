@@ -242,11 +242,18 @@ def charge_chapters(db, user: User, count: int, *, project_id: str = "", note: s
     return cost
 
 
-def refund_chapters(db, user: User, credits: int, *, project_id: str = "") -> int:
+def refund_chapters(
+    db, user: User, credits: int, *, project_id: str = "", origin: str = ""
+) -> int:
     if credits <= 0:
         return 0
     account = billing_account(db, user)
     note = "生成未完成退还"
+    # Stable, bracketed marker for reconciliation (e.g. "[job:xxx]" /
+    # "[marker:xxx]").  ref_type/ref_id stay untouched so existing ledger
+    # queries by project keep working.
+    if origin:
+        note = f"{note}[{origin}]"
     if user.parent_id:
         note = f"子账号 {user.username}：{note}"
     return add_credits(

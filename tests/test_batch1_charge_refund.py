@@ -151,7 +151,9 @@ def _seed_marker(db, *, credits: int = 4, chapters: int = 2, age_days: int = 0):
     user = _seed_user(db, credits=20)
     marker_id = jobqueue.begin_pending_charge(db, user, "p1", credits, chapters)
     if age_days:
-        db.get(PendingCharge, marker_id).created_at = utc_now() - timedelta(days=age_days)
+        marker = db.get(PendingCharge, marker_id)
+        marker.created_at = utc_now() - timedelta(days=age_days)
+        marker.updated_at = utc_now() - timedelta(days=age_days)
     db.flush()
     return marker_id, user
 

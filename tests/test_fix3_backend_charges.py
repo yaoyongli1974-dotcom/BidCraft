@@ -50,9 +50,10 @@ def test_reconcile_uses_configured_ttl(db, monkeypatch):
 
     marker_id, user_id = _seed_pending_charge()
     with session_scope() as session:
-        session.get(PendingCharge, marker_id).created_at = utc_now().replace(
-            year=2000
-        )  # 很久以前的崩溃残留
+        marker = session.get(PendingCharge, marker_id)
+        # 心跳机制以 updated_at 判定存活；崩溃残留必须同时陈旧。
+        marker.created_at = utc_now().replace(year=2000)
+        marker.updated_at = utc_now().replace(year=2000)
 
     monkeypatch.setattr(settings, "pending_charge_ttl_seconds", 3600)
     assert jobqueue.reconcile_pending_charges() == 1

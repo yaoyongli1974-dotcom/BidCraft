@@ -14,7 +14,7 @@ from bidcraft.api import create_app  # noqa: E402
 from bidcraft.config import settings  # noqa: E402
 from bidcraft.db import session_scope  # noqa: E402
 from bidcraft.evaluation.report import update_finding  # noqa: E402
-from bidcraft.jobqueue import claim_context  # noqa: E402
+from bidcraft.jobqueue import claim_context, claim_next  # noqa: E402
 from bidcraft.models import (  # noqa: E402
     AuditLog,
     Issue,
@@ -171,8 +171,19 @@ def test_evaluation_job_retry_reuses_report(db, monkeypatch):
         job_id = job.id
 
     with claim_context("b7-claim"):
-        # 第一次：报告已落库，_done 崩溃由 runner 自己记失败；第二次：重试收尾。
+        # 第一次：报告已落库，_done 崩溃由 runner 自己记失败。
         evaluation_worker._run_evaluation_job(job_id, project_id, note="", created_by="admin")
+
+    # _fail_job 清除 fence token；真实重试必须重新认领，不能在旧 token 下直接重跑。
+    with session_scope() as sess:
+        requeued = sess.get(Job, job_id)
+        requeued.status = "queued"
+        requeued.attempts = 0
+        sess.flush()
+    claimed = claim_next()
+    assert claimed is not None and claimed.id == job_id
+    with claim_context(claimed.claim_token or ""):
+        # 第二次：复用既有报告，只补写 Job.result/done。
         evaluation_worker._run_evaluation_job(job_id, project_id, note="", created_by="admin")
 
     with session_scope() as sess:
