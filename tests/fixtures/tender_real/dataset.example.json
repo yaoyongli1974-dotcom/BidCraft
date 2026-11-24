@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "label": "real-tender-regression",
+  "files": [
+    {
+      "path": "example-redacted-tender.md",
+      "sha256": "<sha256-of-file>",
+      "language": "zh",
+      "source": "user-provided",
+      "annotations": {
+        "required_clauses": ["★投标人须具备……"],
+        "required_values": [{"key": "预算金额", "value": "1000万元"}],
+        "expected_verdicts": {"★投标人须具备……": "SATISFIED"}
+      }
+    }
+  ]
+}

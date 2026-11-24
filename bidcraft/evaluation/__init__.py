@@ -36,8 +36,10 @@ from .scorer import (
     calculate_overall_quality,
     evaluate_project_quality,
 )
+from .tender_dataset import DATASET_SCHEMA, dataset_status, load_dataset
 
 __all__ = [
+    "DATASET_SCHEMA",
     "DIMENSION_WEIGHTS",
     "FINDING_STATUSES",
     "build_quality_report",
@@ -53,11 +55,13 @@ __all__ = [
     "collect_commercial_completeness",
     "collect_project_risks",
     "collect_quality_metrics",
+    "dataset_status",
     "evaluate_project_quality",
     "find_report_for_job",
     "finding_for_project",
     "finding_payload",
     "list_reports",
+    "load_dataset",
     "load_report",
     "report_payload",
     "update_finding",
