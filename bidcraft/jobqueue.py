@@ -552,6 +552,10 @@ def _heartbeat(
                         Job.status == "running",
                         Job.worker_id == _worker_id,
                         Job.claim_token == token,
+                        # Never revive a lease the reaper has already declared
+                        # expired.  A NULL lease is treated as expired too.
+                        Job.lease_expires_at.is_not(None),
+                        Job.lease_expires_at >= now,
                     )
                     .values(heartbeat_at=now, lease_expires_at=lease_until)
                 )
@@ -565,30 +569,131 @@ def _heartbeat(
                     return
         except Exception:  # noqa: BLE001 - heartbeat must never kill the worker
             logger.debug("心跳更新失败 job=%s", job_id, exc_info=True)
+            # A failure to renew is indistinguishable from a lost worker from
+            # the reaper's point of view.  Tell the runner to stop at its next
+            # checkpoint rather than keep computing on a lease we cannot renew.
+            if abort is not None:
+                abort.set()
 
 
-def _set_failed(db, job: Job, message: str) -> None:
+#: Explicit state machine.  Terminal states are immutable; the reaper may only
+#: take a running job back to queued (or fail it at the retry cap), and a worker
+#: may only finish a job it still owns from ``running``.
+VALID_TRANSITIONS: dict[str, frozenset[str]] = {
+    "queued": frozenset({"running", "failed", "cancelled"}),
+    "running": frozenset({"queued", "done", "failed", "cancelled"}),
+    "done": frozenset(),
+    "failed": frozenset(),
+    "cancelled": frozenset(),
+}
+
+
+def transition_job(
+    db,
+    job_id: str,
+    *,
+    from_statuses: tuple[str, ...],
+    to_status: str,
+    token: str | None = None,
+    lease_expired_before=None,
+    require_attempts_below: int | None = None,
+    clear_claim: bool = False,
+    message: str = "",
+    result: dict | None = None,
+    progress: int | None = None,
+) -> Job | None:
+    """Atomically apply one legal Job state transition.
+
+    The whole transition is a single conditional UPDATE, so two reapers (or a
+    heartbeat and a reaper) cannot both win: the loser matches zero rows.  All
+    callers must pass explicit ``from_statuses``; illegal target states are
+    rejected locally instead of silently mutating terminal rows.  Returns the
+    freshly loaded row on success, ``None`` when the preconditions no longer
+    hold (the caller must treat that as "somebody else won").
+    """
+
+    if any(to_status not in VALID_TRANSITIONS.get(src, frozenset()) for src in from_statuses):
+        raise ValueError(f"非法任务状态转换: {from_statuses} -> {to_status}")
+    now = utc_now()
+    statement = update(Job).where(Job.id == job_id, Job.status.in_(from_statuses))
+    if token is not None:
+        statement = statement.where(Job.claim_token == token)
+    if lease_expired_before is not None:
+        statement = statement.where(
+            or_(
+                Job.lease_expires_at.is_(None),
+                Job.lease_expires_at < lease_expired_before,
+            )
+        )
+    if require_attempts_below is not None:
+        statement = statement.where(Job.attempts < require_attempts_below)
+    values: dict[str, Any] = {
+        "status": to_status,
+        "message": message,
+        "updated_at": now,
+    }
+    if clear_claim:
+        values.update(
+            claimed_at=None,
+            lease_expires_at=None,
+            heartbeat_at=None,
+            worker_id=None,
+            claim_token=None,
+            result={},
+            progress=0,
+        )
+    if result is not None:
+        values["result"] = result
+    if progress is not None:
+        values["progress"] = progress
+    if db.execute(statement.values(**values).returning(Job.id)).first() is None:
+        return None
+    # Discard any identity-mapped snapshot from before the UPDATE.
+    db.expire_all()
+    return db.get(Job, job_id)
+
+
+def _set_failed(db, job: Job, message: str) -> bool:
+    """Claim a running job for ``failed``; refund only after winning the claim."""
+
     from . import jobs
+
+    fresh = transition_job(
+        db,
+        job.id,
+        from_statuses=("running",),
+        to_status="failed",
+        token=job.claim_token or None,
+        message=message,
+        result={"error": message},
+        clear_claim=True,
+    )
+    if fresh is None:
+        return False
 
     # A worker that dies between claim and result never reaches its own exception
     # handler, so a charged ``generate`` job would be failed with the debit left
     # stranded.  Settle it here from the idempotency ledger — no-op when the job
     # was never charged or was already refunded (reaper/startup paths included).
     try:
-        refund_charged_job(db, job)
+        refund_charged_job(db, fresh)
     except Exception:  # noqa: BLE001 - never block failure bookkeeping
-        logger.exception("失败任务计费退还失败 job=%s", job.id)
-    job.status = "failed"
-    job.message = message
-    job.result = {"error": message}
-    job.claim_token = None
+        logger.exception("失败任务计费退还失败 job=%s", fresh.id)
     jobs.publish_event(
-        job.id, "failed", {**jobs.job_payload(job), "error": message}, db=db
+        fresh.id, "failed", {**jobs.job_payload(fresh), "error": message}, db=db
     )
+    return True
 
 
-def _requeue(db, job: Job, message: str) -> bool:
-    """Reset a claimed/expired job to queued.  Returns True if re-queued."""
+def _requeue(
+    db,
+    job: Job,
+    message: str,
+    *,
+    token: str | None = None,
+    lease_expired_before=None,
+) -> bool:
+    """Atomically reset an expired/interrupted job to queued.  True if we won."""
 
     from . import jobs
 
@@ -596,14 +701,20 @@ def _requeue(db, job: Job, message: str) -> bool:
     if (job.attempts or 0) >= cap:
         _set_failed(db, job, message)
         return False
-    job.status = "queued"
-    job.message = message
-    job.claimed_at = None
-    job.lease_expires_at = None
-    job.heartbeat_at = None
-    job.worker_id = None
-    job.claim_token = None
-    jobs.publish_event(job.id, "queued", jobs.job_payload(job), db=db)
+    fresh = transition_job(
+        db,
+        job.id,
+        from_statuses=("running",),
+        to_status="queued",
+        token=token,
+        lease_expired_before=lease_expired_before,
+        require_attempts_below=cap,
+        clear_claim=True,
+        message=message,
+    )
+    if fresh is None:
+        return False
+    jobs.publish_event(fresh.id, "queued", jobs.job_payload(fresh), db=db)
     return True
 
 
@@ -626,7 +737,12 @@ def reap_expired() -> tuple[int, int]:
             )
         )
         for row in rows:
-            if _requeue(db, row, "任务租约已过期，正在重新排队"):
+            if _requeue(
+                db,
+                row,
+                "任务租约已过期，正在重新排队",
+                lease_expired_before=now,
+            ):
                 requeued += 1
             else:
                 failed += 1
@@ -656,7 +772,12 @@ def recover_on_startup() -> tuple[int, int]:
             )
         )
         for row in rows:
-            if _requeue(db, row, "服务重启且租约已过期，任务重新排队"):
+            if _requeue(
+                db,
+                row,
+                "服务重启且租约已过期，任务重新排队",
+                lease_expired_before=now,
+            ):
                 requeued += 1
             else:
                 failed += 1
@@ -1078,13 +1199,21 @@ def _finalize_after_run(job_id: str) -> None:
     re-queued with the attempts cap, mirroring the reaper's crash recovery.
     """
 
+    token = _claim_token.get()
     with session_scope() as db:
         job = fenced_job(db, job_id)
         if job is None or job.status != "running":
             return
         cap = min(_max_attempts(), job.max_attempts or _max_attempts())
         if (job.attempts or 0) < cap:
-            _requeue(db, job, "任务意外中断，正在重新排队")
+            # Token is passed into the conditional UPDATE so a reaper cannot win
+            # between this SELECT and the requeue write.
+            _requeue(
+                db,
+                job,
+                "任务意外中断，正在重新排队",
+                token=token or None,
+            )
         else:
             _set_failed(db, job, "任务重试次数已用尽")
 
