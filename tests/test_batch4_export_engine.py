@@ -25,6 +25,30 @@ from bidcraft.schemas import FactItem, FactLedger
 
 EAST_ASIA = qn("w:eastAsia")
 
+# 字体名中可识别 CJK 能力的标记（纯名称判断，不依赖本机字体安装情况）。
+_CJK_FONT_MARKERS = (
+    "CJK",
+    "Han",
+    "SC",
+    "Song",
+    "Hei",
+    "Fang",
+    "Kai",
+    "宋",
+    "黑",
+    "仿宋",
+    "楷体",
+    "Noto Serif CJK",
+    "Noto Sans CJK",
+)
+
+
+def _assert_cjk_capable_name(font_name: str, context: str) -> None:
+    folded = font_name.casefold()
+    assert any(marker.casefold() in folded for marker in _CJK_FONT_MARKERS), (
+        f"{context}: 字体名 {font_name!r} 不含 CJK 标记 {_CJK_FONT_MARKERS}"
+    )
+
 
 def _ledger() -> FactLedger:
     return FactLedger(
@@ -226,10 +250,36 @@ def test_large_document_has_no_consecutive_empty_paragraphs_and_is_fast(tmp_path
     assert elapsed < 20, f"500 章导出耗时 {elapsed:.1f}s"
 
 
+def test_all_preset_fonts_have_cjk_capable_substitutions():
+    """纯映射断言：不查询本机字体，任何环境（含无 fontconfig）都必须执行并通过。"""
+    presets = templates.preset_list()
+    assert presets, "没有任何导出预设可供校验"
+    for preset_item in presets:
+        preset_id = preset_item.get("id")
+        fonts = templates.required_fonts(preset_item)
+        assert fonts, f"预设 {preset_id} 未声明依赖字体"
+        for font in fonts:
+            target = templates.FONT_SUBSTITUTIONS.get(font)
+            assert isinstance(target, str) and target.strip(), (
+                f"预设 {preset_id} 依赖的字体 {font!r} 缺少 FONT_SUBSTITUTIONS 声明"
+            )
+            _assert_cjk_capable_name(target, f"{preset_id}/{font} 的替代字体")
+    # 已声明但当前预设未使用的条目同样必须是 CJK 字体，避免留下误导性映射。
+    for font, target in templates.FONT_SUBSTITUTIONS.items():
+        assert isinstance(target, str) and target.strip(), f"{font!r} 的替代字体名为空"
+        _assert_cjk_capable_name(target, f"FONT_SUBSTITUTIONS[{font!r}]")
+
+
 @pytest.mark.skipif(shutil.which("fc-match") is None, reason="fontconfig 未安装")
 def test_preset_fonts_resolve_to_cjk_and_have_substitutions():
-    # CI runner 可能只有 DejaVu 等西文字体；没有中文字体时 fc-match 必然回退，
-    # 该断言应跳过而非把环境缺失当成代码缺陷。
+    """环境相关断言：仅当本机装有中文字体时验证 fontconfig 的替换结果。
+
+    CI 的 ``docx-render`` 专用作业会预装 CJK 字体，本测试在该作业中必须执行、
+    不得跳过；本地未安装中文字体时才允许跳过。字体映射本身的正确性由
+    ``test_all_preset_fonts_have_cjk_capable_substitutions`` 在每台机器上保证。
+    """
+    if shutil.which("fc-list") is None:
+        pytest.skip("fc-list 未安装，无法枚举中文字体")
     installed = subprocess.run(
         ["fc-list", ":lang=zh", "family"],
         capture_output=True,
@@ -237,7 +287,7 @@ def test_preset_fonts_resolve_to_cjk_and_have_substitutions():
         check=False,
     )
     if not installed.stdout.strip():
-        pytest.skip("系统未安装中文字体，跳过 fc-match 中文字体替换断言")
+        pytest.skip("fc-list :lang=zh 为空：系统未安装中文字体，跳过 fc-match 替换断言")
     for preset_item in templates.preset_list():
         fonts = templates.required_fonts(preset_item)
         assert fonts
@@ -251,8 +301,7 @@ def test_preset_fonts_resolve_to_cjk_and_have_substitutions():
             )
             family = result.stdout
             assert any(
-                marker in family
-                for marker in ("CJK", "Han", "SC", "Song", "Hei", "Fang", "Kai", "宋", "黑")
+                marker.casefold() in family.casefold() for marker in _CJK_FONT_MARKERS
             ), f"{font} 被替换为 {family!r}，可能不是中文字体"
 
 

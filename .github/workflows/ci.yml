@@ -15,10 +15,10 @@ permissions:
   contents: read
 
 jobs:
-  python:
-    name: python (lint + pytest)
+  python-lint:
+    name: python (lint + static checks)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -37,6 +37,17 @@ jobs:
         # api 额外依赖供 tests/test_api*.py 使用；postgres 供 test_postgres_support.py 使用。
         # 缺失 postgres 时该用例会 ModuleNotFoundError（psycopg），不能静默跳过。
         run: uv sync --frozen --python 3.13 --extra api --extra dev --extra postgres
+
+      - name: Environment info
+        run: |
+          echo "runner=${RUNNER_OS}/${RUNNER_ARCH} image=${ImageOS:-unknown}"
+          uv --version
+          uv run --frozen python - <<'PY'
+          import platform, sqlite3, sys
+          import sqlalchemy
+          print("python", sys.version.split()[0], "sqlite", sqlite3.sqlite_version)
+          print("sqlalchemy", sqlalchemy.__version__, "platform", platform.platform())
+          PY
 
       - name: Lint (ruff)
         run: uv run --frozen ruff check bidcraft tests
@@ -122,14 +133,77 @@ jobs:
           print(f"version consistency OK: v{v_init}")
           PY
 
+  python-tests:
+    name: python (pytest + regression)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install Python
+        run: uv python install 3.13
+
+      - name: Sync dependencies (locked, with postgres)
+        run: uv sync --frozen --python 3.13 --extra api --extra dev --extra postgres
+
+      - name: Environment info
+        run: |
+          echo "runner=${RUNNER_OS}/${RUNNER_ARCH} image=${ImageOS:-unknown}"
+          uv --version
+          uv run --frozen python - <<'PY'
+          import platform, sqlite3, sys
+          import sqlalchemy
+          print("python", sys.version.split()[0], "sqlite", sqlite3.sqlite_version)
+          print("sqlalchemy", sqlalchemy.__version__, "platform", platform.platform())
+          PY
+
       - name: Test (pytest)
-        run: uv run --frozen pytest -q
+        run: uv run --frozen pytest -q --junitxml=/tmp/pytest-results.xml
 
       - name: Calibration regression (six industry fixtures)
         run: uv run --frozen bidcraft calibrate tests/fixtures/regression
 
       - name: Verdict regression (FAR / confusion matrix / ★ strict)
         run: uv run --frozen pytest -q tests/test_calibration.py
+
+      - name: Upload pytest report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-junit
+          path: /tmp/pytest-results.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Failure summary
+        if: failure()
+        run: |
+          uv run --frozen python - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          path = Path('/tmp/pytest-results.xml')
+          if not path.is_file():
+              print('pytest JUnit report not produced; see raw logs above.')
+              raise SystemExit(0)
+          root = ET.parse(path).getroot()
+          failed = []
+          for case in root.iter('testcase'):
+              if case.find('failure') is not None or case.find('error') is not None:
+                  failed.append(f"{case.get('classname')}::{case.get('name')}")
+          print(f"FAILED TESTS ({len(failed)}):")
+          for name in failed[:40]:
+              print(" -", name)
+          if len(failed) > 40:
+              print(f" ... and {len(failed) - 40} more; full report in artifact pytest-junit")
+          PY
 
   web:
     name: web (lint + test + build)
@@ -146,6 +220,12 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: web/package-lock.json
+
+      - name: Environment info
+        run: |
+          echo "runner=${RUNNER_OS}/${RUNNER_ARCH} image=${ImageOS:-unknown}"
+          node --version
+          npm --version
 
       - name: Install dependencies (locked)
         # 严格按锁文件安装：锁文件缺失或不一致直接失败，不允许回退到 npm install。
@@ -196,6 +276,18 @@ jobs:
       - name: Sync dependencies (locked, with postgres)
         run: uv sync --frozen --python 3.13 --extra api --extra dev --extra postgres
 
+      - name: Environment info
+        run: |
+          echo "runner=${RUNNER_OS}/${RUNNER_ARCH} image=${ImageOS:-unknown}"
+          uv --version
+          uv run --frozen python - <<'PY'
+          import platform, sys
+          import psycopg, sqlalchemy
+          print("python", sys.version.split()[0], "psycopg", psycopg.__version__)
+          print("sqlalchemy", sqlalchemy.__version__, "platform", platform.platform())
+          PY
+          pg_isready -h 127.0.0.1 -U bidcraft -d bidcraft_test || true
+
       - name: Test (real PostgreSQL integration)
         env:
           BIDCRAFT_TEST_PG_URL: postgresql+psycopg://bidcraft:bidcraft_test@127.0.0.1:5432/bidcraft_test
@@ -213,6 +305,117 @@ jobs:
           assert skipped == 0, f"PG 集成测试被跳过 {skipped} 项（环境变量可能缺失）"
           assert failures == 0, f"PG 集成测试失败 {failures} 项"
           print(f"PG integration OK: {tests} tests, 0 skipped")
+          PY
+
+      - name: Upload PostgreSQL report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgres-junit
+          path: /tmp/pg-results.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: PostgreSQL failure summary
+        if: failure()
+        run: |
+          uv run --frozen python - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          path = Path('/tmp/pg-results.xml')
+          if not path.is_file():
+              print('PostgreSQL JUnit report not produced; see raw logs above.')
+              raise SystemExit(0)
+          root = ET.parse(path).getroot()
+          failed = [
+              f"{case.get('classname')}::{case.get('name')}"
+              for case in root.iter('testcase')
+              if case.find('failure') is not None or case.find('error') is not None
+          ]
+          print(f"FAILED POSTGRES TESTS ({len(failed)}):")
+          for name in failed[:40]:
+              print(" -", name)
+          PY
+
+  docx-render:
+    name: docx (CJK render + fidelity)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rendering toolchain and CJK fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            fonts-noto-cjk libreoffice-writer poppler-utils
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install Python
+        run: uv python install 3.13
+
+      - name: Sync dependencies (locked)
+        run: uv sync --frozen --python 3.13 --extra api --extra dev
+
+      - name: Environment info
+        run: |
+          echo "runner=${RUNNER_OS}/${RUNNER_ARCH} image=${ImageOS:-unknown}"
+          fc-list :lang=zh family | head -5
+          soffice --version
+          pdfinfo -v 2>&1 | head -2
+          uv run --frozen python --version
+
+      - name: DOCX renderer / golden tests (strict, no skip)
+        env:
+          BIDCRAFT_DOCX_REQUIRE_RENDER: "1"
+        run: |
+          uv run --frozen pytest -q --junitxml=/tmp/docx-results.xml \
+            tests/test_docx_renderer.py tests/test_docx_validator.py \
+            tests/test_batch4_export_engine.py tests/test_batch4_golden.py
+          uv run --frozen python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse('/tmp/docx-results.xml').getroot()
+          suite = root.find('testsuite') if root.tag == 'testsuites' else root
+          skipped = int(suite.get('skipped', 0))
+          failures = int(suite.get('failures', 0)) + int(suite.get('errors', 0))
+          assert skipped == 0, f"DOCX 渲染 job 不允许跳过用例，实际跳过 {skipped}"
+          assert failures == 0, f"DOCX 渲染 job 有 {failures} 个失败"
+          print(f"docx render OK: {suite.get('tests')} tests, 0 skipped")
+          PY
+
+      - name: Upload DOCX report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docx-junit
+          path: /tmp/docx-results.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: DOCX failure summary
+        if: failure()
+        run: |
+          uv run --frozen python - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          path = Path('/tmp/docx-results.xml')
+          if not path.is_file():
+              print('DOCX JUnit report not produced; see raw logs above.')
+              raise SystemExit(0)
+          root = ET.parse(path).getroot()
+          for case in root.iter('testcase'):
+              skip = case.find('skipped')
+              failure = case.find('failure') or case.find('error')
+              if skip is not None or failure is not None:
+                  state = 'SKIPPED' if skip is not None else 'FAILED'
+                  print(f"{state}: {case.get('classname')}::{case.get('name')}")
           PY
 
   # ---------------------------------------------------------------------------

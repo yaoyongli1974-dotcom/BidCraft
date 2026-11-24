@@ -7,6 +7,10 @@
 
 会**清空目标库的所有表**，请务必指向专用测试库。默认未设置环境变量时整文件跳过，
 不影响常规 SQLite 套件。
+
+隔离契约（isolation contract）：每个用例执行前由 autouse fixture 清空全部应用表，
+仅保留 alembic_version 的迁移版本记录。这样迁移往返用例遗留的 queued Job 不会
+泄漏进后续 claim/fencing 用例，断言只会看到本用例自己创建的数据。
 """
 
 from __future__ import annotations
@@ -47,6 +51,28 @@ def pg_engine():
         reset_engine_for_tests(old_url)
 
 
+@pytest.fixture(autouse=True)
+def _reset_pg_data(pg_engine):
+    """每个用例前建立真实的数据边界：清空全部应用数据，保留 Alembic 版本。
+
+    隔离契约：claim_next() 认领的是**全局** queued 任务。若上一个用例（尤其是
+    head → 0008 → head 的迁移往返用例）遗留了 queued Job，后续认领断言就可能
+    拿到别人的 id —— CI 上曾因此偶发失败。这里在每个用例执行前把库里所有应用
+    表一次性 TRUNCATE（CASCADE 自动按外键顺序处理依赖，RESTART IDENTITY 复位
+    自增序列），唯独 alembic_version 不动，迁移版本始终连贯。
+    用运行时表清单而不是硬编码表名，新增表/迁移新增表也会自动纳入边界。
+    """
+    from sqlalchemy import inspect
+
+    inspector = inspect(pg_engine)
+    # 只清应用表；alembic_version 是 Alembic 记账表，必须完整保留（不被 CASCADE 波及）。
+    tables = [name for name in inspector.get_table_names() if name != "alembic_version"]
+    with pg_engine.begin() as connection:
+        if tables:
+            quoted = ", ".join(f'"{name}"' for name in tables)
+            connection.execute(text(f"TRUNCATE TABLE {quoted} RESTART IDENTITY CASCADE"))
+
+
 def _alembic_head() -> str:
     """Derive the head revision from migration scripts, not a hardcoded string.
 
@@ -74,14 +100,14 @@ def _alembic_head() -> str:
 
 
 def _make_jobs(count: int) -> list[str]:
+    """只插入本用例自己的 job；跨用例清理完全交给 autouse 的 _reset_pg_data。"""
     from bidcraft.db import session_scope
     from bidcraft.models import Job
 
     ids = [str(uuid.uuid4()) for _ in range(count)]
     with session_scope() as db:
-        # claim_next() 认领全局 queued 任务；前面的迁移往返用例可能遗留 queued job，
-        # 不清理会让并发认领断言拿到别人的 id（CI 上曾因此失败）。
-        db.query(Job).delete()
+        # 不再做全局 delete：那是用公共队列掩盖污染，会连带删掉别的用例数据。
+        # 隔离由每个用例前的 TRUNCATE 边界保证，这里只负责写入本用例的 id。
         for job_id in ids:
             db.add(Job(id=job_id, kind="kb_reindex", status="queued", payload={}, attempts=0))
     return ids
@@ -288,6 +314,7 @@ def test_crud_roundtrip_with_json_and_chinese(pg_engine):
 
 
 def test_claim_next_is_atomic_under_concurrency(pg_engine):
+    """并发认领只应命中本用例创建的 12 个 id（autouse 边界已清除历史 queued job）。"""
     from bidcraft.db import session_scope
     from bidcraft.jobqueue import claim_next
     from bidcraft.models import Job
@@ -311,6 +338,7 @@ def test_claim_next_is_atomic_under_concurrency(pg_engine):
         list(pool.map(claim_until_done, range(12)))
 
     assert len(claimed) == 12, "仍有任务没被认领"
+    # 集合相等即证明没有认领到别的用例遗留的 job（隔离契约的核心断言）。
     assert set(claimed) == set(ids)
     assert len({job.claim_token for job in claimed.values()}) == 12, "认领令牌没有每次刷新"
     with session_scope() as db:
@@ -320,12 +348,14 @@ def test_claim_next_is_atomic_under_concurrency(pg_engine):
 
 
 def test_fencing_rejects_stale_token_on_postgres(pg_engine):
+    """fencing 测试同样只认领本用例那一个 job，避免前面的 queued 残留干扰。"""
     from bidcraft.db import session_scope
     from bidcraft.jobqueue import claim_context, claim_next, fenced_job
     from bidcraft.models import Job
 
     job_id = _make_jobs(1)[0]
     first = claim_next()
+    # 必须正好是本用例的 id；若拿到遗留 job 说明隔离边界失效。
     assert first is not None and first.id == job_id
     old_token = first.claim_token
 

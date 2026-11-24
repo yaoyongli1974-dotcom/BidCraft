@@ -2,11 +2,16 @@
 
 基线以 JSON 风格的结构内联在测试里：页数、标题文本顺序、占位符数量。
 页数与占位符数量允许小幅容差，文本顺序必须严格一致。
+
+环境缺失时的行为：默认跳过以便本地开发；设置
+``BIDCRAFT_DOCX_REQUIRE_RENDER=1`` 后工具缺失必须失败，供 CI 专用渲染作业
+在 CJK 字体与渲染工具齐备的环境下防止黄金断言被静默跳过。
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -73,11 +78,27 @@ def _run(tool: str, *args: str) -> str:
     return result.stdout
 
 
-@pytest.mark.skipif(
-    SOFFICE is None or PDFINFO is None or PDFTOTEXT is None,
-    reason="需要 LibreOffice 与 poppler(pdfinfo/pdftotext)",
-)
+def _require_render_tools() -> None:
+    """工具缺失时：严格模式失败，否则跳过（仅限本地便利）。"""
+    missing = [
+        name
+        for name, path in (
+            ("LibreOffice(soffice)", SOFFICE),
+            ("poppler(pdfinfo)", PDFINFO),
+            ("poppler(pdftotext)", PDFTOTEXT),
+        )
+        if path is None
+    ]
+    if not missing:
+        return
+    reason = f"缺少渲染工具：{', '.join(missing)}；黄金 PDF 断言无法执行"
+    if os.environ.get("BIDCRAFT_DOCX_REQUIRE_RENDER") == "1":
+        pytest.fail(reason + "（BIDCRAFT_DOCX_REQUIRE_RENDER=1 环境不允许跳过）")
+    pytest.skip(reason + "；本地开发可设置 BIDCRAFT_DOCX_REQUIRE_RENDER=1 强制校验")
+
+
 def test_golden_pdf_fidelity(tmp_path):
+    _require_render_tools()
     docx_path = render_document(_representative_ir(), tmp_path / "golden.docx")
     pdf_path = export_pdf(docx_path, timeout=120)
     assert pdf_path.read_bytes().startswith(b"%PDF")
