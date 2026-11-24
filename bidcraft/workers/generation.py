@@ -20,6 +20,7 @@ from ..jobqueue import (
     commit_fenced_result,
     current_claim_token,
     fenced_job,
+    job_abort_event,
     log_job_failure,
     mark_step_done,
     pending_charge_heartbeat,
@@ -87,7 +88,10 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
         # Keep the async charge marker alive for the whole generation attempt;
         # a crash leaves it pending so the reconciler can refund by done_steps.
         with pending_charge_heartbeat(
-            marker_id, lease_project_id=project_id, lease_token=lease_token
+            marker_id,
+            lease_project_id=project_id,
+            lease_token=lease_token,
+            abort=job_abort_event(),
         ), session_scope() as work_db:
             project = work_db.get(Project, project_id)
             ledger = load_ledger(work_db, project_id)

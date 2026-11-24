@@ -3,6 +3,7 @@
 import hashlib
 import logging
 import sys
+import threading
 import uuid
 
 from fastapi import APIRouter
@@ -1617,8 +1618,14 @@ def generate_chapter(ref: str, node_id: str) -> dict[str, Any]:
     #    同步路径没有 Job 行，长任务靠 heartbeat 续 marker 的 updated_at，避免
     #    TTL 对账把仍在运行的生成误判为崩溃并提前全额退款。
     settled = False
+    heartbeat_abort = threading.Event()
     try:
-        with jobqueue.pending_charge_heartbeat(pending_id), session_scope() as gen_db:
+        with jobqueue.pending_charge_heartbeat(
+            pending_id,
+            lease_project_id=project_id,
+            lease_token=lease_token,
+            abort=heartbeat_abort,
+        ), session_scope() as gen_db:
             report = generate_document(
                 gen_db,
                 project_id,
@@ -1628,6 +1635,10 @@ def generate_chapter(ref: str, node_id: str) -> dict[str, Any]:
                 only_node=node_id_value,
                 knowledge_provider=_knowledge_provider(gen_db, user.id),
             )
+        # 心跳线程发现租约失效后只置事件；生成会话可能已写出部分章节，按已写
+        # 章节数结算而不是全额退款，避免把已完成的工作白送。
+        if heartbeat_abort.is_set():
+            raise RuntimeError("项目生成租约已失效，生成中止")
     except BaseException:
         # 原实现里模型调用抛错会回滚整个事务（含扣费）；扣费已提前提交，必须
         # 显式退还，保持净额与原错误行为一致。BaseException（Ctrl-C/SIGTERM）
@@ -1636,7 +1647,12 @@ def generate_chapter(ref: str, node_id: str) -> dict[str, Any]:
             settled = True
             with session_scope() as refund_db:
                 jobqueue.settle_pending_charge(
-                    refund_db, pending_id, user, project_id, 1, 0
+                    refund_db,
+                    pending_id,
+                    user,
+                    project_id,
+                    1,
+                    len(report.written or []) if "report" in locals() else 0,
                 )
         _release_generation_lease(project_id, lease_token)
         raise
@@ -1703,8 +1719,14 @@ def write(ref: str) -> dict[str, Any]:
         )
         project_id = project.id
     settled = False
+    heartbeat_abort = threading.Event()
     try:
-        with jobqueue.pending_charge_heartbeat(pending_id), session_scope() as gen_db:
+        with jobqueue.pending_charge_heartbeat(
+            pending_id,
+            lease_project_id=project_id,
+            lease_token=lease_token,
+            abort=heartbeat_abort,
+        ), session_scope() as gen_db:
             report = generate_document(
                 gen_db,
                 project_id,
@@ -1713,6 +1735,8 @@ def write(ref: str) -> dict[str, Any]:
                 package,
                 knowledge_provider=_knowledge_provider(gen_db, user.id),
             )
+        if heartbeat_abort.is_set():
+            raise RuntimeError("项目生成租约已失效，生成中止")
     except BaseException:
         # 扣费已提前提交；模型调用失败（含 BaseException）时显式退还，等价于
         # 原来的整事务回滚。settled 防住后续正常结算的重复退款。
@@ -1720,7 +1744,12 @@ def write(ref: str) -> dict[str, Any]:
             settled = True
             with session_scope() as refund_db:
                 jobqueue.settle_pending_charge(
-                    refund_db, pending_id, user, project_id, count, 0
+                    refund_db,
+                    pending_id,
+                    user,
+                    project_id,
+                    count,
+                    len(report.written or []) if "report" in locals() else 0,
                 )
         _release_generation_lease(project_id, lease_token)
         raise

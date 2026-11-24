@@ -329,6 +329,14 @@ class Settings:
             os.getenv("BIDCRAFT_PENDING_CHARGE_TTL", str(DEFAULT_PENDING_CHARGE_TTL_SECONDS))
         )
     )
+    # 生成租约寿命与心跳间隔。心跳必须显著快于 TTL，否则 Reclaim 可能在两次
+    # 心跳之间误判活跃任务；间隔由 __post_init__ 限制在 TTL//3 以内。
+    generation_lease_ttl_seconds: int = field(
+        default_factory=lambda: int(os.getenv("BIDCRAFT_GENERATION_LEASE_TTL", "1800"))
+    )
+    generation_heartbeat_interval_seconds: int = field(
+        default_factory=lambda: int(os.getenv("BIDCRAFT_GENERATION_HEARTBEAT_INTERVAL", "60"))
+    )
     # 是否在提交任务时于本进程拉起 worker。单进程（bidcraft serve）保持 True；
     # API/Worker 分离部署时设 BIDCRAFT_EMBEDDED_WORKERS=0，API 进程只入队不执行，
     # 由独立的 `bidcraft worker` 进程认领任务。
@@ -425,6 +433,14 @@ class Settings:
         self.max_parsed_pages = max(1, int(self.max_parsed_pages))
         self.plugin_timeout = max(5.0, min(120.0, self.plugin_timeout))
         self.pending_charge_ttl_seconds = max(0, self.pending_charge_ttl_seconds)
+        self.generation_lease_ttl_seconds = max(60, self.generation_lease_ttl_seconds)
+        self.generation_heartbeat_interval_seconds = max(
+            1,
+            min(
+                self.generation_heartbeat_interval_seconds,
+                self.generation_lease_ttl_seconds // 3,
+            ),
+        )
         self.rate_limit_window_seconds = max(1, min(3600, self.rate_limit_window_seconds))
         for name in (
             "rate_limit_login_ip",

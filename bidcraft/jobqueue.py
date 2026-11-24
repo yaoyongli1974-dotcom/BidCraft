@@ -30,7 +30,7 @@ from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import delete, func, or_, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from . import billing
 from .clock import utc_now
@@ -838,6 +838,13 @@ def _generation_lease_ttl_seconds() -> int:
     return max(60, int(getattr(settings, "generation_lease_ttl_seconds", 1800) or 1800))
 
 
+def _generation_heartbeat_seconds() -> int:
+    """Heartbeat period, always at least 3x faster than the lease TTL."""
+
+    configured = int(getattr(settings, "generation_heartbeat_interval_seconds", 60) or 60)
+    return max(1, min(configured, _generation_lease_ttl_seconds() // 3))
+
+
 def acquire_generation_lease(
     db,
     project_id: str,
@@ -900,6 +907,25 @@ def touch_generation_lease(db, project_id: str, token: str) -> bool:
         )
     )
     return bool(result.rowcount)
+
+
+def renew_generation_lease(project_id: str, token: str) -> str:
+    """Renew a generation lease in an INDEPENDENT session.
+
+    Returns ``active`` / ``lost`` / ``retry`` / ``stopped``.  The heartbeat
+    thread must never borrow the worker's long session: a reaper transaction
+    would otherwise be blocked behind the model call for minutes.
+    """
+
+    if not project_id or not token:
+        return "stopped"
+    try:
+        with session_scope() as db:
+            active = touch_generation_lease(db, project_id, token)
+    except SQLAlchemyError:
+        logger.exception("生成租约续期数据库异常: %s", project_id)
+        return "retry"
+    return "active" if active else "lost"
 
 
 def release_generation_lease(db, project_id: str, token: str) -> bool:
@@ -1007,38 +1033,58 @@ def pending_charge_heartbeat(
     interval: float | None = None,
     lease_project_id: str = "",
     lease_token: str = "",
+    abort: threading.Event | None = None,
 ) -> Iterator[None]:
     """Keep ``marker_id`` alive in the TTL reconciler while the body runs.
 
     A daemon thread calls :func:`touch_pending_charge` every ``interval``
     seconds (default ``max(1, ttl // 6)``, i.e. at least six heartbeats per TTL)
     and is stopped/joined on exit.  The stop is best-effort with a short join
-    timeout so a slow DB cannot hang a worker shutdown.  An empty marker id is
-    accepted and makes the context manager a no-op (billing-exempt callers get
-    an empty marker from :func:`begin_pending_charge`).
+    timeout so a slow DB cannot hang a worker shutdown.  Generation leases are
+    renewed in an INDEPENDENT session; confirmed lease loss or three consecutive
+    failures set ``abort`` so the worker stops at its next checkpoint.  An empty
+    marker id makes this a no-op (billing-exempt callers get an empty marker).
     """
 
     if not marker_id and not (lease_project_id and lease_token):
         yield
         return
     period = (
-        max(1, int(settings.pending_charge_ttl_seconds) // 6)
+        min(
+            max(1, int(settings.pending_charge_ttl_seconds) // 6),
+            _generation_heartbeat_seconds(),
+        )
         if interval is None
-        else interval
+        else max(0.1, float(interval))
     )
     stop = threading.Event()
 
+    def _abort(reason: str) -> None:
+        logger.error("生成任务中止：%s", reason)
+        if abort is not None:
+            abort.set()
+
     def _pulse() -> None:
+        failures = 0
         while not stop.wait(period):
             try:
                 if marker_id:
                     touch_pending_charge(marker_id)
-                if lease_project_id and lease_token and not touch_generation_lease(
-                    lease_project_id, lease_token
-                ):
-                    logger.warning("生成租约已失效: %s", lease_project_id)
-            except Exception:  # noqa: BLE001 - 心跳失败不能打断生成，下次 tick 重试
-                logger.exception("生成心跳刷新失败: %s", marker_id or lease_project_id)
+            except Exception:  # noqa: BLE001 - 续期失败可重试，不能拖垮生成线程
+                failures += 1
+                logger.exception("扣费标记心跳刷新失败: %s", marker_id)
+            if lease_project_id and lease_token:
+                state = renew_generation_lease(lease_project_id, lease_token)
+                if state == "lost":
+                    _abort(f"项目 {lease_project_id} 生成租约已失效")
+                    return
+                if state == "retry":
+                    failures += 1
+                else:
+                    failures = 0
+            if failures >= 3:
+                _abort("生成心跳连续失败 3 次")
+                return
 
     thread = threading.Thread(
         target=_pulse, name=f"charge-heartbeat-{marker_id}", daemon=True
