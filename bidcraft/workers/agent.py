@@ -18,6 +18,7 @@ from ..jobqueue import (
     JobAborted,
     assert_claim_current,
     fenced_job,
+    finalize_job_result,
     log_job_failure,
     raise_if_aborted,
 )
@@ -29,24 +30,9 @@ logger = logging.getLogger("bidcraft.workers")
 
 
 def _terminal_job(job_id: str, status: str, result: dict[str, Any], message: str) -> None:
-    # Terminal write: re-read the token in a fresh session so a reclaimed lease
-    # cannot be overwritten by a stale identity-mapped row.
-    assert_claim_current(job_id)
-    with session_scope() as db:
-        job = fenced_job(db, job_id)
-        if job is None:
-            return
-        job.status = status
-        job.progress = 100
-        job.message = message
-        job.result = result
-        jobs.publish_event(
-            job_id,
-            "done" if status == "done" else "failed",
-            {**jobs.job_payload(job), "result": result},
-            db=db,
-        )
-        db.flush()
+    # Terminal write: the fencing UPDATE and event share one transaction, so a
+    # reclaimed lease cannot slip in between the check and the commit.
+    finalize_job_result(job_id, status=status, result=result, message=message)
 
 
 def _run_agent_job(job_id: str, run_id: str) -> None:

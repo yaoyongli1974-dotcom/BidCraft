@@ -249,6 +249,39 @@ def commit_fenced_result(job_id: str) -> Iterator[tuple[Any, Job]]:
         yield db, job
 
 
+def finalize_job_result(
+    job_id: str,
+    *,
+    status: str = "done",
+    result: dict[str, Any] | None = None,
+    message: str = "",
+    progress: int = 100,
+    event_kind: str = "",
+) -> None:
+    """Write a terminal result with the fencing UPDATE and event in ONE txn.
+
+    Every worker used to re-read the job in a fresh session and then write the
+    terminal state separately; that left a TOCTOU window in which the reaper
+    could reclaim the lease between the check and the commit.  Delegating to
+    :func:`commit_fenced_result` makes the claim check and the business write
+    indivisible on both SQLite and PostgreSQL.
+    """
+    from . import jobs
+
+    payload = result or {}
+    with commit_fenced_result(job_id) as (db, job):
+        job.status = status
+        job.progress = progress
+        job.message = message
+        job.result = payload
+        jobs.publish_event(
+            job_id,
+            event_kind or ("done" if status == "done" else "failed"),
+            {**jobs.job_payload(job), "result": payload},
+            db=db,
+        )
+
+
 def step_status(db, job_id: str, step_key: str) -> bool | None:
     """Idempotency ledger lookup for one unit of work inside a job.
 

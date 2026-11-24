@@ -20,6 +20,7 @@ from ..jobqueue import (
     JobAborted,
     assert_claim_current,
     fenced_job,
+    finalize_job_result,
     log_job_failure,
     raise_if_aborted,
 )
@@ -41,22 +42,7 @@ def _report_result(report: QualityReport) -> dict[str, Any]:
 
 def _done(job_id: str, result: dict[str, Any], message: str) -> None:
     raise_if_aborted()
-    assert_claim_current(job_id)
-    with session_scope() as db:
-        job = fenced_job(db, job_id)
-        if job is None:
-            return
-        job.status = "done"
-        job.progress = 100
-        job.message = message
-        job.result = result
-        jobs.publish_event(
-            job_id,
-            "done",
-            {**jobs.job_payload(job), "result": result},
-            db=db,
-        )
-        db.flush()
+    finalize_job_result(job_id, result=result, message=message)
 
 
 def _run_evaluation_job(

@@ -17,6 +17,7 @@ from ..jobqueue import (
     JobAborted,
     _chapter_done_steps,
     assert_generation_lease,
+    commit_fenced_result,
     current_claim_token,
     fenced_job,
     log_job_failure,
@@ -221,40 +222,37 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
             project.status = "drafting"
             work_db.flush()
 
-        with session_scope() as done_db:
-            row = fenced_job(done_db, job_id)
-            if row is not None:
-                row.status = "done"
-                row.progress = 100
-                row.message = f"正文完成：{len(report.written)} 章"
-                result = _report_payload(report)
-                row.result = result
-                # Use the idempotency ledger (done_steps), not this attempt's
-                # report — on resume, earlier chapters were skipped but remain
-                # earned, so their credits must not be refunded again.
-                written = _chapter_done_steps(dict(row.payload or {}))
-                if written is None:
-                    written = len(report.written or [])
-                if marker_id:
-                    settle_pending_charge(
-                        done_db,
-                        marker_id,
-                        None,
-                        str(row.project_id or ""),
-                        int((row.payload or {}).get("chapters") or 0),
-                        int(written),
-                    )
-                else:
-                    # Legacy jobs created before async markers still need the
-                    # job-level idempotent refund path.
-                    _job_refund(done_db, row)
-                jobs.publish_event(
-                    job_id,
-                    "done",
-                    {**jobs.job_payload(row), "report": result},
-                    db=done_db,
+        with commit_fenced_result(job_id) as (done_db, row):
+            row.status = "done"
+            row.progress = 100
+            row.message = f"正文完成：{len(report.written)} 章"
+            result = _report_payload(report)
+            row.result = result
+            # Use the idempotency ledger (done_steps), not this attempt's
+            # report — on resume, earlier chapters were skipped but remain
+            # earned, so their credits must not be refunded again.
+            written = _chapter_done_steps(dict(row.payload or {}))
+            if written is None:
+                written = len(report.written or [])
+            if marker_id:
+                settle_pending_charge(
+                    done_db,
+                    marker_id,
+                    None,
+                    str(row.project_id or ""),
+                    int((row.payload or {}).get("chapters") or 0),
+                    int(written),
                 )
-                done_db.flush()
+            else:
+                # Legacy jobs created before async markers still need the
+                # job-level idempotent refund path.
+                _job_refund(done_db, row)
+            jobs.publish_event(
+                job_id,
+                "done",
+                {**jobs.job_payload(row), "report": result},
+                db=done_db,
+            )
         _release_lease(project_id, lease_token)
     except JobAborted:
         # Lease lost / graceful shutdown.  Do NOT mark failed or refund here:

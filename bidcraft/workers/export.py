@@ -21,6 +21,7 @@ from ..jobqueue import (
     JobAborted,
     assert_claim_current,
     fenced_job,
+    finalize_job_result,
     log_job_failure,
     raise_if_aborted,
 )
@@ -158,28 +159,20 @@ def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None
 
         raise_if_aborted()
         assert_claim_current(job_id)
-        with session_scope() as db:
-            job = fenced_job(db, job_id)
-            if job is not None:
-                job.status = "done"
-                job.progress = 100
-                message = f"导出完成：成功 {len(files)}，失败 {len(failed_items)}"
-                if blocked:
-                    message += f"（其中风险阻断 {blocked}）"
-                job.message = message
-                job.result = {
-                    "zip_path": str(zip_path),
-                    "files": files,
-                    "failed": failed_items,
-                    "total": total,
-                    "ok": len(files),
-                }
-                jobs.publish_event(
-                    job_id,
-                    "done",
-                    {**jobs.job_payload(job), "report": job.result},
-                    db=db,
-                )
+        message = f"导出完成：成功 {len(files)}，失败 {len(failed_items)}"
+        if blocked:
+            message += f"（其中风险阻断 {blocked}）"
+        finalize_job_result(
+            job_id,
+            result={
+                "zip_path": str(zip_path),
+                "files": files,
+                "failed": failed_items,
+                "total": total,
+                "ok": len(files),
+            },
+            message=message,
+        )
     except JobAborted:
         # 中止不是业务失败：保持 running，由 reaper 重新排队。
         logger.info("批量导出任务 %s 已中止，等待重新排队", job_id)

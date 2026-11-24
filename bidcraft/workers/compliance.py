@@ -14,6 +14,7 @@ from ..jobqueue import (
     JobAborted,
     assert_claim_current,
     fenced_job,
+    finalize_job_result,
     log_job_failure,
     raise_if_aborted,
 )
@@ -110,24 +111,16 @@ def _run_batch_check_job(job_id: str, project_ids: list[str]) -> None:
 
         raise_if_aborted()
         assert_claim_current(job_id)
-        with session_scope() as db:
-            job = fenced_job(db, job_id)
-            if job is not None:
-                job.status = "done"
-                job.progress = 100
-                job.message = f"核对完成：成功 {ok_count} / 失败 {failed_count}"
-                job.result = {
-                    "total": total,
-                    "ok": ok_count,
-                    "failed": failed_count,
-                    "results": results,
-                }
-                jobs.publish_event(
-                    job_id,
-                    "done",
-                    {**jobs.job_payload(job), "report": job.result},
-                    db=db,
-                )
+        finalize_job_result(
+            job_id,
+            result={
+                "total": total,
+                "ok": ok_count,
+                "failed": failed_count,
+                "results": results,
+            },
+            message=f"核对完成：成功 {ok_count} / 失败 {failed_count}",
+        )
     except JobAborted:
         # 中止不是业务失败：保持 running，由 reaper 重新排队。
         logger.info("批量核对任务 %s 已中止，等待重新排队", job_id)
