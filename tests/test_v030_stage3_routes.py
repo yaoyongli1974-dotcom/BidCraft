@@ -149,7 +149,8 @@ def _install_fast_heartbeat(monkeypatch):
     @contextmanager
     def fast_heartbeat(marker_id, **_kwargs):
         calls.append(marker_id)
-        with real_heartbeat(marker_id, interval=0.01):
+        # 生产代码把心跳间隔下限设为 0.1s（避免高频空转），测试等待须超过它。
+        with real_heartbeat(marker_id, interval=0.1):
             yield
 
     monkeypatch.setattr(jobqueue, "touch_pending_charge", counting_touch)
@@ -186,7 +187,7 @@ def test_sync_generation_heartbeat_keeps_marker_and_settles_once(endpoint, monke
     )
 
     def slow_generate(*_args, **_kwargs):
-        time.sleep(0.08)
+        time.sleep(0.3)
         return _report()
 
     monkeypatch.setattr(routes_projects, "generate_document", slow_generate)
@@ -243,7 +244,7 @@ def test_sync_generation_baseexception_refunds_once(endpoint, exc_type, monkeypa
     )
 
     def interrupted(*_args, **_kwargs):
-        time.sleep(0.04)
+        time.sleep(0.3)
         raise exc_type("interrupted")
 
     monkeypatch.setattr(routes_projects, "generate_document", interrupted)
