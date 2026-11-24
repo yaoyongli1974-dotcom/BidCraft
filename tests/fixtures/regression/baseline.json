@@ -1,29 +1,30 @@
 {
   "schema": 1,
-  "saved_at": "2026-11-18T02:28:09.061027+00:00",
+  "saved_at": "2026-11-24T09:41:03.959976+00:00",
   "aggregate": {
-    "files": 6,
-    "ok": 6,
+    "files": 10,
+    "ok": 10,
     "failed": 0,
     "field_hits": {
-      "project.acceptance": 6,
-      "project.agency": 6,
-      "project.bid_deadline": 6,
-      "project.bid_validity": 6,
-      "project.budget": 6,
-      "project.buyer": 6,
-      "project.content": 6,
-      "project.deposit": 6,
-      "project.duration": 6,
-      "project.location": 6,
-      "project.name": 6,
-      "project.number": 6,
-      "project.open_time": 6,
-      "project.payment": 6,
-      "project.warranty": 6,
-      "qualification.requirements": 6,
-      "scoring.method": 6,
-      "tender.number": 6,
+      "project.acceptance": 10,
+      "project.agency": 10,
+      "project.bid_deadline": 10,
+      "project.bid_validity": 10,
+      "project.budget": 10,
+      "project.buyer": 10,
+      "project.content": 10,
+      "project.deposit": 10,
+      "project.duration": 10,
+      "project.location": 10,
+      "project.name": 10,
+      "project.number": 10,
+      "project.open_time": 10,
+      "project.payment": 10,
+      "project.warranty": 10,
+      "qualification.requirements": 10,
+      "scoring.method": 10,
+      "tender.number": 10,
+      "tech.requirements": 2,
       "cabling.cable_grade": 1,
       "cabling.fiber_grade": 1,
       "cabling.point_count": 1,
@@ -72,6 +73,11 @@
         "ok": 1,
         "required_hit_rate": 1.0
       },
+      "common-bid-facts": {
+        "files": 4,
+        "ok": 4,
+        "required_hit_rate": 1.0
+      },
       "decoration": {
         "files": 1,
         "ok": 1,
@@ -101,5 +107,59 @@
     "required_hit_rate": 1.0,
     "avg_materials": 0.0,
     "ocr_files": 0
+  },
+  "provenance": {
+    "label": "synthetic-regression-v030-stage6",
+    "note": "全合成脱敏夹具（首行 SYNTHETIC 哨兵）；aggregate 与逐文件期望均由 bidcraft calibrate 实测生成，不含真实招标内容"
+  },
+  "fixtures": {
+    "synthetic-appendix-tender.md": {
+      "expected_values": {
+        "project.name": "虚构实训中心通用设备采购",
+        "project.number": "SYN-2026-A001",
+        "project.buyer": "虚构采购中心",
+        "project.budget": "人民币 壹佰贰拾万元整（¥1,200,000.00）",
+        "project.duration": "150 日历天",
+        "project.warranty": "2 年"
+      },
+      "min_tables": 0,
+      "min_materials": 0
+    },
+    "synthetic-boq-tender.md": {
+      "expected_values": {
+        "project.name": "虚构社区服务用房配套采购",
+        "project.number": "SYN-2026-B002",
+        "project.buyer": "虚构社区事务中心",
+        "project.budget": "人民币 贰佰叁拾肆万伍仟陆佰元整（¥2,345,600.00）",
+        "project.duration": "200 日历天",
+        "project.warranty": "18 个月"
+      },
+      "min_tables": 0,
+      "min_materials": 0
+    },
+    "synthetic-crossref-tender.md": {
+      "expected_values": {
+        "project.name": "虚构培训中心配套服务采购",
+        "project.number": "SYN-2026-D004",
+        "project.buyer": "虚构培训中心",
+        "project.budget": "人民币 叁佰壹拾陆万元整（¥3,160,000.00）",
+        "project.duration": "240 日历天",
+        "project.warranty": "2 年"
+      },
+      "min_tables": 0,
+      "min_materials": 0
+    },
+    "synthetic-pagination-tender.md": {
+      "expected_values": {
+        "project.name": "虚构档案室配套设施采购",
+        "project.number": "SYN-2026-C003",
+        "project.buyer": "虚构档案管理中心",
+        "project.budget": "人民币 玖拾捌万元整（¥980,000.00）",
+        "project.duration": "90 日历天",
+        "project.warranty": "3 年"
+      },
+      "min_tables": 0,
+      "min_materials": 0
+    }
   }
 }

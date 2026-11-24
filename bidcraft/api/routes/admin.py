@@ -1487,6 +1487,8 @@ def admin_health(request: Request) -> dict[str, Any]:
     """完整运行状态，仅超级管理员可见（公开 /health 保持最小化）。"""
     import platform as platform_module
 
+    from ...health import global_metrics
+
     require_super(request)
     with session_scope() as db:
         endpoint = model_config.resolve_chat_endpoint(db)
@@ -1494,6 +1496,9 @@ def admin_health(request: Request) -> dict[str, Any]:
         models = db.scalar(select(func.count()).select_from(ModelConfig)) or 0
         kbs = db.scalar(select(func.count()).select_from(KnowledgeBase)) or 0
         users = db.scalar(select(func.count()).select_from(User)) or 0
+        # 库内聚合指标随端点本身一并返回；app.create_app 的兼容包装检测到
+        # 该键后会跳过二次计算，响应键与既有 /admin/health 完全一致。
+        metrics = global_metrics(db)
     started = getattr(_core.app.state, "started_at", None)
     db_path = settings.home / "bidcraft.db"
     db_size = db_path.stat().st_size if db_path.is_file() else 0
@@ -1528,6 +1533,7 @@ def admin_health(request: Request) -> dict[str, Any]:
         "registration": True,
         "wechat_login": wechat.available(),
         "wechat_pay": wechatpay.available(),
+        "global_metrics": metrics,
     }
 
 

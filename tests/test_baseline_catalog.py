@@ -210,7 +210,8 @@ def test_cli_calibrate_saves_label_manifest_and_registers(tmp_path):
     assert result.exit_code == 0, result.output
     data = json.loads(baseline.read_text(encoding="utf-8"))
     assert data["provenance"]["label"] == "real-fixtures"
-    assert len(data["provenance"]["file_manifest"]) == 6
+    # 回归集数量会随阶段 6 的合成样本扩充而增长，按目录实测断言避免硬编码过期。
+    assert len(data["provenance"]["file_manifest"]) == len(list(FIXTURES.glob("*.md")))
     assert "溯源标签：real-fixtures" in result.output
     assert "基线已登记" in result.output
     assert load_index(index)["entries"][0]["label"] == "real-fixtures"

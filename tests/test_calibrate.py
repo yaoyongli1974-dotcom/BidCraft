@@ -69,6 +69,19 @@ FIXTURE_NAMES = (
     "decoration-tender.md",
 )
 
+def all_md_fixture_names() -> list[str]:
+    return sorted(path.name for path in FIXTURES.glob("*.md"))
+
+
+def make_original_fixtures_dir(base: Path) -> Path:
+    """只放原始六份行业件，保持「六件对六包」断言的原有语义。"""
+
+    root = base / "original"
+    root.mkdir()
+    for name in FIXTURE_NAMES:
+        shutil.copy(FIXTURES / name, root / name)
+    return root
+
 
 def make_regression_dir(base: Path) -> Path:
     root = base / "regression"
@@ -120,8 +133,8 @@ def test_calibrate_dir_all_fixtures(tmp_path):
         assert bucket["required_hit_rate"] >= 0.8, name
 
 
-def test_six_fixtures_map_to_six_packages():
-    report = calibrate_dir(FIXTURES)
+def test_six_fixtures_map_to_six_packages(tmp_path):
+    report = calibrate_dir(make_original_fixtures_dir(tmp_path))
 
     assert report["aggregate"]["files"] == len(FIXTURE_NAMES)
     assert report["aggregate"]["ok"] == len(FIXTURE_NAMES)

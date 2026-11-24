@@ -1,9 +1,13 @@
 # 回归校准仿真件
 
-本目录存放**仿真**招标文件，用于 `bidcraft calibrate` 与 `tests/test_calibrate.py`
-的回归基线；不是真实招标件，不含任何真实项目信息。
+本目录存放**仿真**招标文件，用于 `bidcraft calibrate` 与回归测试的基线门禁；
+不是真实招标件，不含任何真实项目信息。每份 Markdown 首行均为哨兵：
 
-## 提交的 Markdown 仿真件（6 份）
+```
+<!-- SYNTHETIC: no real data -->
+```
+
+## 提交的 Markdown 仿真件（10 份）
 
 | 文件 | 行业包 | 覆盖重点 |
 |---|---|---|
@@ -13,9 +17,18 @@
 | civil-tender.md | civil | 建筑面积、结构形式、混凝土等级、质量目标 |
 | hvac-tender.md | hvac | 冷热负荷、设备数量、风管材质、验收标准 |
 | decoration-tender.md | decoration | 装饰面积、主材、防火/环保等级 |
+| synthetic-appendix-tender.md | common-bid-facts | 前附表附录 + BOQ 表、中文大写金额、OCR 断字 |
+| synthetic-boq-tender.md | common-bid-facts | 两份 BOQ 风格表、大写总额、分页噪声 |
+| synthetic-pagination-tender.md | common-bid-facts | 连续分页符、OCR 断行字段标签、跨章指针 |
+| synthetic-crossref-tender.md | common-bid-facts | 多处跨章引用、前附表索引表、大写金额 |
+
+后四份为 Stage 6 新增的全合成脱敏件：无真实公司名/电话/邮箱/项目号/身份证号，
+编号统一 `SYN-` 前缀。`tests/test_v030_stage6_fixtures.py` 校验哨兵、脱敏模式、
+基线值/下限，以及 `compare_baseline` 对值漂移与表格/材料行数回归的判定。
 
 行业包由 `parse.keywords` 自动选择；报告 `per_file[].package` 给出选中包名，
 `aggregate.by_type` 按包统计 `{files, ok, required_hit_rate}`。
+`per_file[].values` 给出归一化后的字段值，供逐文件 `expected_values` 比对。
 
 ## 动态生成的 Excel（不入库）
 
@@ -24,14 +37,21 @@
 
 ## 覆盖断言
 
-- 六份 md 全部 `ok`，`aggregate.required_hit_rate >= 0.8`（实测 1.0）；
-- `by_type` 覆盖六个行业包，各自 `required_hit_rate >= 0.8`；
+- 原始六份 md 全部 `ok`，`by_type` 覆盖六个行业包，各自 `required_hit_rate >= 0.8`；
+- 全部 10 份 md 无 error、`required_hit_rate == 1.0`（实测）；
 - 坏 PDF 记 `error` 且 `package=None`，不抛异常、不中断扫描；
-- 动态 xlsx 场景 `files=3, ok=3`、材料 >= 5 行。
+- 动态 xlsx 场景材料 >= 5 行、表格 >= 1 张。
 
 ## CI 门禁
 
-`.github/workflows/ci.yml` 的 python job 在 pytest 之后执行
-`uv run --frozen bidcraft calibrate tests/fixtures/regression`，exit 0 才通过。
+`.github/workflows/ci.yml` 的 python job 在 pytest 之后执行（退出码 0/1/2 门禁）：
 
-真实招标件请另行放入独立目录跑 `bidcraft calibrate <dir>`，不要混入本目录。
+```bash
+uv run --frozen bidcraft calibrate tests/fixtures/regression \
+  --compare-baseline tests/fixtures/regression/baseline.json
+```
+
+`baseline.json` 除 `aggregate` 外，还有可选 `fixtures` 映射，逐文件记录
+`expected_values`、`min_tables`、`min_materials`；这些值全部由
+`bidcraft calibrate` 实测生成，不手写。真实招标件请另行放入独立目录跑
+`bidcraft calibrate <dir>`，不要混入本目录。

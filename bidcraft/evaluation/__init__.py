@@ -12,6 +12,7 @@ from .coverage import (
     calculate_requirement_coverage,
     calculate_scoring_coverage,
 )
+from .quality_metrics import collect_quality_metrics
 from .report import (
     FINDING_STATUSES,
     build_quality_report,
@@ -51,6 +52,7 @@ __all__ = [
     "classify_quality_risks",
     "collect_commercial_completeness",
     "collect_project_risks",
+    "collect_quality_metrics",
     "evaluate_project_quality",
     "find_report_for_job",
     "finding_for_project",

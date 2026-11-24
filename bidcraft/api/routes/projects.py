@@ -1874,7 +1874,14 @@ def requirement_response_update(
         if payload.response_status != "pending":
             # 与 /check 同口径：带入招标截止日期与可选语义 matcher，避免
             # 确认快照的判定与 SUB 问题的判定漂移。
-            current = judge_for_project(db, requirement, context.outline_nodes)
+            current = judge_for_project(
+                db,
+                requirement,
+                context.outline_nodes,
+                deadline=context.deadline,
+                matcher=context.matcher,
+                project_meta=context.project_meta,
+            )
             snapshot = {
                 "state": current.state,
                 "label": current.label,

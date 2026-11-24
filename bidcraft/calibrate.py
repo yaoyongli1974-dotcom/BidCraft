@@ -119,6 +119,7 @@ def _calibrate_file(
             "needs_ocr": False,
             "error": f"{type(exc).__name__}: {exc}",
             "package": None,
+            "values": {},
         }
 
     warnings = _parse_warnings(parsed)
@@ -138,6 +139,7 @@ def _calibrate_file(
             "needs_ocr": needs_ocr,
             "error": error,
             "package": None,
+            "values": {},
         }
 
     try:
@@ -161,6 +163,7 @@ def _calibrate_file(
             "needs_ocr": needs_ocr,
             "error": f"{type(exc).__name__}: {exc}",
             "package": None,
+            "values": {},
         }
 
     return {
@@ -176,6 +179,11 @@ def _calibrate_file(
         "error": None,
         "package": package.name,
         "_hit_keys": {fact.key for fact in ledger.facts if fact.value},
+        "values": {
+            fact.key: _normalize_value(fact.value)
+            for fact in ledger.facts
+            if fact.value
+        },
     }
 
 
@@ -266,6 +274,27 @@ def calibrate_dir(path: str | Path, recursive: bool = False) -> dict[str, Any]:
 BASELINE_SCHEMA = 1
 
 
+def _normalize_value(value: Any) -> Any:
+    """归一化字段值：字符串折叠所有空白（含换行/全角空格），其余类型原样。"""
+
+    if isinstance(value, str):
+        return " ".join(value.split())
+    return value
+
+
+def _values_equal(actual: Any, expected: Any) -> bool:
+    """比较归一化后的值；数字期望允许实际值是等价的数字或数字字符串。"""
+
+    if isinstance(expected, bool) or isinstance(actual, bool):
+        return _normalize_value(actual) == _normalize_value(expected)
+    if isinstance(expected, (int, float)):
+        try:
+            return float(actual) == float(expected)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return False
+    return _normalize_value(actual) == _normalize_value(expected)
+
+
 def _sha256_of_file(path: Path) -> tuple[str, int]:
     """返回文件 sha256 与字节数；只读，不把内容带进基线。"""
 
@@ -312,12 +341,16 @@ def save_baseline(
     label: str | None = None,
     note: str | None = None,
     manifest: list[dict[str, Any]] | bool | None = None,
+    fixtures: dict[str, Any] | None = None,
 ) -> Path:
     """保存回归基线：只存 aggregate（不含 root/per_file），保证跨机器可比。
 
     ``label``/``note``/``manifest`` 是可选的**溯源元数据**，放在 ``provenance``
     下；不传时 payload 与旧版逐字节兼容（schema 仍为 1）。``manifest=True``
     时自动按报告生成文件指纹清单；真实件正文永不写入基线。
+
+    ``fixtures`` 是可选的逐文件期望（``{相对路径: {expected_values, min_tables,
+    min_materials}}``），放在顶层 ``fixtures``；不传时旧基线完全不变。
     """
 
     target = Path(path).expanduser()
@@ -338,6 +371,8 @@ def save_baseline(
         provenance["file_manifest"] = manifest
     if provenance:
         payload["provenance"] = provenance
+    if fixtures:
+        payload["fixtures"] = fixtures
     target.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
@@ -501,11 +536,15 @@ def load_baseline(path: str | Path) -> dict[str, Any]:
 def compare_baseline(
     report: dict[str, Any], baseline_path: str | Path, *, tolerance: float = 0.02
 ) -> dict[str, Any]:
-    """当前报告 vs 基线，只比 aggregate（忽略 root/recursive/saved_at/per_file）。
+    """当前报告 vs 基线：先比 aggregate，再比可选的逐文件期望。
 
-    回归判定：字段不再命中/命中数下降；必填命中率下降超过 tolerance（严格 >）；
-    failed 增加 / ok 减少；avg_materials 相对下降超过 10%。
+    aggregate 回归判定：字段不再命中/命中数下降；必填命中率下降超过 tolerance
+    （严格 >）；failed 增加 / ok 减少；avg_materials 相对下降超过 10%。
     新增字段 key 与指标上升列入 improvements。ok = 无回归。
+
+    基线顶层 ``fixtures``（可选）给出逐文件 ``expected_values`` /
+    ``min_tables`` / ``min_materials``：字段值漂移或缺失、表格/材料行数低于
+    下限都记为回归。旧基线没有 ``fixtures`` 时逐文件检查整体跳过，行为不变。
     """
     baseline = load_baseline(baseline_path)
     base = baseline["aggregate"]
@@ -574,6 +613,68 @@ def compare_baseline(
         improvement(
             "avg_materials", f"平均材料上升：{base_avg}→{cur_avg}", base_avg, cur_avg
         )
+
+    fixtures_spec = baseline.get("fixtures")
+    if isinstance(fixtures_spec, dict) and fixtures_spec:
+        current_files = {
+            str(item.get("file", "")): item for item in report.get("per_file", [])
+        }
+        for relative, spec in sorted(fixtures_spec.items()):
+            if not isinstance(spec, dict):
+                continue
+            relative = str(relative)
+            item = current_files.get(relative)
+            if item is None:
+                regression(
+                    f"fixture.{relative}.present",
+                    f"基线夹具缺失：{relative}",
+                    "存在",
+                    "缺失",
+                )
+                continue
+
+            values = item.get("values") or {}
+            expected_values = spec.get("expected_values") or {}
+            if isinstance(expected_values, dict):
+                for key, expected in expected_values.items():
+                    key = str(key)
+                    metric = f"values.{relative}.{key}"
+                    if key not in values:
+                        regression(
+                            metric,
+                            f"字段值缺失：{relative}::{key}（期望 {expected!r}）",
+                            expected,
+                            None,
+                        )
+                    elif not _values_equal(values[key], expected):
+                        actual = values[key]
+                        regression(
+                            metric,
+                            f"字段值漂移：{relative}::{key} {expected!r}→{actual!r}",
+                            expected,
+                            actual,
+                        )
+
+            for floor_key, count_key, label in (
+                ("min_tables", "tables", "表格数"),
+                ("min_materials", "materials", "材料行数"),
+            ):
+                floor = spec.get(floor_key)
+                if floor is None:
+                    continue
+                try:
+                    floor_number = int(floor)
+                    actual_number = int(item.get(count_key, 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if actual_number < floor_number:
+                    regression(
+                        f"{count_key}.{relative}",
+                        f"{label}回归：{relative} {floor_number}→{actual_number}"
+                        f"（不得低于 {floor_number}）",
+                        floor_number,
+                        actual_number,
+                    )
 
     return {
         "ok": not regressions,

@@ -21,6 +21,7 @@ from .coverage import (
     calculate_requirement_coverage,
     calculate_scoring_coverage,
 )
+from .quality_metrics import collect_quality_metrics
 from .risk import (
     build_risk_recommendations,
     calculate_risk_summary,
@@ -185,6 +186,11 @@ def build_quality_report(
                 status="open",
             )
         )
+    db.flush()
+
+    # 指标在本报告的 finding 落库后采集（自身的 finding 也计入密度）；
+    # 重新赋值整个 summary 以触发 JSON 字段变更追踪，保留全部既有键。
+    report.summary = {**summary, "metrics": collect_quality_metrics(db, project_id)}
     db.flush()
 
     record_audit(

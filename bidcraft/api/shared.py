@@ -590,13 +590,19 @@ class ProjectRequirementContext:
 
     一次 load_outline 同时得到大纲正文（供判定）与 ``node_id → heading`` 索引
     （供 section_heading 展示），避免 ``_requirement_payload`` 对每条条款执行
-    ``db.get(OutlineNode)`` 的 N+1 查询。上下文按请求创建、按 project_id 隔离，
-    请求结束即丢弃，不存在跨请求陈旧缓存。字段带默认值以保持构造兼容。
+    ``db.get(OutlineNode)`` 的 N+1 查询。项目级判定输入（``project_meta`` /
+    ``deadline`` / ``matcher``）同样按请求只算一次，供所有条款复用，避免
+    ``judge_for_project`` 逐条重载项目 + 事实台账 + 语义匹配器。上下文按请求
+    创建、按 project_id 隔离，请求结束即丢弃，不存在跨请求陈旧缓存。字段带
+    默认值以保持构造兼容。
     """
 
     project_id: str = ""
     outline_nodes: list[dict] = field(default_factory=list)
     node_map: dict[str, str] = field(default_factory=dict)
+    project_meta: dict[str, Any] = field(default_factory=dict)
+    deadline: date | None = None
+    matcher: Any = None
 
     def heading_of(self, node_id: str | None) -> str:
         return self.node_map.get(node_id or "", "")
@@ -605,7 +611,14 @@ class ProjectRequirementContext:
 def build_requirement_context(
     db: Session, project_id: str, outline_cache: dict[str, list[dict]] | None = None
 ) -> ProjectRequirementContext:
-    """一次查询构建条款上下文：大纲正文 + node_id→heading 索引（R05）。"""
+    """一次请求级加载：大纲正文、heading 索引与项目级判定输入（R05/Stage6）。
+
+    与 ``pipeline.check_project`` 同口径：deadline 从事实台账解析、meta 兜底，
+    matcher 由可选 LLM 语义层构造（不可用时安全回退规则）。列表接口每条条款
+    复用这些值，项目/台账/匹配器查询次数与条款数无关。
+    """
+
+    from ..verdict_llm import build_verdict_matcher
 
     nodes = get_outline_cached(db, project_id, outline_cache)
     node_map = {
@@ -613,8 +626,21 @@ def build_requirement_context(
         for node in nodes
         if node.get("id")
     }
+    project = db.get(Project, project_id)
+    meta = (getattr(project, "meta", None) or {}) if project is not None else {}
+    try:
+        ledger = load_ledger(db, project_id)
+        deadline = resolve_deadline(ledger.facts, meta)
+    except Exception:  # noqa: BLE001 - 展示判定不可因台账读取失败而 500
+        deadline = resolve_deadline([], meta)
+    matcher = build_verdict_matcher(db)
     return ProjectRequirementContext(
-        project_id=project_id, outline_nodes=nodes, node_map=node_map
+        project_id=project_id,
+        outline_nodes=nodes,
+        node_map=node_map,
+        project_meta=meta,
+        deadline=deadline,
+        matcher=matcher,
     )
 
 
@@ -640,24 +666,40 @@ def judge_for_project(
     db: Session,
     requirement: Requirement,
     nodes: list[dict],
+    *,
+    deadline: date | None = None,
+    matcher: Any = None,
+    project_meta: dict[str, Any] | None = None,
 ) -> Any:
     """与 pipeline.check_project 同口径判定单条条款（截止日期 + 可选 matcher）。
 
     GET/PATCH /requirements 旧实现直接调 judge()，拿不到事实台账里的招标截止
     日期与可选语义 matcher，和 /check 生成的 SUB 问题判定漂移。这里统一解析
     deadline 并复用 matcher；节点由调用方一次加载后传入，不额外查大纲。
+
+    Stage6：``build_requirement_context`` 已按请求算好 ``project_meta`` /
+    ``deadline`` / ``matcher``，列表逐条传入即可复用，不再各自重载项目、台账
+    与匹配器。三参数均省略时保留旧的安全回退路径（PATCH 单条/直接调用），
+    判定口径、四态逻辑、证据与阈值完全不变。传入 ``project_meta`` 表示调用方
+    已解析过项目级输入；此时 ``deadline=None`` 即台账中确无可用截止日期，
+    不再重复加载台账。
     """
 
     from ..verdict_llm import build_verdict_matcher
 
-    project = db.get(Project, requirement.project_id)
-    meta = (getattr(project, "meta", None) or {}) if project is not None else {}
-    try:
-        ledger = load_ledger(db, requirement.project_id)
-        deadline = resolve_deadline(ledger.facts, meta)
-    except Exception:  # noqa: BLE001 - 展示判定不可因台账读取失败而 500
-        deadline = resolve_deadline([], meta)
-    matcher = build_verdict_matcher(db)
+    if project_meta is None:
+        project = db.get(Project, requirement.project_id)
+        meta = (getattr(project, "meta", None) or {}) if project is not None else {}
+    else:
+        meta = project_meta
+    if matcher is None:
+        matcher = build_verdict_matcher(db)
+    if deadline is None and project_meta is None:
+        try:
+            ledger = load_ledger(db, requirement.project_id)
+            deadline = resolve_deadline(ledger.facts, meta)
+        except Exception:  # noqa: BLE001 - 展示判定不可因台账读取失败而 500
+            deadline = resolve_deadline([], meta)
     return judge_requirement(requirement, nodes, matcher=matcher, deadline=deadline)
 
 
@@ -684,7 +726,20 @@ def _requirement_payload(
                 (n.get("heading") or "" for n in nodes if str(n.get("id")) == node_id),
                 "",
             )
-    verdict = judge_for_project(db, requirement, nodes)
+    # Stage6：把请求级上下文里的项目级判定输入透传给判定函数，避免逐条重载
+    # 项目/台账/匹配器。仅当上下文确实预加载了这些值时透传，保持手工构造的
+    # 极简 context（以及 monkeypatch 三参数 judge）的既有兼容性。
+    judge_kwargs: dict[str, Any] = {}
+    if context is not None:
+        ctx_meta = getattr(context, "project_meta", None)
+        ctx_matcher = getattr(context, "matcher", None)
+        if ctx_meta is not None and ctx_matcher is not None:
+            judge_kwargs = {
+                "project_meta": ctx_meta,
+                "deadline": getattr(context, "deadline", None),
+                "matcher": ctx_matcher,
+            }
+    verdict = judge_for_project(db, requirement, nodes, **judge_kwargs)
     return {
         "id": requirement.id,
         "kind": requirement.kind,

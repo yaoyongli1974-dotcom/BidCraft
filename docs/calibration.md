@@ -70,7 +70,8 @@ bidcraft calibrate /path/to/tenders --recursive --output /tmp/calibrate-report.j
 | `per_file[].warnings` | PDF/OCR/空白页等非致命提示 |
 | `per_file[].needs_ocr` | 是否未提取到文本、需要 OCR |
 | `per_file[].error` | 解析失败原因；成功为 `null` |
-| `per_file[].package` | 该文件选中的行业包名（`weakcurrent-cabling`/`fire-protection`/`installation`/`civil`/`hvac`/`decoration`）；解析失败或未选出时为 `null` |
+| `per_file[].package` | 该文件选中的行业包名（`weakcurrent-cabling`/`fire-protection`/`installation`/`civil`/`hvac`/`decoration`，合成件可能落到 `common-bid-facts`）；解析失败或未选出时为 `null` |
+| `per_file[].values` | `{字段 key: 归一化后的值}`，仅列已抽到值的字段；字符串会折叠换行/多余空白，供逐文件值基线比对 |
 | `aggregate.field_hits` | `{字段 key: 命中文件数}`，只列出至少命中 1 次的字段 |
 | `aggregate.by_type` | 按所选行业包分组的 `{包名: {files, ok, required_hit_rate}}`；`ok` 为无 error 的文件数，`required_hit_rate` 为该组「已填必填事实 / 必填事实」 |
 | `aggregate.required_hit_rate` | 所有成功文件的「已填必填事实 / 必填事实」汇总，`0.0`–`1.0` |
@@ -92,8 +93,12 @@ CLI 会额外打印汇总表、每文件一行和字段命中 Top 10；`--output
 
 ## fixtures 与真实件
 
-`tests/fixtures/regression/` 下的六份 Markdown 是**仿真件**，一份对应一个行业规则包，
-用于回归测试别名、行业包选择与必填事实命中率：
+`tests/fixtures/regression/` 下的 Markdown 都是**仿真件**，不含任何真实招标内容。
+每份文件首行必须是哨兵 `<!-- SYNTHETIC: no real data -->`；`tests/test_v030_stage6_fixtures.py`
+对全部夹具强制校验该哨兵，并对新增合成件额外校验无手机号、身份证号、邮箱、
+公司/集团/股份后缀，编号统一使用 `SYN-` 前缀。
+
+原始六份对应六个行业规则包，用于回归测试别名、行业包选择与必填事实命中率：
 
 | 文件 | 行业包 | 关键事实 |
 | --- | --- | --- |
@@ -104,13 +109,24 @@ CLI 会额外打印汇总表、每文件一行和字段命中 Top 10；`--output
 | `hvac-tender.md` | `hvac` | 冷热负荷、冷热源与设备数量、风管/水管材质、暖通验收标准 |
 | `decoration-tender.md` | `decoration` | 装饰范围/面积/标准、主要材料、防火与环保验收标准 |
 
-`boq-weakcurrent.xlsx` 由测试用 openpyxl 动态生成，不入库。
-真实招标文件涉及商业信息，需由用户自行放入独立目录运行校准，不要提交到仓库。
+Stage 6 另加四份**全合成脱敏件**，覆盖表格（前附表摘录 / BOQ 分项清单）、
+分页符与 OCR 断行噪声、中文大写金额、跨章引用指针：
 
-`tests/test_calibrate.py` 断言六份 fixtures 全部 `ok`、`by_type` 覆盖 6 个行业包、
+| 文件 | 覆盖重点 |
+| --- | --- |
+| `synthetic-appendix-tender.md` | 前附表附录 + BOQ 表、中文大写金额、分页/OCR 断字 |
+| `synthetic-boq-tender.md` | 两份 BOQ 风格表、大写总额、分页噪声 |
+| `synthetic-pagination-tender.md` | 连续分页符、OCR 断行字段标签、跨章指针 |
+| `synthetic-crossref-tender.md` | 多处跨章引用、前附表索引表、大写金额 |
+
+真实招标文件涉及商业信息，需由用户自行放入独立目录运行校准，不要提交到仓库；
+`boq-weakcurrent.xlsx` 由测试用 openpyxl 动态生成，不入库。
+
+`tests/test_calibrate.py` 断言原始六份 fixtures 全部 `ok`、`by_type` 覆盖 6 个行业包、
 每个包的 `required_hit_rate >= 0.8`；`tests/test_calibrate_baseline.py` 另以提交的
-`baseline.json` 做门禁（夹具报告 vs 基线 `ok=True`）；CI 的 python job 还以
-`uv run --frozen bidcraft calibrate tests/fixtures/regression` 作为 exit 0 门禁。
+`baseline.json` 做门禁（夹具报告 vs 基线 `ok=True`）；CI 的 python job 以
+`uv run --frozen bidcraft calibrate tests/fixtures/regression --compare-baseline tests/fixtures/regression/baseline.json`
+作为 exit 0 门禁。
 
 ## 基线保存与比对
 
@@ -136,9 +152,40 @@ bidcraft calibrate <真实件目录> \
 被换过；`--no-manifest` 可关闭。清单**不含任何招标文件正文**。不传这些选项时
 基线 payload 与旧版完全一致（schema 仍为 1，旧基线照常可读）。
 
+### 逐文件期望（可选，schema 仍为 1）
+
+基线顶层可带 `fixtures`，按**相对扫描根目录的路径**给出逐文件下限与期望值；
+不传时基线 payload 与旧版完全一致，旧基线比对行为逐字节不变：
+
+```json
+{
+  "schema": 1,
+  "saved_at": "...",
+  "aggregate": {"files": 10, "...": "..."},
+  "fixtures": {
+    "synthetic-appendix-tender.md": {
+      "expected_values": {"project.name": "...", "project.budget": "..."},
+      "min_tables": 0,
+      "min_materials": 0
+    }
+  }
+}
+```
+
+- `expected_values`：`{字段 key: 归一化后的字符串或数字}`。归一化会折叠字符串里的
+  换行和多余空白；数字期望可与等价的数字字符串匹配。
+- `min_tables` / `min_materials`：该文件的结构化表格数 / 材料行数下限（整数）。
+  当前 Markdown 夹具由文本读取器加载，表格数为 0，故仓库基线里的下限是实测的 0；
+  `.xlsx`/`.docx`/带表格的 PDF 可设正数下限来盯住表格抽取能力。
+- `save_baseline(..., fixtures=...)` 可写入这些字段；`compare_baseline` 读取后逐项判定。
+
 判定规则（相对基线）：
 
 - 字段命中 key 消失或 count 下降 → 回归；
+- 基线夹具从当前报告中消失、`expected_values` 的值漂移或缺失 → 回归
+  （metric 形如 `values.<file>.<key>` / `fixture.<file>.present`）；
+- 表格数或材料行数低于 `min_tables` / `min_materials` → 回归
+  （metric 形如 `tables.<file>` / `materials.<file>`）；
 - `required_hit_rate` 降幅**严格大于**容差（默认 0.02，`compare_baseline(..., tolerance=)` 可调）→ 回归；
 - 解析失败文件增多或成功文件减少 → 回归；
 - `avg_materials` 相对降幅 >10% → 回归；

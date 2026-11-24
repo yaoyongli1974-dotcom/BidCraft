@@ -168,8 +168,8 @@ jobs:
       - name: Test (pytest)
         run: uv run --frozen pytest -q --junitxml=/tmp/pytest-results.xml
 
-      - name: Calibration regression (six industry fixtures)
-        run: uv run --frozen bidcraft calibrate tests/fixtures/regression
+      - name: Calibration regression (synthetic + industry fixtures, baseline gate)
+        run: uv run --frozen bidcraft calibrate tests/fixtures/regression --compare-baseline tests/fixtures/regression/baseline.json
 
       - name: Verdict regression (FAR / confusion matrix / ★ strict)
         run: uv run --frozen pytest -q tests/test_calibration.py

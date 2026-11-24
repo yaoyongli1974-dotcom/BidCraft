@@ -19,6 +19,28 @@ from bidcraft.cli import app
 
 FIXTURES = Path(__file__).parent / "fixtures" / "regression"
 COMMITTED_BASELINE = FIXTURES / "baseline.json"
+ORIGINAL_FIXTURE_NAMES = (
+    "weakcurrent-tender.md",
+    "fire-tender.md",
+    "installation-tender.md",
+    "civil-tender.md",
+    "hvac-tender.md",
+    "decoration-tender.md",
+)
+
+
+def all_md_fixture_names() -> list[str]:
+    return sorted(path.name for path in FIXTURES.glob("*.md"))
+
+
+def make_original_fixtures_dir(base: Path) -> Path:
+    """只放原始六份行业件，让既有 CLI 断言不受 Stage 6 合成件影响。"""
+
+    root = base / "original"
+    root.mkdir()
+    for name in ORIGINAL_FIXTURE_NAMES:
+        shutil.copy(FIXTURES / name, root / name)
+    return root
 
 
 def make_report(**aggregate_overrides):
@@ -235,8 +257,9 @@ def test_regressions_win_over_improvements(tmp_path):
 
 def test_cli_save_baseline(tmp_path):
     path = tmp_path / "baseline.json"
+    original = make_original_fixtures_dir(tmp_path)
     result = CliRunner().invoke(
-        app, ["calibrate", str(FIXTURES), "--save-baseline", str(path)]
+        app, ["calibrate", str(original), "--save-baseline", str(path)]
     )
     assert result.exit_code == 0, result.output
     assert path.is_file()
@@ -316,7 +339,8 @@ def test_cli_compare_then_save_on_regression(tmp_path):
     )
     assert result.exit_code == 1, result.output  # 退出码取自比对
     data = json.loads(path.read_text(encoding="utf-8"))
-    assert data["aggregate"]["ok"] == 5  # 比对后仍覆盖保存了变异结果
+    # 比对后仍覆盖保存了变异结果（全部夹具删掉一份）
+    assert data["aggregate"]["ok"] == len(all_md_fixture_names()) - 1
 
 
 def test_cli_compare_then_save_when_ok(tmp_path):
@@ -338,7 +362,7 @@ def test_cli_compare_then_save_when_ok(tmp_path):
     assert "基线比对通过" in result.output
     assert "基线已保存" in result.output
     data = json.loads(path.read_text(encoding="utf-8"))
-    assert data["aggregate"]["ok"] == 6
+    assert data["aggregate"]["ok"] == len(all_md_fixture_names())
 
 
 # ---------- 仓库门禁 ----------
