@@ -1,11 +1,45 @@
 from __future__ import annotations
 
 import re
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ..config import settings
+
+#: 需要按 ZIP 目录声明值做解压体积检查的 OOXML 后缀。
+OOXML_SUFFIXES = frozenset({".docx", ".xlsx", ".xlsm"})
+
+
+class OversizedUploadError(ValueError):
+    """解压后（或原始文本）体积超过安全上限。
+
+    继承 ``ValueError`` 以便既有的 HTTP 错误映射继续把它转成 400；用独立
+    子类让解析阶段可以只重抛这一类错误，其它解析失败仍是"该文件 failed"
+    的旧行为。
+    """
+
+
+def _guard_ooxml_size(path: Path) -> None:
+    """在 OOXML 解析前按 ZIP 目录声明的未压缩体积拦截解压炸弹。
+
+    只读取 central directory 的 ``file_size``，不解压任何条目：几十 MB 的
+    压缩包可以声明数 GB 的解压体积，真正解开才会 OOM。损坏的 ZIP 仍交给
+    对应的读取器按原逻辑报错。
+    """
+    limit = settings.max_uncompressed_upload_bytes
+    try:
+        with zipfile.ZipFile(path) as archive:
+            total = sum(info.file_size for info in archive.infolist())
+    except (OSError, zipfile.BadZipFile, ValueError):
+        return
+    if total > limit:
+        raise OversizedUploadError(
+            f"文件解压后体积约 {total / 1024 / 1024:.1f}MB，超过安全上限 "
+            f"{limit / 1024 / 1024:.1f}MB；请拆分文档或调高 "
+            "BIDCRAFT_MAX_UNCOMPRESSED_UPLOAD_BYTES 后重试"
+        )
 
 
 @dataclass
@@ -63,6 +97,14 @@ class ParsedDocument:
 
 
 def _read_text_file(path: Path) -> ParsedDocument:
+    limit = settings.max_uncompressed_upload_bytes
+    raw_size = path.stat().st_size
+    if raw_size > limit:
+        raise OversizedUploadError(
+            f"文本文件 {path.name} 大小 {raw_size / 1024 / 1024:.1f}MB，超过安全上限 "
+            f"{limit / 1024 / 1024:.1f}MB；请拆分后重试或调高 "
+            "BIDCRAFT_MAX_UNCOMPRESSED_UPLOAD_BYTES"
+        )
     for encoding in ("utf-8-sig", "utf-8", "gb18030", "gbk", "latin-1"):
         try:
             text = path.read_text(encoding=encoding)
@@ -233,6 +275,8 @@ def load_document(path: str | Path) -> ParsedDocument:
         return _read_text_file(file_path)
     if suffix == ".pdf":
         return _read_pdf(file_path)
+    if suffix in OOXML_SUFFIXES:
+        _guard_ooxml_size(file_path)
     if suffix == ".docx":
         return _read_docx(file_path)
     if suffix in {".xlsx", ".xlsm"}:

@@ -13,7 +13,7 @@ from .config import settings
 from .ledger import build_ledger, load_ledger, save_ledger
 from .models import Issue, Project, Requirement, SourceFile
 from .parsing.extract import extract
-from .parsing.loader import Table, load_document
+from .parsing.loader import OversizedUploadError, Table, load_document
 from .rules import store as package_store
 from .rules.engine import run_checks
 from .rules.loader import load_package
@@ -111,6 +111,49 @@ def read_parse_inputs(db: Session, project_id: str) -> tuple[str, list[dict[str,
     ]
 
 
+def _truncation_marker(label: str, limit: int, unit: str) -> str:
+    """写进正文的显式截断标记：任何被丢弃的内容都不会静默消失。"""
+
+    return f"\n\n【解析截断：{label} 超过上限 {limit}{unit}，后续内容未参与解析】"
+
+
+def _apply_parse_limits(
+    text: str,
+    pages: list[str],
+    tables: list[Table],
+    *,
+    label: str,
+    warnings: list[str],
+) -> tuple[str, list[str], list[Table]]:
+    """按配置上限确定性截断解析产物，并把每次丢弃记入 ``warnings``。
+
+    策略：正文保留前 N 个字符，页面/表格保留前 N 项；在截断处追加可见标记。
+    解析照常成功，但被丢弃的内容一定在正文标记、``parse_note``、响应 notes
+    与 HTTP 审计日志里留痕。调用方需要在 ``extract()`` / 落库之前执行。
+    """
+
+    max_chars = settings.max_parsed_chars
+    if len(text) > max_chars:
+        warnings.append(f"{label}: 正文 {len(text)} 字符超过上限 {max_chars}，已截断")
+        text = text[:max_chars] + _truncation_marker(label, max_chars, "字符")
+
+    max_pages = settings.max_parsed_pages
+    if len(pages) > max_pages:
+        warnings.append(f"{label}: 页数 {len(pages)} 超过上限 {max_pages}，仅解析前 {max_pages} 页")
+        pages = pages[:max_pages]
+        text += _truncation_marker(label, max_pages, "页")
+
+    max_tables = settings.max_parsed_tables
+    if len(tables) > max_tables:
+        warnings.append(
+            f"{label}: 表格 {len(tables)} 个超过上限 {max_tables}，仅解析前 {max_tables} 个"
+        )
+        tables = tables[:max_tables]
+        text += _truncation_marker(label, max_tables, "个表格")
+
+    return text, pages, tables
+
+
 def parse_documents(
     package_name: str, sources: list[dict[str, str]]
 ) -> tuple[object, dict, dict[str, dict]]:
@@ -125,20 +168,39 @@ def parse_documents(
     pages: list[str] = []
     tables: list[Table] = []
     notes: list[str] = []
+    warnings: list[str] = []
     updates: dict[str, dict] = {}
     for source in sources:
         filename = source["filename"]
         try:
             parsed = load_document(source["stored_path"])
+        except OversizedUploadError:
+            # 解压炸弹/超大文本必须让调用方拿到 ValueError → HTTP 400，
+            # 不能用「该文件 failed」的旧路径吞掉后继续解析其它来源。
+            raise
         except Exception as exc:  # noqa: BLE001
             notes.append(f"{filename}: {exc}")
             updates[source["id"]] = {"parse_state": "failed", "parse_note": str(exc)}
             continue
+        source_warnings: list[str] = []
+        parsed.text, parsed.pages, parsed.tables = _apply_parse_limits(
+            parsed.text,
+            parsed.pages,
+            parsed.tables,
+            label=filename,
+            warnings=source_warnings,
+        )
+        for warning in source_warnings:
+            warnings.append(warning)
+            notes.append(warning)
+        parse_note = ", ".join(f"{k}={v}" for k, v in parsed.meta.items())
+        if source_warnings:
+            parse_note += "; parse_limits=" + " | ".join(source_warnings)
         updates[source["id"]] = {
             "text_content": parsed.text,
             "page_count": parsed.page_count,
             "parse_state": "needs_ocr" if parsed.meta.get("needs_ocr") else "parsed",
-            "parse_note": ", ".join(f"{k}={v}" for k, v in parsed.meta.items()),
+            "parse_note": parse_note,
         }
         if parsed.meta.get("needs_ocr"):
             reason = parsed.meta.get("ocr_unavailable") or parsed.meta.get("ocr_error")
@@ -161,11 +223,29 @@ def parse_documents(
         )
 
     raw_text = "\n\n".join(texts)
+    # 汇总后再守一次：多份来源各自不超限，拼起来仍可能达到 GB 级。
+    join_warnings: list[str] = []
+    raw_text, pages, tables = _apply_parse_limits(
+        raw_text, pages, tables, label="项目汇总", warnings=join_warnings
+    )
+    for warning in join_warnings:
+        warnings.append(warning)
+        notes.append(warning)
     extracted = extract(raw_text, package, pages=pages, tables=tables)
     ledger = build_ledger(
         package, extracted, source_filename=", ".join(s["filename"] for s in sources)
     )
-    return ledger, {"notes": notes, "tables": len(tables), "pages": len(pages)}, updates
+    return (
+        ledger,
+        {
+            "notes": notes,
+            "tables": len(tables),
+            "pages": len(pages),
+            "parse_warnings": warnings,
+            "truncated": bool(warnings),
+        },
+        updates,
+    )
 
 
 def persist_parse(db: Session, project_id: str, ledger: object, updates: dict) -> None:

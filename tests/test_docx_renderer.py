@@ -158,6 +158,9 @@ def test_render_without_template_writes_structure_and_ooxml(tmp_path):
     assert table.rows[0].cells[1].width.cm == pytest.approx(3.0, abs=0.1)
     assert "主要设备清单" in [paragraph.text for paragraph in document.paragraphs]
     assert table.cell(1, 0).text == "{{待填:品牌}}"
+    description = table._tbl.tblPr.find(qn("w:tblDescription"))
+    assert description is not None
+    assert description.get(qn("w:val")) == "bidcraft-kind:data"
 
     # 占位符保留
     all_text = "\n".join(paragraph.text for paragraph in document.paragraphs)

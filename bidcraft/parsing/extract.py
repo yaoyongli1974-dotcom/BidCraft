@@ -136,19 +136,39 @@ def _next_value_line(lines: list[str], index: int, label_re: re.Pattern[str]) ->
     return ""
 
 
-def _page_for_quote(pages: list[str], quote: str) -> int:
-    needle = compact(quote)[:40]
+_WS_RE = re.compile(r"\s+")
+
+
+def _compact_needle(quote: str) -> str:
+    """引用的匹配键。刻意不调用 :func:`compact`：紧凑页只应在每轮解析里算一次。"""
+
+    return _WS_RE.sub("", quote or "")[:40]
+
+
+def _prepare_pages(pages: list[str]) -> list[str]:
+    """一次把每页压成紧凑形式，供所有引用定位复用。"""
+
+    return [compact(page) for page in pages]
+
+
+def _page_for_quote(compacted_pages: list[str], quote: str) -> int:
+    needle = _compact_needle(quote)
     if not needle:
         return 0
-    for index, page in enumerate(pages, start=1):
-        if needle in compact(page):
+    for index, page in enumerate(compacted_pages, start=1):
+        if needle in page:
             return index
     return 0
 
 
 def extract_fields(
-    text: str, pages: list[str], package: Package
+    text: str,
+    pages: list[str],
+    package: Package,
+    *,
+    compacted_pages: list[str] | None = None,
 ) -> tuple[dict[str, ExtractedField], list[dict[str, str]]]:
+    compacted_pages = _prepare_pages(pages) if compacted_pages is None else compacted_pages
     lines = text.splitlines()
     label_re = _all_label_pattern(package.fields)
     sections = detect_sections(text, package.heading_patterns())
@@ -183,7 +203,7 @@ def extract_fields(
                     value=value,
                     quote=line.strip()[:300],
                     confidence=confidence,
-                    page=_page_for_quote(pages, line.strip()),
+                    page=_page_for_quote(compacted_pages, line.strip()),
                 )
                 if best is None or candidate.confidence > best.confidence:
                     best = candidate
@@ -437,8 +457,11 @@ def extract_requirements_and_risks(
     package: Package,
     pages: list[str] | None = None,
     tables: list[Table] | None = None,
+    *,
+    compacted_pages: list[str] | None = None,
 ) -> tuple[list[RequirementItem], list[RiskItem]]:
     pages = pages or [text]
+    compacted_pages = _prepare_pages(pages) if compacted_pages is None else compacted_pages
     requirements: list[RequirementItem] = []
     risks: list[RiskItem] = []
     seen_req: set[str] = set()
@@ -468,7 +491,7 @@ def extract_requirements_and_risks(
                     # 原文行比章节标题有用：总览页要能指着这一条说「就是它没响应」。
                     source_quote=stripped[:300],
                     marker=marker_match.group(0) if marker_match else "",
-                    page=_page_for_quote(pages, stripped),
+                    page=_page_for_quote(compacted_pages, stripped),
                     clause_no=clause_match.group(0) if clause_match else "",
                 )
             )
@@ -503,7 +526,7 @@ def extract_requirements_and_risks(
                     mandatory=True,
                     source_quote=row_text[:300],
                     marker=marker_match.group(0) if marker_match else "",
-                    page=_page_for_quote(pages, marker_cell),
+                    page=_page_for_quote(compacted_pages, marker_cell),
                     clause_no=clause_match.group(0) if clause_match else "",
                 )
             )
@@ -563,13 +586,15 @@ def extract(
     text = strip_noise(raw_text)
     pages = pages or [raw_text]
     tables = tables or []
-    fields, sections = extract_fields(text, pages, package)
+    # 引用定位过去每条候选都要 compact 每一页（页数 × 条款数）。整轮解析只做一次。
+    compacted_pages = _prepare_pages(pages)
+    fields, sections = extract_fields(text, pages, package, compacted_pages=compacted_pages)
     result = ExtractionResult(fields=fields, sections=sections)
     result.scoring = extract_scoring(tables, text)
     result.materials = extract_materials(tables, text)
     result.parameters = extract_parameters(tables, text, package.parameter_vocab())
     result.requirements, result.risks = extract_requirements_and_risks(
-        text, package, pages, tables
+        text, package, pages, tables, compacted_pages=compacted_pages
     )
     result.template_sections = extract_template_sections(text, package)
     result.stats = {

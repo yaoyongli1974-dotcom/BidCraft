@@ -15,6 +15,7 @@ from docx.shared import Cm, Pt, RGBColor
 
 from .. import clock
 from ..documents.document_ir import (
+    IMAGE_PATTERN,
     DocumentCover,
     DocumentHeaderFooter,
     DocumentPageLayout,
@@ -22,15 +23,22 @@ from ..documents.document_ir import (
     DocumentTOC,
     from_markdown_sections,
 )
-from ..documents.renderer import add_hyperlink, render_document, save_document_verified
+from ..documents.renderer import (
+    MAX_IMAGES,
+    MAX_NODES,
+    add_hyperlink,
+    guard_export_limits,
+    render_document,
+    save_document_verified,
+    set_table_kind,
+)
 from ..schemas import FactLedger
 
 PLACEHOLDER = re.compile(r"(\{\{待填:[^}]*\}\}|\{\{图片占位:[^}]*\}\})")
 _LINK = r"\[([^\]]+)\]\(((?:https?://|mailto:)[^)\s]+)\)"
 _TEXT_TOKEN = re.compile(rf"{PLACEHOLDER.pattern}|({_LINK})")
 
-MAX_NODES = 5000
-MAX_IMAGES = 500
+# 上限统一定义在 documents.renderer（单一守卫层），这里 re-export 保持兼容。
 
 
 def _set_east_asian(style, font_name: str) -> None:
@@ -171,13 +179,20 @@ def _add_placeholder_runs(paragraph, text: str) -> None:
             paragraph.add_run(token[1])
 
 
-def _add_table(document: Document, rows: list[list[str]]) -> None:
+def _add_table(document: Document, rows: list[list[str]], *, kind: str = "layout") -> None:
+    """简单引擎的表格写入器。
+
+    默认 ``layout``：商务标封面键值表/字段表等复用本函数，首行可以留空；
+    Markdown 数据表格由 :func:`_add_body` 显式传入 ``kind="data"``。
+    """
+
     if not rows:
         return
     width = max(len(row) for row in rows)
     table = document.add_table(rows=len(rows), cols=width)
     table.style = "Table Grid"
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    set_table_kind(table, kind)
     for r, row in enumerate(rows):
         for c in range(width):
             cell = table.cell(r, c)
@@ -201,7 +216,8 @@ def _parse_table_block(lines: list[str]) -> list[list[str]]:
     return rows
 
 
-IMAGE_LINE = re.compile(r"^!\[([^\]]*)\]\((/projects/[^)\s]+/images/[^)\s]+)\)$")
+# 与 document_ir 的图片解析共用同一正则；旧的私有名称保留为别名。
+IMAGE_LINE = IMAGE_PATTERN
 
 # Local copy of ``bidcraft.images.DEFAULT_POLICY`` to avoid an import cycle.
 DEFAULT_IMAGE_POLICY = {
@@ -263,7 +279,7 @@ def _add_body(
         if not stripped:
             index += 1
             continue
-        if image_resolver is not None and (match := IMAGE_LINE.match(stripped)):
+        if image_resolver is not None and (match := IMAGE_PATTERN.match(stripped)):
             resolved = image_resolver(match.group(2))
             if resolved is not None:
                 _add_image(document, resolved, match.group(1), figure_state)
@@ -274,7 +290,7 @@ def _add_body(
             while index < len(lines) and lines[index].strip().startswith("|"):
                 block.append(lines[index])
                 index += 1
-            _add_table(document, _parse_table_block(block))
+            _add_table(document, _parse_table_block(block), kind="data")
             continue
         if stripped.startswith("#### "):
             document.add_heading(stripped[5:].strip(), level=4)
@@ -324,13 +340,13 @@ def _professional_styles(preset: dict) -> dict[str, DocumentStyle]:
 
 
 def _guard_limits(nodes: list[dict[str, Any]], *, max_nodes: int, max_images: int) -> None:
-    if len(nodes) > max_nodes:
-        raise ValueError(f"章节数超过导出上限 {max_nodes}")
-    image_count = sum(
-        len(IMAGE_LINE.findall(str(node.get("body") or ""))) for node in nodes
+    """简单引擎的入口守卫；实现与专业引擎共用 renderer.guard_export_limits。"""
+
+    guard_export_limits(
+        [str(node.get("body") or "") for node in nodes],
+        max_nodes=max_nodes,
+        max_images=max_images,
     )
-    if image_count > max_images:
-        raise ValueError(f"图片数超过导出上限 {max_images}")
 
 
 def export_docx(
@@ -352,11 +368,6 @@ def export_docx(
     from .templates import normalize
 
     preset = normalize(template)
-    _guard_limits(
-        nodes,
-        max_nodes=MAX_NODES if max_nodes is None else int(max_nodes),
-        max_images=MAX_IMAGES if max_images is None else int(max_images),
-    )
     output = Path(path)
     figure_state = _figure_state(image_policy)
     top, bottom, left, right = preset["margins"]
@@ -408,8 +419,20 @@ def export_docx(
                 if resolver_path is not None:
                     image["path"] = str(resolver_path)
                 image["width_cm"] = _policy_width_cm(figure_state)
-        return render_document(ir, output, base_template=base_template)
+        # 专业引擎不在导出层重复校验：IR 渲染入口统一守卫，并透传调用方上限。
+        return render_document(
+            ir,
+            output,
+            base_template=base_template,
+            max_nodes=max_nodes,
+            max_images=max_images,
+        )
 
+    _guard_limits(
+        nodes,
+        max_nodes=MAX_NODES if max_nodes is None else int(max_nodes),
+        max_images=MAX_IMAGES if max_images is None else int(max_images),
+    )
     document = Document()
     section = document.sections[0]
     section.page_height = Cm(29.7)

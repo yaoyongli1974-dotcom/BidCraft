@@ -9,7 +9,7 @@ from typing import Any
 from docx import Document
 from docx.oxml.ns import qn
 
-from .document_ir import PLACEHOLDER_PATTERN, DocumentIR, heading_level
+from .document_ir import PLACEHOLDER_PATTERN, DocumentIR, heading_level, table_kind_from_marker
 
 _MAX_PLACEHOLDER_ISSUES = 50
 
@@ -104,6 +104,17 @@ def _check_empty_paragraphs(paragraphs: list) -> list[dict[str, Any]]:
     return issues
 
 
+def _table_kind(table) -> str:
+    """读取渲染器写入的表格类型标记；无标记的旧文档按数据表格处理。"""
+
+    properties = table._tbl.find(qn("w:tblPr"))
+    if properties is None:
+        return "data"
+    description = properties.find(qn("w:tblDescription"))
+    marker = description.get(qn("w:val")) if description is not None else None
+    return table_kind_from_marker(marker)
+
+
 def _check_tables(document) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
     for index, table in enumerate(document.tables):
@@ -114,6 +125,10 @@ def _check_tables(document) -> list[dict[str, Any]]:
                     "empty_table", "warning", f"第 {index + 1} 个表格没有任何行", table_index=index
                 )
             )
+            continue
+        # 签字栏、封面键值表、表单等内容表格只做结构性校验（空表已覆盖），
+        # 首行留空是合法版式，不能因此阻断交付。
+        if _table_kind(table) != "data":
             continue
         header_cells = [cell.text.strip() for cell in rows[0].cells]
         if not all(header_cells):

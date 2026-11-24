@@ -28,8 +28,42 @@ _HEADING_STYLE_PATTERN = re.compile(r"^(?:heading|标题)\s*([1-9])$", re.IGNORE
 _TABLE_DIVIDER_PATTERN = re.compile(r"^:?-{2,}:?$")
 _BULLET_PATTERN = re.compile(r"^[-*•]\s+")
 _NUMBERED_PATTERN = re.compile(r"^\d+[.、)]\s+")
-_IMAGE_PATTERN = re.compile(r"^!\[([^\]]*)\]\(([^)\s]+)\)$")
+#: 全项目唯一的 Markdown 图片行语法：两个引擎共用，避免图片数上限被绕过。
+IMAGE_PATTERN = re.compile(r"^!\[([^\]]*)\]\(([^)\s]+)\)$")
+# 兼容早期私有名称（仍指向同一个正则对象）。
+_IMAGE_PATTERN = IMAGE_PATTERN
 _HEADING_MARKDOWN_PATTERN = re.compile(r"^(#{1,4})\s+(.*)$")
+
+#: 表格类型标记前缀，写入 ``w:tblPr/w:tblDescription``。
+TABLE_KIND_PREFIX = "bidcraft-kind:"
+#: 已知表格类型。``data`` 走严格表头校验，其余仅做结构性校验。
+TABLE_KINDS = frozenset({"data", "layout", "form", "content"})
+
+
+def count_markdown_images(body: str | None) -> int:
+    """按 :data:`IMAGE_PATTERN` 统计正文中的图片行数（与 IR 解析规则一致）。"""
+
+    return sum(
+        1 for line in str(body or "").splitlines() if IMAGE_PATTERN.match(line.strip())
+    )
+
+
+def table_kind_marker(kind: str | None) -> str:
+    """把表格类型序列化成 OXML 标记值；未知类型按版式表格处理。"""
+
+    value = str(kind or "data").strip().lower() or "data"
+    if value not in TABLE_KINDS:
+        value = "layout"
+    return f"{TABLE_KIND_PREFIX}{value}"
+
+
+def table_kind_from_marker(marker: str | None) -> str:
+    """从 OXML 标记还原表格类型；无标记的旧文档按 ``data`` 处理。"""
+
+    text = str(marker or "").strip()
+    if not text.startswith(TABLE_KIND_PREFIX):
+        return "data"
+    return text[len(TABLE_KIND_PREFIX) :].strip().lower() or "data"
 
 
 def iter_text_tokens(content: str | None) -> Iterator[tuple]:
@@ -105,13 +139,19 @@ class DocumentHeaderFooter:
 
 @dataclass
 class DocumentTable:
-    """表格。``rows`` 为纯文本二维表，首行默认视为表头。"""
+    """表格。``rows`` 为纯文本二维表，首行默认视为表头。
+
+    ``kind`` 区分数据表格与版式/表单/内容表格：只有 ``data`` 会触发缺失表头、
+    无数据行、表头未跨页重复等校验；签字栏、封面键值表、表单等即使首行留空
+    也不应拦截交付。渲染时会写入 ``w:tblPr/w:tblDescription`` 稳定标记。
+    """
 
     rows: list[list[str]] = field(default_factory=list)
     header_row: bool = True
     repeat_header: bool = True
     widths_cm: list[float] | None = None
     caption: str = ""
+    kind: str = "data"
 
 
 @dataclass
@@ -340,7 +380,7 @@ def from_markdown_sections(
                     section.tables.append(DocumentTable(rows=rows))
                 continue
 
-            image_match = _IMAGE_PATTERN.match(stripped)
+            image_match = IMAGE_PATTERN.match(stripped)
             if image_match:
                 section.images.append({"path": image_match.group(2), "alt": image_match.group(1)})
                 index += 1

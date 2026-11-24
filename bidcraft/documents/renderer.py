@@ -9,6 +9,7 @@ import copy
 import os
 import tempfile
 import zipfile
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -34,13 +35,110 @@ from .document_ir import (
     DocumentStyle,
     DocumentTable,
     DocumentTOC,
+    count_markdown_images,
     default_styles,
     heading_level,
     iter_text_tokens,
+    table_kind_marker,
 )
 
 #: 固定 ZIP 时间戳：同一份 IR 两次导出应得到逐字节一致的文件。
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
+
+
+def _env_int_limit(name: str, default: int) -> int:
+    """读取导出上限：环境变量覆盖，非法值回退默认值，下限为 0。"""
+
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return max(0, int(raw.strip()))
+    except ValueError:
+        return default
+
+
+#: 单篇文档章节（IR section / 原始 node）数量上限。
+MAX_NODES = _env_int_limit("BIDCRAFT_DOCX_MAX_NODES", 5000)
+#: 单篇文档 Markdown 图片行数量上限。
+MAX_IMAGES = _env_int_limit("BIDCRAFT_DOCX_MAX_IMAGES", 500)
+#: 单篇文档正文字符总量上限，防止超大输入拖垮渲染与交付校验。
+MAX_TOTAL_BODY_CHARS = _env_int_limit("BIDCRAFT_DOCX_MAX_TOTAL_BODY_CHARS", 20_000_000)
+#: 单个章节正文字符上限。
+MAX_NODE_BODY_CHARS = _env_int_limit("BIDCRAFT_DOCX_MAX_NODE_BODY_CHARS", 200_000)
+
+
+def guard_export_limits(
+    bodies: Iterable[str],
+    image_counts: Iterable[int] | None = None,
+    *,
+    max_nodes: int | None = None,
+    max_images: int | None = None,
+) -> None:
+    """导出前统一校验章节数、图片数与正文字符数。
+
+    这是两个引擎共用的唯一一层限制：``export_docx`` 的简单路径直接调用它，
+    专业路径与直接渲染 IR 的调用方则由 :func:`render_document` 调用它。
+    ``image_counts`` 省略时按 :data:`~bidcraft.documents.document_ir.IMAGE_PATTERN`
+    从正文统计，保证与 IR 的图片解析规则一致。
+    """
+
+    body_list = [str(body or "") for body in bodies]
+    node_limit = MAX_NODES if max_nodes is None else int(max_nodes)
+    image_limit = MAX_IMAGES if max_images is None else int(max_images)
+    total_limit = MAX_TOTAL_BODY_CHARS
+    node_char_limit = MAX_NODE_BODY_CHARS
+
+    if len(body_list) > node_limit:
+        raise ValueError(
+            f"章节数超过导出上限 {node_limit}（当前 {len(body_list)}，请拆分章节或减少节点）"
+        )
+
+    counts = (
+        [int(value) for value in image_counts]
+        if image_counts is not None
+        else [count_markdown_images(body) for body in body_list]
+    )
+    if sum(counts) > image_limit:
+        raise ValueError(
+            f"图片数超过导出上限 {image_limit}（当前 {sum(counts)}，"
+            "请减少 Markdown 图片行或提高 BIDCRAFT_DOCX_MAX_IMAGES）"
+        )
+
+    total_chars = sum(len(body) for body in body_list)
+    if total_chars > total_limit:
+        raise ValueError(
+            f"正文总字符数超过导出上限 {total_limit}（当前 {total_chars}，"
+            "请拆分文档或提高 BIDCRAFT_DOCX_MAX_TOTAL_BODY_CHARS）"
+        )
+    for index, body in enumerate(body_list, start=1):
+        if len(body) > node_char_limit:
+            raise ValueError(
+                f"第 {index} 章正文字符数超过导出上限 {node_char_limit}（当前 {len(body)}，"
+                "请拆分该章节或提高 BIDCRAFT_DOCX_MAX_NODE_BODY_CHARS）"
+            )
+
+
+def _ir_section_bodies(ir: DocumentIR) -> list[str]:
+    """把 IR 每节的可导出文本拼成与原始 ``body`` 等价的计数单位。"""
+
+    bodies: list[str] = []
+    for section in ir.sections:
+        parts: list[str] = [section.heading]
+        parts.extend(paragraph.text for paragraph in section.paragraphs)
+        for table in section.tables:
+            if table.caption:
+                parts.append(table.caption)
+            for row in table.rows:
+                parts.extend(str(cell) for cell in row)
+        parts.extend(
+            str(image.get("alt") or "")
+            for image in section.images
+            if isinstance(image, dict)
+        )
+        bodies.append("\n".join(parts))
+    return bodies
+
 
 _ALIGNMENTS = {
     "left": WD_ALIGN_PARAGRAPH.LEFT,
@@ -377,6 +475,21 @@ def _set_fixed_layout(table) -> None:
     layout.set(qn("w:type"), "fixed")
 
 
+def set_table_kind(table, kind: str) -> None:
+    """在 ``w:tblPr/w:tblDescription`` 写入稳定的表格类型标记。
+
+    校验器据此区分数据表格与版式/表单/内容表格，避免签字栏、封面键值表等
+    因首行留空而误报缺失表头。
+    """
+
+    properties = table._tbl.tblPr
+    description = properties.find(qn("w:tblDescription"))
+    if description is None:
+        description = OxmlElement("w:tblDescription")
+        properties.append(description)
+    description.set(qn("w:val"), table_kind_marker(kind))
+
+
 def _render_table(document, spec: DocumentTable, index: int) -> None:
     rows = [list(row) for row in (spec.rows or []) if row]
     if not rows:
@@ -405,6 +518,8 @@ def _render_table(document, spec: DocumentTable, index: int) -> None:
                 if column_index < len(spec.widths_cm):
                     cell.width = Cm(float(spec.widths_cm[column_index]))
 
+    # 放在其他 tblPr 修改之后，保证 w:tblDescription 位于 schema 规定的末尾。
+    set_table_kind(table, spec.kind)
     for row_index, values in enumerate(rows):
         for column_index in range(columns):
             value = values[column_index] if column_index < len(values) else ""
@@ -572,12 +687,22 @@ def render_document(
     path: str | Path,
     *,
     base_template: Path | str | None = None,
+    max_nodes: int | None = None,
+    max_images: int | None = None,
 ) -> Path:
     """按 IR 渲染 DOCX，返回输出路径。
 
     ``base_template`` 存在时继承模板的样式/主题/页眉页脚/页面设置，清空正文后
-    再按 IR 重建；不存在时使用 python-docx 默认文档。
+    再按 IR 重建；不存在时使用 python-docx 默认文档。所有导出必经此处的统一
+    上限校验，直接构造 IR 的调用方无法绕过。
     """
+
+    guard_export_limits(
+        _ir_section_bodies(ir),
+        image_counts=[len(section.images) for section in ir.sections],
+        max_nodes=max_nodes,
+        max_images=max_images,
+    )
 
     if base_template is not None:
         template_path = Path(base_template)
@@ -625,4 +750,10 @@ def render_document(
     return save_document_verified(document, path)
 
 
-__all__ = ["add_hyperlink", "render_document", "save_document_verified"]
+__all__ = [
+    "add_hyperlink",
+    "guard_export_limits",
+    "render_document",
+    "save_document_verified",
+    "set_table_kind",
+]

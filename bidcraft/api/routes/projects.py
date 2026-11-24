@@ -1146,6 +1146,13 @@ async def upload(ref: str, file: UploadFile = File(...)) -> dict[str, Any]:
                 if isinstance(exc, ValueError):
                     raise HTTPException(status_code=400, detail=str(exc)) from exc
                 raise
+            if info.get("parse_warnings"):
+                audit(
+                    db,
+                    project.id,
+                    "source.parse_truncated",
+                    {"warnings": info["parse_warnings"]},
+                )
             audit(db, project.id, "source.upload", {"filename": filename})
             return {
                 "project": _project_payload(project, _project_stats(db, project.id)),
@@ -1189,6 +1196,13 @@ def reparse(ref: str) -> dict[str, Any]:
         persist_parse(db, project_id, ledger, updates)
         project = db.get(Project, project_id)
         audit(db, project.id, "parse.run", {"notes": len(info["notes"])})
+        if info.get("parse_warnings"):
+            audit(
+                db,
+                project.id,
+                "parse.truncated",
+                {"warnings": info["parse_warnings"]},
+            )
         return {
             "project": _project_payload(project, _project_stats(db, project.id)),
             "ledger_summary": ledger_summary(ledger),

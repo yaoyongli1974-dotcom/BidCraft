@@ -42,6 +42,18 @@ WEAK_ADMIN_PASSWORDS = frozenset(
 #: 崩溃窗口未结扣费标记（pending_charges）的默认对账 TTL（秒）。
 DEFAULT_PENDING_CHARGE_TTL_SECONDS = 1800
 
+#: 上传文件解压后的体积上限（默认 512MB）。``MAX_TENDER_UPLOAD_BYTES`` 只限
+#: 压缩后的字节数，一个几十 MB 的 OOXML 压缩包可以声明数 GB 的解压体积，
+#: parser 打开时才会 OOM；这个上限在解析前按 ZIP 目录声明值拦截。
+DEFAULT_MAX_UNCOMPRESSED_UPLOAD_BYTES = 512 * 1024 * 1024
+
+#: 单份招标文件解析产物的上限。纯计算阶段做确定性截断并留下显式标记，
+#: 避免把 GB 级正文写进 SourceFile / 台账。非正数的环境变量统一钳到 1，
+#: 绝不静默关闭这些保护。
+DEFAULT_MAX_PARSED_CHARS = 8_000_000
+DEFAULT_MAX_PARSED_TABLES = 2_000
+DEFAULT_MAX_PARSED_PAGES = 5_000
+
 #: 进程内滑动窗口限流的保守默认值（可通过环境变量调整）。
 DEFAULT_RATE_WINDOW_SECONDS = 300
 DEFAULT_LOGIN_IP_LIMIT = 60
@@ -343,6 +355,31 @@ class Settings:
     kb_vector_batch: int = field(
         default_factory=lambda: int(os.getenv("BIDCRAFT_KB_VECTOR_BATCH", "16"))
     )
+    #: 上传包解压后允许的最大体积（按 ZIP 目录里的 file_size 求和）。
+    max_uncompressed_upload_bytes: int = field(
+        default_factory=lambda: int(
+            os.getenv(
+                "BIDCRAFT_MAX_UNCOMPRESSED_UPLOAD_BYTES",
+                str(DEFAULT_MAX_UNCOMPRESSED_UPLOAD_BYTES),
+            )
+        )
+    )
+    #: 解析产物的字符/表格/页上限；超出时确定性截断并记录警告。
+    max_parsed_chars: int = field(
+        default_factory=lambda: int(
+            os.getenv("BIDCRAFT_MAX_PARSED_CHARS", str(DEFAULT_MAX_PARSED_CHARS))
+        )
+    )
+    max_parsed_tables: int = field(
+        default_factory=lambda: int(
+            os.getenv("BIDCRAFT_MAX_PARSED_TABLES", str(DEFAULT_MAX_PARSED_TABLES))
+        )
+    )
+    max_parsed_pages: int = field(
+        default_factory=lambda: int(
+            os.getenv("BIDCRAFT_MAX_PARSED_PAGES", str(DEFAULT_MAX_PARSED_PAGES))
+        )
+    )
 
     def __post_init__(self) -> None:
         self.home = Path(self.home).expanduser().resolve()
@@ -354,6 +391,11 @@ class Settings:
         self.kb_vector_min_score = max(0.0, min(1.0, self.kb_vector_min_score))
         self.kb_vector_max_chunks = max(0, self.kb_vector_max_chunks)
         self.kb_vector_batch = max(1, min(64, self.kb_vector_batch))
+        # 解析/解压保护一律至少为 1：非法或 0 值不能变成「无限制」。
+        self.max_uncompressed_upload_bytes = max(1, int(self.max_uncompressed_upload_bytes))
+        self.max_parsed_chars = max(1, int(self.max_parsed_chars))
+        self.max_parsed_tables = max(1, int(self.max_parsed_tables))
+        self.max_parsed_pages = max(1, int(self.max_parsed_pages))
         self.plugin_timeout = max(5.0, min(120.0, self.plugin_timeout))
         self.pending_charge_ttl_seconds = max(0, self.pending_charge_ttl_seconds)
         self.rate_limit_window_seconds = max(1, min(3600, self.rate_limit_window_seconds))
