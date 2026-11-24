@@ -687,7 +687,14 @@ def transition_job(
     return db.get(Job, job_id)
 
 
-def _set_failed(db, job: Job, message: str) -> bool:
+def _set_failed(
+    db,
+    job: Job,
+    message: str,
+    *,
+    lease_expired_before=None,
+    token: str | None = None,
+) -> bool:
     """Claim a running job for ``failed``; refund only after winning the claim."""
 
     from . import jobs
@@ -697,7 +704,8 @@ def _set_failed(db, job: Job, message: str) -> bool:
         job.id,
         from_statuses=("running",),
         to_status="failed",
-        token=job.claim_token or None,
+        token=job.claim_token if token is None else token,
+        lease_expired_before=lease_expired_before,
         message=message,
         result={"error": message},
         clear_claim=True,
@@ -738,7 +746,17 @@ def _requeue(
 
     cap = min(_max_attempts(), job.max_attempts or _max_attempts())
     if (job.attempts or 0) >= cap:
-        return "failed" if _set_failed(db, job, message) else "lost"
+        return (
+            "failed"
+            if _set_failed(
+                db,
+                job,
+                message,
+                lease_expired_before=lease_expired_before,
+                token=token,
+            )
+            else "lost"
+        )
     fresh = transition_job(
         db,
         job.id,
@@ -785,6 +803,8 @@ def reap_expired() -> tuple[int, int]:
                 requeued += 1
             elif outcome == "failed":
                 failed += 1
+    # 过期生成租约没有活跃 owner；不清理会让「同一项目禁止并发生成」永久卡死。
+    release_expired_generation_leases()
     return requeued, failed
 
 
@@ -821,6 +841,7 @@ def recover_on_startup() -> tuple[int, int]:
                 requeued += 1
             elif outcome == "failed":
                 failed += 1
+    release_expired_generation_leases()
     # Worker startup is deliberately separate: create_app() runs in every test,
     # and starting poll threads here would race with queued-job assertions.  The
     # real server entry point (CLI `serve`) calls start_workers() explicitly.
