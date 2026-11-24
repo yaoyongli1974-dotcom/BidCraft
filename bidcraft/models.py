@@ -575,6 +575,27 @@ class PendingCharge(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class GenerationLease(Base):
+    """DB-level mutual exclusion for paid document generation.
+
+    One row per project.  A second generation request cannot acquire the row
+    while an existing lease is live, so only one request can charge/write at a
+    time.  An expired lease is reclaimable after a crash; the owner refreshes
+    ``heartbeat_at``/``expires_at`` while work is in progress.  No FK: this is a
+    short-lived coordination row and must not break account deletion.
+    """
+
+    __tablename__ = "generation_leases"
+
+    project_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    token: Mapped[str] = mapped_column(String(36), nullable=False)
+    job_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    acquired_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    heartbeat_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+
+
 class AppSetting(Base):
     __tablename__ = "app_settings"
 

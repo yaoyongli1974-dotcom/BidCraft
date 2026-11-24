@@ -15,11 +15,16 @@ from ..generation.outline import build_outline, load_outline, save_outline
 from ..generation.writer import generate_document
 from ..jobqueue import (
     JobAborted,
+    _chapter_done_steps,
+    assert_generation_lease,
     current_claim_token,
     fenced_job,
     log_job_failure,
     mark_step_done,
+    pending_charge_heartbeat,
     raise_if_aborted,
+    release_generation_lease,
+    settle_pending_charge,
     step_status,
 )
 from ..ledger import load_ledger
@@ -37,12 +42,23 @@ from ..services.job_support import (
 logger = logging.getLogger("bidcraft.workers")
 
 
+def _release_lease(project_id: str, token: str) -> None:
+    if not token:
+        return
+    try:
+        with session_scope() as db:
+            release_generation_lease(db, project_id, token)
+    except Exception:  # noqa: BLE001 - 租约终态释放失败由 reaper 过期清理兜底
+        logger.exception("生成租约释放失败: %s", project_id)
+
+
 def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
     """Background worker: writes chapters and streams progress into the Job row.
 
     Progress is persisted twice: the job row remains the fallback/polling view,
     while ``job_events`` is the resumable SSE feed used by the browser.
     """
+    marker_id = ""
     try:
         with session_scope() as db:
             job = fenced_job(db, job_id)
@@ -56,6 +72,8 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
             if project is None:
                 raise ValueError("项目不存在")
             owner_id = str((job.payload or {}).get("user_id") or project.owner_id or "")
+            marker_id = str((job.payload or {}).get("pending_charge_id") or "")
+            lease_token = str((job.payload or {}).get("generation_lease_token") or "")
             ledger = load_ledger(db, project_id)
             problems = ledger_gate(ledger)
             if problems:
@@ -65,7 +83,11 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
                 save_outline(db, project_id, build_outline(ledger, package))
                 db.flush()
 
-        with session_scope() as work_db:
+        # Keep the async charge marker alive for the whole generation attempt;
+        # a crash leaves it pending so the reconciler can refund by done_steps.
+        with pending_charge_heartbeat(
+            marker_id, lease_project_id=project_id, lease_token=lease_token
+        ), session_scope() as work_db:
             project = work_db.get(Project, project_id)
             ledger = load_ledger(work_db, project_id)
             package = load_package(project.package)
@@ -166,6 +188,7 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
                 # Abort first (lease/shutdown), then consult the idempotency
                 # ledger: a unit finished by an earlier attempt is skipped.
                 raise_if_aborted()
+                assert_generation_lease(chapter_db, project_id, lease_token)
                 status = step_status(chapter_db, job_id, f"chapter:{info['node_id']}")
                 if status is None:  # lost the claim between guard and lookup
                     raise JobAborted("章节任务认领已失效")
@@ -209,7 +232,22 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
                 # Use the idempotency ledger (done_steps), not this attempt's
                 # report — on resume, earlier chapters were skipped but remain
                 # earned, so their credits must not be refunded again.
-                _job_refund(done_db, row)
+                written = _chapter_done_steps(dict(row.payload or {}))
+                if written is None:
+                    written = len(report.written or [])
+                if marker_id:
+                    settle_pending_charge(
+                        done_db,
+                        marker_id,
+                        None,
+                        str(row.project_id or ""),
+                        int((row.payload or {}).get("chapters") or 0),
+                        int(written),
+                    )
+                else:
+                    # Legacy jobs created before async markers still need the
+                    # job-level idempotent refund path.
+                    _job_refund(done_db, row)
                 jobs.publish_event(
                     job_id,
                     "done",
@@ -217,6 +255,7 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
                     db=done_db,
                 )
                 done_db.flush()
+        _release_lease(project_id, lease_token)
     except JobAborted:
         # Lease lost / graceful shutdown.  Do NOT mark failed or refund here:
         # the job stays 'running' and the reaper returns it to 'queued'; the
@@ -229,6 +268,19 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
             row = fenced_job(db, job_id)
             if row is not None:
                 # Refund only for chapters never persisted (done_steps), and
-                # never twice — the helper guards with payload['refunded'].
-                _job_refund(db, row)
+                # never twice — both helpers use conditional DB claims.  A
+                # failed marker settlement is retried by the reconciler.
+                if marker_id:
+                    written = _chapter_done_steps(dict(row.payload or {}))
+                    settle_pending_charge(
+                        db,
+                        marker_id,
+                        None,
+                        str(row.project_id or ""),
+                        int((row.payload or {}).get("chapters") or 0),
+                        int(written or 0),
+                    )
+                else:
+                    _job_refund(db, row)
                 _fail_job(db, row, failed_message)
+        _release_lease(project_id, lease_token)

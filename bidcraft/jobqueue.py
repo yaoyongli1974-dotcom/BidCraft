@@ -29,7 +29,8 @@ from contextvars import ContextVar
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 
 from . import billing
 from .clock import utc_now
@@ -40,7 +41,7 @@ from .config import (
     settings,
 )
 from .db import session_scope
-from .models import Job, OutlineNode, PendingCharge, Section, User
+from .models import GenerationLease, Job, OutlineNode, PendingCharge, Section, User
 
 logger = logging.getLogger("bidcraft.jobs")
 
@@ -692,15 +693,19 @@ def _requeue(
     *,
     token: str | None = None,
     lease_expired_before=None,
-) -> bool:
-    """Atomically reset an expired/interrupted job to queued.  True if we won."""
+) -> str:
+    """Atomically reset an expired/interrupted job.
+
+    Returns ``requeued`` / ``failed`` / ``lost``.  ``lost`` means another
+    reaper won the conditional UPDATE — it must NOT be reported as a new
+    failure (there is no failed row or failed event for this process).
+    """
 
     from . import jobs
 
     cap = min(_max_attempts(), job.max_attempts or _max_attempts())
     if (job.attempts or 0) >= cap:
-        _set_failed(db, job, message)
-        return False
+        return "failed" if _set_failed(db, job, message) else "lost"
     fresh = transition_job(
         db,
         job.id,
@@ -713,9 +718,9 @@ def _requeue(
         message=message,
     )
     if fresh is None:
-        return False
+        return "lost"
     jobs.publish_event(fresh.id, "queued", jobs.job_payload(fresh), db=db)
-    return True
+    return "requeued"
 
 
 def reap_expired() -> tuple[int, int]:
@@ -737,14 +742,15 @@ def reap_expired() -> tuple[int, int]:
             )
         )
         for row in rows:
-            if _requeue(
+            outcome = _requeue(
                 db,
                 row,
                 "任务租约已过期，正在重新排队",
                 lease_expired_before=now,
-            ):
+            )
+            if outcome == "requeued":
                 requeued += 1
-            else:
+            elif outcome == "failed":
                 failed += 1
     return requeued, failed
 
@@ -772,14 +778,15 @@ def recover_on_startup() -> tuple[int, int]:
             )
         )
         for row in rows:
-            if _requeue(
+            outcome = _requeue(
                 db,
                 row,
                 "服务重启且租约已过期，任务重新排队",
                 lease_expired_before=now,
-            ):
+            )
+            if outcome == "requeued":
                 requeued += 1
-            else:
+            elif outcome == "failed":
                 failed += 1
     # Worker startup is deliberately separate: create_app() runs in every test,
     # and starting poll threads here would race with queued-job assertions.  The
@@ -790,6 +797,108 @@ def recover_on_startup() -> tuple[int, int]:
     except Exception:  # noqa: BLE001 - 对账失败不能阻断启动，下次启动会重试
         logger.exception("未结章节计费对账失败，将在下次启动时重试")
     return requeued, failed
+
+
+def _generation_lease_ttl_seconds() -> int:
+    """Lease lifetime; configurable but never shorter than one heartbeat window."""
+
+    return max(60, int(getattr(settings, "generation_lease_ttl_seconds", 1800) or 1800))
+
+
+def acquire_generation_lease(
+    db,
+    project_id: str,
+    *,
+    job_id: str = "",
+    owner_id: str = "",
+    ttl_seconds: int | None = None,
+) -> str | None:
+    """Atomically reserve paid generation for one project.
+
+    Expired rows are removed first; the INSERT is wrapped in a SAVEPOINT so a
+    primary-key conflict returns ``None`` on both SQLite and PG without
+    poisoning the caller's outer transaction.  Returns a fresh token on
+    success, ``None`` when another generation is live.
+    """
+
+    now = utc_now()
+    ttl = max(60, int(ttl_seconds or _generation_lease_ttl_seconds()))
+    db.execute(
+        delete(GenerationLease).where(
+            GenerationLease.project_id == project_id,
+            GenerationLease.expires_at < now,
+        )
+    )
+    token = uuid.uuid4().hex
+    lease = GenerationLease(
+        project_id=project_id,
+        token=token,
+        job_id=job_id or None,
+        owner_id=owner_id or None,
+        acquired_at=now,
+        heartbeat_at=now,
+        expires_at=now + timedelta(seconds=ttl),
+    )
+    try:
+        # SAVEPOINT makes a uniqueness conflict portable across SQLite and PG
+        # without poisoning the caller's outer transaction.
+        with db.begin_nested():
+            db.add(lease)
+            db.flush()
+    except IntegrityError:
+        return None
+    return token
+
+
+def touch_generation_lease(db, project_id: str, token: str) -> bool:
+    """Renew a live lease.  False means the lease was lost/expired."""
+
+    now = utc_now()
+    result = db.execute(
+        update(GenerationLease)
+        .where(
+            GenerationLease.project_id == project_id,
+            GenerationLease.token == token,
+            GenerationLease.expires_at >= now,
+        )
+        .values(
+            heartbeat_at=now,
+            expires_at=now + timedelta(seconds=_generation_lease_ttl_seconds()),
+        )
+    )
+    return bool(result.rowcount)
+
+
+def release_generation_lease(db, project_id: str, token: str) -> bool:
+    """Release a lease only if we still own it."""
+
+    result = db.execute(
+        delete(GenerationLease).where(
+            GenerationLease.project_id == project_id,
+            GenerationLease.token == token,
+        )
+    )
+    return bool(result.rowcount)
+
+
+def assert_generation_lease(db, project_id: str, token: str) -> None:
+    """Abort the current worker if it no longer owns the generation lease."""
+
+    if not token:
+        return
+    row = db.get(GenerationLease, project_id)
+    if row is None or row.token != token or row.expires_at < utc_now():
+        raise JobAborted("项目生成租约已失效")
+
+
+def release_expired_generation_leases() -> int:
+    """Reaper cleanup for leases whose owner never released them."""
+
+    with session_scope() as db:
+        result = db.execute(
+            delete(GenerationLease).where(GenerationLease.expires_at < utc_now())
+        )
+        return int(result.rowcount or 0)
 
 
 def begin_pending_charge(
@@ -860,7 +969,11 @@ def touch_pending_charge(marker_id: str) -> bool:
 
 @contextmanager
 def pending_charge_heartbeat(
-    marker_id: str, *, interval: float | None = None
+    marker_id: str,
+    *,
+    interval: float | None = None,
+    lease_project_id: str = "",
+    lease_token: str = "",
 ) -> Iterator[None]:
     """Keep ``marker_id`` alive in the TTL reconciler while the body runs.
 
@@ -872,7 +985,7 @@ def pending_charge_heartbeat(
     an empty marker from :func:`begin_pending_charge`).
     """
 
-    if not marker_id:
+    if not marker_id and not (lease_project_id and lease_token):
         yield
         return
     period = (
@@ -885,9 +998,14 @@ def pending_charge_heartbeat(
     def _pulse() -> None:
         while not stop.wait(period):
             try:
-                touch_pending_charge(marker_id)
+                if marker_id:
+                    touch_pending_charge(marker_id)
+                if lease_project_id and lease_token and not touch_generation_lease(
+                    lease_project_id, lease_token
+                ):
+                    logger.warning("生成租约已失效: %s", lease_project_id)
             except Exception:  # noqa: BLE001 - 心跳失败不能打断生成，下次 tick 重试
-                logger.exception("未结扣费心跳刷新失败: %s", marker_id)
+                logger.exception("生成心跳刷新失败: %s", marker_id or lease_project_id)
 
     thread = threading.Thread(
         target=_pulse, name=f"charge-heartbeat-{marker_id}", daemon=True
@@ -955,6 +1073,29 @@ def _persisted_sections(db, project_id: str | None) -> int:
     )
 
 
+def _marker_written(db, marker: PendingCharge) -> int:
+    """Chapters earned by a charge marker.
+
+    Async generation now records ``job:<id>`` in the marker note.  When the Job
+    exists, its ``done_steps`` ledger is authoritative: unlike a project-wide
+    section delta it cannot be polluted by another charge or a manual edit.
+    Legacy markers keep the previous delta-based calculation.
+    """
+
+    note = str(getattr(marker, "note", "") or "")
+    if note.startswith("job:"):
+        job_id = note[4:].split("|", 1)[0].strip()
+        job = db.get(Job, job_id) if job_id else None
+        if job is not None:
+            done = _chapter_done_steps(dict(job.payload or {}))
+            if done is not None:
+                return done
+    return max(
+        0,
+        _persisted_sections(db, marker.project_id) - int(marker.sections_at_charge or 0),
+    )
+
+
 def refund_charged_job(db, job: Job, written: int | None = None) -> int:
     """Idempotently refund unearned credits of a charged ``generate`` job.
 
@@ -985,7 +1126,15 @@ def refund_charged_job(db, job: Job, written: int | None = None) -> int:
 
     # Preserve legacy payee resolution, but never consume the claim when there
     # is no account to refund to (a later retry may find the account restored).
-    payee = db.get(User, str(payload.get("user_id") or "")) if refund > 0 else None
+    payee = None
+    if refund > 0:
+        # Async generate_all records the paying billing account on the job, so a
+        # deleted sub-account can still be refunded.  Older rows fall back to
+        # the legacy user id.
+        account_id = str(
+            payload.get("billing_account_id") or payload.get("user_id") or ""
+        )
+        payee = db.get(User, account_id) if account_id else None
     if refund > 0 and payee is None:
         return 0
 
@@ -1048,6 +1197,8 @@ def settle_pending_charge(
     marker = db.get(PendingCharge, marker_id)
     if marker is None:
         return 0
+    if str(getattr(marker, "note", "") or "").startswith("job:"):
+        written = _marker_written(db, marker)
     refund = _refund_for(marker, written)
     payee = _marker_payee(db, marker, user)
     if refund > 0 and payee is None:
@@ -1135,7 +1286,9 @@ def reconcile_pending_charges(
     ttl = older_than_seconds
     if ttl is None:
         ttl = int(settings.pending_charge_ttl_seconds)
-    cutoff = utc_now() - timedelta(seconds=max(0, ttl))
+    if ttl < 0:
+        raise ValueError("对账 TTL 不能为负数")
+    cutoff = utc_now() - timedelta(seconds=ttl)
 
     if db is None:
         with session_scope() as own_db:
@@ -1151,12 +1304,11 @@ def reconcile_pending_charges(
     )
     settled = 0
     for marker in rows:
-        # Only chapters written since the debit belong to this charge.
-        written = max(
-            0,
-            _persisted_sections(db, marker.project_id) - int(marker.sections_at_charge or 0),
+        # Prefer this charge's Job ledger; fall back to the project-wide delta
+        # only for legacy markers created before async generation was tracked.
+        written = min(
+            _marker_written(db, marker), max(1, int(marker.chapters or 1))
         )
-        written = min(written, max(1, int(marker.chapters or 1)))
         refund = _refund_for(marker, written)
         payee = _marker_payee(db, marker)
         if refund > 0 and payee is None:

@@ -1,7 +1,9 @@
 """API routes: /projects (从 app.py 迁移，URL 与响应格式不变)。"""
 
 import hashlib
+import logging
 import sys
+import uuid
 
 from fastapi import APIRouter
 from sqlalchemy import case, or_
@@ -175,6 +177,18 @@ from ..shared import (  # noqa: F401
 )
 
 router = APIRouter()
+
+
+def _release_generation_lease(project_id: str, token: str) -> None:
+    """Release a generation lease after a terminal sync request."""
+
+    if not token:
+        return
+    try:
+        with session_scope() as db:
+            jobqueue.release_generation_lease(db, project_id, token)
+    except Exception:  # noqa: BLE001 - 释放失败由 reaper 的过期清理兜底
+        logging.getLogger(__name__).exception("生成租约释放失败: %s", project_id)
 
 
 def _enqueue_or_429(db, owner_id: str) -> None:
@@ -1545,6 +1559,7 @@ def review_chapter(ref: str, node_id: str, payload: ChapterReview) -> dict[str, 
 
 @router.post("/projects/{ref}/chapters/{node_id}/generate")
 def generate_chapter(ref: str, node_id: str) -> dict[str, Any]:
+    lease_token = ""
     # 1) 短事务：鉴权 + 门禁 + 扣费。扣费不再与耗时数十秒的模型调用共处一个
     #    长事务（原实现一旦网络抖动就会长时间持有计费行与 DB 连接）。
     with session_scope() as db:
@@ -1572,6 +1587,16 @@ def generate_chapter(ref: str, node_id: str) -> dict[str, Any]:
         if user.is_external and not client.available:
             raise HTTPException(
                 status_code=409, detail="尚未配置可用的对话模型，请联系超级管理员"
+            )
+        lease_token = jobqueue.acquire_generation_lease(
+            db,
+            project.id,
+            job_id=f"sync:{uuid.uuid4().hex}",
+            owner_id=user.id,
+        )
+        if not lease_token:
+            raise HTTPException(
+                status_code=409, detail="该项目已有生成任务在运行，请等待完成后再试"
             )
         try:
             charged = billing.charge_chapters(
@@ -1613,6 +1638,7 @@ def generate_chapter(ref: str, node_id: str) -> dict[str, Any]:
                 jobqueue.settle_pending_charge(
                     refund_db, pending_id, user, project_id, 1, 0
                 )
+        _release_generation_lease(project_id, lease_token)
         raise
     # 3) 短写事务：未写出章节退还、状态、溯源与审计。
     with session_scope() as db:
@@ -1626,12 +1652,14 @@ def generate_chapter(ref: str, node_id: str) -> dict[str, Any]:
         db.flush()
         provenance.refresh_node(db, project_id, node_id_value)
         audit(db, project_id, "chapter.generate", {"heading": heading})
+        jobqueue.release_generation_lease(db, project_id, lease_token)
     return _report_payload(report)
 
 
 @router.post("/projects/{ref}/write")
 def write(ref: str) -> dict[str, Any]:
     """Synchronous generation kept for CLI parity and small integrations."""
+    lease_token = ""
     # 与 generate_chapter 同样拆成"短计费事务 → 窄生成会话 → 短收尾事务"。
     # writer.generate_document 必须拿到可写 Session 才能落地章节（见该函数
     # 注释），所以 HTTP 模型调用无法完全脱离会话，但计费已不再处于长事务中。
@@ -1653,6 +1681,16 @@ def write(ref: str) -> dict[str, Any]:
         if user.is_external and not client.available:
             raise HTTPException(
                 status_code=409, detail="尚未配置可用的对话模型，请联系超级管理员"
+            )
+        lease_token = jobqueue.acquire_generation_lease(
+            db,
+            project.id,
+            job_id=f"sync:{uuid.uuid4().hex}",
+            owner_id=user.id,
+        )
+        if not lease_token:
+            raise HTTPException(
+                status_code=409, detail="该项目已有生成任务在运行，请等待完成后再试"
             )
         try:
             charged = billing.charge_chapters(
@@ -1684,6 +1722,7 @@ def write(ref: str) -> dict[str, Any]:
                 jobqueue.settle_pending_charge(
                     refund_db, pending_id, user, project_id, count, 0
                 )
+        _release_generation_lease(project_id, lease_token)
         raise
     with session_scope() as db:
         if not settled:
@@ -1694,6 +1733,7 @@ def write(ref: str) -> dict[str, Any]:
         project = db.get(Project, project_id)
         project.status = "drafting"
         db.flush()
+        jobqueue.release_generation_lease(db, project_id, lease_token)
     return _report_payload(report)
 
 
@@ -1726,13 +1766,30 @@ def generate_all(ref: str, payload: GenerateRequest | None = None) -> dict[str, 
             raise HTTPException(
                 status_code=409, detail="尚未配置可用的对话模型，请联系超级管理员"
             )
+        job_id = str(uuid.uuid4())
+        lease_token = jobqueue.acquire_generation_lease(
+            db, project.id, job_id=job_id, owner_id=user.id
+        )
+        if not lease_token:
+            raise HTTPException(
+                status_code=409, detail="该项目已有生成任务在运行，请等待完成后再试"
+            )
         try:
             charged = billing.charge_chapters(
                 db, user, count, project_id=project.id, note="生成全书正文"
             )
         except billing.InsufficientCredits as exc:
             raise HTTPException(status_code=402, detail=str(exc)) from exc
+        marker_id = jobqueue.begin_pending_charge(
+            db,
+            user,
+            project.id,
+            charged,
+            count,
+            note=f"job:{job_id}|生成全书正文(异步)",
+        )
         job = Job(
+            id=job_id,
             project_id=project.id,
             kind="generate",
             status="queued",
@@ -1741,6 +1798,12 @@ def generate_all(ref: str, payload: GenerateRequest | None = None) -> dict[str, 
                 "charged": charged,
                 "chapters": count,
                 "user_id": user.id,
+                # 扣费实际落在父账号；子账号被删除后退款仍需找到付款方。
+                "billing_account_id": str(getattr(user, "parent_id", None) or user.id),
+                # 对账 marker 与 Job 的双向索引：崩溃后按 done_steps 精确退款。
+                "pending_charge_id": marker_id,
+                # 同项目生成互斥租约；worker 心跳续租、终态释放。
+                "generation_lease_token": lease_token,
                 # 背压检查用 owner_id 索引列；user_id 仅为 worker 结算保留。
                 "owner_id": user.id,
                 "cost_per": charged // count if count else 0,
@@ -1750,7 +1813,6 @@ def generate_all(ref: str, payload: GenerateRequest | None = None) -> dict[str, 
         )
         db.add(job)
         db.flush()
-        job_id = job.id
         job.priority = billing.queue_priority(db, user)
         priority = job.priority
         jobs.publish_event(job_id, "queued", jobs.job_payload(job), db=db)

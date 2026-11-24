@@ -134,8 +134,10 @@ def test_two_reapers_cannot_requeue_same_job_twice(db):
         assert not thread.is_alive()
     assert errors == []
     assert sum(requeued for requeued, _ in outcomes) == 1
-    assert sum(failed for _, failed in outcomes) == 1
+    # 竞争失败的 reaper 既不会重排也不会把任务计为失败（没有 failed 事件）。
+    assert sum(failed for _, failed in outcomes) == 0
     assert _event_count(job_id, "queued") == 1
+    assert _event_count(job_id, "failed") == 0
 
 
 def test_50_rounds_two_reapers_only_one_wins(db):
@@ -162,7 +164,9 @@ def test_50_rounds_two_reapers_only_one_wins(db):
             assert not thread.is_alive(), f"round {round_no} hung"
         assert errors == [], f"round {round_no}: {errors}"
         assert sum(requeued for requeued, _ in outcomes) == 1, round_no
-        assert sum(failed for _, failed in outcomes) == 1, round_no
+        assert sum(failed for _, failed in outcomes) == 0, round_no
+        assert _event_count(job_id, "queued") == 1, round_no
+        assert _event_count(job_id, "failed") == 0, round_no
         assert _state(job_id)[0] == "queued"
 
 
