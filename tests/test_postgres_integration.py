@@ -79,6 +79,9 @@ def _make_jobs(count: int) -> list[str]:
 
     ids = [str(uuid.uuid4()) for _ in range(count)]
     with session_scope() as db:
+        # claim_next() 认领全局 queued 任务；前面的迁移往返用例可能遗留 queued job，
+        # 不清理会让并发认领断言拿到别人的 id（CI 上曾因此失败）。
+        db.query(Job).delete()
         for job_id in ids:
             db.add(Job(id=job_id, kind="kb_reindex", status="queued", payload={}, attempts=0))
     return ids

@@ -228,6 +228,16 @@ def test_large_document_has_no_consecutive_empty_paragraphs_and_is_fast(tmp_path
 
 @pytest.mark.skipif(shutil.which("fc-match") is None, reason="fontconfig 未安装")
 def test_preset_fonts_resolve_to_cjk_and_have_substitutions():
+    # CI runner 可能只有 DejaVu 等西文字体；没有中文字体时 fc-match 必然回退，
+    # 该断言应跳过而非把环境缺失当成代码缺陷。
+    installed = subprocess.run(
+        ["fc-list", ":lang=zh", "family"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if not installed.stdout.strip():
+        pytest.skip("系统未安装中文字体，跳过 fc-match 中文字体替换断言")
     for preset_item in templates.preset_list():
         fonts = templates.required_fonts(preset_item)
         assert fonts

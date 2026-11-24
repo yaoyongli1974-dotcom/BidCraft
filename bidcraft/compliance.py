@@ -764,7 +764,10 @@ def _verify_sqlite_backup(source: Path) -> dict[str, Any]:
             for table in tables:
                 if table.startswith("sqlite_"):
                     continue
-                counts[table] = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+                # 表名仅来自 sqlite_master 枚举并加双引号，不接受外部输入。
+                counts[table] = conn.execute(
+                    f'SELECT COUNT(*) FROM "{table}"'  # nosec B608
+                ).fetchone()[0]
         finally:
             conn.close()
     if integrity != "ok":

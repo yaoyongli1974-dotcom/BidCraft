@@ -389,7 +389,8 @@ def evaluate(expression: str, context: dict[str, Any]) -> Any:
     env = dict(context)
     env.update(FUNCTIONS)
     try:
-        return eval(compile(tree, "<check>", "eval"), {"__builtins__": {}}, env)
+        # AST 已由 _validate 白名单校验，且 __builtins__ 为空，仅执行受控表达式。
+        return eval(compile(tree, "<check>", "eval"), {"__builtins__": {}}, env)  # nosec B307
     except ExpressionError:
         raise
     except Exception as exc:

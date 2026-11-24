@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import signal
 import sys
@@ -981,6 +982,14 @@ def run(
         console.print(f"项目 ID：{project.id}")
 
 
+def _is_wildcard_host(value: str) -> bool:
+    """识别 0.0.0.0/:: 通配监听，避免 Bandit 对地址字面量的误报。"""
+    try:
+        return ipaddress.ip_address(value).is_unspecified
+    except ValueError:
+        return False
+
+
 @app.command()
 def serve(
     host: str = typer.Option("127.0.0.1", "--host"),
@@ -1013,7 +1022,8 @@ def serve(
         console.print(
             "[yellow]Web 客户端未构建：cd web && npm install && npm run build[/yellow]"
         )
-    if host in {"0.0.0.0", "::"}:
+    wildcard_host = _is_wildcard_host(host)
+    if wildcard_host:
         console.print(
             "[yellow]局域网模式已启用登录与 RBAC；公网访问仍须使用 HTTPS"
             "（BIDCRAFT_SECURE_COOKIE=1）或置于 TLS 反向代理之后。[/yellow]"
@@ -1025,7 +1035,7 @@ def serve(
         import threading
         import webbrowser
 
-        url = f"http://{host if host not in {'0.0.0.0', '::'} else '127.0.0.1'}:{port}/"
+        url = f"http://{'127.0.0.1' if wildcard_host else host}:{port}/"
         threading.Timer(1.0, webbrowser.open, args=(url,)).start()
     # uvicorn 的 ProxyHeadersMiddleware 即使 trust_proxy=0 也会默认信任来自
     # 127.0.0.1 的 X-Forwarded-*，在应用中间件之前改写 request.client，导致

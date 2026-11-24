@@ -34,8 +34,9 @@ jobs:
         run: uv python install 3.13
 
       - name: Sync dependencies (locked)
-        # api 额外依赖供 tests/test_api*.py 使用（缺失时会被 importorskip 静默跳过）。
-        run: uv sync --frozen --python 3.13 --extra api --extra dev
+        # api 额外依赖供 tests/test_api*.py 使用；postgres 供 test_postgres_support.py 使用。
+        # 缺失 postgres 时该用例会 ModuleNotFoundError（psycopg），不能静默跳过。
+        run: uv sync --frozen --python 3.13 --extra api --extra dev --extra postgres
 
       - name: Lint (ruff)
         run: uv run --frozen ruff check bidcraft tests
@@ -236,9 +237,14 @@ jobs:
         run: uv export --frozen --format requirements-txt --no-emit-project --extra api --extra postgres -o /tmp/bc-requirements.txt
       - name: pip-audit (Python)
         run: uvx --from pip-audit pip-audit -r /tmp/bc-requirements.txt --progress-spinner off
-      - name: npm audit (frontend, lockfile only)
+      - name: npm audit (production dependencies, lockfile only)
+        # 构建产物只依赖 dependencies；devDependencies 的漏洞另做提示，不作为发版门禁。
         working-directory: web
-        run: npm audit --package-lock-only --audit-level=high
+        run: npm audit --omit=dev --package-lock-only --audit-level=high
+
+      - name: npm audit (full tree, advisory)
+        working-directory: web
+        run: npm audit --package-lock-only --audit-level=high || true
 
   security-sast:
     name: security (bandit SAST)
@@ -250,7 +256,9 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
       - name: Bandit (medium+ severity)
-        run: uvx --from bandit bandit -q -ll -r bidcraft
+        # Alembic migrations 是审查过的静态 DDL（表名/表达式在代码中固定），
+        # 动态拼接由方言决定，统一排除以免误报；业务代码中的受控 SQL/eval 已就地 #nosec 并注释理由。
+        run: uvx --from bandit bandit -q -ll -r bidcraft --exclude bidcraft/migrations
 
   security-secret-scan:
     name: security (secret scanning)
