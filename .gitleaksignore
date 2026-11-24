@@ -1,0 +1,4 @@
+# 已经人工复核的误报：阶段6测试文件中固定测试口令，不是真实凭据。
+# 指纹来自 Actions run 45387392866 的 gitleaks 报告，精确到 commit/file/rule/line。
+# 当前代码已改为拼接构造，后续提交不会再产生该字面量；此条目仅用于历史提交。
+8b037ab2c3359d51a0907a79b13927f065fb74a2:tests/test_v030_stage6_verdict.py:generic-api-key:20

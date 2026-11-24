@@ -482,6 +482,34 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             fonts-noto-cjk libreoffice-writer poppler-utils
 
+      - name: Map Windows tender fonts to Noto CJK
+        # 不降低测试门槛：让 CI 的 fontconfig 与生产部署建议一致，
+        # 使宋体/黑体/仿宋/雅黑在 Linux 上真正确解析为 CJK 字体。
+        run: |
+          sudo tee /etc/fonts/conf.d/99-bidcraft-cjk.conf >/dev/null <<'XML'
+          <?xml version="1.0"?>
+          <!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+          <fontconfig>
+            <match target="pattern">
+              <test name="family" compare="eq"><string>宋体</string></test>
+              <edit name="family" mode="prepend" binding="strong"><string>Noto Serif CJK SC</string></edit>
+            </match>
+            <match target="pattern">
+              <test name="family" compare="eq"><string>黑体</string></test>
+              <edit name="family" mode="prepend" binding="strong"><string>Noto Sans CJK SC</string></edit>
+            </match>
+            <match target="pattern">
+              <test name="family" compare="eq"><string>仿宋_GB2312</string></test>
+              <edit name="family" mode="prepend" binding="strong"><string>Noto Serif CJK SC</string></edit>
+            </match>
+            <match target="pattern">
+              <test name="family" compare="eq"><string>微软雅黑</string></test>
+              <edit name="family" mode="prepend" binding="strong"><string>Noto Sans CJK SC</string></edit>
+            </match>
+          </fontconfig>
+          XML
+          sudo fc-cache -f
+
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
@@ -612,11 +640,12 @@ jobs:
     timeout-minutes: 10
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      # v2 在 2026-09 后从 GitHub hosted runner 移除；v3 仅迁移 Node 24 运行时，行为不变。
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0  # gitleaks 需要完整历史
       - name: Gitleaks
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
