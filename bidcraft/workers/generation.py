@@ -9,6 +9,8 @@ import logging
 import time
 from typing import Any
 
+from sqlalchemy import select
+
 from .. import jobs
 from ..db import session_scope
 from ..generation.outline import build_outline, load_outline, save_outline
@@ -19,6 +21,7 @@ from ..jobqueue import (
     assert_generation_lease,
     commit_fenced_result,
     current_claim_token,
+    fenced_chapter_write,
     fenced_job,
     job_abort_event,
     log_job_failure,
@@ -30,7 +33,7 @@ from ..jobqueue import (
     step_status,
 )
 from ..ledger import load_ledger
-from ..models import Project
+from ..models import OutlineNode, Project, Section
 from ..rules.engine import ledger_gate
 from ..rules.loader import load_package
 from ..services.job_support import (
@@ -207,6 +210,35 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
                     current_claim_token(),
                 )
 
+            def commit_chapter(info: dict[str, Any], body: str, source: str) -> None:
+                """Write one chapter and its done_steps mark under a fresh fence."""
+                node_id = str(info.get("node_id") or "")
+                section_id = str(info.get("section_id") or "")
+                words = int(info.get("words") or 0)
+                status = "fallback" if source == "fallback" else "drafted"
+                with fenced_chapter_write(
+                    job_id,
+                    node_id,
+                    project_id=project_id,
+                    lease_token=lease_token,
+                ) as (chapter_db, _row):
+                    section = chapter_db.scalar(
+                        select(Section).where(Section.id == section_id)
+                    ) if section_id else None
+                    if section is not None:
+                        section.body = body
+                        section.words = words
+                        section.status = status
+                    outline_node = chapter_db.get(OutlineNode, node_id)
+                    if outline_node is not None:
+                        outline_node.status = status
+                    mark_step_done(
+                        chapter_db,
+                        job_id,
+                        f"chapter:{node_id}",
+                        current_claim_token(),
+                    )
+
             report = generate_document(
                 work_db,
                 project_id,
@@ -221,6 +253,7 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
                 knowledge_provider=_knowledge_provider(work_db, owner_id),
                 before_chapter=before_chapter,
                 after_chapter=after_chapter,
+                commit_chapter=commit_chapter,
             )
             flush_delta()
             project.status = "drafting"

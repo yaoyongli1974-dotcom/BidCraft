@@ -249,6 +249,28 @@ def commit_fenced_result(job_id: str) -> Iterator[tuple[Any, Job]]:
         yield db, job
 
 
+@contextmanager
+def fenced_chapter_write(
+    job_id: str,
+    node_id: str,
+    *,
+    project_id: str = "",
+    lease_token: str = "",
+) -> Iterator[tuple[Any, Job]]:
+    """Persist ONE chapter with the same fence as the final result.
+
+    Each chapter is an independent short transaction.  A worker whose lease was
+    reclaimed cannot write a body or a ``done_steps`` mark: the conditional
+    UPDATE in :func:`commit_fenced_result` fails, so the whole chapter unit is
+    rolled back.  The optional generation-lease check happens inside that same
+    transaction.
+    """
+    with commit_fenced_result(job_id) as (db, job):
+        if project_id:
+            assert_generation_lease(db, project_id, lease_token)
+        yield db, job
+
+
 def finalize_job_result(
     job_id: str,
     *,

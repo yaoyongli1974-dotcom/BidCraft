@@ -413,6 +413,7 @@ def generate_document(
     knowledge_provider: Callable[[str], str] | None = None,
     before_chapter: Callable[[dict[str, Any], Session], bool] | None = None,
     after_chapter: Callable[[dict[str, Any], Session], None] | None = None,
+    commit_chapter: Callable[[dict[str, Any], str, str], None] | None = None,
 ) -> GenerationReport:
     """Generate chapters in outline order.
 
@@ -422,6 +423,11 @@ def generate_document(
     idempotency ledger — returning ``False`` skips a unit already completed by
     an earlier attempt, ``after_chapter`` records it on success.  They receive
     the live session so the body write and the ledger mark commit atomically.
+
+    ``commit_chapter``, when supplied, takes over the body write and ledger mark
+    in a NEW short transaction owned by the caller (the background worker uses
+    it for chapter-level fencing).  In that mode the long generation session no
+    longer writes Section/OutlineNode at all.
     """
     from .outline import load_outline
 
@@ -444,6 +450,7 @@ def generate_document(
     for index, node in enumerate(nodes, start=1):
         info = {
             "node_id": node["id"],
+            "section_id": node.get("section_id") or "",
             "heading": node["heading"],
             "index": index,
             "total": len(nodes),
@@ -506,17 +513,24 @@ def generate_document(
             words = count_words(body)
             chapter_words = words
             chapter_source = source
-            section = db.scalar(select(Section).where(Section.id == node["section_id"]))
-            outline_node = db.get(OutlineNode, node["id"])
-            if section is not None:
-                section.body = body
-                section.words = words
-                section.status = "fallback" if source == "fallback" else "drafted"
-            if outline_node is not None:
-                outline_node.status = "fallback" if source == "fallback" else "drafted"
-            db.flush()
-            if after_chapter is not None:
-                after_chapter(info, db)
+            info["words"] = words
+            if commit_chapter is not None:
+                # Fenced short transaction owned by the caller: no body write
+                # happens in the long generation session, so a reclaimed worker
+                # cannot commit a chapter it no longer owns.
+                commit_chapter(info, body, source)
+            else:
+                section = db.scalar(select(Section).where(Section.id == node["section_id"]))
+                outline_node = db.get(OutlineNode, node["id"])
+                if section is not None:
+                    section.body = body
+                    section.words = words
+                    section.status = "fallback" if source == "fallback" else "drafted"
+                if outline_node is not None:
+                    outline_node.status = "fallback" if source == "fallback" else "drafted"
+                db.flush()
+                if after_chapter is not None:
+                    after_chapter(info, db)
             previous_texts.append(body)
             chapters.append((node["heading"], body))
             report.written.append(node["heading"])
