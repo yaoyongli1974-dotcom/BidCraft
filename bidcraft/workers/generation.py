@@ -65,6 +65,7 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
     """
     marker_id = ""
     try:
+        raise_if_aborted()
         with session_scope() as db:
             job = fenced_job(db, job_id)
             if job is None:

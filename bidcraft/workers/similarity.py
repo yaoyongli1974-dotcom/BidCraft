@@ -32,6 +32,7 @@ def _run_similarity_job(job_id: str) -> None:
     from ..similarity import service as similarity_service
 
     try:
+        jobqueue.raise_if_aborted()
         with session_scope() as db:
             job = fenced_job(db, job_id)
             if job is None:
