@@ -29,7 +29,7 @@ from contextvars import ContextVar
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 
 from . import billing
 from .clock import utc_now
@@ -201,6 +201,51 @@ def assert_claim_current(job_id: str) -> None:
     with session_scope() as db:
         if fenced_job(db, job_id) is None:
             raise JobAborted("任务认领已失效")
+
+
+@contextmanager
+def commit_fenced_result(job_id: str) -> Iterator[tuple[Any, Job]]:
+    """Atomically claim the right to write a job's FINAL business result.
+
+    A fresh ``SELECT`` (``assert_claim_current``) followed by a separate commit
+    still leaves a TOCTOU window: the reaper can reclaim the lease between the
+    check and the write.  This context manager instead performs a **conditional
+    UPDATE inside the very transaction that will carry the business writes**.
+
+    The UPDATE matches only a ``running`` row owned by the current fencing
+    token whose lease has not expired.  On PostgreSQL it also takes a row lock
+    until commit; on SQLite the single-writer transaction provides the same
+    serialization without any PG-only syntax.  A zero-row result means the
+    worker lost ownership (reclaimed, cancelled, completed or aborted), so
+    ``JobAborted`` is raised and nothing is committed.
+
+    Yield ``(db, job)``; every business write must happen inside this block.
+    Any exception rolls the whole unit back via :func:`session_scope`.
+    """
+
+    token = _claim_token.get()
+    if not token:
+        raise JobAborted("任务认领已失效（缺少 fencing token）")
+    raise_if_aborted()
+    now = utc_now()
+    with session_scope() as db:
+        claimed = db.execute(
+            update(Job)
+            .where(
+                Job.id == job_id,
+                Job.status == "running",
+                Job.claim_token == token,
+                or_(Job.lease_expires_at.is_(None), Job.lease_expires_at >= now),
+            )
+            .values(updated_at=now)
+            .returning(Job.id)
+        ).first()
+        if claimed is None:
+            raise JobAborted("任务认领已失效，拒绝提交最终结果")
+        job = db.get(Job, job_id)
+        if job is None:
+            raise JobAborted("任务不存在，拒绝提交最终结果")
+        yield db, job
 
 
 def step_status(db, job_id: str, step_key: str) -> bool | None:

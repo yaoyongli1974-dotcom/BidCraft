@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -181,7 +182,7 @@ _RUNNERS = {
 }
 
 
-def run_similarity(
+def prepare_similarity_result(
     db,
     project_id: str,
     *,
@@ -191,14 +192,18 @@ def run_similarity(
     source_project_id: str | None = None,
     created_by: str = "",
     report_id: str | None = None,
-) -> SimilarityReport:
-    """执行一次查重并落库；返回已完成的 ``SimilarityReport``。
+    abort_check: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    """Compute one similarity result WITHOUT persisting it.
 
-    ``report_id`` 用于异步任务：路由先建 queued 报告并立即返回，worker 再
-    复用同一行写入结果，避免「一个请求两份报告」。同步调用方不传该参数。
+    This is the pure-preparation half of :func:`run_similarity`.  It only reads
+    paragraphs/projects and returns the hits plus report metadata, so an async
+    worker can run the expensive O(n²) computation in a throwaway session and
+    commit the final result later inside a fenced transaction
+    (``jobqueue.commit_fenced_result``) together with the Job terminal state.
 
-    ``mode='all'`` 依次跑四维。单个维度异常/无数据不会让整份报告失败：
-    原因写入 ``report.skipped``，其余维度继续。查重过程不修改正文。
+    A completed ``report_id`` is reused idempotently: no recomputation and no
+    new hits (``{'reused': True, ...}``).
     """
 
     threshold = float(threshold)
@@ -220,26 +225,23 @@ def run_similarity(
             raise LookupError(f"查重报告不存在: {report_id}")
         if report.status == "done":
             # 幂等重算：已完成的报告直接返回，不重算、不追加命中、不记审计。
-            return report
-        # 重试（如租约丢失后重新执行）可能在上一次尝试里写过命中：先清掉旧
-        # 命中并重置统计/跳过原因，避免同一份报告追加出重复结果。
-        db.execute(delete(SimilarityHit).where(SimilarityHit.report_id == report.id))
-        report.stats = {}
-        report.skipped = []
-        report.status = "running"
-    else:
-        report = SimilarityReport(
-            project_id=project_id,
-            scope=scope,
-            mode=mode,
-            threshold=threshold,
-            status="running",
-            stats={},
-            skipped=[],
-            created_by=created_by or "",
-        )
-        db.add(report)
-    db.flush()
+            return {
+                "reused": True,
+                "report": report,
+                "report_id": report.id,
+                "project_id": project_id,
+                "project_name": project.name,
+                "scope": str(report.scope or scope),
+                "mode": str(report.mode or mode),
+                "threshold": float(report.threshold or threshold),
+                "source_project_id": str(
+                    (report.stats or {}).get("source_project_id") or base_source or ""
+                ),
+                "created_by": str(report.created_by or created_by or ""),
+                "hits": [],
+                "skipped": list(report.skipped or []),
+                "stats": dict(report.stats or {}),
+            }
 
     requested = list(MODES) if mode == "all" else [mode]
     hits: list[dict[str, Any]] = []
@@ -257,6 +259,8 @@ def run_similarity(
         )
 
     for name in requested:
+        if abort_check is not None:
+            abort_check()
         runner = _RUNNERS[name]
         try:
             outcome = runner(db, project_id, base_source, threshold)
@@ -287,7 +291,81 @@ def run_similarity(
         if (item.get("evidence") or {}).get("common"):
             common_candidates += 1
 
-    for item in hits:
+    stats = {
+        "mode": mode,
+        "scope": scope,
+        "threshold": threshold,
+        "source_project_id": base_source or "",
+        "project": project.name,
+        "modes": mode_stats,
+        "hits": len(hits),
+        "by_kind": by_kind,
+        "common_candidates": common_candidates,
+        "degraded": degraded,
+        "models": models,
+        "truncated": truncated,
+    }
+    return {
+        "reused": False,
+        "report_id": report.id if report is not None else "",
+        "project_id": project_id,
+        "project_name": project.name,
+        "scope": scope,
+        "mode": mode,
+        "threshold": threshold,
+        "source_project_id": base_source or "",
+        "created_by": created_by or "",
+        "hits": hits,
+        "skipped": skipped,
+        "stats": stats,
+    }
+
+
+def persist_similarity_result(
+    db,
+    prepared: dict[str, Any],
+    *,
+    report_id: str | None = None,
+) -> SimilarityReport:
+    """Persist a prepared similarity result.
+
+    Caller owns the transaction boundary.  When invoked inside
+    ``jobqueue.commit_fenced_result`` the report/hits/audit and the Job terminal
+    state commit together, so a stale worker can neither create orphan hits nor
+    overwrite a newer worker's result.  Old hits are removed before insertion,
+    making retries idempotent.
+    """
+
+    if prepared.get("reused"):
+        return prepared["report"]
+    rid = str(report_id or prepared.get("report_id") or "")
+    project_id = str(prepared["project_id"])
+    report = db.get(SimilarityReport, rid) if rid else None
+    if report is not None:
+        if report.project_id != project_id:
+            raise LookupError(f"查重报告不存在: {rid}")
+        if report.status == "done":
+            return report
+        # 重试可能在上一次尝试里写过命中：先清掉旧命中并重置统计/跳过原因。
+        db.execute(delete(SimilarityHit).where(SimilarityHit.report_id == report.id))
+        report.stats = {}
+        report.skipped = []
+        report.status = "running"
+    else:
+        report = SimilarityReport(
+            project_id=project_id,
+            scope=str(prepared["scope"]),
+            mode=str(prepared["mode"]),
+            threshold=float(prepared["threshold"]),
+            status="running",
+            stats={},
+            skipped=[],
+            created_by=str(prepared.get("created_by") or ""),
+        )
+        db.add(report)
+    db.flush()
+
+    for item in prepared["hits"]:
         db.add(
             SimilarityHit(
                 report_id=report.id,
@@ -305,21 +383,8 @@ def run_similarity(
             )
         )
 
-    report.stats = {
-        "mode": mode,
-        "scope": scope,
-        "threshold": threshold,
-        "source_project_id": base_source or "",
-        "project": project.name,
-        "modes": mode_stats,
-        "hits": len(hits),
-        "by_kind": by_kind,
-        "common_candidates": common_candidates,
-        "degraded": degraded,
-        "models": models,
-        "truncated": truncated,
-    }
-    report.skipped = skipped
+    report.stats = dict(prepared["stats"])
+    report.skipped = list(prepared["skipped"])
     report.status = "done"
     report.completed_at = utcnow()
     db.flush()
@@ -330,15 +395,46 @@ def run_similarity(
         "similarity.check",
         {
             "report_id": report.id,
-            "scope": scope,
-            "mode": mode,
-            "threshold": threshold,
-            "hits": len(hits),
-            "source_project_id": base_source or "",
+            "scope": prepared["scope"],
+            "mode": prepared["mode"],
+            "threshold": prepared["threshold"],
+            "hits": len(prepared["hits"]),
+            "source_project_id": prepared["source_project_id"],
         },
     )
     db.flush()
     return report
+
+
+def run_similarity(
+    db,
+    project_id: str,
+    *,
+    scope: str = "project",
+    mode: str = "text",
+    threshold: float = 0.85,
+    source_project_id: str | None = None,
+    created_by: str = "",
+    report_id: str | None = None,
+) -> SimilarityReport:
+    """执行一次查重并落库；返回已完成的 ``SimilarityReport``。
+
+    同步调用方（含无 worker 池时的内联回退）继续使用本函数。异步 worker
+    改为分别调用 :func:`prepare_similarity_result` 与
+    :func:`persist_similarity_result`，把最终落库放入 fencing 事务。
+    """
+
+    prepared = prepare_similarity_result(
+        db,
+        project_id,
+        scope=scope,
+        mode=mode,
+        threshold=threshold,
+        source_project_id=source_project_id,
+        created_by=created_by,
+        report_id=report_id,
+    )
+    return persist_similarity_result(db, prepared, report_id=report_id)
 
 
 def list_reports(db, project_id: str, *, limit: int = 50) -> list[SimilarityReport]:

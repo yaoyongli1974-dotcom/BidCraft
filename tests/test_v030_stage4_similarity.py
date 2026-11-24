@@ -216,7 +216,7 @@ def test_reused_report_project_mismatch_still_rejected(db, monkeypatch):
 
 
 def test_worker_lost_lease_midrun_aborts_without_writing_report(db, monkeypatch):
-    """中途换 token：JobAborted 分支不提交报告/命中/审计，也不写 failed。"""
+    """中途换 token：fencing 事务拒绝提交，报告/命中/审计一律不落库。"""
     from bidcraft import jobqueue
     from bidcraft.db import session_scope
     from bidcraft.models import Job
@@ -228,15 +228,16 @@ def test_worker_lost_lease_midrun_aborts_without_writing_report(db, monkeypatch)
     job_id = _job(project_id, report_id, "token-A")
     calls = _fake_text_runner(monkeypatch)
 
-    real_run = service.run_similarity
+    real_prepare = service.prepare_similarity_result
 
-    def _run_then_lose_lease(db, *args, **kwargs):
+    def _prepare_then_lose_lease(db, *args, **kwargs):
+        prepared = real_prepare(db, *args, **kwargs)
         # 模拟 reaper 在比对运行中回收租约并提交新 token。
         with session_scope() as fresh:
             fresh.get(Job, job_id).claim_token = "token-B"
-        return real_run(db, *args, **kwargs)
+        return prepared
 
-    monkeypatch.setattr(service, "run_similarity", _run_then_lose_lease)
+    monkeypatch.setattr(service, "prepare_similarity_result", _prepare_then_lose_lease)
     failed = []
     monkeypatch.setattr(worker, "_fail_job", lambda *a, **kw: failed.append((a, kw)))
 
@@ -248,15 +249,15 @@ def test_worker_lost_lease_midrun_aborts_without_writing_report(db, monkeypatch)
         assert job.status == "running"
         assert job.claim_token == "token-B"
         assert job.result in (None, {})
-    assert calls and len(calls) == 1  # 计算确实发生过，但结果为回滚
+    assert calls and len(calls) == 1  # 计算确实发生过，但最终提交被拒绝
     assert _counts(report_id) == (0, 0)  # 报告/命中/审计都未提交
     assert _events(job_id, "failed") == 0
     assert _events(job_id, "done") == 0
     assert failed == []
 
 
-def test_final_done_write_uses_fresh_session_and_fences_stale_token(db, monkeypatch):
-    """最终 done 写在全新 Session：旧 worker 不能覆盖新 worker 的 Job 状态。"""
+def test_final_done_write_is_fenced_by_conditional_claim(db, monkeypatch):
+    """最终提交用条件 UPDATE 原子校验 token；旧 worker 不能覆盖新 worker。"""
     from bidcraft import jobqueue
     from bidcraft.db import session_scope
     from bidcraft.models import Job
@@ -268,54 +269,41 @@ def test_final_done_write_uses_fresh_session_and_fences_stale_token(db, monkeypa
     job_id = _job(project_id, report_id, "token-A")
     _fake_text_runner(monkeypatch)
 
-    guard_calls: list[str] = []
+    commit_calls: list[str] = []
+    real_commit = jobqueue.commit_fenced_result
 
-    def _guard(jid):
-        guard_calls.append(jid)
-        if len(guard_calls) == 2:
-            # 第一次校验之后、最终写之前，另一个 worker 成功认领（换 token）。
-            with session_scope() as fresh:
-                fresh.get(Job, jid).claim_token = "token-B"
+    def _commit_with_lost_lease(jid):
+        commit_calls.append(jid)
+        # 在工作会话提交后、最终 fencing 条件 UPDATE 之前换 token。
+        with session_scope() as fresh:
+            fresh.get(Job, jid).claim_token = "token-B"
+        return real_commit(jid)
 
-    monkeypatch.setattr(jobqueue, "assert_claim_current", _guard)
+    monkeypatch.setattr(jobqueue, "commit_fenced_result", _commit_with_lost_lease)
 
-    work_session: list = []
-    fenced_sessions: list = []
-    fenced_tokens: list[str] = []
-    real_run = service.run_similarity
-    real_fenced = worker.fenced_job
+    work_sessions: list = []
+    real_prepare = service.prepare_similarity_result
 
-    def _track_run(db, *args, **kwargs):
-        work_session.append(db)
-        return real_run(db, *args, **kwargs)
+    def _track_prepare(session, *args, **kwargs):
+        work_sessions.append(session)
+        return real_prepare(session, *args, **kwargs)
 
-    def _track_fenced(db, jid):
-        fenced_sessions.append(db)
-        fenced_tokens.append(str(db.get(Job, jid).claim_token or ""))
-        return real_fenced(db, jid)
-
-    monkeypatch.setattr(service, "run_similarity", _track_run)
-    monkeypatch.setattr(worker, "fenced_job", _track_fenced)
+    monkeypatch.setattr(service, "prepare_similarity_result", _track_prepare)
 
     with jobqueue.claim_context("token-A"):
         worker._run_similarity_job(job_id)
 
-    # 两次围栏检查：一次在报告提交前，一次在最终 done 写之前。
-    assert guard_calls == [job_id, job_id]
+    assert commit_calls == [job_id]
     with session_scope() as check:
         stale = check.get(Job, job_id)
         assert stale.status == "running"
         assert stale.claim_token == "token-B"
+        assert stale.result in (None, {})
     assert _events(job_id, "done") == 0
     assert _events(job_id, "failed") == 0
-    # 报告本体已提交（第一次检查通过）；下次重试靠 report_id 幂等短路。
-    assert _counts(report_id) == (2, 1)
-
-    # 最终 fenced_job 必须发生在全新 Session 中，能看到新 token 而不是
-    # 工作 Session 身份映射里的旧 token，因此返回 None 拒绝写入。
-    assert work_session and fenced_sessions
-    assert fenced_sessions[-1] is not work_session[0]
-    assert fenced_tokens[-1] == "token-B"
+    # 事务级 fencing：报告/命中/审计与 Job 终态同事务，旧 worker 全都不写。
+    assert _counts(report_id) == (0, 0)
+    assert work_sessions  # 计算阶段确实在独立会话中执行
 
 
 def test_api_shared_exposes_similarity_runner():
