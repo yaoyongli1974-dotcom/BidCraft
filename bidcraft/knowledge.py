@@ -22,8 +22,9 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import httpx
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 
+from . import clock
 from .config import settings
 from .model_config import api_base, resolve_embedding_endpoint
 from .models import KbChunk, KbDocument, KnowledgeBase, utcnow
@@ -38,6 +39,9 @@ CHUNK_CHARS = 900
 OVERLAP_CHARS = 120
 TIMEOUT = 20.0
 MAX_API_RESPONSE_BYTES = 2 * 1024 * 1024
+# 检索候选上限：SQL 先按 token/LIKE 与文档生命周期收窄，再在 Python 里精确打分。
+SEARCH_CANDIDATE_CAP = 2000
+MAX_QUERY_TOKENS = 32
 
 _CJK = re.compile(r"[\u3400-\u9fff]+")
 _WORD = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.+-]*")
@@ -57,6 +61,8 @@ class Passage:
     document_id: str | None = None
     page: int | None = None
     heading: str = ""
+    # 溯源到具体知识库，避免同名 source 在多个库中互相错配元数据。
+    kb_id: str | None = None
 
     @property
     def page_no(self) -> int | None:
@@ -209,34 +215,55 @@ def _iter_files(root: Path):
 
 
 def index_local(db, kb: KnowledgeBase) -> int:
+    """全量重建本地库索引（按文件增量 upsert，保留未变文件的向量缓存）。
+
+    ``ParsedDocument.pages`` 是 PDF 页码的唯一可靠来源：``loader`` 的
+    ``text`` 用空行连接页面，无法再区分页边界。这里用 ``\\f`` 重新拼接页面，
+    ``ingest_document`` 的 ``_document_pages`` 据此写 KbDocument + 页码溯源。
+    """
+
     root = Path(kb.location).expanduser()
     if not root.exists() or not root.is_dir():
         raise KnowledgeError(f"目录不存在：{root}")
     from .parsing.loader import load_document
 
-    db.execute(delete(KbChunk).where(KbChunk.kb_id == kb.id))
-    total = 0
+    seen: set[str] = set()
     for path in _iter_files(root):
+        source = str(path.relative_to(root))
         try:
             document = load_document(path)
         except Exception:
             logger.debug("跳过无法解析的知识库文件 %s", path, exc_info=True)
             continue
-        chunks = _chunks(document.text)
-        for ordinal, text in enumerate(chunks):
-            db.add(
-                KbChunk(
-                    kb_id=kb.id,
-                    source=str(path.relative_to(root)),
-                    ordinal=ordinal,
-                    text=text,
-                    tokens=" ".join(tokens_for(text)),
-                )
+        seen.add(source)
+        pages = list(document.pages or []) or [document.text]
+        existing = db.scalar(
+            select(KbDocument).where(
+                KbDocument.kb_id == kb.id, KbDocument.source == source
             )
-            total += 1
-    kb.chunk_count = total
+        )
+        ingest_document(
+            db,
+            kb,
+            source,
+            "\f".join(pages),
+            kind=existing.kind if existing is not None else "other",
+            tags=list(existing.tags or []) if existing is not None else None,
+            valid_to=existing.valid_to if existing is not None else None,
+        )
+
+    # 目录里已删除的文件：连同 KbDocument 与其块一起清理。
+    for doc in list(list_documents(db, kb)):
+        if doc.source not in seen:
+            delete_document(db, kb, doc.id)
+    # 旧版全量索引遗留的无 document_id 块不再有生命周期元数据，统一清掉。
+    db.execute(
+        delete(KbChunk).where(
+            KbChunk.kb_id == kb.id, KbChunk.document_id.is_(None)
+        )
+    )
+    total = _refresh_chunk_count(db, kb)
     kb.indexed_at = utcnow()
-    db.flush()
     return total
 
 
@@ -646,15 +673,63 @@ def _query_vector(db, query: str) -> tuple[str, list[float] | None]:
     return _embed_key(endpoint), vectors[0]
 
 
+def _ready_chunk_filter():
+    """文档生命周期门禁：未就绪/已过期的文档不参与检索（旧块兼容放行）。"""
+
+    today = clock.today()
+    start = datetime(today.year, today.month, today.day)
+    return or_(
+        KbDocument.id.is_(None),  # 迁移前的无溯源块仍可检索
+        and_(
+            KbDocument.status == "ready",
+            or_(KbDocument.valid_to.is_(None), KbDocument.valid_to >= start),
+        ),
+    )
+
+
 def search_local(db, kb: KnowledgeBase, query: str, limit: int) -> list[Passage]:
-    rows = list(db.scalars(select(KbChunk).where(KbChunk.kb_id == kb.id)))
-    query_tokens = set(tokens_for(query))
+    """SQL 预筛候选块后再精确打分，避免每次查询全表重建 token 集合。"""
+
+    query_tokens = sorted(set(tokens_for(query)))
     key, query_vector = _query_vector(db, query)
+    if not query_tokens and query_vector is None:
+        return []
     weight = settings.kb_vector_weight
     min_score = settings.kb_vector_min_score
+    cap = min(SEARCH_CANDIDATE_CAP, max(200, int(limit) * 50))
+    candidates: dict[str, KbChunk] = {}
+
+    if query_tokens:
+        token_terms = [KbChunk.tokens.contains(token) for token in query_tokens[:MAX_QUERY_TOKENS]]
+        stmt = (
+            select(KbChunk)
+            .join(KbDocument, KbChunk.document_id == KbDocument.id, isouter=True)
+            .where(KbChunk.kb_id == kb.id, _ready_chunk_filter(), or_(*token_terms))
+            .limit(cap)
+        )
+        for row in db.scalars(stmt):
+            candidates[row.id] = row
+
+    if key and query_vector:
+        vector_cap = int(settings.kb_vector_max_chunks or 0)
+        vector_cap = vector_cap if vector_cap > 0 else SEARCH_CANDIDATE_CAP
+        stmt = (
+            select(KbChunk)
+            .join(KbDocument, KbChunk.document_id == KbDocument.id, isouter=True)
+            .where(
+                KbChunk.kb_id == kb.id,
+                KbChunk.embed_key == key,
+                KbChunk.embedding.is_not(None),
+                _ready_chunk_filter(),
+            )
+            .limit(max(1, min(vector_cap, SEARCH_CANDIDATE_CAP)))
+        )
+        for row in db.scalars(stmt):
+            candidates[row.id] = row
+
     scored: list[tuple[float, KbChunk]] = []
-    for row in rows:
-        bigram = _score(query_tokens, set(row.tokens.split()), query, row.text)
+    for row in candidates.values():
+        bigram = _score(set(query_tokens), set((row.tokens or "").split()), query, row.text)
         if query_vector is None:
             # Pure bigram fallback keeps the historical ``score > 0`` semantics.
             if bigram > 0:
@@ -671,6 +746,7 @@ def search_local(db, kb: KnowledgeBase, query: str, limit: int) -> list[Passage]
     return [
         Passage(
             kb=kb.name,
+            kb_id=kb.id,
             source=row.source,
             text=row.text,
             score=round(score, 3),
@@ -718,7 +794,13 @@ def _passages_from_items(kb: KnowledgeBase, items: list, limit: int) -> list[Pas
         except (TypeError, ValueError):
             score_value = 0.0
         passages.append(
-            Passage(kb=kb.name, source=source or kb.name, text=text[:1500], score=score_value)
+            Passage(
+                kb=kb.name,
+                kb_id=kb.id,
+                source=source or kb.name,
+                text=text[:1500],
+                score=score_value,
+            )
         )
     return passages
 
@@ -853,13 +935,28 @@ def search(
     return passages[:limit]
 
 
+def trace_label(passage: Passage) -> str:
+    """文档溯源标签：文档 ID / 页码 / 标题，缺失字段自动省略。"""
+
+    bits: list[str] = []
+    if passage.document_id:
+        bits.append(f"文档 {passage.document_id}")
+    if passage.page:
+        bits.append(f"页码 {passage.page}")
+    if passage.heading:
+        bits.append(f"标题 {passage.heading}")
+    return " · ".join(bits)
+
+
 def context_block(passages: list[Passage]) -> str:
     if not passages:
         return ""
     rows = []
     for index, passage in enumerate(passages, start=1):
         source = f"（{passage.source}）" if passage.source else ""
-        rows.append(f"[{index}] {source}\n{passage.text}")
+        trace = trace_label(passage)
+        suffix = f"[{trace}]" if trace else ""
+        rows.append(f"[{index}] {source}{suffix}\n{passage.text}")
     return (
         "【知识库参考】\n"
         "以下资料只用于补充行业背景、产品能力与实施方法；资质、业绩、价格、人员与参数"

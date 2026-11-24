@@ -13,7 +13,9 @@ from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
 from docx.shared import Cm, Pt
 
+from ..documents.renderer import save_document_verified
 from .docx import (
+    _add_field,
     _add_page_number_footer,
     _add_table,
     _set_run_font,
@@ -130,13 +132,27 @@ def export_commercial_docx(
         _add_page_number_footer(section)
     _update_fields_on_open(document)
 
-    _cover(document, payload)
-    document.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
+    first_heading_break = False
+    if preset["cover"]:
+        _cover(document, payload)
+        first_heading_break = True
+    if preset["toc"]:
+        heading = document.add_paragraph()
+        heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = heading.add_run("目  录")
+        run.font.size = Pt(18)
+        run.font.bold = True
+        _set_run_font(run, "黑体")
+        _add_field(document.add_paragraph(), 'TOC \\o "1-3" \\h \\z \\u', "（在 Word 中右键更新目录）")
+        first_heading_break = True
 
     sections = payload.get("sections") or {}
     for key, title in SECTION_ORDER:
         data = sections.get(key) or {}
-        document.add_heading(title, level=1)
+        section_heading = document.add_heading(title, level=1)
+        if first_heading_break:
+            section_heading.paragraph_format.page_break_before = True
+            first_heading_break = False
         _add_fields(document, data)
         if data.get("kind") == "table":
             _add_section_table(document, data)
@@ -152,7 +168,4 @@ def export_commercial_docx(
         for error in validation.get("errors") or []:
             document.add_paragraph(_text(error), style="List Bullet")
 
-    output = Path(path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    document.save(str(output))
-    return output
+    return save_document_verified(document, path)

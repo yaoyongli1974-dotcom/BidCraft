@@ -49,6 +49,7 @@ from .constraint_check import (
 from .substantive import (
     REQ_TYPE_GENERAL,
     anchor_coverage,
+    best_matching_section,
     classify_requirement,
     coverage_ratio,
     find_covering_section,
@@ -122,7 +123,7 @@ class RuleSemanticMatcher:
 class Structure:
     """L3 一条结构化约束的可举证视图。"""
 
-    subject: str      # 对象/主体词族
+    subject: str      # 实际主体对象（取不到才退化为词族）
     quantity: str     # 数量阈值（数值约束）
     unit: str         # 单位
     grade: str        # 等级（资质约束）
@@ -130,10 +131,12 @@ class Structure:
     negated: bool     # 正文是否在否定句里出现该约束
     state: str        # satisfied / violated / absent
     detail: str
+    source_span: str = ""   # 约束在条款原文中的片段，保证可追溯
 
     def as_dict(self) -> dict:
         return {
             "subject": self.subject,
+            "source_span": self.source_span,
             "quantity": self.quantity,
             "unit": self.unit,
             "grade": self.grade,
@@ -146,11 +149,14 @@ class Structure:
 
 # 复合条款的连接/转折词。长词优先，避免「并」先于「并提供」匹配。
 # 连接词本身是拆分边界候选；是否真拆要看后续片段是否带独立约束/主体。
-_ATOM_CONNECTORS = re.compile(r"(?:并|且|同时|以及|其中|但|但须|还须|另外|须同时|均应)")
+# 和/与/及 也是招标条款里最常见的并列（「营业执照和税务登记证」），不能漏。
+_ATOM_CONNECTORS = re.compile(
+    r"(?:并提供|并满足|并且|须同时|同时|以及|还须|均应|分别|其中|但须|但|另外|并|且|和|与|及)"
+)
 
 # 真正用于「无标点也能拆」的连接词拆分表（长词在前）。
 _ATOM_CONNECTOR_SPLIT = re.compile(
-    r"(?:并提供|并满足|并且|须同时|同时|以及|还须|均应|分别|其中|并|且|但须|但|另外)"
+    r"(?:并提供|并满足|并且|须同时|同时|以及|还须|均应|分别|其中|并|且|但须|但|另外|和|与|及)"
 )
 # 原子归属用的主体词，辅助判断一个子句属于哪类约束。
 _ATOM_SUBJECT_HINTS = {
@@ -165,6 +171,18 @@ _ATOM_SUBJECT_HINTS = {
 
 def _atom_subjects(text: str) -> list[str]:
     return [name for name, hints in _ATOM_SUBJECT_HINTS.items() if any(h in text for h in hints)]
+
+
+# 并列交付物（证/照/书/报告/表/方案/清单）自身就是可独立成原子的对象，
+# 即使没有命中「主体词族/数值约束」也不能被 和/与/及 粘连成一条。
+_DELIVERABLE_TAIL = re.compile(r"(?:证|照|书|报告|表|方案|清单)$")
+
+
+def _is_self_contained_deliverable(tail: str) -> bool:
+    """连接词之后的片段是否是一个自带宾语的交付物（如「税务登记证」）。"""
+
+    stripped = (tail or "").strip(" \t\r\n，,。；;、：:")
+    return len(stripped) >= 4 and bool(_DELIVERABLE_TAIL.search(stripped))
 
 
 def _clause_spans(text: str) -> list[tuple[int, int, str]]:
@@ -193,7 +211,8 @@ def _connector_spans(segment: str) -> list[tuple[int, int]]:
     for i, match in enumerate(matches):
         tail_end = matches[i + 1].start() if i + 1 < len(matches) else len(segment)
         tail = segment[match.end():tail_end]
-        if extract_constraints(tail) or _atom_subjects(tail):
+        if (extract_constraints(tail) or _atom_subjects(tail)
+                or _is_self_contained_deliverable(tail)):
             kept.append((match.start(), match.end()))
     return kept
 
@@ -367,10 +386,29 @@ _PROJECT_TYPE_HINTS = {
 }
 
 # 招标截止日期台账键（R03）：事实台账/meta 里这些 key 的值会被解析为截止日期。
+# 常见别名统一在这里登记（含英文 bid_opening_time / deadline 与中文「投标截止日期」），
+# 同时 resolve_deadline 对「含 截止 / 开标 / deadline」的键做归一化兜底。
 DEADLINE_KEYS = (
     "tender_deadline", "bid_deadline", "bid_submission_deadline",
-    "投标截止时间", "截止日期", "投标截止", "递交截止时间", "开标时间",
+    "bid_opening_time", "bid_opening", "bid_opening_date", "deadline",
+    "submission_deadline", "tender_opening_time", "tender_opening_date",
+    "投标截止时间", "投标截止日期", "截止日期", "投标截止", "递交截止时间",
+    "递交投标文件的截止时间", "开标时间", "开标日期", "开标截止时间",
 )
+# 含「截止 / 开标 / deadline」但明显不是投标截止的键，避免误取。
+_DEADLINE_KEY_EXCLUDE = re.compile(r"保证金|质保|保修|付款|支付|发票|合同生效")
+_DEADLINE_KEY_HINT = re.compile(r"截止|开标|deadline", re.IGNORECASE)
+
+
+def is_deadline_key(key: str) -> bool:
+    """台账键是否像招标截止日期：登记别名或含 截止/开标/deadline。"""
+
+    lowered = (key or "").strip().lower()
+    if not lowered or _DEADLINE_KEY_EXCLUDE.search(lowered):
+        return False
+    if lowered in {item.lower() for item in DEADLINE_KEYS}:
+        return True
+    return bool(_DEADLINE_KEY_HINT.search(lowered))
 
 
 @dataclass
@@ -524,12 +562,20 @@ def resolve_deadline(facts, meta: dict | None = None) -> date | None:
     for key, value in meta.items():
         if key and value and str(key).strip().lower() not in buckets:
             buckets[str(key).strip().lower()] = str(value)
+    # 先按登记别名精确匹配，保证多别名并存时口径稳定。
     for wanted in DEADLINE_KEYS:
         for stored_key, stored_value in buckets.items():
             if stored_key == wanted.lower():
                 parsed = parse_deadline(stored_value)
                 if parsed is not None:
                     return parsed
+    # 再按归一化提示兜底（bid_opening_time / 投标截止日期 / xxx_deadline 等）。
+    # 只解析明确的年月日，绝不回退到服务器当前时间。
+    for stored_key, stored_value in buckets.items():
+        if is_deadline_key(stored_key):
+            parsed = parse_deadline(stored_value)
+            if parsed is not None:
+                return parsed
     return None
 
 
@@ -545,11 +591,27 @@ def _date_kind(clause: str, date_match) -> str:
     return "unknown"
 
 
+def _achievement_context(requirement_text: str) -> str:
+    """只保留与业绩有关的分句，避免复合条款里其它约束污染项目类型判定。
+
+    例如「近三年至少3项类似项目业绩，且带宽不低于1000Mbps」里的「带宽」
+    是另一条约束，不能据此把业绩项目类型判成「网络通信」。
+    """
+
+    clauses = [
+        part.strip()
+        for part in _CLAUSE_SPLIT.split(requirement_text or "")
+        if part.strip() and _ACHIEVEMENT_RE.search(part)
+    ]
+    return " ".join(clauses) or (requirement_text or "")
+
+
 def _required_project_type(requirement_text: str) -> str:
     """R10：招标条款里是否指定了类似项目类型；没指定返回空串（不做类型过滤）。"""
 
+    source = _achievement_context(requirement_text)
     for ptype, hints in _PROJECT_TYPE_HINTS.items():
-        if any(hint in (requirement_text or "") for hint in hints):
+        if any(hint in source for hint in hints):
             return ptype
     return ""
 
@@ -1008,6 +1070,18 @@ def _judge_atom(
     text = atom.get("text", "")
     atom_verdicts = evaluate_constraints(text, combined)
     atom_windows = extract_time_windows(text)
+    # R20：复合条款里「近三年」常独立成短片段，被 _strip_lead + len<4 过滤掉；
+    # 只从原子文本取时间窗会让「近三年，至少3项类似项目业绩，且带宽不低于
+    # 1000Mbps」的业绩原子丢掉时间窗，过期业绩被误判满足。原子带业绩约束却
+    # 没有自己的时间窗时，必须回退到原始整条条款取窗（项目类型同理见 R16）。
+    carries_achievement_count = any(
+        item.constraint.kind == "numeric"
+        and item.constraint.family == "achievement"
+        and item.constraint.comparator == ">="
+        for item in atom_verdicts
+    )
+    if not atom_windows and carries_achievement_count:
+        atom_windows = extract_time_windows(requirement_text or text)
     # R16：用原始条款判断项目类型/时间窗，而不是只靠拆分后的原子文本。
     atom_deadline = _deadline_window_signals(
         atom_windows, combined, deadline, requirement_text or text
@@ -1070,7 +1144,7 @@ def judge(
     verdicts: list[ConstraintVerdict] = evaluate_constraints(text, combined)
     structures = [
         Structure(
-            subject=item.constraint.family,
+            subject=item.constraint.subject or item.constraint.family,
             quantity=str(item.constraint.threshold) if item.constraint.kind == "numeric" else "",
             unit=item.constraint.unit,
             grade=item.constraint.grade,
@@ -1078,6 +1152,7 @@ def judge(
             negated=any(token in item.detail for token in ("不", "未", "无", "非")),
             state=item.state,
             detail=item.detail,
+            source_span=item.constraint.source_span,
         ).as_dict()
         for item in verdicts
     ]
@@ -1174,14 +1249,30 @@ def judge(
         lvl = "" if agg_state == SATISFIED else (
             review_level(marker) if agg_state == REVIEW else block_level
         )
+        # R21：复合条款也要给上层一个可跳转的章节锚点（coverage 标注复用 judge
+        # 结果，不再另跑一次无 deadline 的 find_covering_section）。只取已满足
+        # 原子的 matched_section，避免用未响应原子的章节冒充响应证据。
+        matched = next(
+            (item.matched_section for item in atom_verdicts if item.matched_section is not None),
+            None,
+        )
+        if agg_state == SATISFIED and matched is None:
+            matched = best_matching_section(text, nodes, req_type)
         evidence["layer5"] = {"state": agg_state, "aggregated_from_atoms": True}
-        return RequirementVerdict(agg_state, lvl, agg_detail, None, evidence)
+        return RequirementVerdict(agg_state, lvl, agg_detail, matched, evidence)
 
     # 单条文本：走与原子完全相同的统一判定。
-    return _decide(
+    single = _decide(
         text, verdicts, deadline_window, time_signals, best_ratio, anchor,
         section, threshold, marker, block_level, evidence,
     )
+    # 业绩全靠截止日期核算成立时，常规锚点可能为空——仍给上层一个章节跳转点。
+    if single.state == SATISFIED and single.matched_section is None:
+        single = RequirementVerdict(
+            single.state, single.level, single.reason,
+            best_matching_section(text, nodes, req_type), single.evidence,
+        )
+    return single
 
 
 def verdict_from_status(response_status: str) -> bool:

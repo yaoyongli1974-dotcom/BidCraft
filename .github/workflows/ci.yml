@@ -82,6 +82,7 @@ jobs:
           CI_GIT_REF: ${{ github.ref }}
         run: |
           uv run --frozen python - <<'PY'
+          import json
           import os
           import re
           from pathlib import Path
@@ -100,6 +101,16 @@ jobs:
           assert notes.is_file(), f"缺少发版说明 {notes}"
           assert re.search(rf"^## v{re.escape(v_init)}\b", changelog, re.M), (
               f"CHANGELOG.md 缺少 v{v_init} 条目"
+          )
+
+          web_pkg = json.loads(Path("web/package.json").read_text(encoding="utf-8"))
+          v_web = web_pkg.get("version")
+          assert v_web == v_init, f"Web 版本号不一致：package.json={v_web}, backend=v{v_init}"
+
+          web_lock = json.loads(Path("web/package-lock.json").read_text(encoding="utf-8"))
+          lock_root = (web_lock.get("packages") or {}).get("", {})
+          assert web_lock.get("version") == v_init and lock_root.get("version") == v_init, (
+              f"Web lock 版本号不一致：{web_lock.get('version')} / {lock_root.get('version')}, backend=v{v_init}"
           )
 
           ref = os.environ.get("CI_GIT_REF", "")

@@ -12,6 +12,7 @@ from .export import _run_batch_export_job
 from .generation import _run_generation_job
 from .images import _run_image_batch_job
 from .knowledge import _run_kb_reindex_job
+from .similarity import _run_similarity_job
 
 # Register runners so the DB-driven dispatcher can rebuild them by ``job.kind``.
 # jobqueue._runner_for lazily imports this module, closing the import loop.
@@ -22,6 +23,7 @@ jobqueue._register("images", _run_image_batch_job)
 jobqueue._register("kb_reindex", _run_kb_reindex_job)
 jobqueue._register("agent", _run_agent_job)
 jobqueue._register("evaluation", _run_evaluation_job)
+jobqueue._register("similarity", _run_similarity_job)
 
 __all__ = [
     "_run_agent_job",
@@ -31,4 +33,5 @@ __all__ = [
     "_run_generation_job",
     "_run_image_batch_job",
     "_run_kb_reindex_job",
+    "_run_similarity_job",
 ]

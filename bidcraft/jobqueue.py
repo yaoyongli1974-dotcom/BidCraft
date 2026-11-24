@@ -35,7 +35,7 @@ from . import billing
 from .clock import utc_now
 from .config import settings
 from .db import session_scope
-from .models import Job, PendingCharge, User
+from .models import Job, PendingCharge, Section, User
 
 logger = logging.getLogger("bidcraft.jobs")
 
@@ -470,6 +470,14 @@ def _heartbeat(
 def _set_failed(db, job: Job, message: str) -> None:
     from . import jobs
 
+    # A worker that dies between claim and result never reaches its own exception
+    # handler, so a charged ``generate`` job would be failed with the debit left
+    # stranded.  Settle it here from the idempotency ledger — no-op when the job
+    # was never charged or was already refunded (reaper/startup paths included).
+    try:
+        refund_charged_job(db, job)
+    except Exception:  # noqa: BLE001 - never block failure bookkeeping
+        logger.exception("失败任务计费退还失败 job=%s", job.id)
     job.status = "failed"
     job.message = message
     job.result = {"error": message}
@@ -582,6 +590,9 @@ def begin_pending_charge(
         return ""
     marker = PendingCharge(
         user_id=str(user.id),
+        # The debit hit the parent account for sub-accounts; record it so the
+        # refund can still find the payer after the sub-account is deleted.
+        billing_account_id=str(getattr(user, "parent_id", None) or user.id),
         project_id=str(project_id or ""),
         credits=int(credits),
         chapters=max(1, int(chapters or 1)),
@@ -610,6 +621,91 @@ def _refund_for(marker: PendingCharge, written: int) -> int:
     return max(0, credits - spent)
 
 
+def _chapter_done_steps(payload: dict | None) -> int | None:
+    """Count chapters recorded in the idempotency ledger, or ``None`` if absent.
+
+    ``done_steps`` is the authoritative record of work that actually committed:
+    the generation worker appends ``chapter:<node_id>`` only *after* the Section
+    write is flushed.  Counting those keys (instead of trusting a per-attempt
+    report) avoids both a full refund after a mid-run exception (earlier chapters
+    already persisted) and an over-refund on resume (earlier chapters skipped).
+    """
+
+    done = (payload or {}).get("done_steps")
+    if not isinstance(done, (list, tuple)):
+        return None
+    return sum(1 for key in done if isinstance(key, str) and key.startswith("chapter:"))
+
+
+def _persisted_sections(db, project_id: str | None) -> int:
+    """Legacy fallback: chapters with a persisted, non-empty Section body."""
+
+    if not project_id:
+        return 0
+    return int(
+        db.scalar(
+            select(func.count())
+            .select_from(Section)
+            .where(Section.project_id == project_id, Section.body != "")
+        )
+        or 0
+    )
+
+
+def refund_charged_job(db, job: Job, written: int | None = None) -> int:
+    """Idempotently refund unearned credits of a charged ``generate`` job.
+
+    ``payload['done_steps']`` is the authoritative count of chapters actually
+    persisted; an explicit ``written`` is only honored when the ledger is absent
+    (legacy rows), with persisted Sections as a final fallback.  The
+    ``payload['refunded']`` flag makes repeated calls no-ops, so worker handlers,
+    the reaper and startup recovery can all call this safely.
+
+    Returns the number of credits refunded (0 when nothing was due).
+    """
+
+    payload = dict(job.payload or {})
+    charged = int(payload.get("charged") or 0)
+    chapters = int(payload.get("chapters") or 0)
+    if not charged or not chapters or payload.get("refunded"):
+        return 0
+    done = _chapter_done_steps(payload)
+    if done is not None:
+        written = done
+    elif written is None:
+        written = _persisted_sections(db, job.project_id)
+    written = max(0, min(int(written or 0), chapters))
+    refund = (chapters - written) * charged // chapters
+    if refund <= 0:
+        return 0
+    user = db.get(User, str(payload.get("user_id") or ""))
+    if user is None:
+        return 0
+    billing.refund_chapters(db, user, refund)
+    payload["refunded"] = True
+    payload["refunded_credits"] = refund
+    job.payload = payload
+    db.flush()
+    return refund
+
+
+def _marker_payee(db, marker: PendingCharge, user: User | None = None) -> User | None:
+    """Resolve the account that must receive a marker's refund.
+
+    A sub-account's charge hits its parent (``billing.billing_account``), so
+    :func:`begin_pending_charge` records that paying account on the marker.
+    Legacy markers fall back to ``user_id`` and then to the caller's user.
+    ``None`` means no payable account exists: callers must leave the marker
+    pending rather than silently dropping the refund.
+    """
+
+    account_id = getattr(marker, "billing_account_id", None) or marker.user_id
+    account = db.get(User, str(account_id)) if account_id else None
+    if account is None and user is not None and getattr(user, "id", None):
+        account = db.get(User, str(user.id))
+    return account
+
+
 def settle_pending_charge(
     db,
     marker_id: str,
@@ -620,23 +716,60 @@ def settle_pending_charge(
 ) -> int:
     """Clear a marker and refund the unwritten chapters, atomically & idempotently.
 
-    Returns the number of credits refunded.  Repeated calls (e.g. an exception
-    handler after an already successful settle) are no-ops.
+    A conditional ``UPDATE ... WHERE status='pending'`` claims the row before any
+    refund is issued, mirroring :func:`reconcile_pending_charges`.  Two settles —
+    or a settle racing the TTL reconciler — can therefore never both refund.
+    Returns the number of credits refunded; repeated calls are no-ops.
     """
 
     if not marker_id:
         return 0
     marker = db.get(PendingCharge, marker_id)
-    if marker is None or marker.status != "pending":
+    if marker is None:
         return 0
     refund = _refund_for(marker, written)
-    if refund > 0 and user is not None:
-        billing.refund_chapters(db, user, refund, project_id=str(project_id or ""))
+    payee = _marker_payee(db, marker, user)
+    if refund > 0 and payee is None:
+        # No payable account (e.g. deleted sub-account): leave it pending for a
+        # later retry instead of clearing the marker with a zero refund.
+        return 0
+    # Claim first; the refund and the status change share this transaction.
+    claimed = db.execute(
+        update(PendingCharge)
+        .where(PendingCharge.id == marker_id, PendingCharge.status == "pending")
+        .values(status="processing", updated_at=utc_now())
+    )
+    if not claimed.rowcount:
+        return 0
+    if refund > 0:
+        billing.refund_chapters(db, payee, refund, project_id=str(project_id or ""))
     marker.status = "refunded" if refund > 0 else "cleared"
     marker.refunded_credits = refund
     marker.updated_at = utc_now()
     db.flush()
     return refund
+
+
+def _project_has_live_job(db, project_id: str | None) -> bool:
+    """Whether a project still has a queued/running job doing work for it.
+
+    A marker can outlive its TTL while a long generation is still in flight.
+    Refunding it then would let the work finish for free.  Tying liveness to
+    the job row (rather than the wall-clock age alone) closes that window.
+    """
+
+    if not project_id:
+        return False
+    return bool(
+        db.scalar(
+            select(func.count())
+            .select_from(Job)
+            .where(
+                Job.project_id == project_id,
+                Job.status.in_(["queued", "running"]),
+            )
+        )
+    )
 
 
 def reconcile_pending_charges(
@@ -647,7 +780,8 @@ def reconcile_pending_charges(
     The marker is created in the debit transaction (see :func:`begin_pending_charge`)
     and cleared/refunded in the same transaction as the generation result.  Only
     a process death (OOM/restart) can leave it pending; this pass settles those
-    rows after a TTL, so a still-running generation is never refunded by mistake.
+    rows after a TTL, **and only when the project has no live job** — a long
+    generation must never be refunded by mistake while it is still running.
     The async ``generate_all`` path is already durable: its charge and Job row
     commit together and the worker refunds via ``payload['charged']``; it needs
     no marker here.
@@ -661,7 +795,8 @@ def reconcile_pending_charges(
         refunded_markers = reconcile_pending_charges()
 
     Returns the number of markers settled.  A transaction-scoped conditional
-    UPDATE claims each row, so concurrent instances never refund twice.
+    UPDATE claims each row, so concurrent instances never refund twice.  Markers
+    with no payable account are deliberately left ``pending`` for a later retry.
     """
 
     ttl = older_than_seconds
@@ -683,6 +818,14 @@ def reconcile_pending_charges(
     )
     settled = 0
     for marker in rows:
+        # A live generation on the same project owns this charge; leave it alone.
+        if _project_has_live_job(db, marker.project_id):
+            continue
+        refund = _refund_for(marker, 0)
+        payee = _marker_payee(db, marker)
+        if refund > 0 and payee is None:
+            # No payable account — refuse to clear with a zero refund.
+            continue
         # Claim first; the refund and the status change share this transaction.
         claimed = db.execute(
             update(PendingCharge)
@@ -691,10 +834,8 @@ def reconcile_pending_charges(
         )
         if not claimed.rowcount:
             continue
-        user = db.get(User, marker.user_id)
-        refund = _refund_for(marker, 0)
-        if refund > 0 and user is not None:
-            billing.refund_chapters(db, user, refund, project_id=marker.project_id)
+        if refund > 0:
+            billing.refund_chapters(db, payee, refund, project_id=marker.project_id)
         marker.status = "refunded"
         marker.refunded_credits = refund
         marker.updated_at = utc_now()

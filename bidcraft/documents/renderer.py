@@ -5,6 +5,10 @@
 
 from __future__ import annotations
 
+import copy
+import os
+import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +17,7 @@ from docx.enum.section import WD_ORIENT, WD_SECTION
 from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
@@ -20,7 +25,7 @@ from docx.shared import Cm, Pt, RGBColor
 from .document_ir import (
     DEFAULT_BODY_FONT,
     DEFAULT_HEADING_FONT,
-    PLACEHOLDER_PATTERN,
+    DocumentCover,
     DocumentHeaderFooter,
     DocumentIR,
     DocumentPageLayout,
@@ -28,9 +33,14 @@ from .document_ir import (
     DocumentSection,
     DocumentStyle,
     DocumentTable,
+    DocumentTOC,
     default_styles,
     heading_level,
+    iter_text_tokens,
 )
+
+#: 固定 ZIP 时间戳：同一份 IR 两次导出应得到逐字节一致的文件。
+ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 
 _ALIGNMENTS = {
     "left": WD_ALIGN_PARAGRAPH.LEFT,
@@ -57,6 +67,9 @@ _STYLE_ALIASES = {
     "h3": "Heading 3",
     "heading3": "Heading 3",
     "标题3": "Heading 3",
+    "h4": "Heading 4",
+    "heading4": "Heading 4",
+    "标题4": "Heading 4",
 }
 
 
@@ -190,22 +203,41 @@ def _add_plain_text(paragraph, part: str) -> None:
             paragraph.add_run(line)
 
 
-def _add_text_runs(paragraph, text: Any) -> None:
-    """写入文本，占位符 ``{{待填:...}}`` 原样保留并高亮。"""
+def add_hyperlink(paragraph, text: str, url: str) -> None:
+    """写入外部超链接（``w:hyperlink`` + external relationship）。"""
 
-    content = "" if text is None else str(text)
-    if not content:
-        return
-    cursor = 0
-    for match in PLACEHOLDER_PATTERN.finditer(content):
-        if match.start() > cursor:
-            _add_plain_text(paragraph, content[cursor : match.start()])
-        run = paragraph.add_run(match.group(0))
-        run.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
-        run.font.bold = True
-        cursor = match.end()
-    if cursor < len(content):
-        _add_plain_text(paragraph, content[cursor:])
+    relationship_id = paragraph.part.relate_to(url, RT.HYPERLINK, is_external=True)
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), relationship_id)
+    run = OxmlElement("w:r")
+    properties = OxmlElement("w:rPr")
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), "0563C1")
+    underline = OxmlElement("w:u")
+    underline.set(qn("w:val"), "single")
+    properties.append(color)
+    properties.append(underline)
+    run.append(properties)
+    content = OxmlElement("w:t")
+    content.set(qn("xml:space"), "preserve")
+    content.text = text
+    run.append(content)
+    hyperlink.append(run)
+    paragraph._p.append(hyperlink)
+
+
+def _add_text_runs(paragraph, text: Any) -> None:
+    """写入文本：占位符高亮，Markdown 链接写成真正的 Word 超链接。"""
+
+    for token in iter_text_tokens(text):
+        if token[0] == "placeholder":
+            run = paragraph.add_run(token[1])
+            run.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
+            run.font.bold = True
+        elif token[0] == "link":
+            add_hyperlink(paragraph, token[1], token[2])
+        else:
+            _add_plain_text(paragraph, token[1])
 
 
 def _clear_paragraph(paragraph) -> None:
@@ -421,7 +453,52 @@ def _render_images(document, images: list[Any]) -> None:
         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
 
-def _render_section(document, spec: DocumentSection) -> None:
+def _render_cover(document, spec: DocumentCover) -> None:
+    """渲染封面；用段前间距代替连续空段落，避免产生空白页警告。"""
+
+    title = document.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    title.paragraph_format.space_before = Pt(80)
+    _add_text_runs(title, spec.title)
+    for run in title.runs:
+        run.font.size = Pt(26)
+        run.font.bold = True
+        _set_fonts(run._r, DEFAULT_HEADING_FONT)
+
+    subtitle = document.add_paragraph()
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    subtitle_run = subtitle.add_run(spec.subtitle)
+    subtitle_run.font.size = Pt(36)
+    subtitle_run.font.bold = True
+    _set_fonts(subtitle_run._r, DEFAULT_HEADING_FONT)
+
+    for label, value in spec.lines:
+        paragraph = document.add_paragraph()
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        info = paragraph.add_run(f"{label}：")
+        _add_text_runs(paragraph, value)
+        info.font.size = Pt(14)
+        for run in paragraph.runs:
+            run.font.size = Pt(14)
+
+
+def _render_toc(document, spec: DocumentTOC) -> None:
+    heading = document.add_paragraph()
+    heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    if spec.page_break:
+        heading.paragraph_format.page_break_before = True
+    run = heading.add_run(spec.title)
+    run.font.size = Pt(18)
+    run.font.bold = True
+    _set_fonts(run._r, DEFAULT_HEADING_FONT)
+    _add_field(
+        document.add_paragraph(),
+        f'TOC \\o "{spec.levels}" \\h \\z \\u',
+        spec.placeholder,
+    )
+
+
+def _render_section(document, spec: DocumentSection, *, page_break_before: bool = False) -> None:
     created = []
     if spec.heading:
         level = int(spec.level or 1)
@@ -433,7 +510,7 @@ def _render_section(document, spec: DocumentSection) -> None:
     for table_index, table in enumerate(spec.tables, start=1):
         _render_table(document, table, table_index)
     _render_images(document, spec.images)
-    if spec.page_break_before and created:
+    if (spec.page_break_before or page_break_before) and created:
         created[0].paragraph_format.page_break_before = True
 
 
@@ -443,6 +520,51 @@ def _apply_core_properties(document, properties: dict[str, Any]) -> None:
         value = properties.get(key)
         if value:
             setattr(core, key, str(value))
+
+
+def _rewrite_zip_timestamps(path: Path) -> None:
+    """把所有 ZIP 条目时间固定为 1980-01-01，消除 wall-clock 造成的字节差异。"""
+
+    temp_path = path.with_name(f".{path.name}.normalized")
+    try:
+        with zipfile.ZipFile(path, "r") as source, zipfile.ZipFile(
+            temp_path, "w", zipfile.ZIP_DEFLATED
+        ) as target:
+            for info in source.infolist():
+                payload = source.read(info.filename)
+                entry = copy.copy(info)
+                entry.date_time = ZIP_TIMESTAMP
+                target.writestr(entry, payload)
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def save_document_verified(document, path: str | Path) -> Path:
+    """先写临时文件并校验 ZIP CRC，再原子替换目标文件。
+
+    同时归一化 ZIP 时间戳，保证相同输入的导出结果逐字节一致。校验失败时目标
+    文件保持旧内容（或不存在），不会留下半写坏的交付件。
+    """
+
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    handle, temp_name = tempfile.mkstemp(
+        dir=output.parent, prefix=f".{output.name}.", suffix=".docx"
+    )
+    os.close(handle)
+    temp_path = Path(temp_name)
+    try:
+        document.save(str(temp_path))
+        _rewrite_zip_timestamps(temp_path)
+        with zipfile.ZipFile(temp_path, "r") as archive:
+            broken = archive.testzip()
+        if broken is not None:
+            raise ValueError(f"DOCX 包 CRC 校验失败：{broken}")
+        os.replace(temp_path, output)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    return output
 
 
 def render_document(
@@ -469,6 +591,11 @@ def render_document(
     _update_fields_on_open(document)
     _apply_styles(document, ir.styles, inherit_defaults=base_template is not None)
 
+    if ir.cover is not None:
+        _render_cover(document, ir.cover)
+    if ir.toc is not None:
+        _render_toc(document, ir.toc)
+
     sections = list(ir.sections) or [DocumentSection()]
     inherited_layout = ir.page_layout
     if inherited_layout is None and base_template is None:
@@ -486,14 +613,16 @@ def render_document(
         )
         if ir.header_footer is not None:
             _apply_header_footer(document, section, ir.header_footer)
-        _render_section(document, section_spec)
+        # 封面/目录与第一节同属一个 section，用 page_break_before 换页；
+        # 后续节本身由 NEW_PAGE 换页，不重复加段前分页以免产生空白页。
+        _render_section(
+            document,
+            section_spec,
+            page_break_before=(index == 0 and (ir.cover is not None or ir.toc is not None)),
+        )
 
     _apply_core_properties(document, ir.core_properties or {})
-
-    output = Path(path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    document.save(str(output))
-    return output
+    return save_document_verified(document, path)
 
 
-__all__ = ["render_document"]
+__all__ = ["add_hyperlink", "render_document", "save_document_verified"]

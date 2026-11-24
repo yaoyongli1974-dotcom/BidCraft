@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from typing import Any
 
@@ -45,7 +46,38 @@ def report_payload(report: SimilarityReport) -> dict[str, Any]:
     }
 
 
+def _rerank_score(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _hit_score(item: Any) -> float:
+    """命中排序分：语义重排分优先，回退原始相似度。"""
+
+    if isinstance(item, dict):
+        evidence = item.get("evidence") or {}
+        reranked = evidence.get("rerank_score") if isinstance(evidence, dict) else None
+        base = float(item.get("similarity") or 0.0)
+        if reranked is not None:
+            score = _rerank_score(reranked)
+            if score is not None:
+                return score
+        return base
+    evidence = item.evidence or {}
+    reranked = evidence.get("rerank_score") if isinstance(evidence, dict) else None
+    if reranked is not None:
+        score = _rerank_score(reranked)
+        if score is not None:
+            return score
+    return float(item.similarity or 0.0)
+
+
 def hit_payload(hit: SimilarityHit) -> dict[str, Any]:
+    evidence = hit.evidence or {}
+    reranked = evidence.get("rerank_score") if isinstance(evidence, dict) else None
     return {
         "id": hit.id,
         "report_id": hit.report_id,
@@ -57,10 +89,17 @@ def hit_payload(hit: SimilarityHit) -> dict[str, Any]:
         "excerpt_a": hit.excerpt_a,
         "excerpt_b": hit.excerpt_b,
         "similarity": hit.similarity,
-        "evidence": hit.evidence or {},
+        "rerank_score": _rerank_score(reranked) if reranked is not None else None,
+        "evidence": evidence,
         "review_status": hit.review_status,
         "review_note": hit.review_note,
     }
+
+
+def validate_check(mode: str, scope: str, threshold: float) -> None:
+    """路由入队前校验参数，避免把非法任务塞进队列。"""
+
+    _validate(mode, scope, threshold)
 
 
 def _validate(mode: str, scope: str, threshold: float) -> None:
@@ -151,8 +190,12 @@ def run_similarity(
     threshold: float = 0.85,
     source_project_id: str | None = None,
     created_by: str = "",
+    report_id: str | None = None,
 ) -> SimilarityReport:
     """执行一次查重并落库；返回已完成的 ``SimilarityReport``。
+
+    ``report_id`` 用于异步任务：路由先建 queued 报告并立即返回，worker 再
+    复用同一行写入结果，避免「一个请求两份报告」。同步调用方不传该参数。
 
     ``mode='all'`` 依次跑四维。单个维度异常/无数据不会让整份报告失败：
     原因写入 ``report.skipped``，其余维度继续。查重过程不修改正文。
@@ -171,17 +214,23 @@ def run_similarity(
         scope = "history"
 
     base_source = source_project_id if scope == "history" else None
-    report = SimilarityReport(
-        project_id=project_id,
-        scope=scope,
-        mode=mode,
-        threshold=threshold,
-        status="running",
-        stats={},
-        skipped=[],
-        created_by=created_by or "",
-    )
-    db.add(report)
+    report = db.get(SimilarityReport, report_id) if report_id else None
+    if report is not None:
+        if report.project_id != project_id:
+            raise LookupError(f"查重报告不存在: {report_id}")
+        report.status = "running"
+    else:
+        report = SimilarityReport(
+            project_id=project_id,
+            scope=scope,
+            mode=mode,
+            threshold=threshold,
+            status="running",
+            stats={},
+            skipped=[],
+            created_by=created_by or "",
+        )
+        db.add(report)
     db.flush()
 
     requested = list(MODES) if mode == "all" else [mode]
@@ -218,7 +267,8 @@ def run_similarity(
         if model and model not in models:
             models.append(model)
 
-    hits.sort(key=lambda item: (-float(item.get("similarity") or 0), item.get("kind") or ""))
+    # 语义维度写入 evidence.rerank_score：以重排分排序，原始 similarity 仅作回退。
+    hits.sort(key=lambda item: (-_hit_score(item), str(item.get("kind") or "")))
     truncated = len(hits) > MAX_TOTAL_HITS
     hits = hits[:MAX_TOTAL_HITS]
     by_kind: dict[str, int] = {}
@@ -318,8 +368,10 @@ def get_hits(
         statement = statement.where(SimilarityHit.review_status == review_status)
     statement = statement.order_by(
         SimilarityHit.similarity.desc(), SimilarityHit.kind, SimilarityHit.id
-    ).limit(max(1, min(2000, limit)))
-    return list(db.scalars(statement).all())
+    )
+    hits = list(db.scalars(statement).all())
+    hits.sort(key=lambda hit: (-_hit_score(hit), hit.kind, hit.id))
+    return hits[: max(1, min(2000, limit))]
 
 
 def review_hit(

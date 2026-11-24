@@ -150,6 +150,7 @@ from ..shared import (  # noqa: F401
     images,
     jobqueue,
     jobs,
+    judge_for_project,
     ledger_gate,
     ledger_summary,
     load_ledger,
@@ -1844,9 +1845,9 @@ def requirement_response_update(
         # 与返回 payload 共享同一次大纲加载（T06/R05）：一次查询同时供判定与展示。
         context = build_requirement_context(db, project.id)
         if payload.response_status != "pending":
-            from ...verdict import judge as judge_requirement
-
-            current = judge_requirement(requirement, context.outline_nodes)
+            # 与 /check 同口径：带入招标截止日期与可选语义 matcher，避免
+            # 确认快照的判定与 SUB 问题的判定漂移。
+            current = judge_for_project(db, requirement, context.outline_nodes)
             snapshot = {
                 "state": current.state,
                 "label": current.label,
@@ -1980,6 +1981,20 @@ def export_template_set(ref: str, payload: ExportTemplateUpdate) -> dict[str, An
         return {"current": chosen, "presets": export_templates.preset_list()}
 
 
+def _require_docx_integrity(path: Path) -> None:
+    """交付前校验 DOCX 包结构；仅 error 级别阻断，警告不阻断。"""
+
+    from ...documents.validator import validate_docx_package
+
+    report = validate_docx_package(path)
+    errors = [item for item in report.get("issues", []) if item.get("severity") == "error"]
+    if errors:
+        raise HTTPException(
+            status_code=500,
+            detail="导出文档完整性校验失败：" + str(errors[0].get("message") or errors[0]),
+        )
+
+
 @router.post("/projects/{ref}/export")
 def export(ref: str, payload: ExportRequest) -> FileResponse:
     fmt = payload.format.lower()
@@ -2013,6 +2028,10 @@ def export(ref: str, payload: ExportRequest) -> FileResponse:
         image_resolver = images.url_resolver(project_id)
         image_policy = images.get_policy(project)
         template = export_templates.load(project)
+        # 专业引擎是 opt-in：显式在 project.meta 中打开并提供基础模板时启用。
+        export_meta = dict(project.meta or {})
+        professional = bool(export_meta.get("export_professional"))
+        base_template = export_meta.get("export_base_template") or None
     # 2) DOCX 渲染与 PDF 的 LibreOffice/UNO 转换（超时可达 240s）在事务外执行，
     #    避免长时间占用数据库连接/写事务；失败时与原实现一样不写审计。
     if fmt == "docx":
@@ -2023,7 +2042,10 @@ def export(ref: str, payload: ExportRequest) -> FileResponse:
             image_resolver=image_resolver,
             image_policy=image_policy,
             template=template,
+            professional=professional,
+            base_template=base_template,
         )
+        _require_docx_integrity(path)
     elif fmt in {"md", "markdown"}:
         path = export_markdown(output_dir / "bid.md", ledger, nodes)
     elif fmt == "xlsx":
@@ -2040,7 +2062,10 @@ def export(ref: str, payload: ExportRequest) -> FileResponse:
             image_resolver=image_resolver,
             image_policy=image_policy,
             template=template,
+            professional=professional,
+            base_template=base_template,
         )
+        _require_docx_integrity(docx_path)
         try:
             path = export_pdf(docx_path)
         except PdfExportError as exc:
@@ -2468,7 +2493,10 @@ def boq_version_delete(ref: str, version_id: str) -> dict[str, Any]:
     with session_scope() as db:
         project, _role = _project(db, ref)
         _require_write(_role)
-        boq.delete_version(db, project, version_id)
+        try:
+            boq.delete_version(db, project, version_id)
+        except boq.BoqConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         audit(db, project.id, "boq.version_delete", {"version_id": version_id})
         return {"deleted": True, "id": version_id}
 

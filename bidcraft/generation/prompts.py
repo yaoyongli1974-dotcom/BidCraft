@@ -1,5 +1,149 @@
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger("bidcraft.generation.prompts")
+
+#: Fallback context window when the model endpoint does not publish one.
+DEFAULT_CONTEXT_TOKENS = 32768
+DEFAULT_MAX_TOKENS = 4000
+#: Every block keeps at least this much room so a huge high-priority block
+#: cannot crowd out lower-priority facts (notably the mandatory needs block).
+_MIN_BLOCK_CHARS = 160
+
+
+def _clip_text(text: str, limit: int) -> str:
+    """Clip on a line boundary; never emit a half-line of assembled context."""
+
+    if len(text) <= limit:
+        return text
+    if limit <= 0:
+        return ""
+    kept: list[str] = []
+    used = 0
+    for line in text.splitlines(keepends=True):
+        if used + len(line) > limit:
+            break
+        kept.append(line)
+        used += len(line)
+    result = "".join(kept).rstrip()
+    if not result:
+        result = text[:limit].rstrip()
+    marker = "\n…（已截断）"
+    if len(result) + len(marker) <= limit:
+        result += marker
+    return result[:limit]
+
+
+def build_chapter_context(
+    *,
+    project_name: str,
+    heading: str,
+    intent: str,
+    target_words: int,
+    ledger_text: str,
+    outline_text: str,
+    previous_summary: str,
+    package_title: str,
+    knowledge_text: str = "",
+    facts_text: str = "",
+    needs: list[str] | None = None,
+    context_tokens: int | None = None,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+) -> str:
+    """Assemble the chapter user prompt within a model context budget.
+
+    The allocator is priority-ordered facts > needs > ledger > outline > digest
+    > KB.  Each block keeps a small minimum, then the remaining room is handed
+    out in priority order; truncation happens on line boundaries.  The final
+    size is logged so an oversized prompt is observable in production.
+    """
+
+    try:
+        window = int(context_tokens or DEFAULT_CONTEXT_TOKENS)
+    except (TypeError, ValueError):
+        window = DEFAULT_CONTEXT_TOKENS
+    try:
+        completion = int(max_tokens or 0)
+    except (TypeError, ValueError):
+        completion = DEFAULT_MAX_TOKENS
+    budget = max(512, window - completion)
+
+    header = (
+        f"项目：{project_name}\n"
+        f"行业包：{package_title}\n"
+        f"当前章节：{heading}\n"
+        f"章节意图：{intent or '按招标文件与本行业惯例展开'}\n"
+        f"目标字数：约 {target_words} 字"
+    )
+    requirements = (
+        "写作要求：\n"
+        "- 直接输出本章正文，不要输出章节标题以外的解释。\n"
+        "- 先用一段话说明本章响应了招标文件的哪些要求，再分层展开。\n"
+        "- 涉及清单、点位、参数、容量计算时使用 Markdown 表格，表头与数据行完整。\n"
+        "- 篇幅不少于目标字数的 80%。"
+    )
+
+    needs_block = ""
+    if needs:
+        lines = "\n".join(f"- {item}" for item in needs)
+        needs_block = (
+            "【本章必须引用的事实字段（逐项在正文体现，缺失写 {{待填:字段名}}）】\n"
+            f"{lines}\n\n"
+        )
+    facts_block = (
+        "【全局事实（必须严格遵守，前后一致）】\n"
+        f"{facts_text}\n"
+        "以上事实与台账冲突时，以台账为准；未列出的事实不得编造。"
+        if facts_text
+        else ""
+    )
+    # (text, priority) - lower priority number is protected first.
+    blocks: list[tuple[str, int]] = [
+        (facts_block, 0),
+        (needs_block, 1),
+        (str(ledger_text or ""), 2),
+        (f"【全书大纲】\n{outline_text or ''}", 3),
+        (f"【已写章节摘要（避免重复）】\n{previous_summary or '（本章为开篇）'}", 4),
+        (f"\n{knowledge_text}\n" if knowledge_text else "", 5),
+    ]
+
+    fixed_len = len(header) + len(requirements) + 2 * (len(blocks) + 1)
+    room = budget - fixed_len
+    if room < len(blocks) * _MIN_BLOCK_CHARS:
+        # Tiny budgets: keep every block's first line rather than dropping a
+        # whole category; the final clip below enforces the hard cap.
+        minimums = [min(len(text), 1) for text, _priority in blocks]
+    else:
+        minimums = [min(len(text), _MIN_BLOCK_CHARS) for text, _priority in blocks]
+    remaining = max(0, room - sum(minimums))
+    limits = list(minimums)
+    for index in sorted(range(len(blocks)), key=lambda i: blocks[i][1]):
+        if remaining <= 0:
+            break
+        needed = max(0, len(blocks[index][0]) - limits[index])
+        add = min(needed, remaining)
+        limits[index] += add
+        remaining -= add
+
+    parts = [
+        _clip_text(text, limit)
+        for (text, _priority), limit in zip(blocks, limits)
+        if text.strip()
+    ]
+    user = f"{header}\n\n" + "\n\n".join(parts) + f"\n\n{requirements}"
+    if len(user) > budget:
+        user = _clip_text(user, budget)
+    logger.info(
+        "chapter prompt size: %d chars (budget %d, window %s, max_tokens %d)",
+        len(user),
+        budget,
+        context_tokens,
+        completion,
+    )
+    return user
+
+
 SYSTEM_WRITER = """你是一名资深弱电/智能化行业投标文件编制工程师。
 你的任务是根据给定的「项目事实台账」和「章节大纲」撰写技术标正文。
 
@@ -28,43 +172,24 @@ def chapter_messages(
     knowledge_text: str = "",
     facts_text: str = "",
     needs: list[str] | None = None,
+    context_tokens: int | None = None,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> list[dict[str, str]]:
-    knowledge = f"\n{knowledge_text}\n" if knowledge_text else ""
-    facts = (
-        "【全局事实（必须严格遵守，前后一致）】\n"
-        f"{facts_text}\n"
-        "以上事实与台账冲突时，以台账为准；未列出的事实不得编造。\n\n"
-        if facts_text
-        else ""
+    user = build_chapter_context(
+        project_name=project_name,
+        heading=heading,
+        intent=intent,
+        target_words=target_words,
+        ledger_text=ledger_text,
+        outline_text=outline_text,
+        previous_summary=previous_summary,
+        package_title=package_title,
+        knowledge_text=knowledge_text,
+        facts_text=facts_text,
+        needs=needs,
+        context_tokens=context_tokens,
+        max_tokens=max_tokens,
     )
-    # 本章必须引用的事实字段（来自大纲 needs）。此前 needs 只在确定性降级路径使用，
-    # 模型路径丢失了这一约束，导致正文可能不引用本章应引用的台账字段。
-    needs_block = ""
-    if needs:
-        lines = "\n".join(f"- {item}" for item in needs)
-        needs_block = (
-            "【本章必须引用的事实字段（逐项在正文体现，缺失写 {{待填:字段名}}）】\n"
-            f"{lines}\n\n"
-        )
-    user = f"""项目：{project_name}
-行业包：{package_title}
-当前章节：{heading}
-章节意图：{intent or '按招标文件与本行业惯例展开'}
-目标字数：约 {target_words} 字
-
-{needs_block}{ledger_text}
-
-{facts}【全书大纲】
-{outline_text}
-
-【已写章节摘要（避免重复）】
-{previous_summary or '（本章为开篇）'}
-{knowledge}
-写作要求：
-- 直接输出本章正文，不要输出章节标题以外的解释。
-- 先用一段话说明本章响应了招标文件的哪些要求，再分层展开。
-- 涉及清单、点位、参数、容量计算时使用 Markdown 表格，表头与数据行完整。
-- 篇幅不少于目标字数的 80%。"""
     return [
         {"role": "system", "content": SYSTEM_WRITER},
         {"role": "user", "content": user},

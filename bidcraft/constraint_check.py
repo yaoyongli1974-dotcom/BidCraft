@@ -325,6 +325,12 @@ class ConstraintVerdict:
             "label": self.constraint.label,
             "state": self.state,
             "detail": self.detail[:120],
+            # 逐约束可追溯字段（R22）：原文片段 / 实际主体 / 阈值 / 单位 / 比较方向。
+            "source_span": self.constraint.source_span,
+            "subject": self.constraint.subject or self.constraint.family,
+            "quantity": self.constraint.quantity,
+            "unit": self.constraint.unit,
+            "comparator": self.constraint.comparator,
         }
 
 
@@ -434,7 +440,7 @@ def extract_constraints(text: str) -> list[Constraint]:
 # R11：连接词也是约束边界，不能只按标点切。无标点的复合条款
 # 「近三年三项类似项目业绩且网络带宽不低于1000Mbps」里，带宽约束的局部
 # 范围应从「且」之前截断，否则业绩词族会污染带宽约束。
-_LOCAL_CONNECTOR = re.compile(r"并提供|并满足|并且|同时|以及|还须|均应|分别|其中|须同时|并|且|但须|但|另外|并且")
+_LOCAL_CONNECTOR = re.compile(r"并提供|并满足|并且|须同时|同时|以及|但须|但|另外|并|且|和|与|及|还须|均应|分别|其中|并且")
 
 
 def _local_window(source: str, pos: int) -> str:

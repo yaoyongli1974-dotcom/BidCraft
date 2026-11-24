@@ -1,5 +1,5 @@
 import { ApiError, asArray, jsonBody, request } from '../lib/http'
-import type { KbDocMetaInput, KbDocMetaItem, KbDocMetaResponse, KbDocPolicy, KbDocSource, KbVectorResult, KnowledgeBase, KnowledgeBaseInput, TermInput, TermItem, TestResult } from '../lib/types'
+import type { KbDocMetaInput, KbDocMetaItem, KbDocMetaResponse, KbDocPolicy, KbDocSource, KbDocumentItem, KbSearchPassage, KbVectorResult, KnowledgeBase, KnowledgeBaseInput, TermInput, TermItem, TestResult } from '../lib/types'
 import { TERM_KINDS, TERM_NOTE_MAX, TERM_SOURCE_MAX, TERM_TARGET_MAX, asBool, asLooseBool, asNumber, asText, kbDocsPath, normalizeKbDocFields, normalizeKbDocPolicyEntry, normalizeKbDocSource, normalizeKbVector, normalizeTermKind, termItems, termPayload } from './shared'
 
 // ---------------------------------------------------------------- knowledge domain
@@ -26,6 +26,27 @@ export const deleteKnowledgeBase = (id: string) =>
 
 export const testKnowledgeBase = (id: string) =>
   request<TestResult>(`/admin/kbs/${encodeURIComponent(id)}/test`, { method: 'POST' })
+
+/** 文档实体清单（含页码/版本/有效期/状态）。 */
+export async function listKnowledgeDocuments(id: string): Promise<KbDocumentItem[]> {
+  const data = await request<{ items?: KbDocumentItem[] } | KbDocumentItem[]>(
+    `/admin/kbs/${encodeURIComponent(id)}/documents`,
+  )
+  return asArray<KbDocumentItem>(data, 'items')
+}
+
+/** 检索预览：返回带 document_id / page / heading 的片段。 */
+export async function previewKnowledgeBase(
+  id: string,
+  query: string,
+  limit = 5,
+): Promise<KbSearchPassage[]> {
+  const params = new URLSearchParams({ q: query, limit: String(limit) })
+  const data = await request<{ items?: KbSearchPassage[] } | KbSearchPassage[]>(
+    `/admin/kbs/${encodeURIComponent(id)}/preview?${params.toString()}`,
+  )
+  return asArray<KbSearchPassage>(data, 'items')
+}
 
 export const DEFAULT_KB_DOC_POLICY: KbDocPolicy = {
   qualification: {

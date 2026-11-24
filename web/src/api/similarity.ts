@@ -1,5 +1,6 @@
 import { asArray, jsonBody, request, requestBlob } from '../lib/http'
 import type {
+  SimilarityEvidence,
   SimilarityHit,
   SimilarityHitStatus,
   SimilarityReport,
@@ -71,12 +72,30 @@ export function normalizeSimilarityReport(raw: unknown): SimilarityReport {
     ...(skipped !== undefined ? { skipped } : {}),
     source_project_id: source.source_project_id ? asText(source.source_project_id) : null,
     created_at: isoOrNull(source.created_at),
-    finished_at: isoOrNull(source.finished_at),
+    // 后端字段是 completed_at；旧前端只看 finished_at 会永远显示「未完成」。
+    finished_at: isoOrNull(source.finished_at ?? source.completed_at),
+  }
+}
+
+export function normalizeSimilarityEvidence(raw: unknown): SimilarityEvidence | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const data = raw as Record<string, unknown>
+  return {
+    ...data,
+    common: data.common === true || data.reasonable_duplicate === true,
+    reasonable_duplicate: data.reasonable_duplicate === true || data.common === true,
+    degraded: data.degraded === true,
+    ...(data.vector_similarity !== undefined
+      ? { vector_similarity: asNumber(data.vector_similarity) }
+      : {}),
+    ...(data.rerank_score !== undefined ? { rerank_score: asNumber(data.rerank_score) } : {}),
   }
 }
 
 export function normalizeSimilarityHit(raw: unknown): SimilarityHit {
   const source = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  const evidence = normalizeSimilarityEvidence(source.evidence)
+  const rerankRaw = source.rerank_score ?? evidence?.rerank_score
   return {
     id: asText(source.id),
     kind: asText(source.kind) || 'text',
@@ -87,6 +106,10 @@ export function normalizeSimilarityHit(raw: unknown): SimilarityHit {
     excerpt_a: asText(source.excerpt_a),
     excerpt_b: asText(source.excerpt_b),
     similarity: asNumber(source.similarity),
+    ...(rerankRaw !== undefined && rerankRaw !== null
+      ? { rerank_score: asNumber(rerankRaw) }
+      : {}),
+    ...(evidence ? { evidence } : {}),
     review_status: (asText(source.review_status, 'pending') || 'pending') as SimilarityHitStatus,
     review_note: asText(source.review_note),
   }
@@ -96,8 +119,13 @@ export function normalizeSimilarityHit(raw: unknown): SimilarityHit {
 export async function checkSimilarity(
   ref: string,
   input: SimilarityCheckInput,
-): Promise<{ report_id: string }> {
-  const data = await request<{ report_id?: string; id?: string }>(
+): Promise<{ report_id: string; job_id?: string; status?: string }> {
+  const data = await request<{
+    report_id?: string
+    id?: string
+    job_id?: string
+    status?: string
+  }>(
     `/projects/${encodeURIComponent(ref)}/similarity/check`,
     jsonBody({
       scope: input.scope,
@@ -106,7 +134,11 @@ export async function checkSimilarity(
       ...(input.source_project_id ? { source_project_id: input.source_project_id } : {}),
     }),
   )
-  return { report_id: asText(data?.report_id ?? data?.id) }
+  return {
+    report_id: asText(data?.report_id ?? data?.id),
+    ...(data?.job_id ? { job_id: asText(data.job_id) } : {}),
+    ...(data?.status ? { status: asText(data.status) } : {}),
+  }
 }
 
 export async function listSimilarityReports(ref: string): Promise<SimilarityReport[]> {

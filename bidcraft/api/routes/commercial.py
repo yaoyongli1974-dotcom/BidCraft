@@ -178,7 +178,11 @@ def commercial_unapprove(ref: str, doc_id: str) -> dict[str, Any]:
 
 @router.post("/projects/{ref}/commercial/{doc_id}/export")
 def commercial_export(
-    ref: str, doc_id: str, format: str = "xlsx"
+    ref: str,
+    doc_id: str,
+    format: str = "xlsx",
+    force: bool = False,
+    force_reason: str = "",
 ) -> FileResponse:
     from ...export_gate import ExportGateError, enforce_export_gate
 
@@ -189,10 +193,25 @@ def commercial_export(
     with session_scope() as db:
         project, role = _project(db, ref)
         _require_write(role)
+        # 强制导出沿用项目导出的独立权限：只有 owner/admin 可以覆盖一致性冲突。
+        if force:
+            _require_owner(role)
         doc = commercial.get_commercial(db, project, doc_id)
         if doc is None:
             raise HTTPException(status_code=404, detail="商务标不存在")
-        payload = commercial.export_payload(db, project, doc)
+        # 交付前重新校验引用的报价版本（旧版/未审批一律拦下），force 需 ≥4 字原因并留痕。
+        try:
+            payload = commercial.ensure_commercial_export_allowed(
+                db,
+                project,
+                doc,
+                fmt=fmt,
+                force=force,
+                force_reason=force_reason,
+                actor=current_user(),
+            )
+        except (commercial.CommercialConflictError, ValueError) as exc:
+            raise _http_error(exc) from exc
         # 商务标是交付件而非内部台账，xlsx 同样走导出硬门禁的口径（export_gate
         # 只为 docx/pdf/md 建模；这里用 docx 门禁，阻断风险与未确认章节都要拦）。
         gate_fmt = "docx" if fmt == "xlsx" else fmt
@@ -200,10 +219,13 @@ def commercial_export(
             enforce_export_gate(db, project.id, gate_fmt)
         except ExportGateError as exc:
             raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+        from ...export import templates as export_templates
+
         project_id = project.id
         doc_id_value = doc.id
         doc_name = doc.name
         quote_version_id = doc.quote_version_id
+        template = export_templates.load(project)
         output = settings.project_dir(project_id) / "output" / f"commercial-{doc_id_value}.{fmt}"
         safe = re.sub(r'[\\/:*?"<>|]', "", project.name).strip() or "BidCraft"
     # 2) 文件渲染（xlsx/docx 可能涉及大量单元格/图片）在事务外执行。
@@ -212,9 +234,17 @@ def commercial_export(
 
         path = export_commercial_xlsx(output, payload)
     else:
+        from ...documents.validator import validate_docx_package
         from ...export.commercial_docx import export_commercial_docx
 
-        path = export_commercial_docx(output, payload)
+        path = export_commercial_docx(output, payload, template=template)
+        report = validate_docx_package(path)
+        errors = [item for item in report.get("issues", []) if item.get("severity") == "error"]
+        if errors:
+            raise HTTPException(
+                status_code=500,
+                detail="导出文档完整性校验失败：" + str(errors[0].get("message") or errors[0]),
+            )
     # 3) 渲染成功后再写审计，与原"同事务提交"语义一致（失败不留痕）。
     with session_scope() as db:
         audit(

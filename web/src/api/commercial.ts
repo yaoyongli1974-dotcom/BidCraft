@@ -135,9 +135,13 @@ export function normalizeCommercialDoc(raw: unknown): CommercialDoc {
   }
 }
 
-export async function listCommercialDocs(ref: string): Promise<CommercialDoc[]> {
+export async function listCommercialDocs(
+  ref: string,
+  packageId?: string | null,
+): Promise<CommercialDoc[]> {
+  const query = packageId ? `?package_id=${encodeURIComponent(packageId)}` : ''
   const data = await request<unknown>(
-    `/projects/${encodeURIComponent(ref)}/commercial`,
+    `/projects/${encodeURIComponent(ref)}/commercial${query}`,
   )
   return asArray<unknown>(data, 'documents').map(normalizeCommercialDoc)
 }
@@ -242,9 +246,13 @@ export function exportCommercialDoc(
   ref: string,
   docId: string,
   format: CommercialExportFormat,
+  options: { force?: boolean; forceReason?: string } = {},
 ): Promise<{ blob: Blob; filename: string }> {
+  const params = new URLSearchParams({ format })
+  if (options.force) params.set('force', 'true')
+  if (options.forceReason?.trim()) params.set('force_reason', options.forceReason.trim())
   return requestBlob(
-    `/projects/${encodeURIComponent(ref)}/commercial/${encodeURIComponent(docId)}/export?format=${encodeURIComponent(format)}`,
+    `/projects/${encodeURIComponent(ref)}/commercial/${encodeURIComponent(docId)}/export?${params.toString()}`,
     { method: 'POST' },
     `商务标.${format}`,
   )

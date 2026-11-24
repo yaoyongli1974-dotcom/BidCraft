@@ -276,15 +276,25 @@ def _issue_anchor(location: str, anchors: list[dict]) -> dict | None:
     return None
 
 
-def _annotate_requirement_coverage(requirements: list[Requirement], nodes: list[dict]) -> None:
+def _annotate_requirement_coverage(
+    requirements: list[Requirement],
+    nodes: list[dict],
+    *,
+    deadline=None,
+    matcher=None,
+) -> None:
     """把「这一条被哪一章覆盖了」写回 Requirement，供风险总览展示与跳转。
 
-    只改自动匹配结果，不动人工确认过的 status / note。
+    复用与 ``requirement_issues`` 相同的 judge() 口径（含截止日期与可选语义层），
+    避免 auto_covered=True 但该条款被判未响应的自相矛盾。只改自动匹配结果，
+    不动人工确认过的 status / note。
     """
 
     for requirement in requirements:
-        section = substantive.find_covering_section(requirement.text or "", nodes)
-        if section is None:
+        covered, section = substantive.coverage_from_verdict(
+            requirement, nodes, deadline=deadline, matcher=matcher
+        )
+        if not covered:
             requirement.auto_covered = False
             if requirement.response_status == "pending":
                 requirement.section_id = None
@@ -293,6 +303,40 @@ def _annotate_requirement_coverage(requirements: list[Requirement], nodes: list[
         requirement.auto_covered = True
         requirement.section_id = section.get("section_id")
         requirement.node_id = section.get("id")
+
+
+def _generation_suspicious_results(ledger, nodes: list[dict]) -> list:
+    """Surface generation-time suspicious numbers as check issues.
+
+    The writer flags ungrounded long numbers while drafting; checks used to
+    ignore them.  Recomputing from the persisted body keeps this read-only and
+    lets the risk overview / export gate consume the same anti-fabrication
+    signal without a new Section column.
+    """
+
+    from .generation.writer import suspicious_numbers
+
+    results = []
+    for node in nodes:
+        body = str(node.get("body") or "")
+        if not body.strip():
+            continue
+        flagged = suspicious_numbers(body, ledger)
+        if not flagged:
+            continue
+        results.append(
+            CheckResult(
+                code="GEN-SUSPICIOUS-NUMBER",
+                level="major",
+                category="生成质量",
+                message="正文出现台账之外的长数字，需人工复核来源",
+                location=str(node.get("heading") or ""),
+                finding="、".join(flagged[:8]),
+                recommendation="核对招标文件/事实台账，无依据的数字改为 {{待填:具体信息}}",
+                evidence={"numbers": flagged, "node_id": node.get("id")},
+            )
+        )
+    return results
 
 
 def check_project(db: Session, project_id: str) -> tuple[list, dict]:
@@ -308,12 +352,7 @@ def check_project(db: Session, project_id: str) -> tuple[list, dict]:
     all_results.extend(_term_results(db, nodes))
     all_results.extend(_textqa_results(db, nodes))
     all_results.extend(_profile_results(db, project, nodes))
-    # 实质性条款 → 正文响应：未响应的条款在这里变成 blocking/critical 问题，
-    # 直接进入导出硬门禁；人工标记 responded/na 的条款由 requirement_issues 跳过。
-    requirements = list(
-        db.scalars(select(Requirement).where(Requirement.project_id == project_id))
-    )
-    _annotate_requirement_coverage(requirements, nodes)
+    all_results.extend(_generation_suspicious_results(ledger, nodes))
     # R03：招标截止日期是业绩时间窗的校验基准——优先 facts 台账，meta 兜底；
     # 拿不到时 judge 会把带明确日期的业绩转人工复核，绝不用服务器当前时间。
     from .verdict import resolve_deadline
@@ -322,6 +361,12 @@ def check_project(db: Session, project_id: str) -> tuple[list, dict]:
     deadline = resolve_deadline(ledger.facts, project.meta)
     # 可选 LLM 语义层：默认关闭或模型不可用时自动回退规则，语义分不替代硬约束。
     matcher = build_verdict_matcher(db)
+    # 实质性条款 → 正文响应：未响应的条款在这里变成 blocking/critical 问题，
+    # 直接进入导出硬门禁；人工标记 responded/na 的条款由 requirement_issues 跳过。
+    requirements = list(
+        db.scalars(select(Requirement).where(Requirement.project_id == project_id))
+    )
+    _annotate_requirement_coverage(requirements, nodes, deadline=deadline, matcher=matcher)
     all_results.extend(
         substantive.requirement_issues(requirements, nodes, deadline=deadline, matcher=matcher)
     )

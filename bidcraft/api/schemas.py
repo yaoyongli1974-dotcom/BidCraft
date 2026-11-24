@@ -642,5 +642,7 @@ class QualityRunRequest(BaseModel):
 
 
 class QualityFindingUpdate(BaseModel):
-    status: str = "handled"
+    # 与 IssueStatusUpdate 口径一致：只允许人工处置的三种终态，非法值在
+    # 请求体解析阶段直接 422，不进入 Service 层。
+    status: Literal["handled", "ignored", "open"] = "handled"
     note: str = ""

@@ -20,7 +20,7 @@ npm install
 npm run dev
 ```
 
-Vite 开发服务器运行在 `http://127.0.0.1:5173`，并把 `/health`、`/packages`、`/projects`、`/jobs`、`/api`、`/auth`、`/billing/*`、`/admin/models`、`/admin/kbs`、`/admin/users`、`/admin/billing`、`/admin/redeem-codes`、`/admin/rule-packages`、`/admin/quotas`、`/admin/plugins`、`/admin/audit` 代理到后端（默认 `http://127.0.0.1:8000`）。目标地址可覆盖：
+Vite 开发服务器运行在 `http://127.0.0.1:5173`，并把以下根级命名空间代理到后端（默认 `http://127.0.0.1:8000`）：`/health`、`/packages`、`/my`、`/projects`、`/enterprise`、`/commercial`、`/similarity`、`/evaluation`、`/orchestration`、`/agents`、`/collaboration`、`/jobs`、`/batch-jobs`、`/api`、`/auth`、`/account`、`/approvals`、`/legal`、`/billing`、`/admin`。`/admin`、`/billing`、`/account`、`/legal` 同时也是 SPA 路由：带 `Accept: text/html` 的浏览器导航会交给 Vite 的历史回退（支持深链刷新），带 `Accept: application/json` 的 API 请求才走代理。目标地址可覆盖：
 
 ```bash
 BIDCRAFT_API_TARGET=http://127.0.0.1:8765 npm run dev
@@ -50,7 +50,7 @@ npm run build
 - `/app/projects/:ref/export`：导出
 - `/app/projects/:ref/collab`：协作与审计
 - `/admin`：管理控制台（仅超级管理员；非管理员显示 403 状态）
-- API 始终在根路径 `/health`、`/packages`、`/projects`、`/jobs`、`/auth`、`/billing/*`、`/admin/*`
+- API 始终在根路径 `/health`、`/packages`、`/my`、`/projects`、`/jobs`、`/batch-jobs`、`/auth`、`/account`、`/approvals`、`/legal`、`/billing/*`、`/admin/*`、`/agents`、`/enterprise`
 
 ## 认证与权限
 

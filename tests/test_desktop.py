@@ -163,6 +163,24 @@ def test_api_prefix_never_hits_static(gateway, upstream):
     assert _UpstreamHandler.records[-1]["path"] == "/projects"
 
 
+@pytest.mark.parametrize("prefix", desktop.PROXY_PREFIXES)
+def test_every_proxy_prefix_is_forwarded(gateway, upstream, prefix):
+    # 每个白名单前缀（含 /agents、/enterprise、/legal）都必须走上游，
+    # 不能被 SPA 回退吞掉；上游 fixture 对裸前缀返回 404 JSON。
+    response = _get(gateway, prefix, headers={"Accept": "application/json"})
+    assert response.headers["content-type"].startswith("application/json")
+    assert "desktop-spa" not in response.text
+    assert _UpstreamHandler.records[-1]["path"] == prefix
+
+
+@pytest.mark.parametrize("path", sorted(desktop.PROXY_PATHS))
+def test_exact_proxy_paths_are_forwarded(gateway, upstream, path):
+    response = _get(gateway, path, headers={"Accept": "application/json"})
+    assert response.headers["content-type"].startswith("application/json")
+    assert "desktop-spa" not in response.text
+    assert _UpstreamHandler.records[-1]["path"] == path
+
+
 def test_upload_requires_token_and_path(gateway):
     local = __file__
     assert (

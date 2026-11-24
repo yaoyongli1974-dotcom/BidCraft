@@ -3,6 +3,8 @@
 from .document_ir import (
     DEFAULT_BODY_FONT,
     DEFAULT_HEADING_FONT,
+    LINK_PATTERN,
+    DocumentCover,
     DocumentHeaderFooter,
     DocumentIR,
     DocumentPageLayout,
@@ -10,9 +12,11 @@ from .document_ir import (
     DocumentSection,
     DocumentStyle,
     DocumentTable,
+    DocumentTOC,
     default_styles,
     from_markdown_sections,
     heading_level,
+    iter_text_tokens,
 )
 from .renderer import render_document
 from .template_parser import (
@@ -27,12 +31,15 @@ from .validator import build_document_report, validate_docx_package
 __all__ = [
     "DEFAULT_BODY_FONT",
     "DEFAULT_HEADING_FONT",
+    "LINK_PATTERN",
+    "DocumentCover",
     "DocumentHeaderFooter",
     "DocumentIR",
     "DocumentPageLayout",
     "DocumentParagraph",
     "DocumentSection",
     "DocumentStyle",
+    "DocumentTOC",
     "DocumentTable",
     "build_document_report",
     "default_styles",
@@ -41,6 +48,7 @@ __all__ = [
     "extract_template_styles",
     "from_markdown_sections",
     "heading_level",
+    "iter_text_tokens",
     "parse_docx_template",
     "render_document",
     "validate_docx_package",

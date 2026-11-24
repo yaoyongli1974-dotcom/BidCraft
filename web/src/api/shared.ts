@@ -520,6 +520,8 @@ export function normalizePendingApproval(value: unknown): PendingApproval | null
     submitted_by: asText(raw.submitted_by).slice(0, 80),
     submitted_at: isoOrNull(raw.submitted_at),
     total_amount: Number.isFinite(amount) ? amount : null,
+    doc_id: asText(raw.doc_id).trim() || undefined,
+    doc_name: asText(raw.doc_name).slice(0, 120) || undefined,
   }
 }
 

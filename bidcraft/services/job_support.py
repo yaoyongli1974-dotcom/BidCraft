@@ -13,11 +13,11 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import billing, jobs, knowledge, material_policy, model_config, user_docs
+from .. import jobs, knowledge, material_policy, model_config, user_docs
 from ..config import settings
 from ..db import session_scope
 from ..generation.agent import ModelClient
-from ..models import Job, User
+from ..models import Job
 
 BATCH_STALE_SECONDS = 2 * 3600
 KB_REINDEX_STALE_SECONDS = 2 * 3600
@@ -128,6 +128,9 @@ def _report_payload(report) -> dict[str, Any]:
         "fallback": report.fallback,
         "failed": report.failed,
         "suspicious_numbers": report.suspicious,
+        "suspicious_count": getattr(report, "suspicious_count", 0),
+        "knowledge_downgrades": getattr(report, "knowledge_downgrades", 0),
+        "verification": getattr(report, "verification", {}),
         "usage": report.usage,
     }
 
@@ -164,22 +167,22 @@ def _knowledge_provider(db, user_id: str | None = None):
             limit=4,
             extra_kb_ids=extra_kb_ids or None,
         )
-        block, _ = material_policy.context_block(db, passages)
-        return block
+        block, downgraded = material_policy.context_block(db, passages)
+        # Forward the advisory downgrade count to the writer so it reaches the
+        # generation report instead of being silently discarded.
+        return block, downgraded
 
     return provide
 
 
-def _job_refund(db, job: Job, written: int) -> None:
-    payload = dict(job.payload or {})
-    charged = int(payload.get("charged") or 0)
-    chapters = int(payload.get("chapters") or 0)
-    if not charged or not chapters or payload.get("refunded"):
-        return
-    refund = max(0, chapters - written) * charged // chapters
-    user = db.get(User, payload.get("user_id") or "")
-    if refund > 0 and user is not None:
-        billing.refund_chapters(db, user, refund)
-        payload["refunded"] = True
-        payload["refunded_credits"] = refund
-        job.payload = payload
+def _job_refund(db, job: Job, written: int | None = None) -> None:
+    """Settle an async ``generate`` charge (thin wrapper over the shared helper).
+
+    ``written`` is optional: when omitted, the authoritative
+    ``payload['done_steps']`` ledger is used, so resumed runs and exception
+    paths refund only for chapters that were genuinely never persisted.
+    """
+
+    from ..jobqueue import refund_charged_job
+
+    refund_charged_job(db, job, written)

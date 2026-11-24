@@ -98,8 +98,9 @@ export function PendingApprovals() {
 
   const openItem = (item: PendingApproval) => {
     setOpen(false)
-    // 沿用现有「打开项目」路径：/app/projects/:ref 的 boq 子路由即清单对齐页签。
-    navigate(`/app/projects/${encodeURIComponent(item.project_id)}/boq`)
+    // 商务标待办跳到商务标页签；报价版本仍沿用清单对齐（BOQ）页签。
+    const tab = item.doc_id ? 'commercial' : 'boq'
+    navigate(`/app/projects/${encodeURIComponent(item.project_id)}/${tab}`)
   }
 
   return (
@@ -166,7 +167,7 @@ export function PendingApprovals() {
             ) : (
               <ul className="pending-list">
                 {items.map((item) => (
-                  <li key={`${item.project_id}:${item.version_id}`}>
+                  <li key={`${item.project_id}:${item.doc_id || item.version_id}`}>
                     <button
                       type="button"
                       className="pending-item"
@@ -204,7 +205,7 @@ export function PendingApprovals() {
 
           <div className="pending-dropdown-foot">
             <ClipboardCheck size={11} aria-hidden />
-            点击跳转到项目的清单对齐页签，在版本面板中审批；Agent 工作流审批在项目「Agent 工作流」页签处理（提交人不能自审）
+            报价跳清单对齐、商务标跳商务标页签，在对应面板中审批；Agent 工作流审批在项目「Agent 工作流」页签处理（提交人不能自审）
           </div>
         </div>
       )}

@@ -554,6 +554,8 @@ class PendingCharge(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    #: 实际付款账号（子账号的 charge 计入主账号）；子账号被删除后仍能定位退款对象。
+    billing_account_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     project_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     credits: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     chapters: Mapped[int] = mapped_column(Integer, nullable=False, default=1)

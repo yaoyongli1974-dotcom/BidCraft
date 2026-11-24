@@ -4,6 +4,8 @@ import sys
 
 from fastapi import APIRouter
 
+from ...models import KbDocument  # 文档实体未纳入 api.shared 导出面
+
 _core = sys.modules['bidcraft.api.app']  # 运行期查找，保持 monkeypatch 生效
 
 from ..shared import (  # noqa: F401
@@ -279,6 +281,8 @@ def update_kb(kb_id: str, payload: KbUpdate, request: Request) -> dict[str, Any]
         if "kind" in data or "provider" in data:
             validate_kb(data.get("kind", row.kind), data.get("provider", row.provider))
         if data.get("kind") == "api" and row.kind == "local":
+            # FK 未开级联，SQLite 也不强制外键：显式清理文档实体与其块。
+            db.execute(delete(KbDocument).where(KbDocument.kb_id == row.id))
             db.execute(delete(KbChunk).where(KbChunk.kb_id == row.id))
             row.chunk_count = 0
             row.indexed_at = None
@@ -287,6 +291,7 @@ def update_kb(kb_id: str, payload: KbUpdate, request: Request) -> dict[str, Any]
             and data["location"] != row.location
             and row.kind == "local"
         ):
+            db.execute(delete(KbDocument).where(KbDocument.kb_id == row.id))
             db.execute(delete(KbChunk).where(KbChunk.kb_id == row.id))
             row.chunk_count = 0
             row.indexed_at = None
@@ -314,6 +319,7 @@ def delete_kb(kb_id: str, request: Request) -> dict[str, Any]:
         row = db.get(KnowledgeBase, kb_id)
         if row is None:
             raise HTTPException(status_code=404, detail="知识库不存在")
+        db.execute(delete(KbDocument).where(KbDocument.kb_id == kb_id))
         db.execute(delete(KbChunk).where(KbChunk.kb_id == kb_id))
         db.delete(row)
         return {"deleted": True, "id": kb_id}
@@ -390,6 +396,60 @@ def embed_kb(kb_id: str, request: Request) -> dict[str, Any]:
             )
         result = knowledge.build_vectors(db, row)
         return {**result, "kb": knowledge.kb_payload(row, db)}
+
+
+@router.get("/admin/kbs/{kb_id}/documents")
+def kb_documents(kb_id: str, request: Request) -> dict[str, Any]:
+    """文档实体清单（版本/哈希/页码/有效期/状态），供溯源与运维核对。"""
+
+    require_super(request)
+    with session_scope() as db:
+        row = db.get(KnowledgeBase, kb_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="知识库不存在")
+        return {
+            "items": [
+                knowledge.document_payload(doc)
+                for doc in knowledge.list_documents(db, row)
+            ]
+        }
+
+
+@router.get("/admin/kbs/{kb_id}/preview")
+def kb_preview(kb_id: str, request: Request, q: str = "", limit: int = 5) -> dict[str, Any]:
+    """检索预览：返回带 document_id/page/heading 溯源字段的候选片段。"""
+
+    require_super(request)
+    query = str(q or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="检索内容不能为空")
+    with session_scope() as db:
+        row = db.get(KnowledgeBase, kb_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="知识库不存在")
+        try:
+            if row.kind == "local":
+                passages = knowledge.search_local(db, row, query, max(1, min(20, limit)))
+            else:
+                passages = knowledge.search_api(db, row, query, max(1, min(20, limit)))
+        except knowledge.KnowledgeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "kb_id": kb_id,
+            "query": query,
+            "items": [
+                {
+                    "kb_id": passage.kb_id or kb_id,
+                    "source": passage.source,
+                    "text": passage.text,
+                    "score": passage.score,
+                    "document_id": passage.document_id,
+                    "page": passage.page,
+                    "heading": passage.heading,
+                }
+                for passage in passages
+            ],
+        }
 
 
 @router.get("/admin/kbs/{kb_id}/docs")

@@ -16,7 +16,8 @@ from ...evaluation import (  # noqa: F401
     report_payload,
     update_finding,
 )
-from ...models import Job, QualityFinding  # noqa: F401
+from ...evaluation.report import finding_for_project  # noqa: F401
+from ...models import Job, QualityFinding, QualityReport  # noqa: F401
 from ..schemas import QualityFindingUpdate, QualityRunRequest  # noqa: F401
 from ..shared import (  # noqa: F401
     BATCH_STALE_SECONDS,
@@ -167,8 +168,21 @@ def evaluation_finding_update(
     with session_scope() as db:
         project, role = _project(db, ref)
         _require_write(role)
-        row = update_finding(db, finding_id, payload.status, payload.note or "", _actor())
+        # IDOR 防护：finding → report → project 归属必须一致；跨项目一律 404，
+        # 不暴露其它项目 finding 是否存在。Service 层再用 project_id 兜一次。
+        found = finding_for_project(db, finding_id, project.id)
+        if found is None:
+            raise LookupError("质量问题不存在")
+        row = update_finding(
+            db,
+            finding_id,
+            payload.status,
+            payload.note or "",
+            _actor(),
+            project_id=project.id,
+        )
         if row is None:
             raise LookupError("质量问题不存在")
-        audit(db, project.id, "quality.finding.http", {"finding_id": finding_id, "status": row.status})
+        # 审计使用真实归属项目（finding_for_project 已校验），不用 ref 猜测。
+        audit(db, found[1].project_id, "quality.finding.http", {"finding_id": finding_id, "status": row.status})
         return finding_payload(row)

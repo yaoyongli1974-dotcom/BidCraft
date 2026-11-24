@@ -167,6 +167,84 @@ def test_0009_upgrade_from_legacy_postgres_schema(pg_engine):
         _reset_to_head()
 
 
+def test_head_downgrade_to_0008_and_reupgrade_preserves_schema_and_data(pg_engine):
+    """opt-in：head → 0008 → head 往返后索引/列/表/数据都还在（PG 专用路径）。"""
+    import importlib
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import inspect
+
+    from bidcraft.db import session_scope
+    from bidcraft.migrations import __file__ as migrations_init
+    from bidcraft.models import Job, Project
+
+    parity = importlib.import_module("bidcraft.migrations.versions.0009_v028_schema_parity")
+    batch1 = importlib.import_module(
+        "bidcraft.migrations.versions.0010_batch1_billing_reliability"
+    )
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(Path(migrations_init).parent))
+    cfg.set_main_option(
+        "sqlalchemy.url",
+        pg_engine.url.render_as_string(hide_password=False).replace("%", "%%"),
+    )
+
+    with session_scope() as db:
+        project = Project(name="往返保留项目")
+        db.add(project)
+        db.flush()
+        db.add(
+            Job(
+                project_id=project.id,
+                kind="generate",
+                status="queued",
+                payload={"owner_id": "u-roundtrip"},
+            )
+        )
+        project_id = project.id
+
+    def columns(table):
+        return {item["name"] for item in inspect(pg_engine).get_columns(table)}
+
+    def indexes(table):
+        return {item["name"] for item in inspect(pg_engine).get_indexes(table)}
+
+    def table_names():
+        return set(inspect(pg_engine).get_table_names())
+
+    parity_indexes = {name for name, _table, _cols in parity._INDEXES}
+    try:
+        command.downgrade(cfg, "0008_job_queue_indexes")
+        assert "owner_id" not in columns("jobs")
+        assert "pending_charges" not in table_names()
+        present_tables = {"jobs", "plugins"} & table_names()
+        remaining = set().union(*(indexes(t) for t in present_tables)) if present_tables else set()
+        assert not parity_indexes & remaining
+
+        command.upgrade(cfg, "head")
+        assert "owner_id" in columns("jobs")
+        assert "pending_charges" in table_names()
+        assert batch1._BILLING_ACCOUNT_COLUMN in columns("pending_charges")
+        for _name, table, _cols in parity._INDEXES:
+            assert _name in indexes(table), _name
+        with pg_engine.connect() as connection:
+            head = connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar()
+        assert head == _alembic_head()
+
+        with session_scope() as db:
+            restored = db.get(Project, project_id)
+            assert restored is not None and restored.name == "往返保留项目"
+            assert db.query(Job).filter_by(project_id=project_id).count() == 1
+    finally:
+        # 其它用例依赖 head schema；无论断言结果如何都恢复。
+        command.upgrade(cfg, "head")
+
+
 def test_crud_roundtrip_with_json_and_chinese(pg_engine):
     from bidcraft.db import session_scope
     from bidcraft.models import Fact, OutlineNode, Project, Section

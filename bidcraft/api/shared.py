@@ -84,7 +84,7 @@ from ..export_gate import (  # noqa: F401,E402
     issue_is_open,
 )
 from ..generation.outline import build_outline, load_outline, save_outline  # noqa: F401,E402
-from ..generation.writer import count_words, generate_document  # noqa: F401,E402
+from ..generation.writer import count_words, generate_document, is_pending  # noqa: F401,E402
 from ..ledger import ledger_summary, load_ledger, update_fact  # noqa: F401,E402
 from ..models import (  # noqa: F401,E402
     AuditLog,
@@ -150,6 +150,7 @@ from ..services.job_support import (  # noqa: F401 - 保留 api 名字空间，�
 )
 from ..substantive import REQ_TYPE_LABELS, classify_requirement  # noqa: F401,E402
 from ..verdict import judge as judge_requirement
+from ..verdict import resolve_deadline
 from ..workers import (  # noqa: F401 - 同上；测试也 monkeypatch 这些名字
     _run_batch_check_job,
     _run_batch_export_job,
@@ -634,6 +635,31 @@ def get_outline_cached(
     return cache[project_id]
 
 
+def judge_for_project(
+    db: Session,
+    requirement: Requirement,
+    nodes: list[dict],
+) -> Any:
+    """与 pipeline.check_project 同口径判定单条条款（截止日期 + 可选 matcher）。
+
+    GET/PATCH /requirements 旧实现直接调 judge()，拿不到事实台账里的招标截止
+    日期与可选语义 matcher，和 /check 生成的 SUB 问题判定漂移。这里统一解析
+    deadline 并复用 matcher；节点由调用方一次加载后传入，不额外查大纲。
+    """
+
+    from ..verdict_llm import build_verdict_matcher
+
+    project = db.get(Project, requirement.project_id)
+    meta = (getattr(project, "meta", None) or {}) if project is not None else {}
+    try:
+        ledger = load_ledger(db, requirement.project_id)
+        deadline = resolve_deadline(ledger.facts, meta)
+    except Exception:  # noqa: BLE001 - 展示判定不可因台账读取失败而 500
+        deadline = resolve_deadline([], meta)
+    matcher = build_verdict_matcher(db)
+    return judge_requirement(requirement, nodes, matcher=matcher, deadline=deadline)
+
+
 def _requirement_payload(
     db: Session,
     requirement: Requirement,
@@ -657,7 +683,7 @@ def _requirement_payload(
                 (n.get("heading") or "" for n in nodes if str(n.get("id")) == node_id),
                 "",
             )
-    verdict = judge_requirement(requirement, nodes)
+    verdict = judge_for_project(db, requirement, nodes)
     return {
         "id": requirement.id,
         "kind": requirement.kind,
@@ -853,7 +879,9 @@ def _outline_payload(db, project_id: str) -> list[dict[str, Any]]:
         chapters.append(
             {
                 **node,
-                "has_body": bool(body),
+                # load_outline 的 body 可能是 None / 纯空白；只看非空文本，
+                # 否则所有节点都会显示「无正文」。
+                "has_body": bool((body or "").strip()),
                 "citations": int(flag.get("citations", 0)),
                 "citations_stale": int(flag.get("stale", 0)),
             }
@@ -906,8 +934,14 @@ def _http_error(status: int, detail: str):
 
 
 def _pending_chapters(db, project_id: str, force: bool = False) -> int:
+    """待重生成章节数：与 writer 的恢复口径共用 is_pending。
+
+    过去只看 body 是否存在，超时/截断后落库的残稿、failed/fallback 状态与
+    明显不足字数的章节不会被重生成；现在统一由 writer.is_pending 判断。
+    """
+
     nodes = load_outline(db, project_id)
-    return len([node for node in nodes if force or not node.get("body")])
+    return sum(1 for node in nodes if force or is_pending(node))
 
 
 def _profile_keys(profile_values: dict[str, Any]) -> list[str]:

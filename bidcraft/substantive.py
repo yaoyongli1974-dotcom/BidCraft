@@ -344,6 +344,35 @@ def anchor_evidence(text: str, body: str, req_type: str) -> list[dict]:
     return _anchor_hits(text, body, req_type)[1]
 
 
+def anchor_evidence_by_node(
+    text: str, nodes: list[dict], req_type: str, limit: int = 10
+) -> list[dict]:
+    """逐章取锚点证据，并带上 node_id / section_id / heading 与章内偏移。
+
+    过去把各章 body 拼成一个大字符串再取证据，``position`` 是拼接串里的
+    全局偏移，无法定位到具体章节。逐章调用后保留章内 ``position``，同时
+    附加节点身份，证据才可被人工复核。
+    """
+
+    hits: list[dict] = []
+    for node in nodes:
+        body = node.get("body") or ""
+        if not body:
+            continue
+        for hit in anchor_evidence(text, body, req_type):
+            hits.append(
+                {
+                    **hit,
+                    "node_id": node.get("id"),
+                    "section_id": node.get("section_id"),
+                    "heading": node.get("heading") or "",
+                }
+            )
+            if len(hits) >= limit:
+                return hits
+    return hits
+
+
 def classify_requirement(text: str) -> str:
     """按条款文本推断类型；只有命中具体信号词才归类，否则 general。
 
@@ -439,28 +468,13 @@ def coverage_ratio(
     return ratio
 
 
-def find_covering_section(
-    text: str, nodes: list[dict], req_type: str = REQ_TYPE_GENERAL
-) -> dict | None:
-    """返回覆盖该条款的章节（position 最小者），没有则 None。
-
-    阈值取 0.45（长条款）或 1.0（短条款必须整句包含）：单靠一个泛词不算响应。
-    req_type 决定是否在 3-gram 之外启用结构化锚点判定。
-    """
+def _section_candidates(
+    text: str, nodes: list[dict], req_type: str
+) -> tuple[tuple[float, int, dict] | None, tuple[float, int, dict] | None]:
+    """返回 (达到阈值的章节, 最相关章节)，供覆盖判定与跳转锚点共用。"""
 
     core = requirement_core(text)
     threshold = 0.45 if len(core) >= 8 else 1.0
-
-    # 约束比较针对整份正文（合并各章），而不是单章：复合条款的三条约束
-    # 可能分散在不同章节响应。违反或未证实的约束直接判未覆盖。
-    combined = "\n".join((node.get("body") or "") for node in nodes)
-    verdicts = evaluate_constraints(text, combined)
-    if constraint_blocked(verdicts):
-        return None
-    # 数值单位缺失/跨量纲无法安全比较：不自动判覆盖，交给上层转人工复核。
-    if any(item.state == "unclear" for item in verdicts):
-        return None
-
     best: tuple[float, int, dict] | None = None
     fallback: tuple[float, int, dict] | None = None
     for order, node in enumerate(nodes):
@@ -478,12 +492,67 @@ def find_covering_section(
             fallback = candidate
         if ratio >= threshold and (best is None or candidate[:2] > best[:2]):
             best = candidate
+    return best, fallback
+
+
+def best_matching_section(
+    text: str, nodes: list[dict], req_type: str = REQ_TYPE_GENERAL
+) -> dict | None:
+    """仅按语义/锚点相似度取最相关章节，不重复做约束与日期判定。
+
+    judge() 已经用 deadline + matcher 跑完五层判定；这里只提供章节跳转点，
+    不再用「默认类型 + 无截止日期」的口径二次判覆盖。
+    """
+
+    best, fallback = _section_candidates(text, nodes, req_type)
+    chosen = best or fallback
+    return chosen[2] if chosen else None
+
+
+def find_covering_section(
+    text: str, nodes: list[dict], req_type: str = REQ_TYPE_GENERAL
+) -> dict | None:
+    """返回覆盖该条款的章节（position 最小者），没有则 None。
+
+    阈值取 0.45（长条款）或 1.0（短条款必须整句包含）：单靠一个泛词不算响应。
+    req_type 决定是否在 3-gram 之外启用结构化锚点判定。
+    """
+
+    # 约束比较针对整份正文（合并各章），而不是单章：复合条款的三条约束
+    # 可能分散在不同章节响应。违反或未证实的约束直接判未覆盖。
+    combined = "\n".join((node.get("body") or "") for node in nodes)
+    verdicts = evaluate_constraints(text, combined)
+    if constraint_blocked(verdicts):
+        return None
+    # 数值单位缺失/跨量纲无法安全比较：不自动判覆盖，交给上层转人工复核。
+    if any(item.state == "unclear" for item in verdicts):
+        return None
+
+    best, fallback = _section_candidates(text, nodes, req_type)
     if best is not None:
         return best[2]
     # 只有当确实存在已证实的量化约束时才用锚点兜底，避免泛词误覆盖。
     if verdicts and all(item.state == "satisfied" for item in verdicts):
         return fallback[2] if fallback else None
     return None
+
+
+def coverage_from_verdict(
+    requirement, nodes: list[dict], *, deadline=None, matcher=None
+) -> tuple[bool, dict | None]:
+    """复用 judge() 的五层判定给出 (auto_covered, section)。
+
+    :func:`pipeline._annotate_requirement_coverage` 旧实现单独调用
+    ``find_covering_section(默认类型、无 deadline)``，与 judge() 的四态结论
+    可能相反（auto_covered=True 但 SUB 问题仍报未响应）。pipeline 不属于本
+    batch 的改动范围，这里先提供同口径 helper 供其接入。
+    """
+
+    from .verdict import SATISFIED, judge
+
+    verdict = judge(requirement, nodes, deadline=deadline, matcher=matcher)
+    covered = verdict.state == SATISFIED and verdict.matched_section is not None
+    return covered, verdict.matched_section
 
 
 def is_substantive(requirement) -> bool:
@@ -544,12 +613,9 @@ def requirement_issues(
             "marker": marker,
             "requirement_type": req_type,
             "keywords": requirement_keywords(text),
-            # 语义层证据：锚点/同义改写命中片段，让「为什么不算响应」可举证。
-            "semantic_matches": anchor_evidence(
-                text,
-                "\n".join((node.get("body") or "") for node in nodes),
-                req_type,
-            )[:10],
+            # 语义层证据：逐章取锚点/同义命中片段，并带 node_id / section_id /
+            # heading，保证每条 evidence 都能定位回具体章节（拼接串偏移不可溯源）。
+            "semantic_matches": anchor_evidence_by_node(text, nodes, req_type),
             "verdict": verdict.state,
             "verdict_label": verdict.label,
             "verdict_reason": verdict.reason,

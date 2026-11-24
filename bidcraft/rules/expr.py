@@ -5,6 +5,16 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+from ..constraint_check import (
+    _DIRECTION_PATTERNS,
+    _VALUE_RE,
+    UNIT_COMPATIBLE,
+    _cmp_with_tolerance,
+    _cn_number,
+    _to_base,
+    unit_relation,
+)
+
 MAX_NODES = 400
 MAX_TEXT = 2_000_000
 
@@ -147,23 +157,119 @@ def _param_tokens(parameter: dict[str, Any]) -> list[str]:
     return [t for t in dict.fromkeys(tokens) if t]
 
 
-def param_response_missing(parameters: Any, text: Any) -> list[str]:
+def _numeric_pass(value: float, threshold: float, comparator: str, tolerance: float) -> bool:
+    """带可选容差的数值方向比较（单位已归一到同一量纲基准）。"""
+
+    if tolerance <= 0:
+        return _cmp_with_tolerance(value, threshold, comparator)
+    slack = tolerance * max(abs(threshold), 1.0)
+    if comparator == "<=":
+        return value <= threshold + slack
+    return value >= threshold - slack
+
+
+def _required_numeric(parameter: dict[str, Any]) -> tuple[float, str, str] | None:
+    """从参数项里取 (阈值, 单位, 比较方向)；取不到就退回字符串口径。
+
+    只有出现明确比较词，或参数项已经登记了可识别单位并且 value 带数值时才做
+    数值核对——否则「Cat6A」「GB 50311」这类文本会被误当成数值阈值。
+    """
+
+    name = str(parameter.get("name") or "")
+    value_text = str(parameter.get("value") or "")
+    requirement = str(parameter.get("requirement") or "")
+    unit = str(parameter.get("unit") or "").strip()
+    text = " ".join(part for part in (value_text, requirement, name) if part)
+
+    # 显式方向词优先：不低于/不大于/至少/最多…（与 constraint_check 同一张表）。
+    for pattern, comparator in _DIRECTION_PATTERNS:
+        match = re.search(pattern, text)
+        if match is None:
+            continue
+        number = _cn_number(match.group(1))
+        if number is None:
+            continue
+        found_unit = (match.group(2) or unit).strip()
+        if not found_unit:
+            continue
+        return float(number), found_unit, comparator
+
+    if not unit:
+        return None
+    # 无方向词：参数项带单位且 value 里确实有「数字+单位」时按阈值核对。
+    for match in _VALUE_RE.finditer(value_text):
+        number = _cn_number(match.group(1))
+        if number is None:
+            continue
+        found_unit = (match.group(2) or unit).strip()
+        if not found_unit:
+            continue
+        comparator = (
+            "<=" if re.search(r"不超过|不大于|最多|响应|时延|延迟|工期", text) else ">="
+        )
+        return float(number), found_unit, comparator
+    return None
+
+
+def _numeric_candidates(body: str, name: str, unit: str) -> list[float]:
+    """取正文里与参数同名子句、且单位同量纲的候选数值（已归一基准）。"""
+
+    compact = re.sub(r"[（(].*?[）)]", "", name).strip()
+    span = max(24, len(name))
+    candidates: list[float] = []
+    for match in _VALUE_RE.finditer(body):
+        cand_unit = (match.group(2) or "").strip()
+        # 裸数值不能借用参数项的量纲（「500 台设备」≠「500Mbps 带宽」）。
+        if not cand_unit or unit_relation(cand_unit, unit) != UNIT_COMPATIBLE:
+            continue
+        # 用数值附近的文本窗口做主体关联：参数表常见「带宽：500Mbps」这类
+        # 冒号/换行分隔，硬按标点切子句会把参数名切掉。
+        window = body[max(0, match.start() - span): min(len(body), match.end() + 8)]
+        if name and not (contains(window, name) or (len(compact) >= 4 and contains(window, compact))):
+            continue
+        number = _cn_number(match.group(1))
+        if number is None:
+            continue
+        candidates.append(_to_base(float(number), cand_unit))
+    return candidates
+
+
+def param_response_missing(
+    parameters: Any, text: Any, tolerance: float = 0.0
+) -> list[str]:
+    """未获响应的参数名；数值阈值不满足（如 500Mbps 答 1000Mbps）也算未响应。
+
+    ``tolerance`` 是相对容差（如 0.01 表示允许 1% 偏差），默认 0 仅吸收浮点
+    换算误差。非数值参数仍按原来的 token 存在性判断。
+    """
+
     missing_items: list[str] = []
     body = str(text or "")
     for parameter in parameters or []:
-        tokens = _param_tokens(parameter or {})
+        parameter = parameter or {}
+        name = str(parameter.get("name") or "")
+        tokens = _param_tokens(parameter)
         if not tokens:
             continue
+        required = _required_numeric(parameter)
+        if required is not None:
+            threshold, unit, comparator = required
+            candidates = _numeric_candidates(body, name, unit)
+            if candidates:
+                base = _to_base(threshold, unit)
+                if not any(_numeric_pass(item, base, comparator, tolerance) for item in candidates):
+                    missing_items.append(name)
+                continue
         if not any(contains(body, token) for token in tokens):
-            missing_items.append(str((parameter or {}).get("name") or ""))
+            missing_items.append(name)
     return missing_items
 
 
-def param_response_ratio(parameters: Any, text: Any) -> float:
+def param_response_ratio(parameters: Any, text: Any, tolerance: float = 0.0) -> float:
     items = [p for p in (parameters or []) if str((p or {}).get("name") or "").strip()]
     if not items:
         return 1.0
-    return 1.0 - len(param_response_missing(items, text)) / len(items)
+    return 1.0 - len(param_response_missing(items, text, tolerance)) / len(items)
 
 
 def count_matches(pattern: Any, text: Any) -> int:

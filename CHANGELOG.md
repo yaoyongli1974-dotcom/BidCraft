@@ -2,6 +2,17 @@
 
 按版本倒序。对外口径以 `docs/release-notes/` 下对应文件为准；本文件是仓库内的简明索引。
 
+## v0.29.0 (2026-11-24)
+
+对标易标专项改造（八批）收官，对外说明见 [docs/release-notes/v0.29.0.md](docs/release-notes/v0.29.0.md)，逐批证据见 [docs/development/BIDCRAFT_YIBIAO_REFACTOR_REPORT.md](docs/development/BIDCRAFT_YIBIAO_REFACTOR_REPORT.md)。
+
+- 新增 Alembic `0010_batch1_billing_reliability`：失败终态幂等退款、条件占claim、TTL 活跃性、付款账号与历史 owner 回填；历史迁移未改。
+- 判定引擎修复业绩时间窗继承、`和/与/及` 拆分与参数数值比较；API verdict 与 /check 同口径，证据节点化与可追溯字段补齐。
+- 生成链路：台账比例截断、prompt token 预算、评分点段级绑定、失败/短章恢复、大纲 upsert 与评分去重。
+- DOCX 专业渲染器接入导出；包完整性校验、确定性字节、字体/超链接、商务标模板与强制门禁；CLI/MCP 渠道对齐。
+- 商务标多包件与共享资产、报价删除保护/冻结币种、多包件评估；知识库生命周期过滤与页码来源追踪、异步相似度；Agent 活跃时钟预算与评估幂等；前端代理与契约测试。
+- 后端 1499 passed / 14 skipped；前端 35 files / 288 tests；ruff 全绿。
+
 ## v0.28.1 (2026-11-23)
 
 v0.28.0 之后的第二轮质量加固与运维补齐，对外说明见 [docs/release-notes/v0.28.1.md](docs/release-notes/v0.28.1.md)。

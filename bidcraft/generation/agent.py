@@ -40,6 +40,55 @@ class ChatResult:
     usage: Usage = field(default_factory=Usage)
 
 
+class _DeltaGate:
+    """Suppress deltas already emitted by an earlier streaming attempt.
+
+    A retried stream often re-sends the same prefix before failing again.  The
+    gate tracks the cumulative emitted prefix; on a new attempt it forwards
+    only the part that goes beyond that prefix and signals a restart so the UI
+    can reset its local buffer.
+    """
+
+    def __init__(self, on_delta, on_stream_restart=None):
+        self._on_delta = on_delta
+        self._on_stream_restart = on_stream_restart
+        self.emitted = ""
+        self._attempt: list[str] = []
+        self._suppress = ""
+
+    def begin_attempt(self, *, restart: bool = False) -> None:
+        self._attempt = []
+        self._suppress = self.emitted
+        if restart and self._on_stream_restart:
+            self._on_stream_restart()
+
+    def _emit(self, text: str) -> None:
+        if not text:
+            return
+        self.emitted += text
+        if self._on_delta:
+            self._on_delta(text)
+
+    def __call__(self, delta: str) -> None:
+        self._attempt.append(delta)
+        full = "".join(self._attempt)
+        if self._suppress:
+            if self._suppress.startswith(full):
+                # Still replaying the already delivered prefix.
+                return
+            if full.startswith(self._suppress):
+                tail = full[len(self._suppress) :]
+                self._suppress = ""
+                self._emit(tail)
+                return
+            # Streams diverged: the old prefix cannot be retracted, so forward
+            # this attempt in full from its beginning.
+            self._suppress = ""
+            self._emit("".join(self._attempt))
+            return
+        self._emit(delta)
+
+
 class ModelClient:
     """Chat client for OpenAI-compatible endpoints and native Ollama."""
 
@@ -121,6 +170,7 @@ class ModelClient:
         temperature: float | None = None,
         stream: bool = False,
         on_delta=None,
+        on_stream_restart=None,
     ) -> str:
         if not self.available:
             raise ModelUnavailable("未配置模型端点（BIDCRAFT_MODEL_BASE_URL / BIDCRAFT_MODEL_NAME）")
@@ -131,12 +181,14 @@ class ModelClient:
         if self.settings.model_api_key:
             headers["Authorization"] = f"Bearer {self.settings.model_api_key}"
 
+        gate = _DeltaGate(on_delta, on_stream_restart) if stream else None
         attempts = 0
         while True:
             attempts += 1
             try:
                 if stream:
-                    return self._stream(payload, headers, on_delta)
+                    gate.begin_attempt(restart=attempts > 1)
+                    return self._stream(payload, headers, gate)
                 response = httpx.post(
                     self._url(),
                     json=payload,

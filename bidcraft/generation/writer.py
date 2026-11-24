@@ -18,6 +18,60 @@ from .prompts import chapter_messages, continue_messages
 _SENTENCE_SPLIT = re.compile(r"(?<=[。！？；\n])")
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")
 _TABLE_ROW = re.compile(r"^\s*\|")
+_MIN_CONTINUE_WORDS = 40
+_UNDERLENGTH_RATIO = 0.8
+_ADHERENCE_MIN = 0.15
+
+
+def is_pending(node: dict[str, Any]) -> bool:
+    """A chapter still needs work if it is empty, failed/fallback, or too short.
+
+    Body presence alone is not completion: a timed-out or truncated draft that
+    was persisted with a few dozen characters must be eligible for regeneration.
+    """
+
+    if not str(node.get("body") or "").strip():
+        return True
+    status = str(
+        node.get("section_status") or node.get("status") or ""
+    ).strip().lower()
+    if status in {"failed", "fallback", "error"}:
+        return True
+    words = int(node.get("words") or 0)
+    target = int(node.get("target_words") or 0)
+    return words <= 0 or (target > 0 and words < 0.5 * target)
+
+
+def _adherence(anchor: str, body: str) -> float:
+    """Containment of the chapter heading/intent bigrams in the body."""
+
+    def bigrams(text: str) -> set[str]:
+        value = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", text or "")
+        return {value[i : i + 2] for i in range(len(value) - 1)}
+
+    expected = bigrams(anchor)
+    if not expected:
+        return 1.0
+    actual = bigrams(body)
+    return round(len(expected & actual) / len(expected), 4)
+
+
+def verify_chapter(node: dict[str, Any], body: str) -> dict[str, Any]:
+    """Check a drafted chapter against its target length and outline intent."""
+
+    target = max(1, int(node.get("target_words") or 1200))
+    words = count_words(body)
+    ratio = round(words / target, 4)
+    anchor = f"{node.get('heading') or ''} {node.get('intent') or ''}".strip()
+    adherence = _adherence(anchor, body)
+    return {
+        "words": words,
+        "target_words": target,
+        "word_ratio": ratio,
+        "adherence": adherence,
+        "underlength": ratio < _UNDERLENGTH_RATIO,
+        "off_topic": bool(anchor) and adherence < _ADHERENCE_MIN,
+    }
 
 
 def count_words(text: str) -> int:
@@ -234,6 +288,9 @@ class GenerationReport:
     failed: list[dict[str, str]] = field(default_factory=list)
     fallback: list[str] = field(default_factory=list)
     suspicious: dict[str, list[str]] = field(default_factory=dict)
+    suspicious_count: int = 0
+    knowledge_downgrades: int = 0
+    verification: dict[str, dict[str, Any]] = field(default_factory=dict)
     usage: dict[str, int] = field(default_factory=dict)
 
 
@@ -298,6 +355,8 @@ def write_chapter(
         knowledge_text=knowledge_text,
         facts_text=facts_text,
         needs=node.get("needs") or [],
+        context_tokens=getattr(getattr(client, "settings", None), "model_context_tokens", None),
+        max_tokens=max(2000, min(8000, target * 2)),
     )
     body = client.complete(
         messages,
@@ -307,9 +366,17 @@ def write_chapter(
     )
     body = strip_leading_heading(body, heading)
 
+    # Verify against the outline before the chapter is marked drafted: an
+    # under-target or off-topic draft is continued first, not shipped as-is.
+    verification = verify_chapter(node, body)
     attempts = 0
-    while _ends_mid_sentence(body) and count_words(body) < target and attempts < 2:
+    while (
+        attempts < 2
+        and count_words(body) >= _MIN_CONTINUE_WORDS
+        and (verification["underlength"] or _ends_mid_sentence(body))
+    ):
         attempts += 1
+        previous = body
         try:
             extra = client.complete(
                 continue_messages(body, body[-1200:]),
@@ -323,6 +390,10 @@ def write_chapter(
         if not extra.strip():
             break
         body = _overlap_join(body, strip_leading_heading(extra, heading))
+        verification = verify_chapter(node, body)
+        if len(body) <= len(previous):
+            break
+    node["_verification"] = verification
     return body, "model"
 
 
@@ -383,7 +454,7 @@ def generate_document(
                 previous_texts.append(node["body"])
                 chapters.append((node["heading"], node["body"]))
             continue
-        already_written = bool(node.get("body")) and not only_node and not force
+        already_written = not is_pending(node) and not only_node and not force
         # Abort checkpoint + idempotency gate happen before the expensive model
         # call, including on chapters we would otherwise skip by body presence.
         should_generate = True
@@ -397,17 +468,26 @@ def generate_document(
         chapter_words = 0
         chapter_source = ""
         chapter_failed = False
+        chapter_downgrades = 0
         if on_chapter_start:
             on_chapter_start(info)
         try:
             knowledge_text = ""
             if knowledge_provider is not None:
                 try:
-                    knowledge_text = knowledge_provider(
+                    retrieved = knowledge_provider(
                         f"{node['heading']} {node.get('intent') or ''}".strip()
                     )
+                    if isinstance(retrieved, tuple):
+                        # Providers may forward the KB downgrade count from
+                        # material_policy.context_block alongside the text.
+                        knowledge_text = str(retrieved[0] or "")
+                        chapter_downgrades = max(0, int(retrieved[1] or 0))
+                    else:
+                        knowledge_text = str(retrieved or "")
                 except Exception:  # noqa: BLE001 - knowledge is optional context
                     knowledge_text = ""
+            report.knowledge_downgrades += chapter_downgrades
             body, source = write_chapter(
                 client,
                 ledger,
@@ -442,9 +522,13 @@ def generate_document(
             report.written.append(node["heading"])
             if source == "fallback":
                 report.fallback.append(node["heading"])
+            report.verification[node["heading"]] = node.get("_verification") or verify_chapter(
+                node, body
+            )
             flagged = suspicious_numbers(body, ledger)
             if flagged:
                 report.suspicious[node["heading"]] = flagged
+                report.suspicious_count += len(flagged)
         except ModelUnavailable as exc:
             chapter_failed = True
             section = db.scalar(select(Section).where(Section.id == node["section_id"]))

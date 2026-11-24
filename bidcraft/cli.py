@@ -696,7 +696,9 @@ def export(
     ),
 ) -> None:
     """导出 DOCX / Markdown / PDF / Excel。"""
+    from .export import templates as export_templates
     from .export.docx import export_docx, export_markdown
+    from .images import get_policy
 
     with _db() as db:
         project = _project_or_exit(db, ref)
@@ -715,6 +717,8 @@ def export(
             raise typer.Exit(1) from exc
         ledger = load_ledger(db, project.id)
         nodes = load_outline(db, project.id)
+        template = export_templates.load(project)
+        image_policy = get_policy(project)
         if fmt not in {"xlsx"} and (not nodes or not any(node.get("body") for node in nodes)):
             console.print("[red]还没有正文，先运行 bidcraft write[/red]")
             raise typer.Exit(1)
@@ -725,7 +729,14 @@ def export(
         target = output or (settings.project_dir(project.id) / "output" / f"bid.{suffix}")
         target.parent.mkdir(parents=True, exist_ok=True)
         if fmt == "docx":
-            path = export_docx(target, ledger, nodes, image_resolver=_image_resolver(project.id))
+            path = export_docx(
+                target,
+                ledger,
+                nodes,
+                image_resolver=_image_resolver(project.id),
+                image_policy=image_policy,
+                template=template,
+            )
         elif fmt in {"md", "markdown"}:
             path = export_markdown(target, ledger, nodes)
         elif fmt == "xlsx":
@@ -741,6 +752,8 @@ def export(
                 ledger,
                 nodes,
                 image_resolver=_image_resolver(project.id),
+                image_policy=image_policy,
+                template=template,
             )
             try:
                 path = export_pdf(docx_path, target)
@@ -933,7 +946,9 @@ def run(
         db.commit()
         console.print(f"核对未通过 {verdict['failed']} 项，结论 {verdict['verdict']}")
 
+        from .export import templates as export_templates
         from .export.docx import export_docx
+        from .images import get_policy
 
         # 一条命令跑到 DOCX 也是真实导出路径，同样过交付硬门禁（按本地操作者处理）。
         # 但 `run` 本身没有复核环节，章节确认在这里不适用（人工检查点在交互式导出）。
@@ -957,6 +972,8 @@ def run(
             ledger,
             load_outline(db, project.id),
             image_resolver=_image_resolver(project.id),
+            image_policy=get_policy(project),
+            template=export_templates.load(project),
         )
         db.add(Delivery(project_id=project.id, file_format="docx", file_path=str(path), status="done"))
         db.commit()

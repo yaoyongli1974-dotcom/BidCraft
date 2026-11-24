@@ -25,6 +25,7 @@ from ..clock import utc_now
 from ..db import session_scope
 from ..models import Job, Project, WorkflowApproval, WorkflowRun, WorkflowTask
 from .approval import approval_payload, request_approval, resume_after_approval
+from .clock_budget import active_seconds, pause_active_clock, start_active_clock
 from .planner import build_workflow
 from .registry import AgentOutput, get_agent
 
@@ -293,8 +294,8 @@ def _budget_error(run: WorkflowRun) -> str:
         return f"预算熔断：步骤数已达上限 {budget['max_steps']}"
     if int(stats.get("tokens") or 0) >= int(budget["max_tokens"]):
         return f"预算熔断：token 用量已达上限 {budget['max_tokens']}"
-    started = run.created_at or utc_now()
-    elapsed = max(0.0, (utc_now() - started).total_seconds())
+    # 只统计 Agent 实际执行时间；审批挂起 / Job 排队期间停表。
+    elapsed = active_seconds(run)
     if elapsed >= int(budget["max_seconds"]):
         return f"预算熔断：运行时长已达上限 {budget['max_seconds']} 秒"
     return ""
@@ -309,6 +310,7 @@ def _authorize_actor(
 
 
 def _fail_run(db: Session, run: WorkflowRun, message: str) -> None:
+    pause_active_clock(run)
     run.status = "failed"
     run.completed_at = utc_now()
     run.result = {**(run.result or {}), "error": message}
@@ -324,6 +326,7 @@ def _fail_run(db: Session, run: WorkflowRun, message: str) -> None:
 
 
 def _complete_run(db: Session, run: WorkflowRun, tasks: list[WorkflowTask]) -> None:
+    pause_active_clock(run)
     warnings: list[str] = []
     for task in tasks:
         for warning in (task.output or {}).get("warnings") or []:
@@ -356,14 +359,29 @@ def _task_payload_for_agent(
 def _upstream_outputs(
     db: Session, run: WorkflowRun, task: WorkflowTask
 ) -> dict[str, dict[str, Any]]:
+    """All completed ancestor outputs, not just direct dependencies.
+
+    The standard DAG funnels through an ``approval_gate`` before ``delivery``;
+    giving the delivery agent only that gate's output hides the four real
+    upstream results (tender/technical/commercial/compliance).  Walking the
+    transitive closure keeps gates and reviewers honest for any custom DAG.
+    """
+
     graph = _dependency_keys(db, run.id)
     by_key = {row.task_key: row for row in _tasks(db, run.id)}
-    output: dict[str, dict[str, Any]] = {}
-    for key in graph.get(task.task_key, []):
-        dependency = by_key.get(key)
-        if dependency is not None:
-            output[key] = dict(dependency.output or {})
-    return output
+    collected: set[str] = set()
+    stack = list(graph.get(task.task_key, []))
+    while stack:
+        key = stack.pop()
+        if key in collected:
+            continue
+        collected.add(key)
+        stack.extend(graph.get(key, []))
+    return {
+        key: dict(by_key[key].output or {})
+        for key in sorted(collected)
+        if key in by_key
+    }
 
 
 def _record_output_stats(run: WorkflowRun, output: AgentOutput) -> None:
@@ -470,6 +488,7 @@ def dispatch_task(
     run.stats = stats
     if run.status in {"queued", "waiting_approval"}:
         run.status = "running"
+    start_active_clock(run)
     # Release the write lock before the Agent opens its own short sessions.
     db.commit()
 
@@ -606,6 +625,8 @@ def run_workflow(
             _reset_interrupted_tasks(db, run)
             if run.status == "queued":
                 run.status = "running"
+            if run.status == "running":
+                start_active_clock(run)
     if progress is not None:
         with session_scope() as db:
             progress(run_payload(get_run(db, run_id)))
@@ -699,6 +720,7 @@ def retry_agent_task(db: Session, task_id: str) -> WorkflowTask:
     task.completed_at = None
     task.started_at = None
     run.status = "running"
+    start_active_clock(run)
     run.completed_at = None
     run.result = {
         key: value for key, value in (run.result or {}).items() if key != "error"
@@ -721,6 +743,7 @@ def cancel_workflow(
         return run
     if run.status == "done":
         raise OrchestrationError("已完成的工作流不能取消")
+    pause_active_clock(run)
     run.status = "cancelled"
     run.completed_at = utc_now()
     run.result = {**(run.result or {}), "cancelled": True}
@@ -754,7 +777,10 @@ def resume_workflow(
     if run.status == "done":
         return run
     if run.status == "waiting_approval":
-        return resume_after_approval(db, run_id)
+        resume_after_approval(db, run_id)
+        start_active_clock(run)
+        db.flush()
+        return run
     if run.status == "failed":
         for task in _tasks(db, run.id):
             if task.status == "failed":
@@ -763,6 +789,7 @@ def resume_workflow(
                 task.completed_at = None
                 task.started_at = None
         run.status = "running"
+        start_active_clock(run)
         run.completed_at = None
         run.result = {
             key: value for key, value in (run.result or {}).items() if key != "error"
@@ -770,6 +797,7 @@ def resume_workflow(
         db.flush()
         return run
     run.status = "running"
+    start_active_clock(run)
     db.flush()
     return run
 

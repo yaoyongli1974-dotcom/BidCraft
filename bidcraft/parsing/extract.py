@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..constraint_check import _VALUE_RE
 from ..rules.loader import FieldSpec, Package
 from ..schemas import MaterialItem, ParameterItem, RequirementItem, RiskItem, ScoringItemModel
 from .clean import detect_sections, is_heading, section_slices, strip_noise
@@ -346,6 +347,19 @@ def extract_materials(tables: list[Table], text: str) -> list[MaterialItem]:
     return items[:400]
 
 
+def _detect_parameter_unit(value: str) -> str:
+    """从参数要求值里取「数字+单位」的单位（注册表 longest-first 匹配）。
+
+    单位写进 ParameterItem 后，rules.expr 才能做同量纲数值比较；取不到就
+    留空，参数响应退回字符串口径，不臆造量纲。
+    """
+
+    for match in _VALUE_RE.finditer(value or ""):
+        if match.group(2):
+            return match.group(2)
+    return ""
+
+
 def extract_parameters(tables: list[Table], text: str, vocab: list[str]) -> list[ParameterItem]:
     items: list[ParameterItem] = []
     seen: set[str] = set()
@@ -371,6 +385,7 @@ def extract_parameters(tables: list[Table], text: str, vocab: list[str]) -> list
                 ParameterItem(
                     name=name[:200],
                     value=value[:300],
+                    unit=_detect_parameter_unit(value),
                     requirement=value[:500],
                     source_quote=" | ".join(values[:8])[:300],
                 )
@@ -398,6 +413,7 @@ def extract_parameters(tables: list[Table], text: str, vocab: list[str]) -> list
                 ParameterItem(
                     name=name.strip()[:200],
                     value=value.strip()[:300],
+                    unit=_detect_parameter_unit(value),
                     requirement=stripped[:500],
                     source_quote=stripped[:300],
                 )
@@ -417,7 +433,10 @@ _REQ_LINE = re.compile(
 
 
 def extract_requirements_and_risks(
-    text: str, package: Package, pages: list[str] | None = None
+    text: str,
+    package: Package,
+    pages: list[str] | None = None,
+    tables: list[Table] | None = None,
 ) -> tuple[list[RequirementItem], list[RiskItem]]:
     pages = pages or [text]
     requirements: list[RequirementItem] = []
@@ -455,6 +474,43 @@ def extract_requirements_and_risks(
             )
             if len(requirements) >= 120:
                 break
+
+    # 表格里的 ★/▲/必须/不得 条款过去只喂给参数/评分/材料提取，要求列表会
+    # 整行漏掉（实质性条款因此不进导出门禁）。这里按行补提并与正文行去重。
+    for table in tables or []:
+        for row in table.as_dicts():
+            cells = [str(value or "").strip() for value in row.values()]
+            row_text = " | ".join(cell for cell in cells if cell)
+            if not (6 <= len(row_text) <= 500):
+                continue
+            if not (_REQ_MARKER.search(row_text) or re.search(r"必须|不得", row_text)):
+                continue
+            # 同一要求在不同表格里常只换序号，序号不应参与去重。
+            dedupe_key = re.sub(r"^\s*\d{1,3}\s*\|\s*", "", row_text)
+            if dedupe_key in seen_req:
+                continue
+            seen_req.add(dedupe_key)
+            marker_cell = next(
+                (cell for cell in cells if _REQ_MARKER.search(cell) or re.search(r"必须|不得", cell)),
+                row_text,
+            )
+            marker_match = _REQ_MARKER.search(row_text)
+            clause_match = _CLAUSE_NO_RE.search(row_text)
+            requirements.append(
+                RequirementItem(
+                    kind="substantive",
+                    text=row_text[:500],
+                    mandatory=True,
+                    source_quote=row_text[:300],
+                    marker=marker_match.group(0) if marker_match else "",
+                    page=_page_for_quote(pages, marker_cell),
+                    clause_no=clause_match.group(0) if clause_match else "",
+                )
+            )
+            if len(requirements) >= 120:
+                break
+        if len(requirements) >= 120:
+            break
 
     for line in text.splitlines():
         stripped = line.strip()
@@ -512,7 +568,9 @@ def extract(
     result.scoring = extract_scoring(tables, text)
     result.materials = extract_materials(tables, text)
     result.parameters = extract_parameters(tables, text, package.parameter_vocab())
-    result.requirements, result.risks = extract_requirements_and_risks(text, package, pages)
+    result.requirements, result.risks = extract_requirements_and_risks(
+        text, package, pages, tables
+    )
     result.template_sections = extract_template_sections(text, package)
     result.stats = {
         "chars": len(text),

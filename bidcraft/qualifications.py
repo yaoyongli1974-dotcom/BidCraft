@@ -623,7 +623,9 @@ def preflight(db, user, *, deadline: date | None = None) -> dict:
     """Build the pre-bid self-check list against one opening date."""
 
     due = _today(deadline)
-    rows = list_qualifications(db, user)
+    # 投标前自查必须与企业共享台账同口径：负责人自己的私有资质 + 其可访问
+    # 企业的共享资质/业绩，避免企业成员登记的有效证书在自查里凭空消失。
+    rows = list_visible_qualifications(db, user)
     items: list[dict] = []
     counts = {"ok": 0, "warn": 0, "missing": 0, "total": len(DEFAULT_ITEMS)}
     for spec in DEFAULT_ITEMS:

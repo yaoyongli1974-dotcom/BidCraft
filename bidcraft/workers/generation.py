@@ -205,7 +205,10 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
                 row.message = f"正文完成：{len(report.written)} 章"
                 result = _report_payload(report)
                 row.result = result
-                _job_refund(done_db, row, len(report.written))
+                # Use the idempotency ledger (done_steps), not this attempt's
+                # report — on resume, earlier chapters were skipped but remain
+                # earned, so their credits must not be refunded again.
+                _job_refund(done_db, row)
                 jobs.publish_event(
                     job_id,
                     "done",
@@ -224,5 +227,7 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
         with session_scope() as db:
             row = fenced_job(db, job_id)
             if row is not None:
-                _job_refund(db, row, 0)
+                # Refund only for chapters never persisted (done_steps), and
+                # never twice — the helper guards with payload['refunded'].
+                _job_refund(db, row)
                 _fail_job(db, row, failed_message)

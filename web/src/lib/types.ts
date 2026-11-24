@@ -310,6 +310,9 @@ export interface PendingApproval {
   submitted_at: string | null
   /** 报价合计（元）；后端未给出时为 null，界面不显示金额。 */
   total_amount: number | null
+  /** 商务标待办标识（与 version_id 同值，便于跳转到商务标页签）。 */
+  doc_id?: string
+  doc_name?: string
 }
 
 export interface Project {
@@ -1990,6 +1993,20 @@ export interface SimilarityReport {
   finished_at?: string | null
 }
 
+/** 查重命中携带的可解释证据；未知字段按 unknown 保留。 */
+export interface SimilarityEvidence {
+  common?: boolean
+  reasonable_duplicate?: boolean
+  common_category?: string
+  common_reason?: string
+  degraded?: boolean
+  vector_similarity?: number
+  rerank_score?: number
+  model?: string
+  method?: string
+  [key: string]: unknown
+}
+
 /** 查重命中：同一段内容在两个来源中的位置与相似度。 */
 export interface SimilarityHit {
   id: string
@@ -2001,8 +2018,41 @@ export interface SimilarityHit {
   excerpt_a: string
   excerpt_b: string
   similarity: number
+  /** 语义重排后的最终排序分（语义+文本加权）；旧后端没有该字段。 */
+  rerank_score?: number | null
+  evidence?: SimilarityEvidence
   review_status: SimilarityHitStatus
   review_note?: string
+}
+
+/** 知识库文档实体（溯源/版本/有效期）。 */
+export interface KbDocumentItem {
+  id: string
+  kb_id: string
+  source: string
+  sha256: string
+  size: number
+  mime: string
+  pages: number
+  status: string
+  version: number
+  kind: string
+  tags: string[]
+  valid_to: string | null
+  error: string
+  created_at: string | null
+  updated_at: string | null
+}
+
+/** 知识库检索预览片段，含文档/页码/标题溯源。 */
+export interface KbSearchPassage {
+  kb_id: string
+  source: string
+  text: string
+  score: number
+  document_id: string | null
+  page: number | null
+  heading: string
 }
 
 // ---------------------------------------------------------------- Agent 编排（第三批）

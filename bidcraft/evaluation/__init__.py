@@ -13,7 +13,10 @@ from .coverage import (
     calculate_scoring_coverage,
 )
 from .report import (
+    FINDING_STATUSES,
     build_quality_report,
+    find_report_for_job,
+    finding_for_project,
     finding_payload,
     list_reports,
     load_report,
@@ -35,6 +38,7 @@ from .scorer import (
 
 __all__ = [
     "DIMENSION_WEIGHTS",
+    "FINDING_STATUSES",
     "build_quality_report",
     "build_risk_recommendations",
     "calculate_chapter_coverage",
@@ -48,6 +52,8 @@ __all__ = [
     "collect_commercial_completeness",
     "collect_project_risks",
     "evaluate_project_quality",
+    "find_report_for_job",
+    "finding_for_project",
     "finding_payload",
     "list_reports",
     "load_report",

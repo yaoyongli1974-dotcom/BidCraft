@@ -4,6 +4,15 @@ Each preset is a plain dict so it can be stored in ``project.meta`` and passed
 straight to :func:`bidcraft.export.docx.export_docx`. Presets only change
 presentation (fonts, sizes, spacing, margins, cover/TOC/page numbers); they
 never change content.
+
+Cross-platform note
+-------------------
+The four preset font families are the Windows names expected by Chinese tender
+documents. On Linux (including the LibreOffice used for PDF delivery) they are
+matched through fontconfig; :data:`FONT_SUBSTITUTIONS` records the equivalent
+open-source families a deployment should install so PDFs keep a CJK serif/sans
+distinction instead of falling back to a non-CJK font. DOCX output deliberately
+keeps the original names for Word fidelity.
 """
 
 from __future__ import annotations
@@ -72,6 +81,27 @@ PRESETS: dict[str, dict[str, Any]] = {
 }
 
 _TEXT_FIELDS = ("body_font", "heading_font")
+
+#: Windows/CJK 字体 → Linux 上 fontconfig/LibreOffice 可用的开源替代字体。
+#: 部署建议同时安装 noto-fonts-cjk（或 fonts-noto-cjk）与 fonts-wqy-microhei。
+FONT_SUBSTITUTIONS: dict[str, str] = {
+    "宋体": "Noto Serif CJK SC",
+    "黑体": "Noto Sans CJK SC",
+    "仿宋_GB2312": "Noto Serif CJK SC",
+    "微软雅黑": "Noto Sans CJK SC",
+}
+
+
+def required_fonts(preset_data: dict[str, Any] | None) -> list[str]:
+    """返回某个预设实际依赖的字体名（去重、保序）。"""
+
+    normalized = normalize(preset_data)
+    fonts: list[str] = []
+    for field in _TEXT_FIELDS:
+        font = str(normalized.get(field) or "")
+        if font and font not in fonts:
+            fonts.append(font)
+    return fonts
 
 
 def preset(template_id: str) -> dict[str, Any] | None:

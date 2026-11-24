@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -256,6 +257,27 @@ def validate_docx_package(path: str | Path) -> dict[str, Any]:
         return {
             "valid": False,
             "issues": [_issue("missing_file", "error", f"文件不存在：{package_path}")],
+        }
+    # ZIP 层 CRC 校验：截断/篡改的 DOCX 可能仍能被部分解析器打开，必须先拦下。
+    try:
+        with zipfile.ZipFile(package_path, "r") as archive:
+            broken_member = archive.testzip()
+    except (zipfile.BadZipFile, OSError) as exc:
+        return {
+            "valid": False,
+            "issues": [_issue("invalid_docx", "error", f"DOCX 不是有效的 ZIP 包：{exc}")],
+        }
+    if broken_member is not None:
+        return {
+            "valid": False,
+            "issues": [
+                _issue(
+                    "invalid_docx",
+                    "error",
+                    f"DOCX 包内条目 {broken_member} 的 CRC 校验失败",
+                    member=broken_member,
+                )
+            ],
         }
     try:
         document = Document(str(package_path))

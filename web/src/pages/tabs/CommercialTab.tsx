@@ -19,10 +19,12 @@ import {
   unapproveCommercialDoc,
 } from '../../api/commercial'
 import { listBoqVersions } from '../../api/boq'
+import { getBidPackages } from '../../api/project'
 import { downloadBlob } from '../../api/generation'
 import { messageOf } from '../../lib/http'
 import { isProjectAdmin } from '../../lib/permissions'
 import type {
+  BidPackage,
   BoqQuoteVersion,
   CommercialDoc,
   CommercialExportFormat,
@@ -53,9 +55,28 @@ export function CommercialTab() {
   const confirm = useConfirm()
   const canReview = isProjectAdmin(project)
 
-  const docsQuery = useQuery(`commercial:${ref}`, () => listCommercialDocs(ref))
-  const versionsQuery = useQuery(`commercial-approved-versions:${ref}`, () =>
-    listBoqVersions(ref),
+  const packagesQuery = useQuery(`commercial-packages:${ref}`, () => getBidPackages(ref))
+  const packages = useMemo<BidPackage[]>(() => packagesQuery.data || [], [packagesQuery.data])
+  const packagesReady = packagesQuery.data !== undefined
+  const [selectedPackageId, setSelectedPackageId] = useState<string | null>(null)
+  // 包件模式必须显式传 package_id：后端 resolve_package 会拒绝「已启用包件但未指定」。
+  const packageId = useMemo(() => {
+    if (packages.length === 0) return null
+    if (selectedPackageId && packages.some((item) => item.id === selectedPackageId)) {
+      return selectedPackageId
+    }
+    return packages[0]?.id ?? null
+  }, [packages, selectedPackageId])
+
+  const docsQuery = useQuery(
+    `commercial:${ref}:${packageId ?? 'single'}`,
+    () => listCommercialDocs(ref, packageId),
+    { enabled: packagesReady },
+  )
+  const versionsQuery = useQuery(
+    `commercial-approved-versions:${ref}:${packageId ?? 'single'}`,
+    () => listBoqVersions(ref, packageId),
+    { enabled: packagesReady },
   )
   const docs = useMemo(() => docsQuery.data || [], [docsQuery.data])
   const approvedVersions = useMemo(
@@ -79,8 +100,10 @@ export function CommercialTab() {
   const [exporting, setExporting] = useState<string | null>(null)
 
   useEffect(() => {
-    if (createOpen && !versionId && approvedVersions.length > 0) {
-      setVersionId(approvedVersions[0].id)
+    // 切换包件后旧版本不属于当前包件，必须重新挑选已定稿版本。
+    if (!createOpen) return
+    if (!approvedVersions.some((version) => version.id === versionId)) {
+      setVersionId(approvedVersions[0]?.id || '')
     }
   }, [createOpen, versionId, approvedVersions])
 
@@ -109,6 +132,7 @@ export function CommercialTab() {
       const created = await createCommercialDoc(ref, {
         name: trimmed,
         quote_version_id: versionId,
+        package_id: packageId,
       })
       docsQuery.setData((current) => [created, ...(current || [])])
       setCreateOpen(false)
@@ -207,9 +231,12 @@ export function CommercialTab() {
     }
   }
 
-  const versionsError = versionsQuery.error
+  const versionsError = packagesQuery.error || versionsQuery.error
   const noApproved =
-    !versionsQuery.loading && !versionsError && approvedVersions.length === 0
+    !packagesQuery.loading &&
+    !versionsQuery.loading &&
+    !versionsError &&
+    approvedVersions.length === 0
   const versionLabel = (version: BoqQuoteVersion) =>
     `${version.name}${version.created_at ? ` · ${formatDate(version.created_at, false)}` : ''}`
 
@@ -227,6 +254,7 @@ export function CommercialTab() {
               icon={<RefreshCw size={13} className={docsQuery.refreshing ? 'spin' : undefined} />}
               disabled={docsQuery.refreshing}
               onClick={() => {
+                packagesQuery.refresh()
                 docsQuery.refresh()
                 versionsQuery.refresh()
               }}
@@ -253,6 +281,33 @@ export function CommercialTab() {
         }
       />
 
+      {packages.length > 0 && (
+        <div className="panel com-package-switch">
+          <label className="form-field">
+            <span>包件</span>
+            <select
+              className="select"
+              aria-label="切换商务标包件"
+              value={packageId ?? ''}
+              onChange={(event) => {
+                setSelectedPackageId(event.target.value)
+                setCreateOpen(false)
+              }}
+            >
+              {packages.map((pkg) => (
+                <option key={pkg.id} value={pkg.id}>
+                  {pkg.name}
+                  {pkg.number ? ` · ${pkg.number}` : ''}
+                </option>
+              ))}
+            </select>
+            <span className="field-hint">
+              商务标按包件分别编制；切换后只显示该包件的已定稿报价版本与商务标。
+            </span>
+          </label>
+        </div>
+      )}
+
       {noApproved && (
         <div className="com-gate" role="status">
           <span className="com-gate-icon" aria-hidden>
@@ -276,7 +331,7 @@ export function CommercialTab() {
             <ShieldAlert size={19} />
           </span>
           <div>
-            <strong>无法读取报价版本</strong>
+            <strong>无法读取包件或报价版本</strong>
             <p>{versionsError}</p>
           </div>
           <Button size="sm" variant="secondary" onClick={versionsQuery.refresh}>

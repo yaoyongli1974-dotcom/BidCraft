@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import inspect
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -143,6 +144,14 @@ def assess(meta: dict[str, Any] | None, policy: dict[str, dict[str, Any]] | None
         return Verdict(ok=False, kind=kind, reason="未知素材类型，未注入正文")
     spec = rules[kind]
     missing = [key for key in spec.get("required", []) if not str(meta.get(key) or "").strip()]
+    status = str(meta.get("status") or "").strip().lower()
+    if status and status != "ready":
+        return Verdict(
+            ok=False,
+            kind=kind,
+            missing=missing,
+            reason=f"素材尚未就绪（{status}），未注入正文",
+        )
     expired = False
     valid_to = _as_date(meta.get("valid_to"))
     if valid_to is not None and valid_to < _today():
@@ -162,19 +171,132 @@ def doc_map(kb) -> dict[str, dict[str, Any]]:
     return docs if isinstance(docs, dict) else {}
 
 
-def find_meta(db, source: str) -> tuple[Any, dict[str, Any]]:
-    """按片段来源找到所属知识库与文档元数据。"""
-    from .models import KnowledgeBase
+def _source_rank(key: str, source: str, location: str = "") -> int:
+    """来源匹配优先级：精确 > 目录相对路径 > 路径后缀。"""
+
+    key = str(key or "").strip()
+    if not key:
+        return -1
+    if key == source:
+        return 0
+    if location and source.startswith(location):
+        relative = source[len(location) :].lstrip("/").lstrip("\\")
+        if relative == key:
+            return 1
+    if source.endswith(("/" + key, "\\" + key)):
+        return 2
+    return -1
+
+
+def _legacy_meta(kb, source: str, location: str) -> dict[str, Any]:
+    """兼容 options['docs'] 里的详细字段（证书号、合同号等）。"""
+
+    merged: dict[str, Any] = {}
+    best_rank = 99
+    for key, meta in doc_map(kb).items():
+        rank = _source_rank(key, source, location)
+        if rank >= 0 and rank < best_rank and isinstance(meta, dict):
+            merged = dict(meta)
+            best_rank = rank
+    return merged
+
+
+def _document_meta(row, legacy: dict[str, Any] | None = None) -> dict[str, Any]:
+    """KbDocument 的生命周期字段为权威值，覆盖 legacy 元数据。"""
+
+    meta = dict(legacy or {})
+    meta["kind"] = str(row.kind or "other")
+    meta["title"] = meta.get("title") or str(row.source or "")
+    meta["source"] = str(row.source or "")
+    meta["status"] = str(row.status or "ready")
+    meta["document_id"] = str(row.id or "")
+    meta["version"] = int(row.version or 1)
+    meta["tags"] = list(row.tags or [])
+    due = row.valid_to
+    if isinstance(due, dt.datetime):
+        meta["valid_to"] = due.date().isoformat()
+    elif isinstance(due, dt.date):
+        meta["valid_to"] = due.isoformat()
+    return meta
+
+
+def find_meta(
+    db,
+    source: str,
+    *,
+    kb_id: str | None = None,
+    document_id: str | None = None,
+) -> tuple[Any, dict[str, Any]]:
+    """按片段来源找到所属知识库与文档元数据。
+
+    优先使用 KbDocument（含 status/valid_to/kind），并可用 ``kb_id`` /
+    ``document_id`` 精确限定范围；没有文档实体时才退回旧 options['docs']，
+    避免同名文件在不同知识库之间互相错配。
+    """
+
+    from .models import KbDocument, KnowledgeBase
 
     source = str(source or "")
+    kb_cache: dict[str, Any] = {}
+
+    def _kb(kb_id_value: str | None):
+        if not kb_id_value:
+            return None
+        if kb_id_value not in kb_cache:
+            try:
+                kb_cache[kb_id_value] = db.get(KnowledgeBase, kb_id_value)
+            except Exception:  # noqa: BLE001 - 兼容轻量假 DB
+                kb_cache[kb_id_value] = None
+        row = kb_cache[kb_id_value]
+        return row if row is not None and hasattr(row, "options") else None
+
+    if document_id and db is not None:
+        try:
+            row = db.get(KbDocument, document_id)
+        except Exception:  # noqa: BLE001
+            row = None
+        if hasattr(row, "kb_id") and (not kb_id or row.kb_id == kb_id):
+            kb = _kb(row.kb_id)
+            legacy = _legacy_meta(kb, source, str(getattr(kb, "location", "") or ""))
+            return kb, _document_meta(row, legacy)
+
+    docs: list = []
+    if db is not None:
+        try:
+            stmt = select(KbDocument)
+            if kb_id:
+                stmt = stmt.where(KbDocument.kb_id == kb_id)
+            docs = [row for row in db.scalars(stmt) if hasattr(row, "source") and hasattr(row, "status")]
+        except Exception:  # noqa: BLE001 - 轻量假 DB 没有 KbDocument 表
+            docs = []
+
     best: tuple[Any, dict[str, Any]] | None = None
+    best_rank = 99
+    for row in docs:
+        if kb_id and getattr(row, "kb_id", None) != kb_id:
+            continue
+        kb = _kb(getattr(row, "kb_id", None))
+        location = str(getattr(kb, "location", "") or "")
+        rank = _source_rank(getattr(row, "source", ""), source, location)
+        if rank < 0 or rank >= best_rank:
+            continue
+        legacy = _legacy_meta(kb, source, location)
+        best = (kb, _document_meta(row, legacy))
+        best_rank = rank
+    if best is not None:
+        return best
+
+    if db is None:
+        return (None, {})
     for kb in db.scalars(select(KnowledgeBase)):
-        docs = doc_map(kb)
-        location = str(kb.location or "")
+        if kb_id and getattr(kb, "id", None) != kb_id:
+            continue
+        docs_meta = doc_map(kb)
+        location = str(getattr(kb, "location", "") or "")
         relative = ""
         if location and source.startswith(location):
             relative = source[len(location) :].lstrip("/").lstrip("\\")
-        for key, meta in docs.items():
+        for key, meta in docs_meta.items():
             if not isinstance(meta, dict):
                 continue
             if key == source or (relative and key == relative) or (key and source.endswith(key)):
@@ -182,6 +304,23 @@ def find_meta(db, source: str) -> tuple[Any, dict[str, Any]]:
         if best is None and relative:
             best = (kb, {})
     return best if best is not None else (None, {})
+
+
+def _passage_meta(db, passage: Passage) -> tuple[Any, dict[str, Any]]:
+    """按 Passage 携带的知识库/文档溯源取元数据，兼容旧的二参 find_meta。"""
+
+    try:
+        accepts_scope = "kb_id" in inspect.signature(find_meta).parameters
+    except (TypeError, ValueError):  # pragma: no cover - 内建回调防御
+        accepts_scope = False
+    if accepts_scope:
+        return find_meta(
+            db,
+            passage.source,
+            kb_id=getattr(passage, "kb_id", None),
+            document_id=passage.document_id,
+        )
+    return find_meta(db, passage.source)
 
 
 def set_meta(db, kb, source: str, meta: dict[str, Any]) -> dict[str, Any]:
@@ -238,17 +377,21 @@ def citation(source: str, meta: dict[str, Any], reason: str) -> str:
 
 def context_block(db, passages: Iterable[Passage], *, policy: dict[str, dict[str, Any]] | None = None) -> tuple[str, int]:
     """构造带可信度分级的检索注入块，返回 (文本, 降级条数)。"""
+    from .knowledge import trace_label
+
     rules = policy or load_policy()
     rows: list[str] = []
     downgraded = 0
     for index, passage in enumerate(passages, start=1):
-        _, meta = find_meta(db, passage.source)
+        _, meta = _passage_meta(db, passage)
+        trace = trace_label(passage)
+        suffix = f"[{trace}]" if trace else ""
         verdict = assess(meta, rules) if meta else Verdict(ok=False, kind="other", reason="未登记素材元数据")
         if verdict.ok:
-            rows.append(f"[{index}] （{passage.source}）\n{passage.text}")
+            rows.append(f"[{index}] （{passage.source}）{suffix}\n{passage.text}")
         else:
             downgraded += 1
-            rows.append(f"[{index}] {citation(passage.source, meta, verdict.reason)}")
+            rows.append(f"[{index}] {citation(passage.source, meta, verdict.reason)}{suffix}")
     if not rows:
         return "", 0
     block = (

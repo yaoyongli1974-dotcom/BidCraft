@@ -16,6 +16,7 @@ from ..authorization import Forbidden, authorize_project
 from ..clock import iso_beijing, utc_now
 from ..context import current_user
 from ..models import WorkflowApproval, WorkflowRun, WorkflowTask
+from .clock_budget import pause_active_clock, start_active_clock
 from .registry import APPROVAL_TYPES
 
 
@@ -108,6 +109,8 @@ def request_approval(
     if task is not None:
         task.status = "running"
         task.started_at = task.started_at or utc_now()
+    # 审批等待不是执行时间：停表，避免长审批触发 max_seconds 熔断。
+    pause_active_clock(run)
     run.status = "waiting_approval"
     db.flush()
     record_audit(
@@ -173,6 +176,7 @@ def approve_task(
     )
     if not remaining and run.status == "waiting_approval":
         run.status = "running"
+        start_active_clock(run)
     record_audit(
         db,
         run.project_id,
@@ -219,6 +223,7 @@ def reject_task(
             task.status = "failed"
             task.error = f"审批驳回：{approval.review_note or '未填写原因'}"
             task.completed_at = utc_now()
+    pause_active_clock(run)
     run.status = "failed"
     run.completed_at = utc_now()
     run.result = {
@@ -270,6 +275,7 @@ def resume_after_approval(db: Session, run_id: str) -> WorkflowRun:
     if run.status in {"done", "failed"}:
         return run
     run.status = "running"
+    start_active_clock(run)
     db.flush()
     return run
 

@@ -9,6 +9,7 @@ import {
   submitCommercialDoc,
 } from '../../api/commercial'
 import { listBoqVersions } from '../../api/boq'
+import { getBidPackages } from '../../api/project'
 import { downloadBlob } from '../../api/generation'
 import type { BoqQuoteVersion, CommercialDoc } from '../../lib/types'
 import { clearQueryCache } from '../../lib/queryCache'
@@ -48,6 +49,7 @@ vi.mock('../useWorkspace', () => ({ useWorkspace: () => workspace }))
 vi.mock('../../context/useToast', () => ({ useToast: () => toast }))
 vi.mock('../../context/useConfirm', () => ({ useConfirm: () => confirmStub }))
 vi.mock('../../api/boq', () => ({ listBoqVersions: vi.fn() }))
+vi.mock('../../api/project', () => ({ getBidPackages: vi.fn() }))
 vi.mock('../../api/generation', () => ({ downloadBlob: vi.fn() }))
 vi.mock('../../api/commercial', () => ({
   listCommercialDocs: vi.fn(),
@@ -117,6 +119,7 @@ beforeEach(() => {
   workspace.canWrite = true
   workspace.readOnly = false
   confirmStub.mockResolvedValue(true)
+  vi.mocked(getBidPackages).mockResolvedValue([])
   vi.mocked(listBoqVersions).mockResolvedValue([VERSION])
   vi.mocked(listCommercialDocs).mockResolvedValue([commercialDoc()])
   vi.mocked(createCommercialDoc).mockResolvedValue(commercialDoc({ id: 'c2', name: '新商务标' }))
@@ -167,6 +170,7 @@ describe('CommercialTab', () => {
       expect(createCommercialDoc).toHaveBeenCalledWith('p1', {
         name: '新商务标',
         quote_version_id: 'v1',
+        package_id: null,
       }),
     )
     expect(toast.success).toHaveBeenCalled()

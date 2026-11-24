@@ -31,6 +31,7 @@ from ...orchestration.orchestrator import (  # noqa: E402
     start_workflow,
     task_payload,
 )
+from ...orchestration.planner import PlanError  # noqa: E402
 from ...orchestration.registry import get_agent, list_agents  # noqa: E402
 from ..schemas import WorkflowApprovalReview, WorkflowCreate  # noqa: E402
 from ..shared import (  # noqa: E402,F401
@@ -65,6 +66,21 @@ def _error(exc: Exception) -> HTTPException:
 
 def _detail(exc: Exception) -> HTTPException:
     return HTTPException(status_code=409, detail=str(exc))
+
+
+def _check_backpressure(db, owner_id: str) -> None:
+    """Gate workflow Job creation with the shared queue cap (same transaction).
+
+    ``jobqueue.check_backpressure`` is the single source of truth for the global
+    and per-user queued caps; keep the call here (instead of in the queue module)
+    so every workflow route that creates a new agent Job is covered.
+    """
+
+    from ... import jobqueue
+
+    error = jobqueue.check_backpressure(db, owner_id)
+    if error:
+        raise HTTPException(status_code=429, detail=error)
 
 
 # --------------------------------------------------------------------------- #
@@ -106,6 +122,7 @@ def create_workflow(ref: str, payload: WorkflowCreate) -> dict:
         project, role = _project(db, ref)
         _require_write(role)
         actor = _actor()
+        _check_backpressure(db, str(actor.get("id") or ""))
         try:
             run = start_workflow(
                 db,
@@ -117,7 +134,7 @@ def create_workflow(ref: str, payload: WorkflowCreate) -> dict:
                 created_by=_username(),
             )
             schedule_workflow(db, run, owner_id=str(actor.get("id") or ""), priority=1)
-        except OrchestrationError as exc:
+        except (OrchestrationError, PlanError) as exc:
             raise _error(exc) from exc
         audit(db, project.id, "workflow.create", {"run_id": run.id, "workflow_type": run.workflow_type})
         result = run_payload(run)
@@ -171,6 +188,7 @@ def resume(ref: str, run_id: str) -> dict:
         project, role = _project(db, ref)
         _require_write(role)
         run = _run_for_project(db, project.id, run_id)
+        _check_backpressure(db, str(_actor().get("id") or ""))
         try:
             run = resume_workflow(db, run.id, actor=_actor())
         except OrchestrationError as exc:
@@ -213,8 +231,12 @@ def review_approval(ref: str, approval_id: str, payload: WorkflowApprovalReview)
         approval = db.get(WorkflowApproval, approval_id)
         if approval is None or _run_for_project(db, project.id, approval.run_id).id != approval.run_id:
             raise LookupError(f"审批不存在: {approval_id}")
+        rejecting = (payload.decision or "approve").lower() in {"reject", "rejected", "deny"}
+        if not rejecting:
+            # Only approval re-schedules an agent Job; enforce the same cap.
+            _check_backpressure(db, str(_actor().get("id") or ""))
         try:
-            if (payload.decision or "approve").lower() in {"reject", "rejected", "deny"}:
+            if rejecting:
                 updated = reject_task(db, approval_id, actor=_actor(), note=payload.note or "")
             else:
                 updated = approve_task(db, approval_id, actor=_actor(), note=payload.note or "")

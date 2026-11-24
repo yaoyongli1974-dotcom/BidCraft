@@ -2,20 +2,35 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 from docx import Document
 from docx.enum.table import WD_TABLE_ALIGNMENT
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
 from .. import clock
+from ..documents.document_ir import (
+    DocumentCover,
+    DocumentHeaderFooter,
+    DocumentPageLayout,
+    DocumentStyle,
+    DocumentTOC,
+    from_markdown_sections,
+)
+from ..documents.renderer import add_hyperlink, render_document, save_document_verified
 from ..schemas import FactLedger
 
 PLACEHOLDER = re.compile(r"(\{\{待填:[^}]*\}\}|\{\{图片占位:[^}]*\}\})")
+_LINK = r"\[([^\]]+)\]\(((?:https?://|mailto:)[^)\s]+)\)"
+_TEXT_TOKEN = re.compile(rf"{PLACEHOLDER.pattern}|({_LINK})")
+
+MAX_NODES = 5000
+MAX_IMAGES = 500
 
 
 def _set_east_asian(style, font_name: str) -> None:
@@ -88,11 +103,11 @@ def _update_fields_on_open(document: Document) -> None:
     update.set(qn("w:val"), "true")
 
 
-def _add_cover(document: Document, ledger: FactLedger) -> None:
-    for _ in range(4):
-        document.add_paragraph()
+def _add_cover(document: Document, ledger: FactLedger, *, as_of: date | None = None) -> None:
+    # 段前留白代替连续空段落：既保留封面视觉，又不产生空白页/校验警告。
     title = document.add_paragraph()
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    title.paragraph_format.space_before = Pt(80)
     run = title.add_run(ledger.value("project.name") or "{{待填:招标项目名称}}")
     run.font.size = Pt(26)
     run.font.bold = True
@@ -105,20 +120,17 @@ def _add_cover(document: Document, ledger: FactLedger) -> None:
     sub_run.font.bold = True
     _set_run_font(sub_run, "黑体")
 
-    document.add_paragraph()
     info = [
         ("项目编号", ledger.value("project.number") or "{{待填:项目编号}}"),
         ("招标人", ledger.value("project.buyer") or "{{待填:招标人}}"),
         ("投标人", ledger.value("bidder.name") or "{{待填:投标人名称}}"),
-        ("日期", clock.today().strftime("%Y 年 %m 月 %d 日")),
+        ("日期", (as_of or clock.today()).strftime("%Y 年 %m 月 %d 日")),
     ]
     for label, value in info:
         paragraph = document.add_paragraph()
         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
         run = paragraph.add_run(f"{label}：{value}")
         run.font.size = Pt(14)
-
-    document.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
 
 
 def _set_run_font(run, name: str) -> None:
@@ -131,17 +143,32 @@ def _set_run_font(run, name: str) -> None:
     fonts.set(qn("w:eastAsia"), name)
 
 
-def _add_placeholder_runs(paragraph, text: str) -> None:
+def _iter_text_tokens(text: str):
+    """切分文本：占位符原样高亮，Markdown 链接写成外部超链接。"""
+
     cursor = 0
-    for match in PLACEHOLDER.finditer(text):
+    for match in _TEXT_TOKEN.finditer(text):
         if match.start() > cursor:
-            paragraph.add_run(text[cursor : match.start()])
-        run = paragraph.add_run(match.group(1))
-        run.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
-        run.font.bold = True
+            yield "text", text[cursor : match.start()]
+        if match.group(1):
+            yield "placeholder", match.group(1)
+        else:
+            yield "link", match.group(3), match.group(4)
         cursor = match.end()
     if cursor < len(text):
-        paragraph.add_run(text[cursor:])
+        yield "text", text[cursor:]
+
+
+def _add_placeholder_runs(paragraph, text: str) -> None:
+    for token in _iter_text_tokens(text):
+        if token[0] == "placeholder":
+            run = paragraph.add_run(token[1])
+            run.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
+            run.font.bold = True
+        elif token[0] == "link":
+            add_hyperlink(paragraph, token[1], token[2])
+        else:
+            paragraph.add_run(token[1])
 
 
 def _add_table(document: Document, rows: list[list[str]]) -> None:
@@ -195,13 +222,18 @@ def _figure_state(image_policy: dict | None) -> dict:
     return {"n": 0, "policy": policy}
 
 
-def _add_image(document: Document, path: Path, alt: str, figure_state: dict) -> None:
+def _policy_width_cm(figure_state: dict) -> float:
     policy = figure_state["policy"]
     try:
         width_cm = float(policy.get("width_cm") or DEFAULT_IMAGE_POLICY["width_cm"])
     except (TypeError, ValueError):
-        width_cm = DEFAULT_IMAGE_POLICY["width_cm"]
-    document.add_picture(str(path), width=Cm(width_cm))
+        return float(DEFAULT_IMAGE_POLICY["width_cm"])
+    return width_cm
+
+
+def _add_image(document: Document, path: Path, alt: str, figure_state: dict) -> None:
+    policy = figure_state["policy"]
+    document.add_picture(str(path), width=Cm(_policy_width_cm(figure_state)))
     picture = document.paragraphs[-1]
     picture.alignment = WD_ALIGN_PARAGRAPH.CENTER
     if policy.get("captions", True) and alt:
@@ -244,7 +276,9 @@ def _add_body(
                 index += 1
             _add_table(document, _parse_table_block(block))
             continue
-        if stripped.startswith("### "):
+        if stripped.startswith("#### "):
+            document.add_heading(stripped[5:].strip(), level=4)
+        elif stripped.startswith("### "):
             document.add_heading(stripped[4:].strip(), level=3)
         elif stripped.startswith("## "):
             document.add_heading(stripped[3:].strip(), level=2)
@@ -263,6 +297,42 @@ def _add_body(
         index += 1
 
 
+def _professional_styles(preset: dict) -> dict[str, DocumentStyle]:
+    """把排版预设映射成专业引擎的样式（含四级标题）。"""
+
+    base = float(preset["body_size"])
+    styles = {
+        "Normal": DocumentStyle(
+            name="Normal",
+            font_name=str(preset["body_font"]),
+            font_size_pt=base,
+            line_spacing=float(preset["line_spacing"]),
+            space_after=6.0,
+        )
+    }
+    for level, increment in ((1, 6), (2, 3), (3, 1), (4, 0.5)):
+        styles[f"Heading {level}"] = DocumentStyle(
+            name=f"Heading {level}",
+            font_name=str(preset["heading_font"]),
+            font_size_pt=base + increment,
+            bold=True,
+            line_spacing=float(preset["line_spacing"]),
+            space_before=12.0,
+            space_after=8.0,
+        )
+    return styles
+
+
+def _guard_limits(nodes: list[dict[str, Any]], *, max_nodes: int, max_images: int) -> None:
+    if len(nodes) > max_nodes:
+        raise ValueError(f"章节数超过导出上限 {max_nodes}")
+    image_count = sum(
+        len(IMAGE_LINE.findall(str(node.get("body") or ""))) for node in nodes
+    )
+    if image_count > max_images:
+        raise ValueError(f"图片数超过导出上限 {max_images}")
+
+
 def export_docx(
     path: str | Path,
     ledger: FactLedger,
@@ -273,14 +343,75 @@ def export_docx(
     image_resolver: Callable[[str], Path | None] | None = None,
     image_policy: dict | None = None,
     template: dict | None = None,
+    professional: bool = False,
+    base_template: Path | str | None = None,
+    as_of: date | None = None,
+    max_nodes: int | None = None,
+    max_images: int | None = None,
 ) -> Path:
     from .templates import normalize
 
     preset = normalize(template)
-    document = Document()
+    _guard_limits(
+        nodes,
+        max_nodes=MAX_NODES if max_nodes is None else int(max_nodes),
+        max_images=MAX_IMAGES if max_images is None else int(max_images),
+    )
+    output = Path(path)
     figure_state = _figure_state(image_policy)
-    section = document.sections[0]
     top, bottom, left, right = preset["margins"]
+
+    if professional:
+        # 专业引擎：IR → 模板继承渲染 + 导出后 CRC 校验（含超链接、表头、目录域）。
+        page_layout = None
+        if base_template is None:
+            page_layout = DocumentPageLayout(
+                page_width_cm=21.0,
+                page_height_cm=29.7,
+                margin_top_cm=float(top),
+                margin_bottom_cm=float(bottom),
+                margin_left_cm=float(left),
+                margin_right_cm=float(right),
+            )
+        cover = None
+        if include_cover and preset["cover"]:
+            cover = DocumentCover(
+                title=ledger.value("project.name") or "{{待填:招标项目名称}}",
+                lines=[
+                    ("项目编号", ledger.value("project.number") or "{{待填:项目编号}}"),
+                    ("招标人", ledger.value("project.buyer") or "{{待填:招标人}}"),
+                    ("投标人", ledger.value("bidder.name") or "{{待填:投标人名称}}"),
+                    ("日期", (as_of or clock.today()).strftime("%Y 年 %m 月 %d 日")),
+                ],
+            )
+        ir = from_markdown_sections(
+            nodes,
+            title=ledger.value("project.name") or "",
+            author=ledger.value("bidder.name") or "",
+            styles=_professional_styles(preset),
+            page_layout=page_layout,
+            header_footer=DocumentHeaderFooter(page_number=bool(preset["page_numbers"])),
+            core_properties={
+                "title": ledger.value("project.name") or "投标文件",
+                "author": ledger.value("bidder.name") or "",
+            },
+            cover=cover,
+            toc=DocumentTOC() if include_toc and preset["toc"] else None,
+        )
+        for section in ir.sections:
+            for image in section.images:
+                resolver_path = (
+                    image_resolver(str(image.get("path") or ""))
+                    if image_resolver is not None
+                    else None
+                )
+                if resolver_path is not None:
+                    image["path"] = str(resolver_path)
+                image["width_cm"] = _policy_width_cm(figure_state)
+        return render_document(ir, output, base_template=base_template)
+
+    document = Document()
+    section = document.sections[0]
     section.page_height = Cm(29.7)
     section.page_width = Cm(21.0)
     section.top_margin = Cm(top)
@@ -292,8 +423,10 @@ def export_docx(
         _add_page_number_footer(section)
     _update_fields_on_open(document)
 
+    has_front_matter = False
     if include_cover and preset["cover"]:
-        _add_cover(document, ledger)
+        _add_cover(document, ledger, as_of=as_of)
+        has_front_matter = True
 
     if include_toc and preset["toc"]:
         heading = document.add_paragraph()
@@ -303,10 +436,13 @@ def export_docx(
         run.font.bold = True
         _set_run_font(run, "黑体")
         _add_field(document.add_paragraph(), 'TOC \\o "1-3" \\h \\z \\u', "（在 Word 中右键更新目录）")
-        document.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
+        has_front_matter = True
 
-    for node in nodes:
-        document.add_heading(str(node.get("heading") or ""), level=1)
+    for index, node in enumerate(nodes):
+        # 用段前分页代替「空段落 + 手动分页符」，大文档不再积累空白段落。
+        node_heading = document.add_heading(str(node.get("heading") or ""), level=1)
+        if has_front_matter or index:
+            node_heading.paragraph_format.page_break_before = True
         body = str(node.get("body") or "")
         if not body.strip():
             paragraph = document.add_paragraph()
@@ -319,12 +455,8 @@ def export_docx(
                 image_resolver,
                 figure_state,
             )
-        document.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
 
-    output = Path(path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    document.save(str(output))
-    return output
+    return save_document_verified(document, output)
 
 
 def export_markdown(path: str | Path, ledger: FactLedger, nodes: list[dict[str, Any]]) -> Path:

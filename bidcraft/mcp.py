@@ -261,14 +261,17 @@ def _tool_export_document(db, args: dict[str, Any], readonly: bool) -> dict[str,
     output_dir = settings.project_dir(project.id) / "output"
 
     if fmt == "docx":
+        from .export import templates as export_templates
         from .export.docx import export_docx
-        from .images import url_resolver
+        from .images import get_policy, url_resolver
 
         path = export_docx(
             output_dir / "bid.docx",
             ledger,
             nodes,
             image_resolver=url_resolver(project.id),
+            image_policy=get_policy(project),
+            template=export_templates.load(project),
         )
     elif fmt == "md":
         from .export.docx import export_markdown
@@ -295,7 +298,11 @@ def _tool_search_knowledge(db, args: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         {
             "kb": passage.kb,
+            "kb_id": passage.kb_id,
             "source": passage.source,
+            "document_id": passage.document_id,
+            "page": passage.page,
+            "heading": passage.heading,
             "score": passage.score,
             "text": (passage.text or "")[:800],
         }

@@ -7,15 +7,36 @@
 
 任务只声明 ``depends_on``；调度器按依赖是否全部完成决定可执行任务，因此
 并行分支不需要线程也能保证「下游必须等两个分支都完成」。
+
+``full`` / ``bid`` 是 ``standard`` 的兼容别名（见 :data:`WORKFLOW_ALIASES`）：
+不会生成第二套 DAG，但会在任务 input 上写入 ``_workflow_alias`` 元数据并记
+debug 日志，让请求种类在审计/排障中可辨认。
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from .. import scoring
 from ..models import Project
 from .registry import AgentOutput, BaseAgent, register_agent
+
+logger = logging.getLogger("bidcraft.orchestration.planner")
+
+#: 历史/兼容别名：``full`` 与 ``bid`` 不是独立 DAG，而是 ``standard`` 的别名。
+#: 任务键与依赖完全一致，但每个任务会带上 ``_workflow_alias`` 元数据，
+#: API/日志/审计可明确区分用户实际请求的种类，避免「看起来有三种工作流」。
+WORKFLOW_ALIASES = {"full": "standard", "bid": "standard"}
+
+CANONICAL_WORKFLOWS = frozenset({"standard"})
+
+
+def canonical_workflow_type(workflow_type: str) -> str:
+    """Resolve compatibility aliases to the canonical workflow type."""
+
+    kind = str(workflow_type or "standard")
+    return WORKFLOW_ALIASES.get(kind, kind)
 
 
 class PlanError(ValueError):
@@ -34,10 +55,14 @@ def _normalize_task(raw: dict[str, Any], seq: int) -> dict[str, Any]:
     depends_on = raw.get("depends_on") or []
     if isinstance(depends_on, str):
         depends_on = [depends_on]
+    try:
+        normalized_seq = int(raw.get("seq") if raw.get("seq") is not None else seq)
+    except (TypeError, ValueError) as exc:
+        raise PlanError(f"任务 {task_key} 的 seq 必须是整数") from exc
     return {
         "task_key": task_key,
         "agent_type": agent_type,
-        "seq": int(raw.get("seq") if raw.get("seq") is not None else seq),
+        "seq": normalized_seq,
         "input": dict(raw.get("input") or {}),
         "depends_on": [str(item) for item in depends_on if str(item).strip()],
     }
@@ -229,14 +254,16 @@ def build_workflow(
 
     ``workflow_type='custom'`` reads ``payload['tasks']`` (used by extensions
     and tests); any unknown type is rejected rather than silently running an
-    empty workflow.
+    empty workflow.  ``full`` / ``bid`` resolve to the canonical ``standard``
+    graph and are annotated with alias metadata instead of forking a DAG.
     """
 
     options = dict(payload or {})
     kind = str(workflow_type or "standard")
-    if kind in {"standard", "full", "bid"}:
+    canonical = canonical_workflow_type(kind)
+    if canonical in CANONICAL_WORKFLOWS:
         tasks = _standard_tasks(options)
-    elif kind == "custom":
+    elif canonical == "custom":
         raw_tasks = options.get("tasks")
         if not isinstance(raw_tasks, list) or not raw_tasks:
             raise PlanError("custom 工作流必须提供非空 tasks 列表")
@@ -244,6 +271,14 @@ def build_workflow(
     else:
         raise PlanError(f"未知工作流类型: {kind}")
 
+    if canonical != kind:
+        logger.debug("工作流类型 %s 使用 %s 的标准 DAG", kind, canonical)
+        for item in tasks:
+            item["input"] = {
+                **item["input"],
+                "_workflow_alias": kind,
+                "_canonical_workflow_type": canonical,
+            }
     errors = validate_workflow_graph(tasks)
     if errors:
         raise PlanError("；".join(errors))
@@ -302,10 +337,13 @@ class PlanningAgent(BaseAgent):
 register_agent(PlanningAgent)
 
 __all__ = [
+    "CANONICAL_WORKFLOWS",
+    "WORKFLOW_ALIASES",
     "PlanError",
     "PlanningAgent",
     "build_task_dependencies",
     "build_workflow",
+    "canonical_workflow_type",
     "validate_workflow_graph",
     "workflow_order",
 ]

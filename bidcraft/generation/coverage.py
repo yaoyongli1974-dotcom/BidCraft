@@ -19,9 +19,10 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from .outline import similarity
+from .outline import normalize_scoring, similarity
 
 #: 标题相似度命中阈值（与 _scoring_outline 的 0.25 口径一致，便于双向对称）。
 MATCH_THRESHOLD = 0.25
@@ -62,16 +63,54 @@ def _match_reasons(item: dict[str, Any], node: dict[str, Any]) -> list[str]:
     return reasons
 
 
-def _status_for(nodes: list[dict[str, Any]]) -> str:
-    """根据匹配章节的正文情况给出覆盖状态。"""
+def _criteria_anchor(item: dict[str, Any]) -> str:
+    """Extract a short, checkable phrase from a scoring item's criteria.
+
+    The phrase becomes a per-criteria anchor: it must appear in the matched
+    chapter body before that chapter counts as evidence for the scoring point.
+    """
+
+    text = str(item.get("criteria") or "").strip()
+    if not text:
+        return ""
+    for part in re.split(r"[，,；;。、：:\n（）()【】\[\]]", text):
+        part = part.strip()
+        if len(part) >= 4:
+            return part[:60]
+    return text[:60]
+
+
+def _paragraph_hit(body: str, anchor: str) -> int | None:
+    """Return the index of the paragraph that contains the anchor, if any."""
+
+    if not anchor:
+        return None
+    needle = _norm(anchor)
+    for index, paragraph in enumerate(re.split(r"\n\s*\n", body or "")):
+        if needle in _norm(paragraph):
+            return index
+    return None
+
+
+def _status_for(nodes: list[dict[str, Any]], anchor: str = "") -> str:
+    """根据匹配章节的正文与评分锚点证据给出覆盖状态。
+
+    有 criteria 锚点时，光有标题匹配和正文不够——锚点必须真的出现在正文里，
+    否则即使写了 800 字也只能算「覆盖薄弱」，不做语义脑补。
+    """
 
     if not nodes:
         return STATUS_UNCOVERED
     best = 0
     for node in nodes:
+        if anchor and not node.get("anchor_hit"):
+            continue
         words = int(node.get("words") or 0)
         best = max(best, words)
     if best <= 0:
+        # 有匹配章节但锚点完全没落进正文：保守记为薄弱（不是未覆盖，章节存在）。
+        if anchor and any(node.get("words") for node in nodes):
+            return STATUS_WEAK
         return STATUS_UNCOVERED
     if best < WEAK_WORDS:
         return STATUS_WEAK
@@ -87,6 +126,7 @@ def calculate_score_coverage(
     为 :func:`bidcraft.generation.outline.load_outline` 的输出列表。
     """
 
+    scores, validation_issues = normalize_scoring(scores)
     rows: list[dict[str, Any]] = []
     covered_score = 0.0
     weak_score = 0.0
@@ -97,22 +137,34 @@ def calculate_score_coverage(
         except (TypeError, ValueError):
             score = 0.0
         total_score += max(score, 0.0)
+        anchor = _criteria_anchor(item)
         matched: list[dict[str, Any]] = []
         for node in nodes:
             reasons = _match_reasons(item, node)
             if not reasons:
                 continue
-            matched.append(
-                {
-                    "node_id": node.get("id"),
-                    "heading": node.get("heading") or "",
-                    "words": int(node.get("words") or 0),
-                    "has_body": bool(node.get("has_body")),
-                    "review_status": node.get("review_status") or "draft",
-                    "reasons": reasons,
+            body = str(node.get("body") or "")
+            paragraph = _paragraph_hit(body, anchor)
+            anchor_hit = bool(anchor) and paragraph is not None
+            entry: dict[str, Any] = {
+                "node_id": node.get("id"),
+                "heading": node.get("heading") or "",
+                "words": int(node.get("words") or 0),
+                # Derive body presence from the body itself: load_outline does
+                # not promise a has_body key, so a seeded body must still show.
+                "has_body": bool(body.strip()) or bool(node.get("has_body")),
+                "review_status": node.get("review_status") or "draft",
+                "reasons": reasons,
+                "anchor_hit": anchor_hit,
+            }
+            if anchor:
+                entry["evidence"] = {
+                    "anchor": anchor,
+                    "hit": anchor_hit,
+                    "paragraph": paragraph,
                 }
-            )
-        status = _status_for(matched)
+            matched.append(entry)
+        status = _status_for(matched, anchor)
         if status == STATUS_COVERED:
             covered_score += max(score, 0.0)
         elif status == STATUS_WEAK:
@@ -127,6 +179,7 @@ def calculate_score_coverage(
                 "status": status,
                 "status_label": STATUS_LABELS[status],
                 "nodes": matched,
+                "anchors": [anchor] if anchor else [],
             }
         )
 
@@ -139,6 +192,7 @@ def calculate_score_coverage(
         "weak_score": round(weak_score, 4),
         "covered_ratio": covered_ratio,
         "uncovered_count": len(uncovered),
+        "validation_issues": validation_issues,
         "rows": rows,
     }
 
@@ -146,7 +200,7 @@ def calculate_score_coverage(
 def validate_scoring_coverage(report: dict[str, Any]) -> list[str]:
     """给出覆盖自检提示（只读、不抛异常）。"""
 
-    issues: list[str] = []
+    issues: list[str] = list(report.get("validation_issues") or [])
     for row in report.get("rows", []):
         if row.get("status") == STATUS_UNCOVERED:
             hint = row.get("section_hint") or row.get("name") or row.get("id")

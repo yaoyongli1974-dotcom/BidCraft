@@ -30,6 +30,7 @@ from .models import (
     BidPackage,
     BoqQuoteVersion,
     BoqSnapshot,
+    CommercialDoc,
     Material,
     Project,
     ProjectMember,
@@ -705,6 +706,15 @@ QUOTE_VERSION_NOTE_MAX = 200
 QUOTE_VERSION_STATUSES = ("draft", "submitted", "approved", "rejected")
 QUOTE_REVIEW_DECISIONS = ("approve", "reject")
 PENDING_APPROVALS_LIMIT = 100
+#: 项目策略币种被显式改动的次数；用于区分「冻结依据」与「R25 重新定向」。
+POLICY_CURRENCY_REVISION_KEY = "price_policy_currency_revision"
+
+
+def _int_value(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _stage_min_amount(value: Any) -> int | float | None:
@@ -913,6 +923,29 @@ def completed_stages(
     return completed
 
 
+def version_currency(
+    version: BoqQuoteVersion, project: Project | None = None
+) -> str | None:
+    """Approval-gate currency of one version: immutable basis first, policy fallback.
+
+    A version freezes ``basis.currency`` at save time, so a USD version must not
+    silently fall into the default CNY approval branch. An explicit, non-default
+    currency policy change *after* the version was frozen is the one exception:
+    it deliberately re-scopes pending approvals (R25 policy-switch contract).
+    """
+
+    frozen = _text((version.basis or {}).get("currency"))
+    if project is None:
+        return frozen or None
+    policy = get_price_policy(project)
+    revision = _int_value((project.meta or {}).get(POLICY_CURRENCY_REVISION_KEY))
+    frozen_revision = _int_value((version.basis or {}).get("currency_revision"))
+    default = _currency_code(DEFAULT_PRICE_POLICY["currency"])
+    if frozen and (revision <= frozen_revision or _currency_code(policy["currency"]) == default):
+        return frozen
+    return policy["currency"]
+
+
 def version_payload(
     version: BoqQuoteVersion,
     *,
@@ -934,7 +967,7 @@ def version_payload(
     chain = normalize_chain((project.meta or {}).get("approval_chain")) if project else []
     total_amount = summary.get("total_amount")
     package_id = version.package_id
-    currency = get_price_policy(project)["currency"] if project else None
+    currency = version_currency(version, project)
     payload: dict[str, Any] = {
         "id": version.id,
         "name": version.name,
@@ -1042,6 +1075,9 @@ def save_version(
         "qty": qty_by_key,
         "tax_rate": policy["tax_rate"],
         "currency": policy["currency"],
+        "currency_revision": _int_value(
+            (project.meta or {}).get(POLICY_CURRENCY_REVISION_KEY)
+        ),
         "exchange_rate": policy["exchange_rate"],
         "factor": policy["factor"],
         "round_digits": policy["round_digits"],
@@ -1079,6 +1115,15 @@ def delete_version(db: Session, project: Project, version_id: str) -> None:
     version = get_version(db, project.id, version_id)
     if version is None:
         raise LookupError("版本不存在")
+    if (version.status or "draft") == "approved":
+        raise BoqConflictError("已定稿的报价版本不可删除，请先撤销定稿")
+    referenced = db.scalar(
+        select(CommercialDoc.id)
+        .where(CommercialDoc.quote_version_id == version.id)
+        .limit(1)
+    )
+    if referenced is not None:
+        raise BoqConflictError("报价版本已被商务标引用，不可删除")
     db.delete(version)
     db.flush()
 
@@ -1149,7 +1194,7 @@ def review_version(
     approvals = list(version.approvals or [])
     total_amount = (version.summary or {}).get("total_amount")
     package_id = version.package_id
-    currency = get_price_policy(project)["currency"]
+    currency = version_currency(version, project)
     applicable = applicable_stages(chain, total_amount, package_id, currency)
     done = completed_stages(chain, approvals, total_amount, package_id, currency)
     # Authorization precedes the state check so an unauthorized caller gets 403
@@ -1280,7 +1325,6 @@ def pending_for_user(db: Session, user: dict) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for project in projects:
         chain = normalize_chain((project.meta or {}).get("approval_chain"))
-        currency = get_price_policy(project)["currency"]
         versions = db.scalars(
             select(BoqQuoteVersion).where(
                 BoqQuoteVersion.project_id == project.id,
@@ -1288,6 +1332,7 @@ def pending_for_user(db: Session, user: dict) -> list[dict[str, Any]]:
             )
         )
         for version in versions:
+            currency = version_currency(version, project)
             approvals = list(version.approvals or [])
             if not chain:
                 if not is_super and project.owner_id != user_id:
@@ -1656,6 +1701,10 @@ def set_price_policy(
     if candidate["currency"] == DEFAULT_CURRENCY:
         candidate["exchange_rate"] = DEFAULT_EXCHANGE_RATE
     meta = dict(project.meta or {})
+    if candidate["currency"] != current["currency"]:
+        meta[POLICY_CURRENCY_REVISION_KEY] = (
+            _int_value(meta.get(POLICY_CURRENCY_REVISION_KEY)) + 1
+        )
     meta["price_policy"] = candidate
     project.meta = meta
     db.flush()

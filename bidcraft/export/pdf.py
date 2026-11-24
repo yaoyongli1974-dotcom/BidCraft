@@ -19,6 +19,16 @@ from pathlib import Path
 
 UNO_HELPER = Path(__file__).with_name("_uno_pdf.py")
 
+#: 可由环境变量 BIDCRAFT_PDF_TIMEOUT 覆盖；大文档导出可按实际情况放宽。
+def _default_timeout() -> int:
+    try:
+        return max(30, int(os.environ.get("BIDCRAFT_PDF_TIMEOUT", "240")))
+    except (TypeError, ValueError):
+        return 240
+
+
+PDF_EXPORT_TIMEOUT = _default_timeout()
+
 
 class PdfExportError(RuntimeError):
     pass
@@ -130,16 +140,18 @@ def export_pdf(
     docx_path: str | Path,
     pdf_path: str | Path | None = None,
     *,
-    timeout: int = 240,
+    timeout: int | None = None,
     update_toc: bool = True,
 ) -> Path:
     """Convert an existing DOCX to PDF using headless LibreOffice.
 
     This can block for up to ``timeout`` seconds (UNO field refresh plus the
-    plain ``--convert-to`` fallback).  Callers from request handlers MUST run
-    it *outside* any open database transaction/session so a slow conversion
+    plain ``--convert-to`` fallback).  When omitted, :data:`PDF_EXPORT_TIMEOUT`
+    (env ``BIDCRAFT_PDF_TIMEOUT``) is used. Callers from request handlers MUST
+    run it *outside* any open database transaction/session so a slow conversion
     never holds a DB connection or write lock.
     """
+    effective_timeout = PDF_EXPORT_TIMEOUT if timeout is None else int(timeout)
     source = Path(docx_path)
     if not source.exists():
         raise PdfExportError(f"DOCX 不存在: {source}")
@@ -148,8 +160,8 @@ def export_pdf(
     if target.exists():
         target.unlink()
     started = time.monotonic()
-    if update_toc and _export_with_uno(source, target, timeout=timeout):
+    if update_toc and _export_with_uno(source, target, timeout=effective_timeout):
         return target
-    remaining = max(30, timeout - int(time.monotonic() - started))
+    remaining = max(30, effective_timeout - int(time.monotonic() - started))
     _export_plain(source, target, timeout=remaining)
     return target

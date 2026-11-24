@@ -21,7 +21,15 @@ export function SimilarityResult({
   const [note, setNote] = useState('')
   const kind = similarityKindMeta(hit.kind)
   const status = similarityStatusMeta(hit.review_status)
-  const score = Math.max(0, Math.min(100, Math.round((hit.similarity || 0) * 100)))
+  const rerankScore = hit.rerank_score
+  const hasRerank = typeof rerankScore === 'number' && Number.isFinite(rerankScore)
+  const displayScore = hasRerank ? (rerankScore as number) : hit.similarity || 0
+  const score = Math.max(0, Math.min(100, Math.round(displayScore * 100)))
+  const evidence = hit.evidence
+  const vectorScore =
+    typeof evidence?.vector_similarity === 'number' && Number.isFinite(evidence.vector_similarity)
+      ? Math.round(evidence.vector_similarity * 100)
+      : null
 
   return (
     <article
@@ -32,11 +40,39 @@ export function SimilarityResult({
         <Badge tone={kind.tone} subtle>
           {kind.label}
         </Badge>
-        <span className="sim-hit-score mono" title="文本相似度">
+        <span
+          className="sim-hit-score mono"
+          title={hasRerank ? '重排相似度（语义与文本加权）' : '原始相似度'}
+        >
           {score}%
         </span>
+        {hasRerank && (
+          <Badge tone="info" subtle title="语义重排后的最终排序分">
+            重排
+          </Badge>
+        )}
         <Badge tone={status.tone}>{status.label}</Badge>
       </header>
+
+      {(evidence?.reasonable_duplicate || evidence?.common || evidence?.degraded || vectorScore !== null) && (
+        <div className="sim-hit-evidence">
+          {(evidence?.reasonable_duplicate || evidence?.common) && (
+            <Badge tone="warn" subtle title={evidence?.common_reason || '法律法规、标准或固定条款等常见表述'}>
+              合理重复候选
+            </Badge>
+          )}
+          {evidence?.degraded && (
+            <Badge tone="warn" subtle title="语义模型不可用，已回退文本查重">
+              降级运行
+            </Badge>
+          )}
+          {vectorScore !== null && (
+            <Badge tone="neutral" subtle title="语义向量余弦相似度">
+              向量 {vectorScore}%
+            </Badge>
+          )}
+        </div>
+      )}
 
       <div className="sim-hit-grid">
         <div className="sim-excerpt">

@@ -29,6 +29,9 @@ from .risk import (
 )
 from .scorer import evaluate_project_quality
 
+#: 报告摘要里的后台 Job 标识，用于重跑时复用同一份报告（避免重复版本）。
+EVALUATION_JOB_ID_KEY = "evaluation_job_id"
+
 
 def _next_version(db: Session, project_id: str) -> int:
     current = db.scalar(
@@ -39,6 +42,24 @@ def _next_version(db: Session, project_id: str) -> int:
     return (current or 0) + 1
 
 
+def find_report_for_job(
+    db: Session, project_id: str, job_id: str
+) -> QualityReport | None:
+    """Find the report already produced by an evaluation Job (retry-safe)."""
+
+    if not job_id:
+        return None
+    rows = db.scalars(
+        select(QualityReport)
+        .where(QualityReport.project_id == project_id)
+        .order_by(QualityReport.report_version.desc())
+    )
+    for row in rows:
+        if (row.summary or {}).get(EVALUATION_JOB_ID_KEY) == job_id:
+            return row
+    return None
+
+
 def build_quality_report(
     db: Session,
     project_id: str,
@@ -47,9 +68,18 @@ def build_quality_report(
     note: str = "",
     weights: dict[str, float] | None = None,
     commercial_info: dict[str, Any] | None = None,
+    job_id: str = "",
 ) -> QualityReport:
-    """生成并落库一份质量报告（含 finding 明细）。与调用方同事务。"""
+    """生成并落库一份质量报告（含 finding 明细）。与调用方同事务。
 
+    传入 ``job_id`` 时先查同 Job 已提交的报告；命中则直接返回，使后台任务在
+    「报告已落库但 Job 未标记完成」的崩溃重试中不会生成第二个版本。
+    """
+
+    if job_id:
+        existing = find_report_for_job(db, project_id, job_id)
+        if existing is not None:
+            return existing
     if commercial_info is None:
         commercial_info = collect_commercial_completeness(db, project_id)
     coverage = {
@@ -119,6 +149,8 @@ def build_quality_report(
         "recommendations": build_risk_recommendations(risk_summary),
         "note": note,
     }
+    if job_id:
+        summary[EVALUATION_JOB_ID_KEY] = job_id
     if commercial_info is not None:
         summary["commercial"] = commercial_info
 
@@ -219,21 +251,72 @@ def finding_payload(row: QualityFinding) -> dict[str, Any]:
     }
 
 
-def update_finding(db: Session, finding_id: str, status: str, note: str, actor: str = "system") -> QualityFinding | None:
-    row = db.get(QualityFinding, finding_id)
-    if row is None:
+#: finding 人工处置的合法状态（API schema 在此设了 Literal 校验，这里再兜一层）。
+FINDING_STATUSES = ("open", "handled", "ignored")
+
+
+def finding_for_project(
+    db: Session, finding_id: str, project_id: str | None = None
+) -> tuple[QualityFinding, QualityReport] | None:
+    """Resolve a finding together with its report.
+
+    ``project_id`` is authoritative when supplied: a finding that belongs to a
+    different project is indistinguishable from a missing one (no cross-project
+    data leak).  The joined report also supplies the real project id for audit.
+    """
+
+    result = db.execute(
+        select(QualityFinding, QualityReport)
+        .join(QualityReport, QualityReport.id == QualityFinding.report_id)
+        .where(QualityFinding.id == finding_id)
+    ).one_or_none()
+    if result is None:
         return None
+    row, report = result
+    if project_id is not None and report.project_id != project_id:
+        return None
+    return row, report
+
+
+def update_finding(
+    db: Session,
+    finding_id: str,
+    status: str,
+    note: str,
+    actor: str = "system",
+    *,
+    project_id: str | None = None,
+) -> QualityFinding | None:
+    """Update one finding's disposition, scoped to its owning project.
+
+    Returns ``None`` for an unknown finding or a cross-project mismatch.  The
+    audit row always carries the real ``QualityReport.project_id`` (never a
+    caller-supplied or null value).
+    """
+
+    if status is not None and status not in FINDING_STATUSES:
+        raise ValueError(f"非法的质量问题状态: {status}")
+    found = finding_for_project(db, finding_id, project_id)
+    if found is None:
+        return None
+    row, report = found
     row.status = status or "handled"
     evidence = dict(row.evidence or {})
     if note:
         evidence["resolution_note"] = note
     evidence["resolved_by"] = actor
     row.evidence = evidence
+    db.flush()
     record_audit(
         db,
-        None,
+        report.project_id,
         "quality.finding_update",
-        {"finding_id": finding_id, "status": row.status, "note": note},
+        {
+            "finding_id": finding_id,
+            "report_id": report.id,
+            "status": row.status,
+            "note": note,
+        },
         actor={"username": actor},
     )
     return row

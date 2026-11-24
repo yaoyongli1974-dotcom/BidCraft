@@ -14,6 +14,12 @@ from typing import Any
 
 #: 待填占位符，例如 ``{{待填:项目经理}}``。渲染时必须原样保留。
 PLACEHOLDER_PATTERN = re.compile(r"\{\{待填:[^}]*\}\}")
+#: Markdown 链接（外部链接写成 Word 的 w:hyperlink + 外部关系）。
+LINK_PATTERN = re.compile(r"\[([^\]]+)\]\(((?:https?://|mailto:)[^)\s]+)\)")
+#: 单次扫描同时识别占位符与链接，避免嵌套解析把 ``[a](http://x)`` 当普通文本。
+TEXT_TOKEN_PATTERN = re.compile(
+    rf"({PLACEHOLDER_PATTERN.pattern})|(\[([^\]]+)\]\(((?:https?://|mailto:)[^)\s]+)\))"
+)
 
 DEFAULT_BODY_FONT = "宋体"
 DEFAULT_HEADING_FONT = "黑体"
@@ -23,6 +29,28 @@ _TABLE_DIVIDER_PATTERN = re.compile(r"^:?-{2,}:?$")
 _BULLET_PATTERN = re.compile(r"^[-*•]\s+")
 _NUMBERED_PATTERN = re.compile(r"^\d+[.、)]\s+")
 _IMAGE_PATTERN = re.compile(r"^!\[([^\]]*)\]\(([^)\s]+)\)$")
+_HEADING_MARKDOWN_PATTERN = re.compile(r"^(#{1,4})\s+(.*)$")
+
+
+def iter_text_tokens(content: str | None) -> Iterator[tuple]:
+    """把文本切成 ``("text", s)`` / ``("placeholder", s)`` / ``("link", text, url)``。
+
+    渲染层（简单引擎与专业引擎）共用这一套切分规则，保证 Markdown 链接在
+    两个路径下都能写成真正的 Word 超链接。
+    """
+
+    value = "" if content is None else str(content)
+    cursor = 0
+    for match in TEXT_TOKEN_PATTERN.finditer(value):
+        if match.start() > cursor:
+            yield "text", value[cursor : match.start()]
+        if match.group(1):
+            yield "placeholder", match.group(1)
+        else:
+            yield "link", match.group(3), match.group(4)
+        cursor = match.end()
+    if cursor < len(value):
+        yield "text", value[cursor:]
 
 
 def heading_level(style_name: str | None) -> int | None:
@@ -88,12 +116,17 @@ class DocumentTable:
 
 @dataclass
 class DocumentParagraph:
-    """段落。``style`` 为 Word 样式名，``level`` 是标题层级（1-9）。"""
+    """段落。``style`` 为 Word 样式名，``level`` 是标题层级（1-9）。
+
+    ``links`` 保存从 ``text`` 中的 Markdown 链接解析出的 ``{text, url}``，供
+    报告/校验使用；渲染仍以 ``text`` 为准（由渲染器写成真正的超链接）。
+    """
 
     text: str = ""
     style: str = "Normal"
     level: int = 0
     alignment: str | None = None
+    links: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -110,6 +143,26 @@ class DocumentSection:
 
 
 @dataclass
+class DocumentCover:
+    """封面。``lines`` 为逐行展示的 ``(标签, 值)`` 信息。"""
+
+    title: str = ""
+    subtitle: str = "投 标 文 件"
+    lines: list[tuple[str, str]] = field(default_factory=list)
+    page_break: bool = True
+
+
+@dataclass
+class DocumentTOC:
+    """目录占位（Word 中通过右键更新域生成真实目录）。"""
+
+    title: str = "目  录"
+    levels: str = "1-4"
+    placeholder: str = "（在 Word 中右键更新目录）"
+    page_break: bool = True
+
+
+@dataclass
 class DocumentIR:
     """整篇文档的中间表示。"""
 
@@ -118,6 +171,8 @@ class DocumentIR:
     page_layout: DocumentPageLayout | None = None
     header_footer: DocumentHeaderFooter | None = None
     core_properties: dict[str, str] = field(default_factory=dict)
+    cover: DocumentCover | None = None
+    toc: DocumentTOC | None = None
 
     def add_section(self, section: DocumentSection | None = None) -> DocumentSection:
         section = section or DocumentSection()
@@ -201,6 +256,15 @@ def default_styles() -> dict[str, DocumentStyle]:
             space_before=8.0,
             space_after=4.0,
         ),
+        "Heading 4": DocumentStyle(
+            name="Heading 4",
+            font_name=DEFAULT_HEADING_FONT,
+            font_size_pt=12.0,
+            bold=True,
+            line_spacing=1.5,
+            space_before=6.0,
+            space_after=3.0,
+        ),
     }
 
 
@@ -215,6 +279,16 @@ def _parse_table_block(lines: Iterable[str]) -> list[list[str]]:
     return rows
 
 
+def _paragraph_with_links(text: str, style: str = "Normal", level: int = 0) -> DocumentParagraph:
+    """构造段落并记录其中的 Markdown 链接元数据。"""
+
+    links = [
+        {"text": match.group(1), "url": match.group(2)}
+        for match in LINK_PATTERN.finditer(text)
+    ]
+    return DocumentParagraph(text=text, style=style, level=level, links=links)
+
+
 def from_markdown_sections(
     nodes: Iterable[dict[str, Any]],
     *,
@@ -225,19 +299,24 @@ def from_markdown_sections(
     styles: dict[str, DocumentStyle] | None = None,
     page_layout: DocumentPageLayout | None = None,
     header_footer: DocumentHeaderFooter | None = None,
+    core_properties: dict[str, str] | None = None,
+    cover: DocumentCover | None = None,
+    toc: DocumentTOC | None = None,
 ) -> DocumentIR:
     """把 ``[{"heading": ..., "body": "markdown"}]`` 转成 :class:`DocumentIR`。
 
     ``body`` 中：
 
-    * ``#`` / ``##`` / ``###`` 行 → Heading 1/2/3 段落
+    * ``#`` / ``##`` / ``###`` / ``####`` 行 → Heading 1/2/3/4 段落
     * ``| a | b |`` 连续行 → 表格（自动跳过 ``---`` 分隔行）
     * ``-`` / ``*`` / ``•`` 开头 → List Bullet
     * ``1.`` / ``1、`` 开头 → List Number
     * ``![alt](path)`` → 图片条目
+    * ``[文本](https://...)`` → 段落的 ``links`` 元数据（渲染时写成超链接）
     * 其余非空行 → Normal 段落
     """
 
+    core_properties_override = dict(core_properties or {})
     sections: list[DocumentSection] = []
     for node in nodes:
         body = str(node.get("body") or "")
@@ -267,34 +346,26 @@ def from_markdown_sections(
                 index += 1
                 continue
 
-            if stripped.startswith("### "):
+            heading_match = _HEADING_MARKDOWN_PATTERN.match(stripped)
+            if heading_match:
+                level = len(heading_match.group(1))
                 section.paragraphs.append(
-                    DocumentParagraph(text=stripped[4:].strip(), style="Heading 3", level=3)
-                )
-            elif stripped.startswith("## "):
-                section.paragraphs.append(
-                    DocumentParagraph(text=stripped[3:].strip(), style="Heading 2", level=2)
-                )
-            elif stripped.startswith("# "):
-                section.paragraphs.append(
-                    DocumentParagraph(text=stripped[2:].strip(), style="Heading 1", level=1)
+                    _paragraph_with_links(
+                        heading_match.group(2).strip(),
+                        style=f"Heading {level}",
+                        level=level,
+                    )
                 )
             elif _BULLET_PATTERN.match(stripped):
                 section.paragraphs.append(
-                    DocumentParagraph(
-                        text=_BULLET_PATTERN.sub("", stripped),
-                        style="List Bullet",
-                    )
+                    _paragraph_with_links(_BULLET_PATTERN.sub("", stripped), style="List Bullet")
                 )
             elif _NUMBERED_PATTERN.match(stripped):
                 section.paragraphs.append(
-                    DocumentParagraph(
-                        text=_NUMBERED_PATTERN.sub("", stripped),
-                        style="List Number",
-                    )
+                    _paragraph_with_links(_NUMBERED_PATTERN.sub("", stripped), style="List Number")
                 )
             else:
-                section.paragraphs.append(DocumentParagraph(text=stripped))
+                section.paragraphs.append(_paragraph_with_links(stripped))
             index += 1
 
         sections.append(section)
@@ -305,10 +376,16 @@ def from_markdown_sections(
         "subject": subject,
         "keywords": keywords,
     }
+    if core_properties_override:
+        core_properties.update(
+            {key: str(value) for key, value in core_properties_override.items() if value}
+        )
     return DocumentIR(
         sections=sections,
         styles=styles if styles is not None else default_styles(),
         page_layout=page_layout,
         header_footer=header_footer,
         core_properties={key: value for key, value in core_properties.items() if value},
+        cover=cover,
+        toc=toc,
     )

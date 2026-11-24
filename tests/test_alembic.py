@@ -14,7 +14,7 @@ from bidcraft.config import settings
 from bidcraft.db import get_engine, init_db, reset_engine_for_tests
 
 #: 当前 alembic head（新增 revision 时同步这里）。
-HEAD = "0009_v028_schema_parity"
+HEAD = "0010_batch1_billing_reliability"
 
 
 def _version() -> list[str]:
@@ -53,7 +53,12 @@ def test_legacy_db_is_converged_then_stamped(tmp_path, monkeypatch):
         assert {"embedding", "embed_key", "embed_dim"} <= cols
         assert _version() == [HEAD]
     finally:
-        reset_engine_for_tests("sqlite+pysqlite:///:memory:")
+        # 回到一个可用的文件库：内存库每连接独立，后续直接 import api/app 的
+        # 测试会在 init_db() 里让 Alembic 连到空库而报 NoSuchTableError。
+        scratch = tmp_path / ".bidcraft" / "after.sqlite"
+        scratch.parent.mkdir(parents=True, exist_ok=True)
+        reset_engine_for_tests(f"sqlite+pysqlite:///{scratch}")
+        init_db()
 
 
 def test_batch2_downgrade_drops_indexes_before_columns(tmp_path, monkeypatch):
@@ -98,7 +103,12 @@ def test_batch2_downgrade_drops_indexes_before_columns(tmp_path, monkeypatch):
         assert added <= table_set()
         assert _version() == [HEAD]
     finally:
-        reset_engine_for_tests("sqlite+pysqlite:///:memory:")
+        # 回到一个可用的文件库：内存库每连接独立，后续直接 import api/app 的
+        # 测试会在 init_db() 里让 Alembic 连到空库而报 NoSuchTableError。
+        scratch = tmp_path / ".bidcraft" / "after.sqlite"
+        scratch.parent.mkdir(parents=True, exist_ok=True)
+        reset_engine_for_tests(f"sqlite+pysqlite:///{scratch}")
+        init_db()
 
 
 def test_migrations_follow_runtime_home(tmp_path, monkeypatch):
@@ -116,7 +126,12 @@ def test_migrations_follow_runtime_home(tmp_path, monkeypatch):
                 "SELECT version_num FROM alembic_version"
             ).fetchall() == [(HEAD,)]
     finally:
-        reset_engine_for_tests("sqlite+pysqlite:///:memory:")
+        # 回到一个可用的文件库：内存库每连接独立，后续直接 import api/app 的
+        # 测试会在 init_db() 里让 Alembic 连到空库而报 NoSuchTableError。
+        scratch = tmp_path / ".bidcraft" / "after.sqlite"
+        scratch.parent.mkdir(parents=True, exist_ok=True)
+        reset_engine_for_tests(f"sqlite+pysqlite:///{scratch}")
+        init_db()
 
 
 def test_job_queue_indexes_created_and_reversible(db):
@@ -194,3 +209,71 @@ def test_v028_parity_columns_and_table_are_reversible(db):
     assert "owner_id" in columns("jobs")
     assert "pending_charges" in set(inspect(engine).get_table_names())
     assert _version() == [HEAD]
+
+
+def test_0010_backfills_owner_from_user_id_and_project(tmp_path, monkeypatch):
+    """0009 只认 payload['owner_id']；0010 按运行时同款 COALESCE 链补全老行。"""
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+
+    from bidcraft.migrations import __file__ as migrations_init
+    from bidcraft.models import Job, Project
+
+    home = tmp_path / ".bidcraft"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(settings, "home", home)
+    db_file = home / "owner-backfill.sqlite"
+    reset_engine_for_tests(f"sqlite+pysqlite:///{db_file}")
+    try:
+        init_db()
+        engine = get_engine()
+        cfg = Config()
+        cfg.set_main_option("script_location", str(Path(migrations_init).parent))
+        cfg.set_main_option(
+            "sqlalchemy.url",
+            engine.url.render_as_string(hide_password=False).replace("%", "%%"),
+        )
+        command.downgrade(cfg, "0008_job_queue_indexes")
+
+        # 造两条 0009 回填不到的老行：只有 user_id / 只有 project_id。
+        with engine.begin() as connection:
+            connection.execute(
+                Project.__table__.insert().values(
+                    id="p-legacy", name="老项目", owner_id="u-from-project"
+                )
+            )
+            connection.execute(
+                Job.__table__.insert().values(
+                    id="legacy-user-id",
+                    kind="generate",
+                    status="queued",
+                    payload={"user_id": "u-from-payload"},
+                )
+            )
+            connection.execute(
+                Job.__table__.insert().values(
+                    id="legacy-project-owner",
+                    kind="generate",
+                    status="queued",
+                    project_id="p-legacy",
+                    payload={},
+                )
+            )
+
+        command.upgrade(cfg, "head")
+
+        with sqlite3.connect(db_file) as conn:
+            owners = dict(conn.execute("SELECT id, owner_id FROM jobs").fetchall())
+            version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+        assert owners["legacy-user-id"] == "u-from-payload"
+        assert owners["legacy-project-owner"] == "u-from-project"
+        assert version == HEAD
+    finally:
+        # 回到一个可用的文件库：内存库每连接独立，后续直接 import api/app 的
+        # 测试会在 init_db() 里让 Alembic 连到空库而报 NoSuchTableError。
+        scratch = tmp_path / ".bidcraft" / "after.sqlite"
+        scratch.parent.mkdir(parents=True, exist_ok=True)
+        reset_engine_for_tests(f"sqlite+pysqlite:///{scratch}")
+        init_db()

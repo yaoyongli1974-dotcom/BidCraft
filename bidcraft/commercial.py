@@ -19,13 +19,14 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import boq, clock
+from . import auth, boq, clock, personnel, qualifications
 from .audit import record_audit
 from .models import (
     BoqQuoteVersion,
     CommercialDoc,
     Personnel,
     Project,
+    ProjectMember,
     Qualification,
     utcnow,
 )
@@ -36,6 +37,15 @@ REVIEW_DECISIONS = ("approve", "reject")
 NAME_MAX = 120
 NOTE_MAX = 200
 MONEY_TOLERANCE = 0.01
+FORCE_REASON_MIN_CHARS = 4
+PENDING_APPROVALS_LIMIT = 100
+
+QUALIFICATION_STATUS_LABELS = {
+    "valid": "有效",
+    "expiring": "即将到期",
+    "expired": "已过期",
+    "none": "长期有效",
+}
 
 SECTION_ORDER = (
     "bid_letter",
@@ -170,26 +180,68 @@ def _fact(facts: dict[str, str], key: str, label: str) -> str:
     return value or _placeholder(label)
 
 
+def _owner_user(project: Project) -> dict[str, str]:
+    """项目负责人的用户身份，用于复用「私有 + 企业共享」可见性规则。"""
+
+    return {"id": project.owner_id or ""}
+
+
 def _qualifications(db: Session, project: Project) -> list[Qualification]:
+    """项目负责人私有资质 + 其可访问企业的共享资质/业绩。"""
+
     if not project.owner_id:
         return []
-    rows = db.scalars(
-        select(Qualification)
-        .where(Qualification.owner_id == project.owner_id)
-        .order_by(Qualification.kind, Qualification.name, Qualification.id)
-    )
-    return list(rows)
+    return list(qualifications.list_visible_qualifications(db, _owner_user(project)))
 
 
 def _personnel(db: Session, project: Project) -> list[Personnel]:
+    """项目负责人私有人员 + 其可访问企业的共享人员。"""
+
     if not project.owner_id:
         return []
-    rows = db.scalars(
-        select(Personnel)
-        .where(Personnel.owner_id == project.owner_id)
-        .order_by(Personnel.name, Personnel.id)
-    )
-    return list(rows)
+    return list(personnel.list_visible_personnel(db, _owner_user(project)))
+
+
+def _qualification_status(row: Qualification) -> str:
+    return qualifications.status_of(row.valid_to)
+
+
+def _qualification_warning(row: Qualification) -> str | None:
+    status = _qualification_status(row)
+    if status == "expired":
+        return f"资质「{_text(row.name)}」已过期，不得用于投标响应"
+    if status == "expiring":
+        return f"资质「{_text(row.name)}」即将到期（{qualifications.days_left(row.valid_to)} 天）"
+    return None
+
+
+def _personnel_status(row: Personnel) -> str:
+    return "locked" if row.locked else "available"
+
+
+def _personnel_warning(row: Personnel) -> str | None:
+    if row.locked:
+        return f"人员「{_text(row.name)}」在建锁定，不可作为本项目负责人"
+    return None
+
+
+def _asset_warnings(sections: dict[str, Any]) -> list[str]:
+    """Collect the qualification/personnel flags shown in the section tables."""
+
+    warnings: list[str] = []
+    for key in (
+        "qualification_checklist",
+        "performance_table",
+        "personnel_table",
+    ):
+        section = sections.get(key) or {}
+        if not isinstance(section, dict):
+            continue
+        for note in section.get("notes") or []:
+            text = _text(note)
+            if text and text not in warnings:
+                warnings.append(text)
+    return warnings
 
 
 def _latest_approved_version(
@@ -486,18 +538,26 @@ def build_qualification_checklist(
     facts = facts if facts is not None else _facts(db, project.id)
     rows = rows if rows is not None else _qualifications(db, project)
     items: list[dict[str, Any]] = []
-    for index, row in enumerate(rows, start=1):
+    warnings: list[str] = []
+    for row in rows:
         if row.kind == "performance":
             continue
+        status = _qualification_status(row)
+        warning = _qualification_warning(row)
+        if warning:
+            warnings.append(warning)
         items.append(
             {
-                "seq": index,
+                "seq": len(items) + 1,
                 "kind": QUALIFICATION_KINDS.get(row.kind, row.kind or "其他"),
                 "name": _text(row.name),
                 "holder": _text(row.holder),
                 "cert_no": _text(row.cert_no) or _placeholder("证书编号"),
                 "issuer": _text(row.issuer),
                 "valid_to": _iso(row.valid_to) or _placeholder("有效期"),
+                "status": status,
+                "status_label": QUALIFICATION_STATUS_LABELS.get(status, status),
+                "shared": bool(row.enterprise_id),
                 "note": _text(row.note),
             }
         )
@@ -520,10 +580,12 @@ def build_qualification_checklist(
             {"key": "cert_no", "label": "证书编号"},
             {"key": "issuer", "label": "发证机关"},
             {"key": "valid_to", "label": "有效期至"},
+            {"key": "status", "label": "状态"},
             {"key": "note", "label": "备注"},
         ],
         "rows": items,
-        "notes": [] if items else ["资质台账为空，请先登记资质或填写资格要求响应"],
+        "notes": warnings
+        or ([] if items else ["资质台账为空，请先登记资质或填写资格要求响应"]),
     }
 
 
@@ -536,9 +598,14 @@ def build_performance_table(
     """业绩表：只取 ``Qualification.kind == "performance"`` 的台账记录。"""
     rows = rows if rows is not None else _qualifications(db, project)
     items: list[dict[str, Any]] = []
+    warnings: list[str] = []
     for row in rows:
         if row.kind != "performance":
             continue
+        status = _qualification_status(row)
+        warning = _qualification_warning(row)
+        if warning:
+            warnings.append(warning)
         items.append(
             {
                 "seq": len(items) + 1,
@@ -546,6 +613,9 @@ def build_performance_table(
                 "holder": _text(row.holder) or _placeholder("发包人"),
                 "cert_no": _text(row.cert_no),
                 "valid_to": _iso(row.valid_to),
+                "status": status,
+                "status_label": QUALIFICATION_STATUS_LABELS.get(status, status),
+                "shared": bool(row.enterprise_id),
                 "note": _text(row.note),
             }
         )
@@ -559,11 +629,12 @@ def build_performance_table(
             {"key": "holder", "label": "发包人"},
             {"key": "cert_no", "label": "合同/证明材料编号"},
             {"key": "valid_to", "label": "日期"},
+            {"key": "status", "label": "状态"},
             {"key": "note", "label": "备注"},
         ],
         "rows": items,
         "fields": [],
-        "notes": [] if items else ["业绩台账为空，请先登记业绩"],
+        "notes": warnings or ([] if items else ["业绩台账为空，请先登记业绩"]),
     }
 
 
@@ -577,19 +648,28 @@ def build_personnel_table(
     """人员表：项目负责人取台账字段，缺失写占位符；人员明细来自台账。"""
     facts = facts if facts is not None else _facts(db, project.id)
     rows = rows if rows is not None else _personnel(db, project)
-    items = [
-        {
-            "seq": index,
-            "name": _text(row.name),
-            "title": _text(row.title),
-            "specialty": _text(row.specialty),
-            "cert_no": _text(row.cert_no) or _placeholder("证书编号"),
-            "social_months": row.social_months,
-            "locked": "是" if row.locked else "否",
-            "note": _text(row.note),
-        }
-        for index, row in enumerate(rows, start=1)
-    ]
+    items: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for row in rows:
+        warning = _personnel_warning(row)
+        if warning:
+            warnings.append(warning)
+        status = _personnel_status(row)
+        items.append(
+            {
+                "seq": len(items) + 1,
+                "name": _text(row.name),
+                "title": _text(row.title),
+                "specialty": _text(row.specialty),
+                "cert_no": _text(row.cert_no) or _placeholder("证书编号"),
+                "social_months": row.social_months,
+                "locked": "是" if row.locked else "否",
+                "status": status,
+                "status_label": "在建锁定" if status == "locked" else "可用",
+                "shared": bool(row.enterprise_id),
+                "note": _text(row.note),
+            }
+        )
     return {
         "key": "personnel_table",
         "kind": "table",
@@ -609,10 +689,11 @@ def build_personnel_table(
             {"key": "cert_no", "label": "证书编号"},
             {"key": "social_months", "label": "社保月份"},
             {"key": "locked", "label": "在建锁定"},
+            {"key": "status", "label": "状态"},
             {"key": "note", "label": "备注"},
         ],
         "rows": items,
-        "notes": [] if items else ["人员台账为空，请先登记投标人员"],
+        "notes": warnings or ([] if items else ["人员台账为空，请先登记投标人员"]),
     }
 
 
@@ -737,7 +818,9 @@ def build_commercial_payload(
         "blocked_reason": "" if quote.get("is_approved") else quote.get("blocked_reason", ""),
         "generated_at": clock.iso_utc(utcnow()),
     }
-    payload["validation"] = validate_commercial_consistency(payload)
+    validation = validate_commercial_consistency(payload)
+    validation["warnings"].extend(_asset_warnings(sections))
+    payload["validation"] = validation
     payload["completeness"] = validate_commercial_completeness(payload)
     return payload
 
@@ -1018,8 +1101,12 @@ def update_commercial(
     doc = get_commercial(db, project, doc_id)
     if doc is None:
         raise LookupError("商务标不存在")
-    if (doc.status or "draft") == "approved":
-        raise CommercialConflictError("已审批的商务标不可修改，请先撤销审批")
+    # 送审后的章节是审批对象：必须保持冻结，避免审批期间偷改内容。
+    # 如需修改请先驳回（rejected）或撤销定稿（draft），重走提交流程会清空审批记录。
+    if (doc.status or "draft") not in {"draft", "rejected"}:
+        raise CommercialConflictError(
+            "当前状态的商务标不可修改，请先驳回或撤销定稿后再编辑"
+        )
     if name is not None:
         doc.name = _clean_name(name)
     if sections is not None:
@@ -1053,7 +1140,9 @@ def _stored_payload(doc: CommercialDoc) -> dict[str, Any]:
 def _refresh_stored_validation(doc: CommercialDoc) -> None:
     validation = dict(doc.validation or {})
     payload = _stored_payload(doc)
-    validation["consistency"] = validate_commercial_consistency(payload)
+    consistency = validate_commercial_consistency(payload)
+    consistency["warnings"].extend(_asset_warnings(payload.get("sections") or {}))
+    validation["consistency"] = consistency
     validation["completeness"] = validate_commercial_completeness(payload)
     doc.validation = validation
 
@@ -1316,6 +1405,59 @@ def delete_commercial(
     )
 
 
+def ensure_commercial_export_allowed(
+    db: Session,
+    project: Project,
+    doc: CommercialDoc,
+    *,
+    fmt: str = "",
+    force: bool = False,
+    force_reason: str = "",
+    actor: dict | str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Commercial-export preflight: block stale/invalid quotes before rendering.
+
+    The reusable gate revalidates the *stored* doc against the current approved
+    quote, so a superseded or unapproved quote can never be exported silently.
+    Without ``force`` it raises :class:`CommercialConflictError` (HTTP 409).
+    ``force`` requires a reason (≥4 chars) and writes a dedicated audit; the
+    caller must perform the owner authorization check itself (the HTTP route
+    owns that decision).
+
+    Returns the checked export payload so a route can render from it directly.
+    """
+
+    checked = payload if payload is not None else export_payload(db, project, doc)
+    validation = dict(checked.get("validation") or {})
+    if validation.get("ok"):
+        return checked
+    errors = [str(item) for item in (validation.get("errors") or []) if _text(item)]
+    detail = "；".join(errors[:6]) or "商务标一致性校验未通过"
+    if not force:
+        raise CommercialConflictError(
+            f"商务标一致性校验未通过，不能导出：{detail}。"
+            "请重新汇编后再导出；确需导出请由项目负责人填写原因后强制导出"
+        )
+    reason = _text(force_reason).strip()
+    if len(reason) < FORCE_REASON_MIN_CHARS:
+        raise ValueError(f"强制导出商务标必须填写不少于 {FORCE_REASON_MIN_CHARS} 个字的原因")
+    record_audit(
+        db,
+        project.id,
+        "commercial.export_force",
+        {
+            "doc_id": doc.id,
+            "format": fmt,
+            "reason": reason,
+            "errors": errors[:10],
+            "quote_version_id": doc.quote_version_id,
+        },
+        actor=_audit_actor(actor),
+    )
+    return checked
+
+
 def export_payload(
     db: Session, project: Project, doc: CommercialDoc
 ) -> dict[str, Any]:
@@ -1350,6 +1492,107 @@ def export_payload(
                 f"商务标引用的报价版本「{cited.name}」已不是已审批状态，请重新汇编"
             )
             validation["ok"] = False
+    validation["warnings"].extend(_asset_warnings(payload.get("sections") or {}))
     payload["validation"] = validation
     payload["completeness"] = validate_commercial_completeness(payload)
     return payload
+
+
+def pending_for_user(db: Session, user: dict | None) -> list[dict[str, Any]]:
+    """Cross-project inbox of submitted commercial docs awaiting this user.
+
+    Mirrors :func:`bidcraft.boq.pending_for_user` (visible projects, empty chain
+    → owner, staged chain → current approvers) but reads the stored commercial
+    validation quote for amount/package/currency. The ``version_id`` key is kept
+    so the shared /approvals/pending payload stays shape-compatible; ``doc_id``
+    and ``doc_name`` additionally identify the commercial doc for callers that
+    want to link directly to the commercial tab.
+    """
+
+    user = user or {}
+    role = user.get("role") or ""
+    if role == auth.ROLE_VIEWER:
+        return []
+    is_super = role == auth.ROLE_SUPER_ADMIN
+    user_id = str(user.get("id") or "")
+    if is_super:
+        projects = list(db.scalars(select(Project)))
+    else:
+        member_ids = [
+            row.project_id
+            for row in db.scalars(select(ProjectMember).where(ProjectMember.user_id == user_id))
+        ]
+        visible: dict[str, Project] = {
+            item.id: item
+            for item in db.scalars(select(Project).where(Project.owner_id == user_id))
+        }
+        if member_ids:
+            for item in db.scalars(select(Project).where(Project.id.in_(member_ids))):
+                visible.setdefault(item.id, item)
+        projects = list(visible.values())
+
+    items: list[dict[str, Any]] = []
+    for project in projects:
+        chain = boq.normalize_chain((project.meta or {}).get("approval_chain"))
+        docs = db.scalars(
+            select(CommercialDoc).where(
+                CommercialDoc.project_id == project.id,
+                CommercialDoc.status == "submitted",
+            )
+        )
+        for doc in docs:
+            validation = dict(doc.validation or {})
+            approvals = list(validation.get("approvals") or [])
+            quote = dict(validation.get("quote") or {})
+            total_amount = _number(quote.get("total_amount"))
+            package_id = doc.package_id or _text(quote.get("package_id")) or None
+            currency = _text(quote.get("currency")) or boq.get_price_policy(project)["currency"]
+            if not chain:
+                if not is_super and project.owner_id != user_id:
+                    continue
+                pending_stage, stage_count, mode = 1, 1, ""
+            else:
+                applicable = boq.applicable_stages(
+                    chain, total_amount, package_id, currency
+                )
+                done = boq.completed_stages(
+                    chain, approvals, total_amount, package_id, currency
+                )
+                if done >= len(applicable):
+                    continue
+                stage, current = applicable[done]
+                pending_stage, stage_count, mode = done + 1, len(applicable), current["mode"]
+                if not is_super:
+                    approver_ids = {
+                        str(person.get("id") or "") for person in current["approvers"]
+                    }
+                    if user_id not in approver_ids:
+                        continue
+                    if mode == "all" and any(
+                        record.get("decision") == "approve"
+                        and record.get("stage") == stage
+                        and str(record.get("user_id") or "") == user_id
+                        for record in approvals
+                    ):
+                        continue
+            items.append(
+                {
+                    "project_id": project.id,
+                    "project_name": project.name,
+                    # Shared inbox shape: the doc id occupies version_id so the
+                    # flat /approvals/pending list stays consumable as-is.
+                    "version_id": doc.id,
+                    "version_name": f"商务标 · {_text(doc.name)}",
+                    "doc_id": doc.id,
+                    "doc_name": doc.name or "",
+                    "package_id": package_id,
+                    "stage": pending_stage,
+                    "stage_count": stage_count,
+                    "mode": mode,
+                    "submitted_by": doc.submitted_by or "",
+                    "submitted_at": _iso(doc.submitted_at),
+                    "total_amount": total_amount,
+                }
+            )
+    items.sort(key=lambda item: item["submitted_at"] or "", reverse=True)
+    return items[:PENDING_APPROVALS_LIMIT]
