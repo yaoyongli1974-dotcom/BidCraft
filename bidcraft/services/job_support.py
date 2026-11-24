@@ -38,6 +38,10 @@ def _fail_job(db: Session, job: Job, message: str, error: str | None = None) -> 
     from .. import jobqueue
 
     detail = error or message
+    # 终态任务的重复回调只能补做尚未领取的退款，绝不能重复发失败事件。
+    was_terminal = job.status in {"done", "failed", "cancelled"}
+    if was_terminal and job.refund_claimed:
+        return
     refunded = 0
     refund_error: str | None = None
     try:
@@ -49,32 +53,33 @@ def _fail_job(db: Session, job: Job, message: str, error: str | None = None) -> 
         refund_error = str(exc) or exc.__class__.__name__
         logger.exception("失败任务计费退还失败 job=%s", job.id)
 
-    job.status = "failed"
-    job.message = message
-    job.result = {"error": detail}
-    # Fence out a hung worker: its fenced_job() lookup compares the claim token,
-    # so once cleared (and the lease dropped) it can no longer overwrite this
-    # failed row with a late "done" write or event.
-    job.claim_token = None
-    job.lease_expires_at = None
-    job.claimed_at = None
-    job.worker_id = None
-    job.heartbeat_at = None
-    event_detail: dict[str, Any] = {**jobs.job_payload(job), "error": detail}
-    if refunded:
-        event_detail["refunded_credits"] = refunded
-    jobs.publish_event(job.id, "failed", event_detail, db=db)
-    if refund_error is not None:
-        jobs.publish_event(
-            job.id,
-            "refund_failed",
-            {
-                "job_id": job.id,
-                "error": refund_error,
-                "message": "失败任务计费退还失败，请人工对账",
-            },
-            db=db,
-        )
+    if not was_terminal:
+        job.status = "failed"
+        job.message = message
+        job.result = {"error": detail}
+        # Fence out a hung worker: its fenced_job() lookup compares the claim
+        # token, so once cleared (and the lease dropped) it can no longer
+        # overwrite this failed row with a late "done" write or event.
+        job.claim_token = None
+        job.lease_expires_at = None
+        job.claimed_at = None
+        job.worker_id = None
+        job.heartbeat_at = None
+        event_detail: dict[str, Any] = {**jobs.job_payload(job), "error": detail}
+        if refunded:
+            event_detail["refunded_credits"] = refunded
+        jobs.publish_event(job.id, "failed", event_detail, db=db)
+        if refund_error is not None:
+            jobs.publish_event(
+                job.id,
+                "refund_failed",
+                {
+                    "job_id": job.id,
+                    "error": refund_error,
+                    "message": "失败任务计费退还失败，请人工对账",
+                },
+                db=db,
+            )
     db.flush()
 
 
