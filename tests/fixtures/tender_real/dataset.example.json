@@ -10,7 +10,8 @@
       "annotations": {
         "required_clauses": ["★投标人须具备……"],
         "required_values": [{"key": "预算金额", "value": "1000万元"}],
-        "expected_verdicts": {"★投标人须具备……": "SATISFIED"}
+        "expected_verdicts": {"★投标人须具备……": "satisfied"},
+        "responses": {"★投标人须具备……": "我方具备招标文件要求的资质，详见资质证书。"}
       }
     }
   ]

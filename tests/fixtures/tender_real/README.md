@@ -11,7 +11,8 @@
 3. 为每个文件填写 `sha256`（可用 `sha256sum <file>` 生成）与人工标注：
    - `required_clauses`：必须被识别的实质性条款原文片段数组；
    - `required_values`：关键数值/等级/日期及其单位数组；
-   - `expected_verdicts`：条款片段到期望判定状态的映射。
+   - `expected_verdicts`：条款片段到期望判定状态的映射（`satisfied`/`partial`/`unsatisfied`/`review`，大小写不敏感）；
+   - `responses`（可选）：同一条款片段到应答正文的映射。只有同时提供 `expected_verdicts` 与 `responses` 的条款才参与 `verdict_agreement` 计算；缺少应答时该项为 `null`（未测量）。
 4. 运行 `pytest tests/test_tender_dataset_v031.py` 验证契约；数据未就绪时测试
    报告“未就绪”，不会把合成夹具冒充真实样本。
 

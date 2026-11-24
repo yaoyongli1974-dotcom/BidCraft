@@ -57,6 +57,57 @@ def test_ready_dataset_computes_recall_and_value_rate(tmp_path: Path) -> None:
     assert any("应答文本" in note for note in result["notes"])
 
 
+def test_verdict_agreement_uses_judge_on_annotated_responses(tmp_path: Path) -> None:
+    clause = "投标人须具备独立法人资格"
+    tender = tmp_path / "redacted.md"
+    tender.write_text(f"# 招标公告\n★{clause}，预算金额 1000万元。\n", encoding="utf-8")
+    manifest = {
+        "schema": 1,
+        "label": "tmp-real-fixture-with-responses",
+        "files": [
+            {
+                "path": "redacted.md",
+                "sha256": "",
+                "annotations": {
+                    "required_clauses": [clause],
+                    "required_values": [{"key": "预算金额", "value": "1000万元"}],
+                    "expected_verdicts": {clause: "satisfied"},
+                    "responses": {clause: "我方具备独立法人资格，详见资质证书。"},
+                },
+            }
+        ],
+    }
+    (tmp_path / "dataset.json").write_text(json.dumps(manifest), encoding="utf-8")
+    result = collect_tender_quality(tmp_path)
+    assert result["verdict_agreement"] == 1.0
+    assert result["files"][0]["verdict_agreement"] == 1.0
+
+
+def test_invalid_responses_annotation_is_rejected(tmp_path: Path) -> None:
+    from bidcraft.evaluation.tender_dataset import load_dataset
+
+    tender = tmp_path / "redacted.md"
+    tender.write_text("# 招标公告\n★投标人须具备独立法人资格。\n", encoding="utf-8")
+    manifest = {
+        "schema": 1,
+        "files": [
+            {
+                "path": "redacted.md",
+                "sha256": "",
+                "annotations": {
+                    "required_clauses": ["投标人须具备独立法人资格"],
+                    "required_values": [{"key": "预算", "value": "100"}],
+                    "expected_verdicts": {"投标人须具备独立法人资格": "satisfied"},
+                    "responses": ["not-a-mapping"],
+                },
+            }
+        ],
+    }
+    (tmp_path / "dataset.json").write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="responses"):
+        load_dataset(tmp_path)
+
+
 @pytest.mark.usefixtures("db")
 def test_report_summary_includes_tender_quality(monkeypatch) -> None:
     pytest.importorskip("fastapi")

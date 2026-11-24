@@ -82,6 +82,13 @@ def load_dataset(root: Path | str = DEFAULT_ROOT) -> dict[str, Any]:
         head = file_path.read_bytes()[:4096].decode("utf-8", errors="ignore")
         if any(marker in head for marker in SYNTHETIC_MARKERS):
             raise ValueError(f"{name} 含合成/示例标记，不能作为真实样本")
+        # 可选标注：条款 → 应答正文。缺它时判定一致性只能记为未测量。
+        responses = annotations.get("responses") or {}
+        if not isinstance(responses, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in responses.items()
+        ):
+            raise ValueError(f"{name}.annotations.responses 必须是条款到应答文本的字符串映射")
         normalized.append(
             {
                 "path": name,
@@ -89,7 +96,8 @@ def load_dataset(root: Path | str = DEFAULT_ROOT) -> dict[str, Any]:
                 "size": file_path.stat().st_size,
                 "annotations": {
                     key: annotations[key] for key in REQUIRED_ANNOTATIONS
-                },
+                }
+                | ({"responses": responses} if responses else {}),
                 "language": str(entry.get("language") or "zh"),
                 "source": str(entry.get("source") or "user-provided"),
             }

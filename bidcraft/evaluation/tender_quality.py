@@ -12,18 +12,20 @@
 * ``value_parse_rate``：人工标注的 ``required_values`` 中，能在解析字段里
   找到同值文本的比例；
 * ``verdict_agreement``：仅在标注提供 ``responses``（条款→应答文本）时，
-  用与 ``check_project`` 相同的判定引擎复算并比较 ``expected_verdicts``；
-  未提供应答文本时返回 ``None`` 并在 ``notes`` 中说明。
+  用与 ``check_project`` 相同的 ``verdict.judge`` 引擎复算并比较
+  ``expected_verdicts``；未提供应答文本时返回 ``None`` 并在 ``notes`` 中说明。
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from ..calibrate import _load_calibration_packages, _select_package
 from ..parsing.extract import extract
 from ..parsing.loader import load_document
+from ..verdict import judge
 from .tender_dataset import DEFAULT_ROOT, dataset_status, load_dataset
 
 STATUS_MEASURED = "已测量"
@@ -74,12 +76,34 @@ def evaluate_tender_file(path: Path, annotations: dict[str, Any]) -> dict[str, A
 
     notes: list[str] = []
     agreement: float | None = None
-    if responses and expected_verdicts:
-        # Deferred until the dataset schema carries annotated response bodies;
-        # see module docstring.  Keeping the key explicit avoids silent zeros.
-        notes.append("标注含 responses 但判定一致性计算尚未启用，记为未测量")
-    elif expected_verdicts:
-        notes.append("缺少应答文本标注，无法复算判定一致性，记为未测量")
+    mismatches: list[str] = []
+    if expected_verdicts:
+        compared = 0
+        agreed = 0
+        for clause, expected in expected_verdicts.items():
+            body = responses.get(str(clause))
+            if body is None or not str(body).strip():
+                continue
+            requirement = SimpleNamespace(
+                text=str(clause), marker="", source_quote=str(clause)
+            )
+            state = str(
+                judge(requirement, [{"body": str(body)}]).state or ""
+            ).lower()
+            want = str(expected).strip().lower()
+            compared += 1
+            if state == want:
+                agreed += 1
+            else:
+                mismatches.append(f"{_text(clause)[:40]}：期望 {want}，实测 {state}")
+        if compared:
+            agreement = agreed / compared
+            if mismatches:
+                notes.append(
+                    f"判定不一致 {len(mismatches)}/{compared} 条：" + "；".join(mismatches[:3])
+                )
+        else:
+            notes.append("缺少应答文本标注，无法复算判定一致性，记为未测量")
 
     return {
         "path": str(path),
