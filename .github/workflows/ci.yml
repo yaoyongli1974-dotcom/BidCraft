@@ -50,7 +50,7 @@ jobs:
           PY
 
       - name: Lint (ruff)
-        run: uv run --frozen ruff check bidcraft tests
+        run: uv run --frozen ruff check bidcraft tests scripts
 
       - name: Alembic single-head check
         # 不硬编码 revision 号：扫描版本文件，断言恰好一个 head（无分叉/孤立迁移）。
@@ -459,9 +459,20 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
       - name: Bandit (medium+ severity)
-        # Alembic migrations 是审查过的静态 DDL（表名/表达式在代码中固定），
-        # 动态拼接由方言决定，统一排除以免误报；业务代码中的受控 SQL/eval 已就地 #nosec 并注释理由。
-        run: uvx --from bandit bandit -q -ll -r bidcraft --exclude bidcraft/migrations
+        # 全量扫描 bidcraft，不再按目录排除 Alembic 迁移：迁移里的 B608 是审查过的静态 DDL，
+        # 由门禁脚本按 (文件, 行号, 规则) 精确豁免；业务代码中的受控 SQL/eval 已就地 #nosec 并注释理由。
+        # 阈值仍为 -ll（中/高危），门禁脚本内部也只判定 MEDIUM/HIGH，不放宽级别。
+        # bandit 发现问题时退出码为 1（报告已落盘）；扫描自身出错（>1）直接失败。
+        run: |
+          set +e
+          uvx --from bandit bandit -q -ll -f json -r bidcraft -o /tmp/bandit.json
+          bandit_code=$?
+          set -e
+          if [ "$bandit_code" -gt 1 ]; then
+            echo "Bandit 扫描失败（退出码 $bandit_code）"
+            exit "$bandit_code"
+          fi
+          uv run --frozen python scripts/bandit_gate.py /tmp/bandit.json
 
   security-secret-scan:
     name: security (secret scanning)

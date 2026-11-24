@@ -67,11 +67,24 @@ export default defineConfig({
   build: {
     outDir: '../bidcraft/web_dist',
     emptyOutDir: true,
-    rollupOptions: {
+    // Vite 8 bundles with Rolldown: the object form of Rollup's
+    // `output.manualChunks` is gone, so the two vendor chunks are declared as
+    // Rolldown code-splitting groups instead (same names and contents).
+    rolldownOptions: {
       output: {
-        manualChunks: {
-          'react-vendor': ['react', 'react-dom', 'react-router-dom'],
-          icons: ['lucide-react'],
+        codeSplitting: {
+          groups: [
+            {
+              name: 'react-vendor',
+              test: /node_modules[\\/](?:react|react-dom|react-router|react-router-dom|scheduler)[\\/]/,
+              priority: 2,
+            },
+            {
+              name: 'icons',
+              test: /node_modules[\\/]lucide-react[\\/]/,
+              priority: 2,
+            },
+          ],
         },
       },
     },
