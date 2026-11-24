@@ -16,7 +16,7 @@ from typing import Any
 from .. import jobs
 from ..db import session_scope
 from ..evaluation import build_quality_report, find_report_for_job
-from ..jobqueue import fenced_job
+from ..jobqueue import JobAborted, assert_claim_current, fenced_job, raise_if_aborted
 from ..models import QualityReport
 from ..services.job_support import _fail_job
 
@@ -34,6 +34,8 @@ def _report_result(report: QualityReport) -> dict[str, Any]:
 
 
 def _done(job_id: str, result: dict[str, Any], message: str) -> None:
+    raise_if_aborted()
+    assert_claim_current(job_id)
     with session_scope() as db:
         job = fenced_job(db, job_id)
         if job is None:
@@ -56,6 +58,8 @@ def _run_evaluation_job(
 ) -> None:
     """Generate one report per Job and write its index into ``Job.result``."""
     try:
+        raise_if_aborted()
+        assert_claim_current(job_id)
         with session_scope() as db:
             job = fenced_job(db, job_id)
             if job is None:
@@ -67,6 +71,8 @@ def _run_evaluation_job(
             jobs.publish_event(job_id, "status", jobs.job_payload(job), db=db)
 
         result: dict[str, Any] = {}
+        # 报告生成是重操作：开始前再检查一次租约/关闭信号。
+        raise_if_aborted()
         with session_scope() as db:
             job = fenced_job(db, job_id)
             if job is None:
@@ -96,6 +102,9 @@ def _run_evaluation_job(
             db.flush()
 
         _done(job_id, result, f"已生成质量报告 v{result['report_version']}")
+    except JobAborted:
+        # 中止不是业务失败：保持 running，由 reaper 重新排队。
+        logger.info("质量评估任务 %s 已中止，等待重新排队", job_id)
     except Exception as exc:  # noqa: BLE001 - runner 自己落失败状态
         logger.exception("质量评估任务失败 job=%s", job_id)
         with session_scope() as db:

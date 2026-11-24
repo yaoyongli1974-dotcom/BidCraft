@@ -158,6 +158,7 @@ from ..workers import (  # noqa: F401 - 同上；测试也 monkeypatch 这些名
     _run_generation_job,
     _run_image_batch_job,
     _run_kb_reindex_job,
+    _run_similarity_job,
 )
 
 # FastAPI 类型原先只在 create_app 内 import，提升的 helper 需要模块级可见。
@@ -1472,6 +1473,7 @@ __all__ = [
     '_run_generation_job',
     '_run_image_batch_job',
     '_run_kb_reindex_job',
+    '_run_similarity_job',
     '_safe_filename',
     '_save_upload',
     '_source_payload',

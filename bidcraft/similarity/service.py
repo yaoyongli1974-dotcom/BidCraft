@@ -11,7 +11,7 @@ import math
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from ..audit import record_audit
 from ..models import Project, SimilarityHit, SimilarityReport, utcnow
@@ -218,6 +218,14 @@ def run_similarity(
     if report is not None:
         if report.project_id != project_id:
             raise LookupError(f"查重报告不存在: {report_id}")
+        if report.status == "done":
+            # 幂等重算：已完成的报告直接返回，不重算、不追加命中、不记审计。
+            return report
+        # 重试（如租约丢失后重新执行）可能在上一次尝试里写过命中：先清掉旧
+        # 命中并重置统计/跳过原因，避免同一份报告追加出重复结果。
+        db.execute(delete(SimilarityHit).where(SimilarityHit.report_id == report.id))
+        report.stats = {}
+        report.skipped = []
         report.status = "running"
     else:
         report = SimilarityReport(

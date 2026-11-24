@@ -17,7 +17,7 @@ from ..db import session_scope
 from ..export.docx import export_docx, export_markdown
 from ..export_gate import ExportGateError, enforce_export_gate
 from ..generation.outline import load_outline
-from ..jobqueue import fenced_job
+from ..jobqueue import JobAborted, assert_claim_current, fenced_job, raise_if_aborted
 from ..ledger import load_ledger
 from ..models import Project
 from ..services.job_support import _fail_job
@@ -41,6 +41,8 @@ def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None
     entries: list[tuple[Path, str]] = []
     blocked = 0
     try:
+        raise_if_aborted()
+        assert_claim_current(job_id)
         with session_scope() as db:
             job = fenced_job(db, job_id)
             if job is None:
@@ -51,6 +53,8 @@ def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None
             jobs.publish_event(job_id, "status", jobs.job_payload(job), db=db)
 
         for index, project_id in enumerate(project_ids, start=1):
+            # 放在内层 except Exception 之外：中止不能被当成单个项目失败吞掉。
+            raise_if_aborted()
             name = ""
             item: dict[str, Any]
             try:
@@ -108,6 +112,7 @@ def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None
                 failed_items.append(
                     {"project_id": project_id, "name": name, "error": str(exc)}
                 )
+            raise_if_aborted()
             with session_scope() as db:
                 job = fenced_job(db, job_id)
                 if job is None:
@@ -137,6 +142,7 @@ def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None
                     db=db,
                 )
 
+        raise_if_aborted()  # zip 打包与落盘前再确认一次租约
         zip_dir = settings.home / "output"
         zip_dir.mkdir(parents=True, exist_ok=True)
         zip_path = zip_dir / f"batch-{job_id[:8]}.zip"
@@ -144,6 +150,8 @@ def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None
             for path, arcname in entries:
                 bundle.write(path, arcname=arcname)
 
+        raise_if_aborted()
+        assert_claim_current(job_id)
         with session_scope() as db:
             job = fenced_job(db, job_id)
             if job is not None:
@@ -166,6 +174,9 @@ def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None
                     {**jobs.job_payload(job), "report": job.result},
                     db=db,
                 )
+    except JobAborted:
+        # 中止不是业务失败：保持 running，由 reaper 重新排队。
+        logger.info("批量导出任务 %s 已中止，等待重新排队", job_id)
     except Exception:  # noqa: BLE001 - surfaced to the UI as a stable message
         logger.exception("批量导出任务 %s 失败", job_id)
         failed_message = "批量导出失败：服务内部错误，详情见服务日志"

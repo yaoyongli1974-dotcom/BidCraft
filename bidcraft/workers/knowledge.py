@@ -11,7 +11,7 @@ from typing import Any
 from .. import jobs, knowledge, model_config
 from ..config import settings
 from ..db import session_scope
-from ..jobqueue import fenced_job
+from ..jobqueue import JobAborted, assert_claim_current, fenced_job, raise_if_aborted
 from ..services.job_support import _fail_job
 
 logger = logging.getLogger("bidcraft.api")
@@ -29,6 +29,8 @@ def _run_kb_reindex_job(job_id: str, kb_id: str) -> None:
     from ..models import KnowledgeBase  # imported inside create_app at request time
 
     try:
+        raise_if_aborted()
+        assert_claim_current(job_id)
         with session_scope() as db:
             job = fenced_job(db, job_id)
             if job is None:
@@ -39,6 +41,7 @@ def _run_kb_reindex_job(job_id: str, kb_id: str) -> None:
             db.flush()
             jobs.publish_event(job_id, "status", jobs.job_payload(job), db=db)
 
+        raise_if_aborted()  # 文本索引前检查租约/关闭信号
         with session_scope() as db:
             kb = db.get(KnowledgeBase, kb_id)
             if kb is None:
@@ -59,6 +62,7 @@ def _run_kb_reindex_job(job_id: str, kb_id: str) -> None:
 
         vector: dict[str, Any] | None = None
         if settings.kb_vector_enabled:
+            raise_if_aborted()  # 向量索引前检查租约/关闭信号
             with session_scope() as db:
                 kb = db.get(KnowledgeBase, kb_id)
                 if kb is None:
@@ -89,6 +93,8 @@ def _run_kb_reindex_job(job_id: str, kb_id: str) -> None:
                             db=db,
                         )
 
+        raise_if_aborted()
+        assert_claim_current(job_id)
         with session_scope() as db:
             job = fenced_job(db, job_id)
             if job is not None:
@@ -102,6 +108,9 @@ def _run_kb_reindex_job(job_id: str, kb_id: str) -> None:
                     {**jobs.job_payload(job), "report": job.result},
                     db=db,
                 )
+    except JobAborted:
+        # 中止不是业务失败：保持 running，由 reaper 重新排队。
+        logger.info("知识库索引任务 %s 已中止，等待重新排队", job_id)
     except Exception as exc:  # noqa: BLE001 - surfaced to the UI as a stable message
         logger.exception("知识库索引任务 %s 失败", job_id)
         if isinstance(exc, knowledge.KnowledgeError):

@@ -10,7 +10,7 @@ from typing import Any
 
 from .. import jobs
 from ..db import session_scope
-from ..jobqueue import fenced_job
+from ..jobqueue import JobAborted, assert_claim_current, fenced_job, raise_if_aborted
 from ..models import Project
 from ..pipeline import check_project
 from ..services.job_support import _fail_job
@@ -30,6 +30,8 @@ def _run_batch_check_job(job_id: str, project_ids: list[str]) -> None:
     ok_count = 0
     failed_count = 0
     try:
+        raise_if_aborted()
+        assert_claim_current(job_id)
         with session_scope() as db:
             job = fenced_job(db, job_id)
             if job is None:
@@ -40,6 +42,8 @@ def _run_batch_check_job(job_id: str, project_ids: list[str]) -> None:
             jobs.publish_event(job_id, "status", jobs.job_payload(job), db=db)
 
         for index, project_id in enumerate(project_ids, start=1):
+            # 放在内层 except Exception 之外：中止不能被当成单个项目失败吞掉。
+            raise_if_aborted()
             name = ""
             item: dict[str, Any]
             try:
@@ -67,6 +71,7 @@ def _run_batch_check_job(job_id: str, project_ids: list[str]) -> None:
                 }
                 failed_count += 1
             results.append(item)
+            raise_if_aborted()
             with session_scope() as db:
                 job = fenced_job(db, job_id)
                 if job is None:
@@ -97,6 +102,8 @@ def _run_batch_check_job(job_id: str, project_ids: list[str]) -> None:
                     db=db,
                 )
 
+        raise_if_aborted()
+        assert_claim_current(job_id)
         with session_scope() as db:
             job = fenced_job(db, job_id)
             if job is not None:
@@ -115,6 +122,9 @@ def _run_batch_check_job(job_id: str, project_ids: list[str]) -> None:
                     {**jobs.job_payload(job), "report": job.result},
                     db=db,
                 )
+    except JobAborted:
+        # 中止不是业务失败：保持 running，由 reaper 重新排队。
+        logger.info("批量核对任务 %s 已中止，等待重新排队", job_id)
     except Exception:  # noqa: BLE001 - surfaced to the UI as a stable message
         logger.exception("批量核对任务 %s 失败", job_id)
         failed_message = "批量核对失败：服务内部错误，详情见服务日志"

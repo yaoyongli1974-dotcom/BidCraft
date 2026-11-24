@@ -14,7 +14,7 @@ from typing import Any
 
 from .. import jobs
 from ..db import session_scope
-from ..jobqueue import fenced_job
+from ..jobqueue import JobAborted, assert_claim_current, fenced_job, raise_if_aborted
 from ..models import Job
 from ..orchestration import run_workflow as _drive_workflow
 from ..services.job_support import _fail_job
@@ -23,6 +23,9 @@ logger = logging.getLogger("bidcraft.api")
 
 
 def _terminal_job(job_id: str, status: str, result: dict[str, Any], message: str) -> None:
+    # Terminal write: re-read the token in a fresh session so a reclaimed lease
+    # cannot be overwritten by a stale identity-mapped row.
+    assert_claim_current(job_id)
     with session_scope() as db:
         job = fenced_job(db, job_id)
         if job is None:
@@ -44,6 +47,7 @@ def _run_agent_job(job_id: str, run_id: str) -> None:
     """Drive one WorkflowRun from its queued/running state to a terminal or gate."""
 
     def on_progress(payload: dict[str, Any]) -> None:
+        raise_if_aborted()
         with session_scope() as db:
             job: Job | None = fenced_job(db, job_id)
             if job is None:
@@ -57,6 +61,8 @@ def _run_agent_job(job_id: str, run_id: str) -> None:
             db.flush()
 
     try:
+        raise_if_aborted()
+        assert_claim_current(job_id)
         with session_scope() as db:
             job = fenced_job(db, job_id)
             if job is None:
@@ -67,6 +73,7 @@ def _run_agent_job(job_id: str, run_id: str) -> None:
             jobs.publish_event(job_id, "status", jobs.job_payload(job), db=db)
 
         result = _drive_workflow(run_id, job_id=job_id, progress=on_progress)
+        raise_if_aborted()
         run = result.get("run") or {}
         status = str(run.get("status") or "")
         if status == "waiting_approval":
@@ -82,6 +89,9 @@ def _run_agent_job(job_id: str, run_id: str) -> None:
             _terminal_job(job_id, "done", result, "工作流已取消")
         else:
             _terminal_job(job_id, "done", result, "Agent 工作流完成")
+    except JobAborted:
+        # 租约失效/优雅关闭：不写 failed、不退款，留给 reaper 重新排队。
+        logger.info("Agent 工作流任务 %s 已中止，等待重新排队", job_id)
     except Exception as exc:  # noqa: BLE001 - job-level surface, never kill the worker
         logger.exception("Agent 工作流任务 %s 失败", job_id)
         with session_scope() as db:

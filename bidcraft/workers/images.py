@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from .. import images, jobs
 from ..db import session_scope
-from ..jobqueue import fenced_job
+from ..jobqueue import JobAborted, assert_claim_current, fenced_job, raise_if_aborted
 from ..models import ImageAsset, Project
 from ..services.job_support import _fail_job
 
@@ -34,6 +34,8 @@ def _run_image_batch_job(job_id: str, project_id: str, targets: list[dict[str, A
     failed_labels: list[str] = []
     policy: dict = dict(images.DEFAULT_POLICY)
     try:
+        raise_if_aborted()
+        assert_claim_current(job_id)
         with session_scope() as db:
             job = fenced_job(db, job_id)
             if job is None:
@@ -47,6 +49,8 @@ def _run_image_batch_job(job_id: str, project_id: str, targets: list[dict[str, A
             jobs.publish_event(job_id, "status", jobs.job_payload(job), db=db)
 
         for index, target in enumerate(targets, start=1):
+            # 放在内层 try 之外：中止不能被 ImageError/ImageConfigError 分支吞掉。
+            raise_if_aborted()
             label = str(target.get("label") or "配图")
             style = str(target.get("style") or policy.get("style") or "").strip()
             policy_size = str(policy.get("size") or "").strip()
@@ -106,6 +110,7 @@ def _run_image_batch_job(job_id: str, project_id: str, targets: list[dict[str, A
                         job.message = f"配图失败：{label}（{exc}）"
                         db.flush()
 
+            raise_if_aborted()
             if status == "ready":
                 succeeded += 1
             elif status == "skipped":
@@ -152,6 +157,8 @@ def _run_image_batch_job(job_id: str, project_id: str, targets: list[dict[str, A
                 jobs.publish_event(job_id, "image", event, db=db)
                 db.flush()
 
+        raise_if_aborted()
+        assert_claim_current(job_id)
         with session_scope() as db:
             job = fenced_job(db, job_id)
             if job is not None:
@@ -174,6 +181,9 @@ def _run_image_batch_job(job_id: str, project_id: str, targets: list[dict[str, A
                     db=db,
                 )
                 db.flush()
+    except JobAborted:
+        # 中止不是业务失败：保持 running，由 reaper 重新排队。
+        logger.info("配图任务 %s 已中止，等待重新排队", job_id)
     except Exception:  # noqa: BLE001 - surfaced to the UI as a stable message
         logger.exception("配图任务 %s 失败", job_id)
         failed_message = "配图任务失败：图片服务不可用或响应异常，详情见服务日志"

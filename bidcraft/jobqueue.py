@@ -149,6 +149,26 @@ def raise_if_aborted() -> None:
         raise JobAborted("租约失效或服务正在关闭")
 
 
+def assert_claim_current(job_id: str) -> None:
+    """Re-check the fencing token in a FRESH session.
+
+    ``fenced_job(db, ...)`` can be fooled by SQLAlchemy's identity map: a
+    long-lived ``Session`` that already loaded the Job keeps returning its
+    cached (stale) ``claim_token`` even after a reaper changed the row.  Opening
+    a new session here forces a real SELECT, so a runner that held a stale row
+    can no longer write a terminal state over the new owner's work.  The
+    ContextVar token is inherited by the executing worker thread, so the fresh
+    session sees the same claim.
+
+    Raises :class:`JobAborted` when this worker no longer owns the claim (or is
+    called outside a claim context).
+    """
+
+    with session_scope() as db:
+        if fenced_job(db, job_id) is None:
+            raise JobAborted("任务认领已失效")
+
+
 def step_status(db, job_id: str, step_key: str) -> bool | None:
     """Idempotency ledger lookup for one unit of work inside a job.
 
@@ -210,6 +230,7 @@ _API_RUNNER_NAMES = {
     "kb_reindex": "_run_kb_reindex_job",
     "agent": "_run_agent_job",
     "evaluation": "_run_evaluation_job",
+    "similarity": "_run_similarity_job",
 }
 
 
