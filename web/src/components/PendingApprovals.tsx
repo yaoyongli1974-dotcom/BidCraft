@@ -2,8 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { AlertCircle, ClipboardCheck, Inbox, Loader2, RefreshCw } from 'lucide-react'
 import { getPendingApprovals } from '../api/jobs'
+import { getPendingWorkflowApprovals } from '../api/orchestration'
 import { isAbortError, messageOf } from '../lib/http'
-import type { PendingApproval } from '../lib/types'
+import type { PendingApproval, PendingWorkflowApproval } from '../lib/types'
 import { className, formatDate, formatMoney, formatRelative } from '../lib/format'
 import { useAuth } from '../context/useAuth'
 
@@ -18,8 +19,8 @@ function modeLabel(mode: PendingApproval['mode']): string {
 
 /**
  * 顶栏「待我审批」入口：图标 + 数量 Badge（0 不显示数字），点击展开只读面板。
- * 面板列出跨项目的待审报价，点击某项沿用现有路由机制打开该项目并切到清单对齐
- * （BOQ）页签——审批动作在版本面板里完成，这里只读、不做审批。
+ * 面板分两节：报价/商务标待办跳清单对齐（BOQ）或商务标页签；工作流待审闸门跳
+ * 项目的「Agent 工作流」页签。审批动作都在对应项目面板里完成，这里只读。
  */
 export function PendingApprovals() {
   const { user } = useAuth()
@@ -27,6 +28,7 @@ export function PendingApprovals() {
   const location = useLocation()
   const [open, setOpen] = useState(false)
   const [items, setItems] = useState<PendingApproval[]>([])
+  const [workflowItems, setWorkflowItems] = useState<PendingWorkflowApproval[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [loaded, setLoaded] = useState(false)
@@ -36,8 +38,12 @@ export function PendingApprovals() {
     setLoading(true)
     setError(null)
     try {
-      const data = await getPendingApprovals(signal)
+      const [data, workflowData] = await Promise.all([
+        getPendingApprovals(signal),
+        getPendingWorkflowApprovals(signal),
+      ])
       setItems(data)
+      setWorkflowItems(workflowData)
       setLoaded(true)
     } catch (err) {
       if (isAbortError(err)) return
@@ -93,7 +99,7 @@ export function PendingApprovals() {
 
   if (!user) return null
 
-  const count = items.length
+  const count = items.length + workflowItems.length
   const countText = count > 99 ? '99+' : String(count)
 
   const openItem = (item: PendingApproval) => {
@@ -101,6 +107,11 @@ export function PendingApprovals() {
     // 商务标待办跳到商务标页签；报价版本仍沿用清单对齐（BOQ）页签。
     const tab = item.doc_id ? 'commercial' : 'boq'
     navigate(`/app/projects/${encodeURIComponent(item.project_id)}/${tab}`)
+  }
+
+  const openWorkflowItem = (item: PendingWorkflowApproval) => {
+    setOpen(false)
+    navigate(`/app/projects/${encodeURIComponent(item.project_id)}/agents`)
   }
 
   return (
@@ -124,7 +135,7 @@ export function PendingApprovals() {
       </button>
 
       {open && (
-        <div className="pending-dropdown" role="menu" aria-label="待我审批的报价">
+        <div className="pending-dropdown" role="menu" aria-label="待我审批">
           <div className="pending-dropdown-head">
             <ClipboardCheck size={14} aria-hidden />
             <strong>待我审批</strong>
@@ -165,41 +176,88 @@ export function PendingApprovals() {
                 </div>
               )
             ) : (
-              <ul className="pending-list">
-                {items.map((item) => (
-                  <li key={`${item.project_id}:${item.doc_id || item.version_id}`}>
-                    <button
-                      type="button"
-                      className="pending-item"
-                      role="menuitem"
-                      onClick={() => openItem(item)}
-                      title={`${item.project_name} · ${item.version_name}`}
-                    >
-                      <span className="pending-item-title">
-                        <strong>{item.project_name}</strong>
-                        <span className="pending-item-version">· {item.version_name}</span>
-                      </span>
-                      <span className="pending-item-stage">
-                        第 {item.stage}/{item.stage_count} 级{modeLabel(item.mode)}
-                      </span>
-                      <span className="pending-item-meta">
-                        <span className="pending-item-submitter">
-                          {item.submitted_by || '—'}
-                          <span title={formatDate(item.submitted_at)}>
-                            {' '}
-                            · {formatRelative(item.submitted_at)}
-                          </span>
-                        </span>
-                        {item.total_amount !== null && (
-                          <span className="pending-item-amount mono">
-                            ¥{formatMoney(item.total_amount)}
-                          </span>
-                        )}
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
+              <>
+                {items.length > 0 && (
+                  <section className="pending-section" aria-label="报价与商务标">
+                    <div className="pending-section-label">报价 / 商务标</div>
+                    <ul className="pending-list">
+                      {items.map((item) => (
+                        <li key={`${item.project_id}:${item.doc_id || item.version_id}`}>
+                          <button
+                            type="button"
+                            className="pending-item"
+                            role="menuitem"
+                            onClick={() => openItem(item)}
+                            title={`${item.project_name} · ${item.version_name}`}
+                          >
+                            <span className="pending-item-title">
+                              <strong>{item.project_name}</strong>
+                              <span className="pending-item-version">· {item.version_name}</span>
+                            </span>
+                            <span className="pending-item-stage">
+                              第 {item.stage}/{item.stage_count} 级{modeLabel(item.mode)}
+                            </span>
+                            <span className="pending-item-meta">
+                              <span className="pending-item-submitter">
+                                {item.submitted_by || '—'}
+                                <span title={formatDate(item.submitted_at)}>
+                                  {' '}
+                                  · {formatRelative(item.submitted_at)}
+                                </span>
+                              </span>
+                              {item.total_amount !== null && (
+                                <span className="pending-item-amount mono">
+                                  ¥{formatMoney(item.total_amount)}
+                                </span>
+                              )}
+                            </span>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                )}
+
+                {workflowItems.length > 0 && (
+                  <section className="pending-section" aria-label="工作流待审">
+                    <div className="pending-section-label">工作流待审</div>
+                    <ul className="pending-list">
+                      {workflowItems.map((item) => (
+                        <li key={`workflow:${item.id}:${item.run_id}`}>
+                          <button
+                            type="button"
+                            className="pending-item"
+                            role="menuitem"
+                            onClick={() => openWorkflowItem(item)}
+                            title={`${item.project_name} · ${item.goal || item.approval_type}`}
+                          >
+                            <span className="pending-item-title">
+                              <strong>{item.project_name}</strong>
+                              <span className="pending-item-version">
+                                · {item.goal || item.workflow_type}
+                              </span>
+                            </span>
+                            <span className="pending-item-stage">
+                              {item.approval_type}
+                              {item.status ? ` · ${item.status}` : ''}
+                              {item.labels.length > 0 ? ` · ${item.labels.join(' · ')}` : ''}
+                            </span>
+                            <span className="pending-item-meta">
+                              <span className="pending-item-submitter">
+                                {item.submitted_by || '—'}
+                                <span title={formatDate(item.submitted_at)}>
+                                  {' '}
+                                  · {formatRelative(item.submitted_at)}
+                                </span>
+                              </span>
+                            </span>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                )}
+              </>
             )}
           </div>
 

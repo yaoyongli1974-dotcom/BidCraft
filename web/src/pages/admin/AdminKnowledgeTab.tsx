@@ -4,6 +4,7 @@ import { messageOf } from '../../lib/http'
 import {
   Cloud,
   Database,
+  FileSearch,
   FolderOpen,
   Pencil,
   Plus,
@@ -98,6 +99,7 @@ export function AdminKnowledgeTab({
   const [kindFilter, setKindFilter] = useState('all')
   const [modal, setModal] = useState<KnowledgeModalState | null>(null)
   const [docsKb, setDocsKb] = useState<KnowledgeBase | null>(null)
+  const [docsView, setDocsView] = useState<'meta' | 'docs'>('meta')
   const [testingId, setTestingId] = useState<string | null>(null)
   const [reindexingId, setReindexingId] = useState<string | null>(null)
   const [reindexJobId, setReindexJobId] = useState<string | null>(null)
@@ -647,9 +649,23 @@ export function AdminKnowledgeTab({
                               variant="ghost"
                               size="sm"
                               icon={<Tags size={12} />}
-                              onClick={() => setDocsKb(kb)}
+                              onClick={() => {
+                                setDocsView('meta')
+                                setDocsKb(kb)
+                              }}
                             >
                               素材元数据
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              icon={<FileSearch size={12} />}
+                              onClick={() => {
+                                setDocsView('docs')
+                                setDocsKb(kb)
+                              }}
+                            >
+                              文档与预览
                             </Button>
                             <Button
                               variant="ghost"
@@ -700,8 +716,9 @@ export function AdminKnowledgeTab({
 
       {docsKb && (
         <AdminKbDocsModal
-          key={docsKb.id}
+          key={`${docsKb.id}-${docsView}`}
           kb={docsKb}
+          initialView={docsView}
           onClose={() => setDocsKb(null)}
         />
       )}

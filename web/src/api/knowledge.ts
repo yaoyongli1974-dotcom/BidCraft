@@ -27,25 +27,124 @@ export const deleteKnowledgeBase = (id: string) =>
 export const testKnowledgeBase = (id: string) =>
   request<TestResult>(`/admin/kbs/${encodeURIComponent(id)}/test`, { method: 'POST' })
 
-/** 文档实体清单（含页码/版本/有效期/状态）。 */
-export async function listKnowledgeDocuments(id: string): Promise<KbDocumentItem[]> {
-  const data = await request<{ items?: KbDocumentItem[] } | KbDocumentItem[]>(
-    `/admin/kbs/${encodeURIComponent(id)}/documents`,
-  )
-  return asArray<KbDocumentItem>(data, 'items')
-}
-
 /** 检索预览：返回带 document_id / page / heading 的片段。 */
 export async function previewKnowledgeBase(
   id: string,
   query: string,
   limit = 5,
 ): Promise<KbSearchPassage[]> {
-  const params = new URLSearchParams({ q: query, limit: String(limit) })
-  const data = await request<{ items?: KbSearchPassage[] } | KbSearchPassage[]>(
-    `/admin/kbs/${encodeURIComponent(id)}/preview?${params.toString()}`,
+  return previewKbRetrieval(id, query, limit)
+}
+
+// ---------------------------------------------------------------- 文档实体与检索预览
+
+/** 文档实体列表行：后端原字段全部保留，另补展示用的 filename / chunk_count。 */
+export interface KbDocumentRow extends KbDocumentItem {
+  filename: string
+  chunk_count: number
+  [key: string]: unknown
+}
+
+function nullablePage(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null
+  const page = asNumber(value, Number.NaN)
+  return Number.isFinite(page) ? Math.max(0, Math.round(page)) : null
+}
+
+/**
+ * 归一化 `GET /admin/kbs/{id}/documents` 的一条记录。
+ * 状态统一成小写（缺省 ready），数值/数组字段容错；未知字段原样保留，便于溯源核对。
+ */
+export function normalizeKbDocument(value: unknown): KbDocumentRow | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  const id = asText(raw.id).trim()
+  const source = asText(raw.source).trim()
+  if (!id && !source) return null
+  return {
+    ...raw,
+    id: id || source,
+    kb_id: asText(raw.kb_id),
+    source,
+    filename: asText(raw.filename).trim() || source || id,
+    sha256: asText(raw.sha256),
+    size: Math.max(0, Math.round(asNumber(raw.size, 0))),
+    mime: asText(raw.mime),
+    pages: Math.max(0, Math.round(asNumber(raw.pages, 0))),
+    status: asText(raw.status, 'ready').trim().toLowerCase() || 'ready',
+    version: Math.max(1, Math.round(asNumber(raw.version, 1))),
+    kind: asText(raw.kind, 'other').trim() || 'other',
+    tags: Array.isArray(raw.tags)
+      ? raw.tags.filter((tag): tag is string => typeof tag === 'string')
+      : [],
+    valid_to: typeof raw.valid_to === 'string' && raw.valid_to ? raw.valid_to : null,
+    // 后端不同版本可能叫 chunk_count / chunks / chunkCount。
+    chunk_count: Math.max(
+      0,
+      Math.round(asNumber(raw.chunk_count ?? raw.chunks ?? raw.chunkCount, 0)),
+    ),
+    error: asText(raw.error),
+    created_at: typeof raw.created_at === 'string' ? raw.created_at : null,
+    updated_at: typeof raw.updated_at === 'string' ? raw.updated_at : null,
+  }
+}
+
+/** 归一化 `GET /admin/kbs/{id}/preview` 的片段；document/page/heading 缺失时留空。 */
+export function normalizeKbPassage(value: unknown): KbSearchPassage | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  const source = asText(raw.source)
+  const text = asText(raw.text)
+  if (!source && !text) return null
+  return {
+    ...raw,
+    kb_id: asText(raw.kb_id),
+    source,
+    text,
+    score: asNumber(raw.score, 0),
+    document_id:
+      typeof raw.document_id === 'string' && raw.document_id ? raw.document_id : null,
+    page: nullablePage(raw.page),
+    heading: asText(raw.heading),
+  }
+}
+
+export async function listKnowledgeDocuments(id: string): Promise<KbDocumentItem[]> {
+  return listKbDocuments(id)
+}
+
+/** 文档实体清单（后端 batch6 的 /documents 端点）。 */
+export async function listKbDocuments(kbId: string): Promise<KbDocumentRow[]> {
+  const data = await request<unknown>(
+    `/admin/kbs/${encodeURIComponent(kbId)}/documents`,
   )
-  return asArray<KbSearchPassage>(data, 'items')
+  if (data && typeof data === 'object' && !Array.isArray(data) && !('items' in data)) {
+    throw new ApiError(500, null, '服务端返回的文档清单无法识别，请刷新后重试。')
+  }
+  return asArray<unknown>(data, 'items')
+    .map(normalizeKbDocument)
+    .filter((item): item is KbDocumentRow => item !== null)
+}
+
+/** 检索预览（后端 batch6 的 /preview 端点），携带 q / limit 查询参数。 */
+export async function previewKbRetrieval(
+  kbId: string,
+  query: string,
+  limit = 5,
+): Promise<KbSearchPassage[]> {
+  const q = query.trim()
+  if (!q) throw new ApiError(400, null, '检索内容不能为空')
+  const bounded = Math.max(1, Math.min(20, Math.round(limit)))
+  const params = new URLSearchParams({ q, limit: String(bounded) })
+  const data = await request<unknown>(
+    `/admin/kbs/${encodeURIComponent(kbId)}/preview?${params.toString()}`,
+  )
+  if (data && typeof data === 'object' && !Array.isArray(data) && !('items' in data)) {
+    throw new ApiError(500, null, '服务端返回的检索预览无法识别，请刷新后重试。')
+  }
+  return asArray<unknown>(data, 'items')
+    .map(normalizeKbPassage)
+    .filter((item): item is KbSearchPassage => item !== null)
 }
 
 export const DEFAULT_KB_DOC_POLICY: KbDocPolicy = {

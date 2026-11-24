@@ -1,6 +1,6 @@
 import { normalizeProjectType, projectTypeLabel } from '../lib/format'
 import { ApiError, asArray, request } from '../lib/http'
-import type { AdminRulePackage, AuditEntry, AuditPage, BatchItemResult, BidPackage, BoqLedgerSummary, BoqPayload, BoqPrice, BoqQuoteVersion, BoqRow, BoqSnapshot, BoqVersionDiffChanged, BoqVersionDiffEntry, ImagePlan, ImagePlanDocument, ImagePolicy, KbDocPolicyEntry, KbDocSource, KbVectorResult, KnowledgeBase, PackageInfo, PendingApproval, Personnel, PluginCatalogEntry, PreflightItem, PreflightStatus, PriceCurrency, ProjectTemplate, Qualification, QualificationEvidence, QualificationKind, QualificationStatus, QuotaItem, QuotaProposal, QuoteApprovalRecord, QuoteVersionStatus, RequirementResponse, RequirementResponseStatus, RequirementVerdict, RiskCategorySummary, RiskTierLevel, RiskTierSummary, RulePackageSummary, RulePackageValidation, TermInput, TextQaSettings, UserDoc, WechatConfig } from '../lib/types'
+import type { AdminRulePackage, AuditEntry, AuditPage, BatchItemResult, BidPackage, BoqLedgerSummary, BoqPayload, BoqPrice, BoqQuoteVersion, BoqRow, BoqSnapshot, BoqVersionDiffChanged, BoqVersionDiffEntry, ImagePlan, ImagePlanDocument, ImagePolicy, KbDocPolicyEntry, KbDocSource, KbVectorResult, KnowledgeBase, PackageInfo, PendingApproval, PendingWorkflowApproval, Personnel, PluginCatalogEntry, PreflightItem, PreflightStatus, PriceCurrency, ProjectTemplate, Qualification, QualificationEvidence, QualificationKind, QualificationStatus, QuotaItem, QuotaProposal, QuoteApprovalRecord, QuoteVersionStatus, RequirementResponse, RequirementResponseStatus, RequirementVerdict, RiskCategorySummary, RiskTierLevel, RiskTierSummary, RulePackageSummary, RulePackageValidation, TermInput, TextQaSettings, UserDoc, WechatConfig } from '../lib/types'
 import type { DeletionState } from './account'
 import type { InvoiceRequest } from './auth'
 import { normalizeBoqQuoteVersion, normalizeBoqSummary } from './boq'
@@ -522,6 +522,37 @@ export function normalizePendingApproval(value: unknown): PendingApproval | null
     total_amount: Number.isFinite(amount) ? amount : null,
     doc_id: asText(raw.doc_id).trim() || undefined,
     doc_name: asText(raw.doc_name).slice(0, 120) || undefined,
+  }
+}
+
+/**
+ * 归一化一条跨项目工作流待审闸门。后端平铺返回审批记录并附带项目/运行信息；
+ * 兼容只有 run_id 而没有 id 的旧数据，标签统一收敛为去重后的字符串列表。
+ */
+export function normalizePendingWorkflowApproval(value: unknown): PendingWorkflowApproval | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  const projectId = asText(raw.project_id).trim()
+  const id = asText(raw.id ?? raw.approval_id).trim()
+  const runId = asText(raw.run_id).trim()
+  if (!projectId || (!id && !runId)) return null
+  const labels = Array.from(
+    new Set(asStringList(raw.labels ?? raw.label ?? raw.tags).map((item) => item.slice(0, 40))),
+  ).slice(0, 8)
+  return {
+    id: id || runId,
+    run_id: runId || id,
+    task_id: asText(raw.task_id ?? raw.task).trim() || null,
+    approval_type: asText(raw.approval_type ?? raw.type).trim() || 'approval',
+    status: asText(raw.status, 'pending').trim() || 'pending',
+    project_id: projectId,
+    project_name: asText(raw.project_name).slice(0, 120) || '未命名项目',
+    workflow_type: asText(raw.workflow_type).trim() || 'standard',
+    run_status: asText(raw.run_status).trim(),
+    goal: asText(raw.goal ?? raw.objective).slice(0, 200),
+    labels,
+    submitted_by: asText(raw.submitted_by).slice(0, 80),
+    submitted_at: isoOrNull(raw.submitted_at),
   }
 }
 

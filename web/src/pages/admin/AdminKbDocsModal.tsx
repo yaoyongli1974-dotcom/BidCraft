@@ -1,8 +1,20 @@
 import { useEffect, useState } from 'react'
-import { FileText, RefreshCw, Tags, Trash2 } from 'lucide-react'
-import type { KbDocMetaItem, KbDocMetaResponse, KnowledgeBase } from '../../lib/types'
-import { className } from '../../lib/format'
-import { deleteKbDoc, getKbDocs, updateKbDoc } from '../../api/knowledge'
+import { FileSearch, FileText, RefreshCw, Search, Tags, Trash2 } from 'lucide-react'
+import type {
+  KbDocMetaItem,
+  KbDocMetaResponse,
+  KbSearchPassage,
+  KnowledgeBase,
+} from '../../lib/types'
+import { className, type Tone } from '../../lib/format'
+import {
+  deleteKbDoc,
+  getKbDocs,
+  listKbDocuments,
+  previewKbRetrieval,
+  updateKbDoc,
+  type KbDocumentRow,
+} from '../../api/knowledge'
 import { messageOf } from '../../lib/http'
 import { Badge } from '../../components/Badge'
 import { Button, IconButton } from '../../components/Button'
@@ -10,6 +22,7 @@ import { EmptyState, ErrorState, Skeleton } from '../../components/Feedback'
 import { Modal } from '../../components/Modal'
 import { useConfirm } from '../../context/useConfirm'
 import { useToast } from '../../context/useToast'
+import { AdminSegment } from './AdminShared'
 
 const FIELD_LABELS: Record<string, string> = {
   cert_no: '证书编号',
@@ -39,16 +52,54 @@ function sourceName(source: string): string {
   return parts[parts.length - 1] || source
 }
 
+type DocsView = 'meta' | 'docs'
+
+const DOC_STATUS_TONES: Record<string, Tone> = {
+  ready: 'success',
+  indexing: 'info',
+  processing: 'info',
+  pending: 'warn',
+  expired: 'danger',
+  failed: 'danger',
+  error: 'danger',
+}
+
+const DOC_STATUS_LABELS: Record<string, string> = {
+  ready: '就绪',
+  indexing: '索引中',
+  processing: '处理中',
+  pending: '待处理',
+  expired: '已过期',
+  failed: '失败',
+  error: '错误',
+}
+
+function docStatus(status: string): { label: string; tone: Tone } {
+  const key = status.trim().toLowerCase()
+  return {
+    label: DOC_STATUS_LABELS[key] || status || '未知',
+    tone: DOC_STATUS_TONES[key] || 'neutral',
+  }
+}
+
+function shortId(id: string | null): string {
+  if (!id) return ''
+  return id.length > 10 ? `${id.slice(0, 8)}…` : id
+}
+
 /** 素材元数据弹窗：左侧列出全部片段来源，右侧按策略登记 / 删除元数据。 */
 export function AdminKbDocsModal({
   kb,
   onClose,
+  initialView = 'meta',
 }: {
   kb: KnowledgeBase
   onClose: () => void
+  initialView?: DocsView
 }) {
   const toast = useToast()
   const confirm = useConfirm()
+  const [view, setView] = useState<DocsView>(initialView)
   const [data, setData] = useState<KbDocMetaResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -59,6 +110,14 @@ export function AdminKbDocsModal({
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [docs, setDocs] = useState<KbDocumentRow[]>([])
+  const [docsLoading, setDocsLoading] = useState(false)
+  const [docsError, setDocsError] = useState<string | null>(null)
+  const [docsReloadKey, setDocsReloadKey] = useState(0)
+  const [query, setQuery] = useState('')
+  const [passages, setPassages] = useState<KbSearchPassage[] | null>(null)
+  const [previewing, setPreviewing] = useState(false)
+  const [previewError, setPreviewError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -86,6 +145,29 @@ export function AdminKbDocsModal({
       cancelled = true
     }
   }, [kb.id, reloadKey])
+
+  // 文档清单按需加载：切到「文档与预览」或点击重试时才请求后端。
+  useEffect(() => {
+    if (view !== 'docs') return
+    let cancelled = false
+    setDocsLoading(true)
+    setDocsError(null)
+    listKbDocuments(kb.id)
+      .then((next) => {
+        if (cancelled) return
+        setDocs(next)
+      })
+      .catch((err) => {
+        if (cancelled) return
+        setDocsError(messageOf(err))
+      })
+      .finally(() => {
+        if (!cancelled) setDocsLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [kb.id, view, docsReloadKey])
 
   // Reset the draft whenever the selected source (or refreshed server data) changes.
   useEffect(() => {
@@ -163,6 +245,22 @@ export function AdminKbDocsModal({
       toast.error('删除素材登记失败', message)
     } finally {
       setDeleting(false)
+    }
+  }
+
+  const runPreview = async () => {
+    const q = query.trim()
+    if (!q || previewing) return
+    setPreviewing(true)
+    setPreviewError(null)
+    setPassages(null)
+    try {
+      const next = await previewKbRetrieval(kb.id, q)
+      setPassages(next)
+    } catch (err) {
+      setPreviewError(messageOf(err))
+    } finally {
+      setPreviewing(false)
     }
   }
 
@@ -273,188 +371,365 @@ export function AdminKbDocsModal({
       }
     >
       <div className="kb-docs">
-        <div className="kb-docs-note">
-          <Tags size={15} aria-hidden />
-          <span>
-            按素材类型登记可信字段；缺失必填项或证书过期的片段只会作为题录引用，
-            不注入正文。左侧列出知识库内全部片段来源。
-          </span>
-        </div>
+        <AdminSegment
+          label="知识库文档视图"
+          value={view}
+          onChange={(value) => setView(value as DocsView)}
+          items={[
+            { id: 'meta', label: '素材登记' },
+            { id: 'docs', label: '文档与预览' },
+          ]}
+        />
 
-        {loading && !data ? (
-          <div className="kb-docs-loading">
-            <Skeleton width="38%" height={14} />
-            <Skeleton width="100%" height={42} />
-            <Skeleton width="100%" height={42} />
-            <Skeleton width="82%" height={42} />
-          </div>
-        ) : error ? (
-          <ErrorState
-            message={error}
-            onRetry={() => setReloadKey((value) => value + 1)}
-          />
-        ) : sources.length === 0 ? (
-          <EmptyState
-            icon={Tags}
-            compact
-            title="还没有可登记的素材"
-            description="知识库还没有索引片段。先重建索引，再回来登记证书编号、合同信息或官方出处。"
-            actions={
-              <Button
-                variant="secondary"
-                icon={<RefreshCw size={14} />}
-                onClick={() => setReloadKey((value) => value + 1)}
-              >
-                重新读取
-              </Button>
-            }
-          />
-        ) : (
-          <div className="kb-docs-grid">
-            <aside className="kb-docs-sources" aria-label="素材来源">
-              <header className="kb-docs-sources-head">
-                <span>素材来源</span>
-                <span className="kb-docs-count">{sources.length}</span>
-              </header>
-              <div className="kb-docs-source-list">
-                {sources.map((entry) => {
-                  const registered = data?.items.some(
-                    (item) => item.source === entry.source,
-                  )
-                  return (
-                    <button
-                      key={entry.source}
-                      type="button"
-                      className={className(
-                        'kb-docs-source',
-                        selected === entry.source && 'is-active',
-                      )}
-                      title={entry.source}
-                      onClick={() => setSelected(entry.source)}
-                      aria-pressed={selected === entry.source}
-                    >
-                      <span className="kb-docs-source-main">
-                        <FileText size={13} aria-hidden />
-                        <span className="kb-docs-source-name">
-                          {sourceName(entry.source)}
-                        </span>
-                      </span>
-                      <span className="kb-docs-source-meta">
-                        <span>{entry.chunks} 片段</span>
-                        {registered ? (
-                          <Badge tone="success" subtle>
-                            已登记
-                          </Badge>
-                        ) : (
-                          <span className="kb-docs-unregistered">未登记</span>
+        {view === 'meta' ? (
+          <>
+            <div className="kb-docs-note">
+              <Tags size={15} aria-hidden />
+              <span>
+                按素材类型登记可信字段；缺失必填项或证书过期的片段只会作为题录引用，
+                不注入正文。左侧列出知识库内全部片段来源。
+              </span>
+            </div>
+
+          {loading && !data ? (
+            <div className="kb-docs-loading">
+              <Skeleton width="38%" height={14} />
+              <Skeleton width="100%" height={42} />
+              <Skeleton width="100%" height={42} />
+              <Skeleton width="82%" height={42} />
+            </div>
+          ) : error ? (
+            <ErrorState
+              message={error}
+              onRetry={() => setReloadKey((value) => value + 1)}
+            />
+          ) : sources.length === 0 ? (
+            <EmptyState
+              icon={Tags}
+              compact
+              title="还没有可登记的素材"
+              description="知识库还没有索引片段。先重建索引，再回来登记证书编号、合同信息或官方出处。"
+              actions={
+                <Button
+                  variant="secondary"
+                  icon={<RefreshCw size={14} />}
+                  onClick={() => setReloadKey((value) => value + 1)}
+                >
+                  重新读取
+                </Button>
+              }
+            />
+          ) : (
+            <div className="kb-docs-grid">
+              <aside className="kb-docs-sources" aria-label="素材来源">
+                <header className="kb-docs-sources-head">
+                  <span>素材来源</span>
+                  <span className="kb-docs-count">{sources.length}</span>
+                </header>
+                <div className="kb-docs-source-list">
+                  {sources.map((entry) => {
+                    const registered = data?.items.some(
+                      (item) => item.source === entry.source,
+                    )
+                    return (
+                      <button
+                        key={entry.source}
+                        type="button"
+                        className={className(
+                          'kb-docs-source',
+                          selected === entry.source && 'is-active',
                         )}
-                      </span>
-                    </button>
-                  )
-                })}
-              </div>
-            </aside>
-
-            <div className="kb-docs-editor">
-              <div className="kb-docs-editor-head">
-                <div className="kb-docs-editor-title">
-                  <strong title={selected}>{sourceName(selected)}</strong>
-                  <span className="cell-sub mono" title={selected}>
-                    {selected}
-                  </span>
+                        title={entry.source}
+                        onClick={() => setSelected(entry.source)}
+                        aria-pressed={selected === entry.source}
+                      >
+                        <span className="kb-docs-source-main">
+                          <FileText size={13} aria-hidden />
+                          <span className="kb-docs-source-name">
+                            {sourceName(entry.source)}
+                          </span>
+                        </span>
+                        <span className="kb-docs-source-meta">
+                          <span>{entry.chunks} 片段</span>
+                          {registered ? (
+                            <Badge tone="success" subtle>
+                              已登记
+                            </Badge>
+                          ) : (
+                            <span className="kb-docs-unregistered">未登记</span>
+                          )}
+                        </span>
+                      </button>
+                    )
+                  })}
                 </div>
-                <div className="kb-docs-editor-actions">
-                  {selectedItem ? (
-                    <Badge
-                      tone={selectedItem.ok ? 'success' : 'danger'}
-                      dot
-                      subtle
-                    >
-                      {selectedItem.ok ? '可全文引用' : '仅题录引用'}
-                    </Badge>
-                  ) : (
-                    <Badge tone="neutral" subtle>
-                      未登记
-                    </Badge>
-                  )}
-                  {selectedItem && (
-                    <IconButton
-                      label={`删除素材登记 ${sourceName(selected)}`}
-                      tone="danger"
+              </aside>
+
+              <div className="kb-docs-editor">
+                <div className="kb-docs-editor-head">
+                  <div className="kb-docs-editor-title">
+                    <strong title={selected}>{sourceName(selected)}</strong>
+                    <span className="cell-sub mono" title={selected}>
+                      {selected}
+                    </span>
+                  </div>
+                  <div className="kb-docs-editor-actions">
+                    {selectedItem ? (
+                      <Badge
+                        tone={selectedItem.ok ? 'success' : 'danger'}
+                        dot
+                        subtle
+                      >
+                        {selectedItem.ok ? '可全文引用' : '仅题录引用'}
+                      </Badge>
+                    ) : (
+                      <Badge tone="neutral" subtle>
+                        未登记
+                      </Badge>
+                    )}
+                    {selectedItem && (
+                      <IconButton
+                        label={`删除素材登记 ${sourceName(selected)}`}
+                        tone="danger"
+                        disabled={saving || deleting}
+                        onClick={() => void remove()}
+                      >
+                        {deleting ? (
+                          <RefreshCw size={14} className="spin" />
+                        ) : (
+                          <Trash2 size={14} />
+                        )}
+                      </IconButton>
+                    )}
+                  </div>
+                </div>
+
+                {selectedItem && !selectedItem.ok && selectedItem.reason && (
+                  <div className="kb-docs-reason" role="status">
+                    <strong>{selectedItem.reason}</strong>
+                    <span>补齐必填字段或更新有效期后重新保存。</span>
+                  </div>
+                )}
+
+                <form
+                  id="kb-docs-form"
+                  className="kb-docs-form"
+                  onSubmit={(event) => {
+                    event.preventDefault()
+                    void save()
+                  }}
+                >
+                  <div className="form-field">
+                    <label htmlFor="kb-doc-kind">
+                      素材类型 <span className="required-mark">必填</span>
+                    </label>
+                    <select
+                      id="kb-doc-kind"
+                      className="input"
+                      value={kind}
+                      onChange={(event) => {
+                        setKind(event.target.value)
+                        if (actionError) setActionError(null)
+                      }}
                       disabled={saving || deleting}
-                      onClick={() => void remove()}
                     >
-                      {deleting ? (
-                        <RefreshCw size={14} className="spin" />
-                      ) : (
-                        <Trash2 size={14} />
-                      )}
-                    </IconButton>
-                  )}
-                </div>
-              </div>
+                      <option value="" disabled>
+                        请选择素材类型
+                      </option>
+                      {kindOptions.map(([value, spec]) => (
+                        <option key={value} value={value}>
+                          {spec.label || value}
+                          {value === 'other' ? '（需出处）' : ''}
+                        </option>
+                      ))}
+                    </select>
+                    {policy[kind]?.hint && (
+                      <p className="field-hint">{policy[kind].hint}</p>
+                    )}
+                  </div>
 
-              {selectedItem && !selectedItem.ok && selectedItem.reason && (
-                <div className="kb-docs-reason" role="status">
-                  <strong>{selectedItem.reason}</strong>
-                  <span>补齐必填字段或更新有效期后重新保存。</span>
+                  {required.length > 0 ? (
+                    <div className="kb-docs-field-grid">
+                      {required.map((key) => renderField(key))}
+                    </div>
+                  ) : (
+                    <div className="kb-docs-no-fields">
+                      该类型没有必填字段，保存后即视为可全文引用。
+                    </div>
+                  )}
+
+                  {actionError && (
+                    <div className="form-alert" role="alert">
+                      {actionError}
+                    </div>
+                  )}
+                </form>
+              </div>
+            </div>
+              )}
+          </>
+        ) : (
+          <div className="kb-docs" role="region" aria-label="文档清单与检索预览">
+            <div className="kb-docs-note">
+              <FileSearch size={15} aria-hidden />
+              <span>
+                核对文档实体的版本、有效期与索引状态；检索预览会显示片段可追溯到的文档、页码与标题。
+              </span>
+            </div>
+
+            <section className="kb-docs-sources" role="region" aria-label="文档清单">
+              <header className="kb-docs-sources-head">
+                <span>文档清单</span>
+                <span className="kb-docs-count">{docs.length}</span>
+              </header>
+              {docsLoading && docs.length === 0 ? (
+                <div className="kb-docs-loading">
+                  <Skeleton width="100%" height={42} />
+                  <Skeleton width="100%" height={42} />
+                </div>
+              ) : docsError ? (
+                <ErrorState
+                  message={docsError}
+                  compact
+                  onRetry={() => setDocsReloadKey((value) => value + 1)}
+                />
+              ) : docs.length === 0 ? (
+                <EmptyState
+                  icon={FileText}
+                  compact
+                  title="还没有文档实体"
+                  description="索引重建后即可在这里核对文件大小、页码、有效期与状态。"
+                  actions={
+                    <Button
+                      variant="secondary"
+                      icon={<RefreshCw size={14} />}
+                      onClick={() => setDocsReloadKey((value) => value + 1)}
+                    >
+                      重新读取
+                    </Button>
+                  }
+                />
+              ) : (
+                <div className="kb-docs-source-list">
+                  {docs.map((doc) => {
+                    const status = docStatus(doc.status)
+                    return (
+                      <div key={doc.id} className="kb-docs-source" title={doc.source}>
+                        <span className="kb-docs-source-main">
+                          <FileText size={13} aria-hidden />
+                          <span className="kb-docs-source-name">
+                            {sourceName(doc.filename)}
+                          </span>
+                        </span>
+                        <span className="kb-docs-source-meta">
+                          <Badge tone={status.tone} subtle>
+                            {status.label}
+                          </Badge>
+                          <span>有效 {doc.valid_to || '不限'}</span>
+                          <span>{doc.chunk_count} 片段</span>
+                          {doc.pages > 0 && <span>{doc.pages} 页</span>}
+                        </span>
+                      </div>
+                    )
+                  })}
                 </div>
               )}
+            </section>
 
-              <form
-                id="kb-docs-form"
-                className="kb-docs-form"
-                onSubmit={(event) => {
-                  event.preventDefault()
-                  void save()
-                }}
+            <form
+              className="form-field"
+              onSubmit={(event) => {
+                event.preventDefault()
+                void runPreview()
+              }}
+            >
+              <label htmlFor="kb-doc-preview-q">检索预览</label>
+              <div className="admin-row-actions">
+                <input
+                  id="kb-doc-preview-q"
+                  className="input"
+                  value={query}
+                  placeholder="输入关键词，例如证书编号"
+                  autoComplete="off"
+                  disabled={previewing}
+                  onChange={(event) => {
+                    setQuery(event.target.value)
+                    if (previewError) setPreviewError(null)
+                  }}
+                />
+                <Button
+                  variant="primary"
+                  type="submit"
+                  loading={previewing}
+                  disabled={!query.trim()}
+                >
+                  检索
+                </Button>
+              </div>
+              <p className="field-hint">按当前知识库的检索配置返回候选片段。</p>
+            </form>
+
+            {(previewing || previewError || passages !== null) && (
+              <section
+                className="kb-docs-sources"
+                role="region"
+                aria-label="检索预览结果"
               >
-                <div className="form-field">
-                  <label htmlFor="kb-doc-kind">
-                    素材类型 <span className="required-mark">必填</span>
-                  </label>
-                  <select
-                    id="kb-doc-kind"
-                    className="input"
-                    value={kind}
-                    onChange={(event) => {
-                      setKind(event.target.value)
-                      if (actionError) setActionError(null)
-                    }}
-                    disabled={saving || deleting}
-                  >
-                    <option value="" disabled>
-                      请选择素材类型
-                    </option>
-                    {kindOptions.map(([value, spec]) => (
-                      <option key={value} value={value}>
-                        {spec.label || value}
-                        {value === 'other' ? '（需出处）' : ''}
-                      </option>
-                    ))}
-                  </select>
-                  {policy[kind]?.hint && (
-                    <p className="field-hint">{policy[kind].hint}</p>
-                  )}
-                </div>
-
-                {required.length > 0 ? (
-                  <div className="kb-docs-field-grid">
-                    {required.map((key) => renderField(key))}
+                <header className="kb-docs-sources-head">
+                  <span>检索片段</span>
+                  <span className="kb-docs-count">{passages?.length ?? 0}</span>
+                </header>
+                {previewing ? (
+                  <div className="kb-docs-loading">
+                    <Skeleton width="100%" height={42} />
+                    <Skeleton width="72%" height={42} />
                   </div>
+                ) : previewError ? (
+                  <ErrorState
+                    message={previewError}
+                    compact
+                    onRetry={() => void runPreview()}
+                  />
+                ) : passages && passages.length === 0 ? (
+                  <EmptyState
+                    icon={Search}
+                    compact
+                    title="没有匹配的片段"
+                    description="换个关键词试试，或先确认文档已经重建索引。"
+                  />
                 ) : (
-                  <div className="kb-docs-no-fields">
-                    该类型没有必填字段，保存后即视为可全文引用。
+                  <div className="kb-docs-source-list">
+                    {passages?.map((passage, index) => (
+                      <div
+                        className="kb-docs-source"
+                        key={`${passage.source || 'passage'}-${index}`}
+                      >
+                        <span className="kb-docs-source-main">
+                          <FileSearch size={13} aria-hidden />
+                          <span className="kb-docs-source-name">
+                            {passage.heading || passage.source || '未命名片段'}
+                          </span>
+                        </span>
+                        <span className="kb-docs-source-meta">
+                          {passage.score > 0 && (
+                            <span>相关度 {passage.score.toFixed(2)}</span>
+                          )}
+                          {passage.document_id && (
+                            <span title={passage.document_id}>
+                              文档 {shortId(passage.document_id)}
+                            </span>
+                          )}
+                          {passage.page !== null && <span>第 {passage.page} 页</span>}
+                        </span>
+                        <p className="cell-sub" style={{ whiteSpace: 'normal' }}>
+                          {passage.text}
+                        </p>
+                      </div>
+                    ))}
                   </div>
                 )}
-
-                {actionError && (
-                  <div className="form-alert" role="alert">
-                    {actionError}
-                  </div>
-                )}
-              </form>
-            </div>
+              </section>
+            )}
           </div>
         )}
       </div>

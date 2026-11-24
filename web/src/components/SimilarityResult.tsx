@@ -2,7 +2,11 @@ import { useState } from 'react'
 import { Check, RotateCcw, ShieldOff } from 'lucide-react'
 import type { SimilarityHit, SimilarityHitStatus } from '../lib/types'
 import { className } from '../lib/format'
-import { similarityKindMeta, similarityStatusMeta } from '../lib/similarityMeta'
+import {
+  isSimilarityReviewable,
+  similarityKindMeta,
+  similarityStatusMeta,
+} from '../lib/similarityMeta'
 import { Badge } from './Badge'
 import { Button } from './Button'
 
@@ -126,7 +130,8 @@ export function SimilarityResult({
           >
             标记原创
           </Button>
-          {hit.review_status !== 'pending' && (
+          {/* normal/suspicious 也是后端允许的复核态，可继续复核或重置。 */}
+          {isSimilarityReviewable(hit.review_status) && (
             <Button
               size="sm"
               variant="ghost"

@@ -28,17 +28,34 @@ export function normalizeSimilarityStats(raw: unknown): SimilarityStats {
           ]),
         )
       : undefined
-  const numeric = (key: string) =>
-    source[key] !== undefined ? asNumber(source[key]) : undefined
+  // 后端 stats 只输出 hits/by_kind/modes/common_candidates/degraded/models 等
+  // 原始统计（bidcraft/similarity/service.py:308-320），不输出 checked/reviewed/
+  // pending/total/skipped。未知键原样透传，展示用的 checked/reviewed 由前端派生。
   return {
     ...source,
-    total: numeric('total'),
-    checked: numeric('checked'),
-    hits: numeric('hits'),
-    reviewed: numeric('reviewed'),
-    pending: numeric('pending'),
-    skipped: numeric('skipped'),
+    ...(source.hits !== undefined ? { hits: asNumber(source.hits) } : {}),
     ...(byKind ? { by_kind: byKind } : {}),
+  }
+}
+
+/** 统计磁贴的展示值；checked/reviewed 来自命中明细，不是后端 stats 字段。 */
+export interface SimilarityTileValues {
+  checked: number
+  hits: number
+  reviewed: number
+  skipped: number | string
+}
+
+export function similarityTileValues(
+  hits: readonly { review_status?: string | null }[],
+  stats: SimilarityStats,
+  skippedText = '',
+): SimilarityTileValues {
+  return {
+    checked: hits.length,
+    hits: typeof stats.hits === 'number' ? stats.hits : hits.length,
+    reviewed: hits.filter((hit) => hit.review_status !== 'pending').length,
+    skipped: stats.skipped ?? (skippedText || '—'),
   }
 }
 

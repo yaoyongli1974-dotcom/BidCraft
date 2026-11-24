@@ -315,6 +315,27 @@ export interface PendingApproval {
   doc_name?: string
 }
 
+/**
+ * 跨项目「工作流待审」的一条人工审批闸门
+ * （`GET /approvals/workflows/pending` 平铺数组的一项）。
+ * 只读视图：点击跳到项目的「Agent 工作流」页签，在审批面板里处理。
+ */
+export interface PendingWorkflowApproval {
+  id: string
+  run_id: string
+  task_id: string | null
+  approval_type: string
+  status: string
+  project_id: string
+  project_name: string
+  workflow_type: string
+  run_status: string
+  goal: string
+  labels: string[]
+  submitted_by: string
+  submitted_at: string | null
+}
+
 export interface Project {
   id: string
   name: string

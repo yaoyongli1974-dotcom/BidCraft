@@ -1,13 +1,20 @@
 import { ApiError, asArray, jsonBody, request } from '../lib/http'
 import type {
   AgentInfo,
+  PendingWorkflowApproval,
   WorkflowApproval,
   WorkflowApprovalReviewInput,
   WorkflowCreateInput,
   WorkflowRun,
   WorkflowTask,
 } from '../lib/types'
-import { asNumber, asStringList, asText, isoOrNull } from './shared'
+import {
+  asNumber,
+  asStringList,
+  asText,
+  isoOrNull,
+  normalizePendingWorkflowApproval,
+} from './shared'
 
 // ---------------------------------------------------------------- agent orchestration
 
@@ -235,4 +242,24 @@ export async function reviewWorkflowApproval(
   const found = approvals.find((item) => item.id === approvalId)
   if (found) return found
   throw new ApiError(500, null, '审批已提交，但服务端未返回可识别的审批记录。')
+}
+
+// ---------------------------------------------------------------- cross-project approval inbox
+
+/**
+ * 跨项目工作流待审闸门（平铺数组）。与报价/商务标待办分开暴露，互不改变响应形状。
+ * 旧后端没有该接口（404）或 SPA 兜底返回 HTML（JSON 解析失败）时按「无待办」降级。
+ */
+export async function getPendingWorkflowApprovals(
+  signal?: AbortSignal,
+): Promise<PendingWorkflowApproval[]> {
+  let data: unknown
+  try {
+    data = await request<unknown>('/approvals/workflows/pending', undefined, signal)
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return []
+    if (error instanceof SyntaxError) return []
+    throw error
+  }
+  return mapList(data, ['items'], normalizePendingWorkflowApproval)
 }

@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest'
 
 import { normalizeCommercialDoc, normalizeCommercialValidation } from './commercial'
 import { normalizePlugin } from './plugins'
-import { normalizeSimilarityReport } from './similarity'
+import {
+  normalizeSimilarityHit,
+  normalizeSimilarityReport,
+  similarityTileValues,
+} from './similarity'
 
 /**
  * 对接真实后端形状：第二批后端 lane 的返回结构与前端契约有若干差异，
@@ -82,6 +86,54 @@ describe('backend shape reconciliation', () => {
   it('similarity: skipped 为数字或字符串时仍兼容', () => {
     expect(normalizeSimilarityReport({ skipped: 5 }).skipped).toBe(5)
     expect(normalizeSimilarityReport({ skipped: ['空文档'] }).skipped).toEqual(['空文档'])
+  })
+
+  it('similarity: 真实 stats 形状（hits/by_kind/modes/...）由前端派生统计磁贴', () => {
+    const report = normalizeSimilarityReport({
+      id: 'r2',
+      scope: 'history',
+      mode: 'all',
+      status: 'done',
+      stats: {
+        mode: 'all',
+        scope: 'history',
+        threshold: 0.85,
+        source_project_id: 'p0',
+        project: '历史标书',
+        modes: {
+          text: { hits: 1 },
+          structure: { hits: 1 },
+          semantic: { error: '模型未配置', hits: 0 },
+        },
+        hits: 2,
+        by_kind: { text: 1, logic: 1 },
+        common_candidates: 1,
+        degraded: true,
+        models: ['bge-small'],
+        truncated: false,
+      },
+      skipped: [{ mode: 'semantic', reason: '模型未配置' }],
+    })
+
+    // 后端 stats 不含 checked/reviewed/pending/skipped（service.py:308-320）。
+    expect(report.stats.checked).toBeUndefined()
+    expect(report.stats.reviewed).toBeUndefined()
+    expect(report.stats.hits).toBe(2)
+    expect(report.stats.by_kind).toEqual({ text: 1, logic: 1 })
+    expect(report.stats.modes).toEqual({
+      text: { hits: 1 },
+      structure: { hits: 1 },
+      semantic: { error: '模型未配置', hits: 0 },
+    })
+
+    const hits = [
+      normalizeSimilarityHit({ id: 'h1', review_status: 'pending' }),
+      normalizeSimilarityHit({ id: 'h2', review_status: 'normal' }),
+      normalizeSimilarityHit({ id: 'h3', review_status: 'suspicious' }),
+    ]
+    expect(
+      similarityTileValues(hits, report.stats, 'semantic：模型未配置'),
+    ).toEqual({ checked: 3, hits: 2, reviewed: 2, skipped: 'semantic：模型未配置' })
   })
 
   it('plugins: 保留后端的 scope / owner_id / allow_private_net，避免编辑时降级为全局', () => {

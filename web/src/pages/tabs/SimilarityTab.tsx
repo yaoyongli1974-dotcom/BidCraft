@@ -14,6 +14,7 @@ import {
   getSimilarityHits,
   getSimilarityReport,
   listSimilarityReports,
+  similarityTileValues,
   updateSimilarityHit,
 } from '../../api/similarity'
 import { downloadBlob } from '../../api/generation'
@@ -61,6 +62,27 @@ function reportStatusMeta(status: string): { label: string; tone: Tone } {
 
 function isTerminal(status: string | undefined): boolean {
   return Boolean(status && TERMINAL_STATUS.has(status.toLowerCase()))
+}
+
+// 与后端枚举保持一致（bidcraft/similarity/service.py:23-24）。
+const SCOPE_LABELS: Record<string, string> = {
+  project: '项目内部',
+  history: '历史项目',
+}
+const MODE_LABELS: Record<string, string> = {
+  text: '文本',
+  structure: '结构',
+  semantic: '语义',
+  image: '图片',
+  all: '全部维度',
+}
+
+function scopeLabel(value: string | undefined): string {
+  return (value && SCOPE_LABELS[value]) || value || '项目内部'
+}
+
+function modeLabel(value: string | undefined): string {
+  return (value && MODE_LABELS[value]) || value || '文本'
 }
 
 /** 轮询单份查重报告，直到服务端返回终态。 */
@@ -122,8 +144,8 @@ export function SimilarityTab() {
   const reportsQuery = useQuery(`similarity-reports:${ref}`, () => listSimilarityReports(ref))
   const reports = useMemo(() => reportsQuery.data || [], [reportsQuery.data])
 
-  const [scope, setScope] = useState('all')
-  const [mode, setMode] = useState('paragraph')
+  const [scope, setScope] = useState('project')
+  const [mode, setMode] = useState('text')
   const [threshold, setThreshold] = useState('0.85')
   const [sourceProjectId, setSourceProjectId] = useState('')
   const [starting, setStarting] = useState(false)
@@ -177,6 +199,12 @@ export function SimilarityTab() {
       setFormError('相似度阈值需在 0 到 1 之间。')
       return
     }
+    // 历史项目比对必须指定来源项目，否则后端无法定位比对对象。
+    const source = sourceProjectId.trim()
+    if (scope === 'history' && !source) {
+      setFormError('历史项目比对需填写来源项目编号。')
+      return
+    }
     setStarting(true)
     setFormError(null)
     try {
@@ -184,7 +212,7 @@ export function SimilarityTab() {
         scope,
         mode,
         threshold: value,
-        ...(sourceProjectId.trim() ? { source_project_id: sourceProjectId.trim() } : {}),
+        ...(scope === 'history' && source ? { source_project_id: source } : {}),
       })
       if (!response.report_id) {
         throw new Error('服务端未返回查重报告编号。')
@@ -243,6 +271,8 @@ export function SimilarityTab() {
     : typeof report?.skipped === 'number'
       ? `${report.skipped} 项`
       : ''
+  // 后端 stats 不含 checked/reviewed；从已规范化的命中明细派生，避免磁贴显示「—」。
+  const tiles = similarityTileValues(hits, stats, skippedText)
 
   return (
     <div className="tab-content sim-tab">
@@ -283,9 +313,8 @@ export function SimilarityTab() {
                   value={scope}
                   onChange={(event) => setScope(event.target.value)}
                 >
-                  <option value="all">全部来源</option>
-                  <option value="internal">项目内部</option>
-                  <option value="external">外部资料</option>
+                  <option value="project">项目内部</option>
+                  <option value="history">历史项目</option>
                 </select>
               </label>
               <label className="form-field">
@@ -295,9 +324,11 @@ export function SimilarityTab() {
                   value={mode}
                   onChange={(event) => setMode(event.target.value)}
                 >
-                  <option value="paragraph">段落</option>
-                  <option value="sentence">句子</option>
-                  <option value="section">章节</option>
+                  <option value="text">文本</option>
+                  <option value="structure">结构</option>
+                  <option value="semantic">语义</option>
+                  <option value="image">图片</option>
+                  <option value="all">全部维度</option>
                 </select>
               </label>
               <label className="form-field">
@@ -314,11 +345,11 @@ export function SimilarityTab() {
                 <span className="field-hint">0–1，越高越严格。</span>
               </label>
               <label className="form-field">
-                <span>来源项目（可选）</span>
+                <span>{scope === 'history' ? '来源项目（必填）' : '来源项目（历史比对可选）'}</span>
                 <input
                   className="input"
                   value={sourceProjectId}
-                  placeholder="项目编号，仅外部比对时填写"
+                  placeholder={scope === 'history' ? '历史项目编号' : '历史比对时填写项目编号'}
                   onChange={(event) => setSourceProjectId(event.target.value)}
                 />
               </label>
@@ -337,8 +368,14 @@ export function SimilarityTab() {
                 variant="primary"
                 icon={<Sparkles size={14} />}
                 loading={starting}
-                disabled={!canWrite}
-                title={!canWrite ? '只读成员不能启动查重' : undefined}
+                disabled={!canWrite || (scope === 'history' && !sourceProjectId.trim())}
+                title={
+                  !canWrite
+                    ? '只读成员不能启动查重'
+                    : scope === 'history' && !sourceProjectId.trim()
+                      ? '历史项目比对需填写来源项目编号'
+                      : undefined
+                }
               >
                 启动查重
               </Button>
@@ -392,13 +429,13 @@ export function SimilarityTab() {
                       onClick={() => setActiveId(item.id)}
                     >
                       <span className="sim-report-item-top">
-                        <strong>{item.scope || '全部来源'}</strong>
+                        <strong>{scopeLabel(item.scope)}</strong>
                         <Badge tone={meta.tone} subtle>
                           {meta.label}
                         </Badge>
                       </span>
                       <span className="sim-report-item-meta mono">
-                        {item.mode || '—'} · 阈值 {item.threshold || '—'}
+                        {item.mode ? modeLabel(item.mode) : '—'} · 阈值 {item.threshold || '—'}
                         {item.created_at ? ` · ${formatRelative(item.created_at)}` : ''}
                       </span>
                     </button>
@@ -452,24 +489,24 @@ export function SimilarityTab() {
               <div className="sim-stats">
                 <StatTile
                   label="比对条目"
-                  value={stats.checked ?? '—'}
+                  value={tiles.checked}
                   detail="已检查内容块"
                 />
                 <StatTile
                   label="命中"
-                  value={stats.hits ?? stats.total ?? hits.length}
-                  tone={(stats.hits ?? hits.length) > 0 ? 'warn' : 'success'}
+                  value={tiles.hits}
+                  tone={tiles.hits > 0 ? 'warn' : 'success'}
                   detail="需人工复核"
                 />
                 <StatTile
                   label="已复核"
-                  value={stats.reviewed ?? '—'}
+                  value={tiles.reviewed}
                   tone="info"
                   detail="人工确认或忽略"
                 />
                 <StatTile
                   label="跳过"
-                  value={stats.skipped ?? (skippedText || '—')}
+                  value={tiles.skipped}
                   detail="无法比对的内容"
                 />
               </div>

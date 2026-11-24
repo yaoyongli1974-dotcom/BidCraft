@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { normalizePendingApproval } from './shared'
+import { normalizePendingApproval, normalizePendingWorkflowApproval } from './shared'
 
 describe('normalizePendingApproval', () => {
   it('保留商务标待办标识以便跳转商务标页签', () => {
@@ -31,5 +31,45 @@ describe('normalizePendingApproval', () => {
 
     expect(item?.doc_id).toBeUndefined()
     expect(item?.doc_name).toBeUndefined()
+  })
+})
+
+describe('normalizePendingWorkflowApproval', () => {
+  it('保留工作流闸门的项目、运行与标签字段以便跳转 Agent 工作流页签', () => {
+    const item = normalizePendingWorkflowApproval({
+      id: 'a1',
+      run_id: 'r1',
+      task_id: 't1',
+      approval_type: 'gate',
+      status: 'pending',
+      project_id: 'p1',
+      project_name: '项目甲',
+      workflow_type: 'bid',
+      run_status: 'waiting_approval',
+      goal: '复核报价',
+      labels: ['关键', '关键', '复核'],
+      submitted_by: '张三',
+      submitted_at: '2026-11-24T09:00:00+08:00',
+    })
+
+    expect(item).toMatchObject({
+      id: 'a1',
+      run_id: 'r1',
+      task_id: 't1',
+      approval_type: 'gate',
+      status: 'pending',
+      project_id: 'p1',
+      workflow_type: 'bid',
+      labels: ['关键', '复核'],
+    })
+  })
+
+  it('旧数据只有 run_id 时也能识别，缺失 project_id 时丢弃', () => {
+    const item = normalizePendingWorkflowApproval({ run_id: 'r2', project_id: 'p2', type: 'review' })
+
+    expect(item?.id).toBe('r2')
+    expect(item?.approval_type).toBe('review')
+    expect(item?.task_id).toBeNull()
+    expect(normalizePendingWorkflowApproval({ id: 'a3' })).toBeNull()
   })
 })
