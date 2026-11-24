@@ -41,6 +41,17 @@ const LEVEL_TONE: Record<string, 'danger' | 'warn' | 'info' | 'neutral'> = {
   info: 'neutral',
 }
 
+function metricText(
+  value: number | string | null | undefined,
+  kind: 'rate' | 'density',
+): string {
+  if (value === null || value === undefined || value === '') return '未测量'
+  const numeric = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(numeric)) return String(value)
+  if (kind === 'rate') return `${(numeric * 100).toFixed(1)}%`
+  return `${numeric.toFixed(1)} /千词`
+}
+
 function dimensionClass(score: number): string {
   if (score >= 90) return 'is-ok'
   if (score >= 60) return 'is-warn'
@@ -343,6 +354,33 @@ export function QualityTab() {
               </div>
             </div>
             <QualityDimensions dimensions={report.dimensions || []} />
+          </section>
+
+          <section className="panel quality-panel">
+            <div className="config-head">
+              <div>
+                <div className="eyebrow">可追踪质量口径</div>
+                <h3>过程与真实件指标</h3>
+              </div>
+              <Badge tone={report.summary?.tender_quality?.status === '已就绪' ? 'success' : 'neutral'} subtle>
+                {report.summary?.tender_quality?.status || '真实件未测量'}
+              </Badge>
+            </div>
+            <div className="quality-overview">
+              <StatTile label="人工修改率" value={metricText(report.summary?.metrics?.manual_edit_rate, 'rate')} />
+              <StatTile label="问题密度" value={metricText(report.summary?.metrics?.issue_density, 'density')} />
+              <StatTile label="清单匹配率" value={metricText(report.summary?.metrics?.boq_match_rate, 'rate')} />
+              <StatTile label="条款召回率" value={metricText(report.summary?.tender_quality?.clause_recall, 'rate')} />
+              <StatTile label="关键值解析率" value={metricText(report.summary?.tender_quality?.value_parse_rate, 'rate')} />
+              <StatTile label="判定一致率" value={metricText(report.summary?.tender_quality?.verdict_agreement, 'rate')} />
+            </div>
+            {(report.summary?.tender_quality?.reason ||
+              (report.summary?.tender_quality?.notes || []).length > 0) && (
+              <p className="subtle">
+                {report.summary?.tender_quality?.reason ||
+                  (report.summary?.tender_quality?.notes || []).join('；')}
+              </p>
+            )}
           </section>
 
           {(report.summary?.recommendations || []).length > 0 && (

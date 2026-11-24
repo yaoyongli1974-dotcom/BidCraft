@@ -2334,6 +2334,28 @@ export interface QualityReport {
       doc_status: string
       source: string
     }
+    /** v0.31 阶段 6：既有质量口径；无样本时后端写 0 并给 notes。 */
+    metrics?: {
+      manual_edit_rate?: number | string | null
+      issue_density?: number | string | null
+      boq_match_rate?: number | string | null
+      notes?: string[]
+    }
+    /** v0.31 阶段 6：真实件指标；数据集未就绪时全部为 null。 */
+    tender_quality?: {
+      status: string
+      reason?: string
+      notes?: string[]
+      clause_recall?: number | string | null
+      value_parse_rate?: number | string | null
+      verdict_agreement?: number | string | null
+      files?: Array<{
+        path: string
+        clause_recall?: number | string | null
+        value_parse_rate?: number | string | null
+        notes?: string[]
+      }>
+    }
   }
   risk_summary: Record<string, unknown>
   created_by: string

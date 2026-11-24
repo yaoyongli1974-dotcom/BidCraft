@@ -9,6 +9,18 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
 }
 
+/** 后端真实件指标未测量时返回 null，绝不展示为 0。 */
+function asMetric(value: unknown): number | string | null {
+  if (value === null || value === undefined || value === '') return null
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value === 'string') return value
+  return null
+}
+
+function asNotes(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(String) : []
+}
+
 export function normalizeQualityReport(value: unknown): QualityReport | null {
   const raw = asRecord(value)
   if (!raw.id) return null
@@ -49,6 +61,38 @@ export function normalizeQualityReport(value: unknown): QualityReport | null {
         : [],
       note: String(summary.note || ''),
       commercial,
+      metrics: summary.metrics
+        ? {
+            manual_edit_rate: asMetric(asRecord(summary.metrics).manual_edit_rate),
+            issue_density: asMetric(asRecord(summary.metrics).issue_density),
+            boq_match_rate: asMetric(asRecord(summary.metrics).boq_match_rate),
+            notes: asNotes(asRecord(summary.metrics).notes),
+          }
+        : undefined,
+      tender_quality: summary.tender_quality
+        ? (() => {
+            const tender = asRecord(summary.tender_quality)
+            return {
+              status: String(tender.status || '未测量'),
+              reason: tender.reason ? String(tender.reason) : undefined,
+              notes: asNotes(tender.notes),
+              clause_recall: asMetric(tender.clause_recall),
+              value_parse_rate: asMetric(tender.value_parse_rate),
+              verdict_agreement: asMetric(tender.verdict_agreement),
+              files: Array.isArray(tender.files)
+                ? tender.files.map((item) => {
+                    const row = asRecord(item)
+                    return {
+                      path: String(row.path || ''),
+                      clause_recall: asMetric(row.clause_recall),
+                      value_parse_rate: asMetric(row.value_parse_rate),
+                      notes: asNotes(row.notes),
+                    }
+                  })
+                : [],
+            }
+          })()
+        : undefined,
     },
     risk_summary: asRecord(raw.risk_summary),
     created_by: String(raw.created_by || ''),

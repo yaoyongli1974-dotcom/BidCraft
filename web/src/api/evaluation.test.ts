@@ -22,6 +22,33 @@ describe('normalizeQualityReport', () => {
     expect(report!.findings[0].status).toBe('open')
   })
 
+  it('keeps v0.31 quality metrics and marks real-tender data as unmeasured', () => {
+    const report = normalizeQualityReport({
+      ...base,
+      summary: {
+        metrics: {
+          manual_edit_rate: 0.5,
+          issue_density: 23.9234,
+          boq_match_rate: '0.75',
+          notes: ['word count note'],
+        },
+        tender_quality: {
+          status: '未测量',
+          reason: '真实招标文件数据集尚未就绪',
+          clause_recall: null,
+          value_parse_rate: null,
+          verdict_agreement: null,
+          files: [],
+        },
+      },
+    })
+    expect(report!.summary.metrics?.manual_edit_rate).toBe(0.5)
+    expect(report!.summary.metrics?.boq_match_rate).toBe('0.75')
+    expect(report!.summary.tender_quality?.status).toBe('未测量')
+    expect(report!.summary.tender_quality?.clause_recall).toBeNull()
+    expect(report!.summary.tender_quality?.reason).toContain('数据集尚未就绪')
+  })
+
   it('handles missing/legacy fields without throwing', () => {
     const report = normalizeQualityReport({ id: 'r2', verdict: 'warn' })
     expect(report!.grade).toBe('C')
