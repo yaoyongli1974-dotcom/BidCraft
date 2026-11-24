@@ -39,6 +39,9 @@ WEAK_ADMIN_PASSWORDS = frozenset(
     }
 )
 
+#: 崩溃窗口未结扣费标记（pending_charges）的默认对账 TTL（秒）。
+DEFAULT_PENDING_CHARGE_TTL_SECONDS = 1800
+
 #: 进程内滑动窗口限流的保守默认值（可通过环境变量调整）。
 DEFAULT_RATE_WINDOW_SECONDS = 300
 DEFAULT_LOGIN_IP_LIMIT = 60
@@ -279,6 +282,13 @@ class Settings:
     job_max_attempts: int = field(
         default_factory=lambda: int(os.getenv("BIDCRAFT_JOB_MAX_ATTEMPTS", "3"))
     )
+    # 崩溃窗口未结扣费的对账 TTL：只有 pending 超过此时长才退还，避免误退在途生成。
+    # 启动恢复、worker reaper 周期扫描与 `bidcraft reconcile-charges` 都使用此值。
+    pending_charge_ttl_seconds: int = field(
+        default_factory=lambda: int(
+            os.getenv("BIDCRAFT_PENDING_CHARGE_TTL", str(DEFAULT_PENDING_CHARGE_TTL_SECONDS))
+        )
+    )
     # 是否在提交任务时于本进程拉起 worker。单进程（bidcraft serve）保持 True；
     # API/Worker 分离部署时设 BIDCRAFT_EMBEDDED_WORKERS=0，API 进程只入队不执行，
     # 由独立的 `bidcraft worker` 进程认领任务。
@@ -344,6 +354,7 @@ class Settings:
         self.kb_vector_max_chunks = max(0, self.kb_vector_max_chunks)
         self.kb_vector_batch = max(1, min(64, self.kb_vector_batch))
         self.plugin_timeout = max(5.0, min(120.0, self.plugin_timeout))
+        self.pending_charge_ttl_seconds = max(0, self.pending_charge_ttl_seconds)
         self.rate_limit_window_seconds = max(1, min(3600, self.rate_limit_window_seconds))
         for name in (
             "rate_limit_login_ip",

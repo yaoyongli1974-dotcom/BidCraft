@@ -218,7 +218,8 @@ SSE 不可用时回退到约 1.6 秒一次的任务轮询。刷新页面后通�
 **全局运营指标（`global_metrics`）**：`GET /admin/health`（仅超管）在原有字段之外附带
 `global_metrics` 对象，由 `bidcraft/health.py` 在请求时**直接从数据库聚合**得出，**不新增
 HTTP 路由、不单独建表存储、不做缓存**：`projects_by_status`（项目按状态分组）、
-`jobs_by_status`（任务按状态分组）、`open_findings`（未处置质量 finding 数，状态
+`jobs_by_status`（任务按状态分组）、`projects`（项目总数，各状态之和）、
+`jobs`（任务总数，各状态之和）、`open_findings`（未处置质量 finding 数，状态
 `open`/`new`/`reopened`）、`users`（账号总数）。它与 uptime/磁盘等进程本地字段不同，是多实例
 共享的库内视图。它是全站当前快照，只提供计数而非比率——不保存历史序列、不做趋势对比、
 不是质量评分或考核依据，也不代表单项目口径；数据量大时查询耗时随行数增长。

@@ -317,6 +317,21 @@ export function projectStatus(status?: string): Meta {
   return PROJECT_STATUS[status.toLowerCase()] || { label: status, tone: 'neutral' }
 }
 
+/** 后台任务状态（bidcraft/models.py 的 Job.status），供任务统计等处复用。 */
+export const JOB_STATUS: Record<string, Meta> = {
+  queued: { label: '排队中', tone: 'neutral' },
+  running: { label: '运行中', tone: 'info' },
+  done: { label: '已完成', tone: 'success' },
+  failed: { label: '失败', tone: 'danger' },
+  cancelled: { label: '已取消', tone: 'neutral' },
+  waiting_approval: { label: '待审批', tone: 'warn' },
+}
+
+export function jobStatus(status?: string): Meta {
+  if (!status) return { label: '未知', tone: 'neutral' }
+  return JOB_STATUS[status.toLowerCase()] || { label: status, tone: 'neutral' }
+}
+
 export const FACT_STATUS: Record<FactStatus, Meta> = {
   extracted: { label: '已提取', tone: 'info' },
   confirmed: { label: '已确认', tone: 'success' },

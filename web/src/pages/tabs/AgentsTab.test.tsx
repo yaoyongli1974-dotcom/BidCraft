@@ -110,13 +110,13 @@ describe('AgentsTab', () => {
     vi.mocked(listWorkflowApprovals).mockResolvedValue([
       { ...APPROVAL, id: 'ap-1', approval_type: 'technical' },
       { ...APPROVAL, id: 'ap-2', approval_type: 'commercial', status: 'approved' },
-      { ...APPROVAL, id: 'ap-3', approval_type: 'qualification', status: 'ignored' },
+      { ...APPROVAL, id: 'ap-3', approval_type: 'asset', status: 'ignored' },
       { ...APPROVAL, id: 'ap-4', approval_type: 'unknown_type', status: 'approved' },
     ] as never)
     render(<AgentsTab />)
     expect(await screen.findByText('技术审批')).toBeTruthy()
     expect(screen.getByText('商务审批')).toBeTruthy()
-    expect(screen.getByText('资格资质审批')).toBeTruthy()
+    expect(screen.getByText('资质资产审批')).toBeTruthy()
     // 未知类型保留原码便于排查新闸门。
     expect(screen.getByText('unknown_type')).toBeTruthy()
     expect(screen.queryByText('technical')).toBeNull()

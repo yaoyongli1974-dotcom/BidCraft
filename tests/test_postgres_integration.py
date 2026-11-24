@@ -94,6 +94,79 @@ def test_schema_created_and_alembic_stamped(pg_engine):
     assert head == _alembic_head()
 
 
+def test_0009_upgrade_from_legacy_postgres_schema(pg_engine):
+    """v0.27 → v0.28 真实 PG 升级：0009 补列、回填 owner_id、建表与索引。
+
+    模块级 ``pg_engine`` fixture 每次只建 head schema；这里把 0009 的变更逆向
+    拆掉（列/索引/表），把 alembic_version 退回 0008，再跑 ``init_db()``，最后
+    **完整重建 head schema**，不影响同文件其它用例。
+    """
+
+    import importlib
+
+    from sqlalchemy import inspect
+
+    from bidcraft.db import init_db
+    from bidcraft.models import Base, Job
+
+    migration = importlib.import_module(
+        "bidcraft.migrations.versions.0009_v028_schema_parity"
+    )
+
+    def _reset_to_head() -> None:
+        Base.metadata.drop_all(pg_engine)
+        with pg_engine.begin() as connection:
+            connection.execute(text("DROP TABLE IF EXISTS alembic_version"))
+        init_db()
+
+    try:
+        with pg_engine.begin() as connection:
+            inspector = inspect(connection)
+            # 0009 新增的索引先删（SQLite 不需要，PG 上删除列前也得先解引用）。
+            for name, table, _cols in migration._INDEXES:
+                existing = {item["name"] for item in inspector.get_indexes(table)}
+                if name in existing:
+                    connection.execute(text(f'DROP INDEX IF EXISTS "{name}"'))
+            for table, name, *_rest in migration._ADD_COLUMNS:
+                existing = {item["name"] for item in inspector.get_columns(table)}
+                if name in existing:
+                    connection.execute(text(f'ALTER TABLE "{table}" DROP COLUMN "{name}"'))
+            connection.execute(text("DROP TABLE IF EXISTS pending_charges"))
+
+            # 造一条只有 payload['owner_id'] 的旧 Job（不能走 ORM，owner_id 列已删）。
+            connection.execute(
+                Job.__table__.insert().values(
+                    id="legacy-owner-1",
+                    kind="generate",
+                    status="queued",
+                    payload={"owner_id": "legacy-user-1"},
+                )
+            )
+            connection.execute(
+                text("UPDATE alembic_version SET version_num = '0008_job_queue_indexes'")
+            )
+
+        # create_all 只补整表，0009 的列/回填/索引仍必须由 Alembic revision 完成。
+        init_db()
+
+        inspector = inspect(pg_engine)
+        for table, name, *_rest in migration._ADD_COLUMNS:
+            assert name in {item["name"] for item in inspector.get_columns(table)}, (table, name)
+        for name, table, _cols in migration._INDEXES:
+            assert name in {item["name"] for item in inspector.get_indexes(table)}, name
+        assert "pending_charges" in set(inspector.get_table_names())
+
+        with pg_engine.connect() as connection:
+            head = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
+            owner = connection.execute(
+                text("SELECT owner_id FROM jobs WHERE id = 'legacy-owner-1'")
+            ).scalar()
+        assert head == _alembic_head()
+        assert owner == "legacy-user-1", "0009 的 PG payload->>'owner_id' 回填没有执行"
+    finally:
+        _reset_to_head()
+
+
 def test_crud_roundtrip_with_json_and_chinese(pg_engine):
     from bidcraft.db import session_scope
     from bidcraft.models import Fact, OutlineNode, Project, Section

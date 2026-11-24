@@ -42,28 +42,31 @@ describe('AdminHealthTab', () => {
     expect(screen.getAllByText('暂无全局聚合')).toHaveLength(2)
   })
 
-  it('后端返回 global_metrics 时渲染全局指标区块', async () => {
+  it('后端返回 global_metrics 时按真实后端键渲染全局指标区块', async () => {
     vi.mocked(getAdminHealth).mockResolvedValue({
       ...health,
+      // bidcraft/health.py 实际返回的六个键，状态值也用后端真实口径。
       global_metrics: {
+        projects_by_status: { intake: 3, drafting: 4, analyzed: 2, parsing: 1, ready: 2 },
+        jobs_by_status: { queued: 5, running: 3, done: 20 },
+        open_findings: 7,
+        users: 9,
         projects: 12,
-        active_users: 3,
-        avg_score: 78.5,
-        manual_edit_rate: '12.5%',
-        unknown_key: null,
-        projects_by_status: { draft: 8, active: 4 },
-        jobs_by_status: { done: 20 },
+        jobs: 28,
       },
     })
     render(<AdminHealthTab />)
     expect(await screen.findByText('全局指标（数据库聚合）')).toBeTruthy()
-    expect(screen.getByText('项目总数')).toBeTruthy()
-    expect(screen.getByText('活跃用户数')).toBeTruthy()
-    expect(screen.getByText('平均质量分')).toBeTruthy()
+    // 六个真实键都有中文标签，其中 jobs 与 job 分词不再显示英文原码。
     expect(screen.getByText('项目状态分布')).toBeTruthy()
-    expect(screen.getByText('草稿 8 · 进行中 4')).toBeTruthy()
-    expect(screen.getByText('12.5%')).toBeTruthy()
-    expect(screen.getByText('—')).toBeTruthy()
+    expect(screen.getByText('任务状态分布')).toBeTruthy()
+    expect(screen.getByText('未处置质量问题')).toBeTruthy()
+    expect(screen.getByText('用户总数')).toBeTruthy()
+    expect(screen.getByText('项目总数')).toBeTruthy()
+    expect(screen.getByText('任务总数')).toBeTruthy()
+    // 状态值复用规范标签：项目取 projectStatus()，任务取 JOB_STATUS。
+    expect(screen.getByText('待导入 3 · 撰写中 4 · 已解析 2 · 解析中 1 · 可交付 2')).toBeTruthy()
+    expect(screen.getByText('排队中 5 · 运行中 3 · 已完成 20')).toBeTruthy()
     // 原有单进程快照仍在。
     expect(screen.getByText('0.27.0')).toBeTruthy()
   })

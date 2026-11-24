@@ -922,6 +922,8 @@ def generate_missing_images(
             status="queued",
             message=f"配图任务排队中（{len(targets)} 个图名）…",
             payload={
+                # 归一化归属人：背压检查按索引列 jobs.owner_id 计数。
+                "owner_id": (current_user() or {}).get("id") or project.owner_id or "",
                 "total": len(targets),
                 "done": 0,
                 "succeeded": 0,
@@ -1711,6 +1713,8 @@ def generate_all(ref: str, payload: GenerateRequest | None = None) -> dict[str, 
                 "charged": charged,
                 "chapters": count,
                 "user_id": user.id,
+                # 背压检查用 owner_id 索引列；user_id 仅为 worker 结算保留。
+                "owner_id": user.id,
                 "cost_per": charged // count if count else 0,
                 # DB 驱动派发：worker 从 payload 重建 force 参数。
                 "force": bool(force),

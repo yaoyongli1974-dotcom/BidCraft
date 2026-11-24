@@ -303,6 +303,9 @@ bidcraft backup-prune --keep 10 --dry-run  # 先看轮转名单，再去 --dry-r
   文件清单时自动跳过这一步。
 - 恢复：**停服 → 解压 → 把数据库、`secret.key` 与数据目录放回同一 `BIDCRAFT_HOME` → 启动**。
   命令不自动还原，避免误覆盖线上数据；恢复后属主应为运行用户（容器内 uid 10001）。
+- 恢复演练为可选流程：需要时用 `BIDCRAFT_RESTORE_DRILL=1` 开启演练模式，在临时目录/临时库上
+  还原并校验备份包，不覆盖线上 `BIDCRAFT_HOME`；季度演练步骤见
+  [`deploy/README.md`](../deploy/README.md)「5.2 备份与恢复演练」。
 - 限制：不要直接 `cp`/`tar` 运行中的 SQLite 文件（WAL 下主库与 `-wal`/`-shm` 可能撕裂）；
   `secret.key` 必须与库一起保留，否则加密的模型/知识库 API Key 无法解密；多实例共享数据库时
   必须共享同一密钥或统一设置 `BIDCRAFT_SECRET_KEY`。备份默认保留 10 份，按
@@ -436,6 +439,8 @@ HTTP 路由、不单独落库、不缓存**。它与 uptime/磁盘余量等进�
 |---|---|
 | `projects_by_status` | 项目按状态分组的计数 |
 | `jobs_by_status` | 后台任务按状态分组的计数 |
+| `projects` | 项目总数（各状态之和） |
+| `jobs` | 后台任务总数（各状态之和） |
 | `open_findings` | 未处置的质量 finding 数（状态 `open` / `new` / `reopened`） |
 | `users` | 账号总数 |
 

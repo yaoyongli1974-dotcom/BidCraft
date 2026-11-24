@@ -1,0 +1,79 @@
+# BidCraft 反向代理层限流示例（OpenResty / Nginx）
+#
+# 为什么需要：应用内的 _RateLimiter 是**每进程内存**滑动窗口计数（重启清零、
+# 多 worker 各算各的，bucket 上限 2048），只覆盖认证敏感端点。生产多实例部署
+# 必须在反代层再做一次限流，下面给出可直接粘贴的 zones 与 locations。
+#
+# 用法：
+#   1) limit_req_zone 三行放到 http{} 全局上下文（1Panel：网站 → 配置文件 →
+#      主配置/全局配置；不要放进 server{}，否则 nginx -t 会报 unknown directive）。
+#   2) server{} 里的 location 片段合并到现有 443 server 块；已有 proxy_pass 的
+#      公共 location / 保留即可。修改后先 nginx -t，再 reload。
+#   3) 若前面还有 CDN/负载均衡，$binary_remote_addr 拿到的是上游地址而不是真实
+#      客户端 IP：此时须用 ngx_http_realip_module（set_real_ip_from + real_ip_header）
+#      修正来源，或改按已信任的 X-Forwarded-For 变量建 zone。
+#   4) 应用侧 BIDCRAFT_TRUST_PROXY=1 只在请求确实经过你控制的反代时开启；直连开启
+#      会让客户端伪造 IP 绕过应用层限流。反代层限流与本例的 zone 键是独立的两套。
+#
+# 速率按单 IP 计：登录 1 r/s（burst 5），注册 1 r/min（burst 3），认证端点全局
+# 5 r/s（burst 20）；应用层的每 IP/全局阈值仍同时生效，取更严格者。
+
+# ---- http{} 上下文 ----
+limit_req_zone $binary_remote_addr zone=bidcraft_login_ip:10m rate=1r/s;
+limit_req_zone $binary_remote_addr zone=bidcraft_register_ip:10m rate=1r/m;
+limit_req_zone $binary_remote_addr zone=bidcraft_auth_all:10m rate=5r/s;
+
+# ---- server{} 上下文（HTTPS/443）----
+server {
+    # listen 443 ssl;
+    # server_name bid.example.com;
+    # 省略证书、HSTS、client_max_body_size 等既有配置……
+
+    # 登录：按 IP + 认证端点全局双层限流，超出返回 429（与应用一致）。
+    location = /auth/login {
+        limit_req zone=bidcraft_login_ip burst=5 nodelay;
+        limit_req zone=bidcraft_auth_all burst=20 nodelay;
+        limit_req_status 429;
+        limit_req_log_level warn;
+
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # 注册：比登录更严格，防止批量灌账号。
+    location = /auth/register {
+        limit_req zone=bidcraft_register_ip burst=3 nodelay;
+        limit_req zone=bidcraft_auth_all burst=20 nodelay;
+        limit_req_status 429;
+
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # 其余认证敏感端点（改密/重置/兑换码/模型测试等）：套用全局兜底 zone。
+    # 正则 location 会优先于下面的普通前缀 location /。
+    location ~ ^/(auth/(password|reset-password|forgot-password)|billing/redeem|admin/(wechat/test|(models|kbs|plugins)/[^/]+/test)) {
+        limit_req zone=bidcraft_auth_all burst=20 nodelay;
+        limit_req_status 429;
+
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

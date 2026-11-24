@@ -14,6 +14,15 @@
 点数变更全部写入 `credit_transactions`，包括注册赠送、充值、兑换、生成消耗、
 失败退回与管理员调整，便于对账。
 
+**崩溃窗口与未结扣费对账**：章节扣费与 `pending_charges` marker 在同一事务提交，
+生成结果也与其结清/退还写在同一事务。若进程在扣费后、结果落库前被 OOM/重启打断，
+marker 会停留在 `pending`。对账只在 marker 停留超过 TTL（默认 1800 秒，可用
+`BIDCRAFT_PENDING_CHARGE_TTL` 调整）后才全额退还，避免误退仍在运行的生成；
+worker 的 reaper 会周期扫描，启动恢复也会先做一次。未跑 worker 的部署可以用
+`bidcraft reconcile-charges` 由 cron 定期执行（支持 `--older-than` 覆盖 TTL）。
+VIP 折扣后点数不能被章节数整除时，退款按 `credits - ceil(credits × 已写章节 / 总章节)`
+计算，保证零头一并退回。
+
 ## 注册方式
 
 ### 用户名密码
@@ -80,6 +89,7 @@ export BIDCRAFT_WECHAT_PAY_NOTIFY_URL=https://bid.example.com/billing/wechat/not
 |---|---|---|
 | `BIDCRAFT_SIGNUP_CREDITS` | 5 | 注册赠送点数 |
 | `BIDCRAFT_CHAPTER_COST` | 1 | 每章生成消耗点数 |
+| `BIDCRAFT_PENDING_CHARGE_TTL` | 1800 | 未结扣费对账 TTL（秒），见「崩溃窗口与未结扣费对账」 |
 | `BIDCRAFT_WECHAT_APP_ID` / `_SECRET` / `_REDIRECT_URI` | 空 | 微信网站应用 |
 | `BIDCRAFT_WECHAT_MOCK` | 0 | 模拟微信扫码登录 |
 | `BIDCRAFT_WECHAT_PAY_MCH_ID` / `_SERIAL_NO` | 空 | 微信支付商户 |

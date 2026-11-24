@@ -3,7 +3,6 @@ export const APPROVAL_TYPE_META: Record<string, string> = {
   technical: '技术审批',
   commercial: '商务审批',
   asset: '资质资产审批',
-  qualification: '资格资质审批',
   price: '报价审批',
   compliance: '合规审批',
   delivery: '交付审批',

@@ -41,8 +41,8 @@ logger = logging.getLogger("bidcraft.jobs")
 
 # 背压 check + insert 的跨进程串行化（仅 PostgreSQL；SQLite 单写者天然串行）。
 _BACKPRESSURE_LOCK_KEY = 0x42494352514C4F43  # "BICRQLC"
-#: 超过这个时长仍为 pending 的扣费视为崩溃残留，对账时退还。可被显式参数覆盖。
-PENDING_CHARGE_TTL_SECONDS = 30 * 60
+# 未结扣费的 TTL 由 settings.pending_charge_ttl_seconds 配置（BIDCRAFT_PENDING_CHARGE_TTL，
+# 默认 1800 秒）；启动恢复、reaper 周期扫描与 CLI 对账共用同一策略。
 
 # Fencing token: every claim gets a fresh token.  A worker may only write job
 # state while it still holds that token (a reaper reclaim changes it), so a
@@ -188,6 +188,8 @@ _stop = threading.Event()
 # Reaper cadence (seconds) and idle poll interval when the queue is empty.
 _REAP_INTERVAL = 30.0
 _IDLE_WAIT = 5.0
+# 未结扣费的周期对账间隔：复用 reaper 线程，独立计时以免每次 reap 都扫全表。
+_RECONCILE_INTERVAL = 300.0
 
 # kind -> runner.  Registered lazily by :func:`_runner_for` to avoid a circular
 # import (workers import jobs which used to import this module).
@@ -592,19 +594,20 @@ def begin_pending_charge(
 
 
 def _refund_for(marker: PendingCharge, written: int) -> int:
-    """Refund formula used by the generation endpoints (and crash recovery).
+    """Refund every credit not earned by the chapters actually written.
 
-    Partial settles keep the historical ``(credits // chapters) * unwritten``
-    formula; when nothing was written the whole debit is returned (crash window
-    must not under-refund a discounted charge that is not divisible by chapters).
+    A VIP/discounted charge is often not divisible by ``chapters`` (e.g. 5 credits
+    for 3 chapters).  The old ``(credits // chapters) * unwritten`` formula kept
+    the rounding remainder and under-refunded partial failures.  Charge for the
+    written chapters is ``ceil(credits * written / chapters)``, so the refund is
+    ``credits - ceil(...)``; integer arithmetic avoids float rounding surprises.
     """
 
     total = max(1, int(marker.chapters or 1))
     done = max(0, min(int(written or 0), total))
     credits = int(marker.credits or 0)
-    if done == 0:
-        return credits
-    return (credits // total) * (total - done)
+    spent = (credits * done + total - 1) // total  # ceil(credits * done / total)
+    return max(0, credits - spent)
 
 
 def settle_pending_charge(
@@ -649,8 +652,10 @@ def reconcile_pending_charges(
     commit together and the worker refunds via ``payload['charged']``; it needs
     no marker here.
 
-    Called automatically from :func:`recover_on_startup` (used by `serve`/`worker`)
-    and safe to call explicitly from a CLI/maintenance job::
+    Called automatically from :func:`recover_on_startup` (used by `serve`/`worker`),
+    periodically from the worker reaper, and explicitly from maintenance jobs::
+
+        bidcraft reconcile-charges                    # CLI, uses configured TTL
 
         from bidcraft.jobqueue import reconcile_pending_charges
         refunded_markers = reconcile_pending_charges()
@@ -661,7 +666,7 @@ def reconcile_pending_charges(
 
     ttl = older_than_seconds
     if ttl is None:
-        ttl = int(getattr(settings, "pending_charge_ttl_seconds", PENDING_CHARGE_TTL_SECONDS))
+        ttl = int(settings.pending_charge_ttl_seconds)
     cutoff = utc_now() - timedelta(seconds=max(0, ttl))
 
     if db is None:
@@ -821,14 +826,26 @@ def _reaper_loop() -> None:
     Reaping used to live in the worker's idle branch (``claim_next() is None``).
     A steadily busy queue — or workers all stuck in long-running jobs — could
     starve it forever, leaving expired leases unclaimed.  This loop runs on its
-    own schedule whether or not any worker is idle.
+    own schedule whether or not any worker is idle.  It also sweeps crash-window
+    pending charges on a slower cadence: startup recovery alone cannot catch a
+    crash that happens days after a long-lived worker started.
     """
 
+    next_reconcile = 0.0  # 首次 tick 就做一次；此后按固定间隔，失败下次再试。
     while True:
         try:
             reap_expired()
         except Exception:  # noqa: BLE001 - a DB hiccup must not kill the reaper
             logger.debug("reaper 异常", exc_info=True)
+        now = time.monotonic()
+        if now >= next_reconcile:
+            try:
+                # 不额外加锁：reconcile 自身用行级条件 UPDATE 抢占，且 TTL 保证
+                # 不会误退正在执行的生成；失败不影响 reaper 的租约回收。
+                reconcile_pending_charges()
+            except Exception:  # noqa: BLE001 - 对账失败不能停掉 reaper
+                logger.debug("未结章节计费周期对账失败，将在下个周期重试", exc_info=True)
+            next_reconcile = now + _RECONCILE_INTERVAL
         if _stop.wait(_REAP_INTERVAL):
             break
 

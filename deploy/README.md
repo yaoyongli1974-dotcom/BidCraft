@@ -157,7 +157,10 @@ BIDCRAFT_LOG_LEVEL=INFO            # text | json 由 BIDCRAFT_LOG_FORMAT 控制
 
 限流是**进程内**计数器：重启清零、多 worker 各算各的，且只覆盖认证敏感端点；
 bucket 按 TTL 过期并设 LRU 硬上限（最多 2048 个 key），不会被伪造 IP 无限撑大。
-公网部署仍须在 OpenResty/1Panel 层配置全局速率限制与 WAF；`BIDCRAFT_TRUST_PROXY`
+公网部署仍须在 OpenResty/1Panel 层配置全局速率限制与 WAF：可直接参考
+[`deploy/nginx.conf.example`](nginx.conf.example) 中的 `limit_req_zone`（登录、注册、
+认证端点兜底）与对应 `location` 片段，按实际域名和上游端口调整后再 `nginx -t`
+并 reload。该示例同时说明为何进程内计数器无法替代反代层限流。`BIDCRAFT_TRUST_PROXY`
 只在请求确实经过你控制的反代时开启，直连时开启会让客户端伪造 IP 绕过限流。
 `bidcraft serve` 会把该开关透传给 uvicorn：关闭时不启用其 ProxyHeadersMiddleware；
 若直接用 `uvicorn bidcraft.api:app` 启动，请显式加 `--no-proxy-headers`（否则

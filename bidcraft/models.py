@@ -15,6 +15,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     event,
+    select,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -492,19 +493,31 @@ class Job(Base):
 def _job_owner_from_payload(mapper, connection, target: Job) -> None:
     """Derive the indexed owner column from payload without touching callers.
 
-    Job creation sites already put ``owner_id`` in ``payload``.  Mirroring it to
-    a real column lets ``check_backpressure`` use an index (PostgreSQL stores
-    ``payload`` as JSON, not JSONB, so a JSON filter cannot use one).  An
-    explicitly supplied column value always wins.
+    Mirroring the owner into a real column lets ``check_backpressure`` use an
+    index (PostgreSQL stores ``payload`` as JSON, not JSONB, so a JSON filter
+    cannot use one).  An explicitly supplied column value always wins.  Older
+    creation sites only stored ``user_id`` (or nothing but ``project_id``), so
+    fall back through those before giving up — otherwise per-user backpressure
+    silently sees no owner.
     """
 
     if target.owner_id:
         return
     payload = target.payload
+    owner = ""
     if isinstance(payload, dict):
-        owner = payload.get("owner_id")
-        if owner:
-            target.owner_id = str(owner)
+        owner = payload.get("owner_id") or payload.get("user_id") or ""
+    if not owner and target.project_id:
+        owner = (
+            connection.execute(
+                select(Project.__table__.c.owner_id).where(
+                    Project.__table__.c.id == target.project_id
+                )
+            ).scalar()
+            or ""
+        )
+    if owner:
+        target.owner_id = str(owner)
 
 
 class JobEvent(Base):

@@ -1055,6 +1055,29 @@ def worker() -> None:
     console.print("[yellow]Worker 已优雅停止[/yellow]")
 
 
+@app.command("reconcile-charges")
+def reconcile_charges(
+    older_than_seconds: int | None = typer.Option(
+        None, "--older-than", help="覆盖 TTL（秒）；默认 BIDCRAFT_PENDING_CHARGE_TTL"
+    ),
+) -> None:
+    """对账崩溃残留的未结扣费标记（建议由 cron/运维周期调用）。
+
+    只退还在 ``pending_charges`` 里停留超过 TTL 的 marker；行级条件更新保证
+    多实例并发调用时不会重复退款。worker 的 reaper 也会周期做同一件事，本命令
+    用于手动核查、排障或在未启动 worker 的部署里定时执行。
+    """
+
+    from . import jobqueue
+
+    init_db()
+    with session_scope() as db:
+        settled = jobqueue.reconcile_pending_charges(
+            older_than_seconds=older_than_seconds, db=db
+        )
+    typer.echo(f"扣费对账完成：已结清 {settled} 条未结扣费标记")
+
+
 @app.command("reset-password")
 def reset_password(
     username: str = typer.Argument(..., help="用户名"),

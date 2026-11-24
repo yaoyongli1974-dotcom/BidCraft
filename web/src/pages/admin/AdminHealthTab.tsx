@@ -1,7 +1,7 @@
 import { Activity, CheckCircle2, Database, Server, ShieldCheck, XCircle } from 'lucide-react'
 import { getAdminHealth } from '../../api/admin'
 import { useQuery } from '../../lib/hooks'
-import { formatDate, formatNumber } from '../../lib/format'
+import { formatDate, formatNumber, ISSUE_STATUS, JOB_STATUS, PROJECT_STATUS, projectStatus } from '../../lib/format'
 import { Badge } from '../../components/Badge'
 import { ErrorState, Skeleton } from '../../components/Feedback'
 import { AdminSectionLabel } from './AdminShared'
@@ -28,6 +28,7 @@ const OPS_METRICS = [
 /** 后端全局聚合的常见键 → 中文标签；未知键按片段翻译，保留原键便于排查。 */
 const GLOBAL_METRIC_LABELS: Record<string, string> = {
   projects: '项目总数',
+  jobs: '任务总数',
   total_projects: '项目总数',
   active_projects: '活跃项目数',
   users: '用户总数',
@@ -61,6 +62,7 @@ const GLOBAL_METRIC_TOKENS: Record<string, string> = {
   active: '活跃',
   count: '数量',
   project: '项目',
+  job: '任务',
   user: '用户',
   chapter: '章节',
   node: '节点',
@@ -88,21 +90,30 @@ function globalMetricLabel(key: string): string {
   return parts.join('') || key
 }
 
-const METRIC_STATUS_LABELS: Record<string, string> = {
-  draft: '草稿',
-  active: '进行中',
-  done: '已完成',
-  failed: '失败',
-  cancelled: '已取消',
-  queued: '排队中',
-  running: '运行中',
-  waiting_approval: '待审批',
+/** 质量 finding 的真实处置状态（OPEN_FINDING_STATUSES 及其处置后状态）。 */
+const FINDING_STATUS_LABELS: Record<string, string> = {
   open: '未处置',
+  new: '未处置',
+  reopened: '重新打开',
   handled: '已处置',
   ignored: '已忽略',
 }
 
-function metricValue(value: unknown): string {
+/** 按所属聚合键选用规范状态标签，避免项目态/任务态同名值互相串译。 */
+function metricStatusLabel(metricKey: string, key: string): string {
+  const normalized = key.toLowerCase()
+  if (metricKey === 'projects_by_status') {
+    return PROJECT_STATUS[normalized] ? projectStatus(normalized).label : key
+  }
+  if (metricKey === 'jobs_by_status') {
+    return JOB_STATUS[normalized] ? JOB_STATUS[normalized].label : key
+  }
+  if (FINDING_STATUS_LABELS[normalized]) return FINDING_STATUS_LABELS[normalized]
+  if (ISSUE_STATUS[normalized]) return ISSUE_STATUS[normalized].label
+  return key
+}
+
+function metricValue(value: unknown, metricKey = ''): string {
   if (typeof value === 'number' && Number.isFinite(value)) return formatNumber(value)
   if (typeof value === 'string') return value
   if (value === null || value === undefined) return '—'
@@ -110,7 +121,7 @@ function metricValue(value: unknown): string {
     const entries = Object.entries(value as Record<string, unknown>)
     if (entries.length === 0) return '—'
     return entries
-      .map(([key, count]) => `${METRIC_STATUS_LABELS[key] || key} ${metricValue(count)}`)
+      .map(([key, count]) => `${metricStatusLabel(metricKey, key)} ${metricValue(count)}`)
       .join(' · ')
   }
   return JSON.stringify(value)
@@ -272,8 +283,8 @@ export function AdminHealthTab() {
             </tbody>
           </table>
           <div className="admin-footnote">
-            三项指标由章节修订、核对问题与清单行的项目数据计算；后端未暴露全局聚合前，
-            此处只展示定义，不引用未经测量的数字。
+            三项指标由章节修订、核对问题与清单行的项目数据计算，目前按单项目口径；
+            后端提供 metrics 值时才显示，否则仅展示定义。下方「全局指标」是后端实时聚合的全库计数，不含这三个比率。
           </div>
         </section>
       </div>
@@ -298,7 +309,7 @@ export function AdminHealthTab() {
               {Object.entries(globalMetrics).map(([key, value]) => (
                 <tr key={key}>
                   <td>{globalMetricLabel(key)}</td>
-                  <td className="mono">{metricValue(value)}</td>
+                  <td className="mono">{metricValue(value, key)}</td>
                 </tr>
               ))}
             </tbody>
