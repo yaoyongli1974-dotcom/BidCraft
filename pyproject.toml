@@ -1,6 +1,6 @@
 [project]
 name = "bidcraft"
-version = "0.30.0"
+version = "0.31.0"
 description = "投标文件编制系统：招标解析 → 事实台账 → 规则引擎 → 大纲/正文 → 合规核对 → 清单报价 → DOCX/PDF 导出"
 readme = "README.md"
 requires-python = ">=3.11"

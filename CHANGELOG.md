@@ -2,6 +2,15 @@
 
 按版本倒序。对外口径以 `docs/release-notes/` 下对应文件为准；本文件是仓库内的简明索引。
 
+## v0.31.0 (2026-11-24)
+
+并发可靠性、账务一致性与真实投标质量治理专项收官，对外说明见 [docs/release-notes/v0.31.0.md](docs/release-notes/v0.31.0.md)，逐阶段证据与最终验收矩阵见 `docs/development/BIDCRAFT_V031_*.md`。
+
+- Worker 终态写入全部改为事务级 fencing（`commit_fenced_result` / `finalize_job_result`），Reaper 条件迁移与中止检查点覆盖 8 类任务。
+- 账务新增异步生成 marker、done_steps 退款归因、付款账号兜底与同项目生成互斥租约（Alembic `0012_generation_lease`）；冲突返回 409，历史迁移未改。
+- 真实招标文件数据集契约框架与未测量口径落地；质量报告摘要与前端统一展示过程/真实件六项指标。
+- 备份恢复手册与演练检查补齐；本地后端 1669 passed / 18 skipped，前端 39 files / 320 tests。
+
 ## v0.30.0 (2026-11-24)
 
 十阶段质量治理收官，对外说明见 [docs/release-notes/v0.30.0.md](docs/release-notes/v0.30.0.md)，逐阶段证据与最终验收矩阵见 `docs/development/BIDCRAFT_V030_*.md`。
