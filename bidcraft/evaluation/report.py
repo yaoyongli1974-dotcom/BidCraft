@@ -29,6 +29,7 @@ from .risk import (
     collect_project_risks,
 )
 from .scorer import evaluate_project_quality
+from .tender_quality import collect_tender_quality
 
 #: 报告摘要里的后台 Job 标识，用于重跑时复用同一份报告（避免重复版本）。
 EVALUATION_JOB_ID_KEY = "evaluation_job_id"
@@ -190,7 +191,11 @@ def build_quality_report(
 
     # 指标在本报告的 finding 落库后采集（自身的 finding 也计入密度）；
     # 重新赋值整个 summary 以触发 JSON 字段变更追踪，保留全部既有键。
-    report.summary = {**summary, "metrics": collect_quality_metrics(db, project_id)}
+    report.summary = {
+        **summary,
+        "metrics": collect_quality_metrics(db, project_id),
+        "tender_quality": collect_tender_quality(),
+    }
     db.flush()
 
     record_audit(
