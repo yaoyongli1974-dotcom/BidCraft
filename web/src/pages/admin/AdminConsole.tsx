@@ -1,4 +1,4 @@
-import { useRef, useState, type KeyboardEvent } from 'react'
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { Link } from 'react-router-dom'
 import {
   Activity,
@@ -183,6 +183,11 @@ function AdminWorkspace() {
     health: undefined,
   }
   const currentTab = ADMIN_TABS.find((item) => item.id === tab) || ADMIN_TABS[0]
+
+  // 12 个分类横向溢出时，保证当前页签（含键盘切换后的页签）始终滚动到可见区域。
+  useEffect(() => {
+    tabRefs.current[tab]?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
+  }, [tab])
 
   // WAI-ARIA horizontal tabs: arrows wrap, Home/End jump to the edges.
   const onTabKeyDown = (

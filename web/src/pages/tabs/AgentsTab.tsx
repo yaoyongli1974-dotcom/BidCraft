@@ -13,6 +13,7 @@ import {
   reviewWorkflowApproval,
 } from '../../api/orchestration'
 import { messageOf } from '../../lib/http'
+import { approvalTypeLabel } from './AgentsTab.meta'
 import type {
   AgentInfo,
   WorkflowApproval,
@@ -189,7 +190,10 @@ export function AgentsTab() {
         decision,
         note: (reviewNotes[approval.id] || '').trim(),
       })
-      toast.success(decision === 'approve' ? '已通过审批' : '已驳回', approval.approval_type)
+      toast.success(
+        decision === 'approve' ? '已通过审批' : '已驳回',
+        approvalTypeLabel(approval.approval_type),
+      )
       setReviewNotes((current) => ({ ...current, [approval.id]: '' }))
       await Promise.all([approvalsQuery.refresh(), workflowsQuery.refresh()])
       if (selectedId && detail) {
@@ -374,7 +378,7 @@ export function AgentsTab() {
                 {[...pendingApprovals, ...processedApprovals].map((approval) => (
                   <div key={approval.id} className="approval-item">
                     <div className="approval-main">
-                      <strong>{approval.approval_type}</strong>
+                      <strong>{approvalTypeLabel(approval.approval_type)}</strong>
                       <small>{approval.run_id || ''}</small>
                       <small>提交人：{approval.submitted_by || '—'}</small>
                       {approval.status !== 'pending' && (
@@ -388,7 +392,7 @@ export function AgentsTab() {
                       <div className="approval-actions">
                         <input
                           className="input input--sm"
-                          aria-label={`审批意见：${approval.approval_type}`}
+                          aria-label={`审批意见：${approvalTypeLabel(approval.approval_type)}`}
                           placeholder="审批意见（可选）"
                           value={reviewNotes[approval.id] || ''}
                           onChange={(event) =>

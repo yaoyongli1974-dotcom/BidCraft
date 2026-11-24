@@ -80,7 +80,14 @@
 
 **缺失**：质量总分/评分卡（0-100、等级、维度权重）；跨维度单一报告；质量快照/趋势（`check_project` 每次 DELETE 后重插 Issue，历史只在 AuditLog）；评分项覆盖闭环（`section_hint` 未参与核对）；质量报告导出；批量质量看板。**命名陷阱**：`bidcraft/compliance.py` 是法务/账号合规，与投标质量无关；正确入口是 `rules/engine.py`+`pipeline.check_project`+`substantive.py`+`verdict.py`+`export_gate.py`。**`Risk`（招标废标条款）≠ `Issue`（运行时问题），门禁只认 Issue。**
 
-**建议文件**：新增 `evaluation/{coverage,risk,scorer,report}.py`（或 `quality.py`）、`QualitySnapshot` 模型 + 迁移、`api/routes/evaluation.py`、前端 `EvaluationTab.tsx`/`components/QualityScorecard.tsx`/`api/evaluation.ts`。权重配置化；**blocking 一票否决、质量分不抵消废标风险、不称中标概率、强制导出不受分数影响**。测试 `test_evaluation_*.py`/`test_quality_report.py`。
+> **状态说明（v0.28 核对，避免误读为已可用）**：上文所列的 **「质量报告导出」** 与 **「批量质量看板」** 为 **未实现 / 暂缓**。
+> 已经落地的是质量评估中心本身（`evaluation/`、`POST /evaluation/run`、`POST /evaluation/run-async` 与
+> `GET /evaluation`、`/evaluation/reports[...]` 的不可变快照读取与 finding 处置，见 `docs/evaluation.md`）；
+> **没有报告导出端点，也没有前端导出按钮或跨项目质量看板 UI**。暂缓原因：报告快照含逐条 finding 与证据，
+> 导出格式（DOCX/PDF/XLSX）与脱敏/水印口径尚未定稿；现有 `POST /projects/{ref}/export` 的门禁针对投标文件
+> 正文，复用会混淆语义。待产品确定口径后再补独立导出端点与看板，在此之前不对外声称可用。
+
+**建议文件**：新增 `evaluation/{coverage,risk,scorer,report}.py`（或 `quality.py`）、`QualitySnapshot` 模型 + 迁移、`api/routes/evaluation.py`、前端 `EvaluationTab.tsx`/`components/QualityScorecard.tsx`/`api/evaluation.ts`。权重配置化；**blocking 一票否决、质量分不抵消废标风险、不称中标概率、强制导出不受分数影响**。测试 `test_evaluation_*.py`/`test_quality_report.py`（后者含导出/看板测试，随上面两项暂缓一并推迟）。
 
 ---
 

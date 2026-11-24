@@ -224,8 +224,23 @@ def review_approval(ref: str, approval_id: str, payload: WorkflowApprovalReview)
         result = approval_payload(updated)
         run_id = updated.run_id
         approved = updated.status == "approved"
+        job_id = ""
+        if approved:
+            # 审批通过后 run 回到 running，但旧 agent Job 在挂起时已结束；和
+            # /resume 一样必须新建一条排队 Job，否则 run 永久停在 running。
+            run = _run_for_project(db, project.id, run_id)
+            job = schedule_workflow(
+                db, run, owner_id=str(_actor().get("id") or ""), priority=1
+            )
+            audit(
+                db,
+                project.id,
+                "workflow.approval.resume",
+                {"approval_id": approval_id, "run_id": run_id, "job_id": job.id},
+            )
+            job_id = job.id
     if approved:
         from ... import jobqueue
 
         jobqueue.submit()
-    return {**result, "run_id": run_id}
+    return {**result, "run_id": run_id, "job_id": job_id}

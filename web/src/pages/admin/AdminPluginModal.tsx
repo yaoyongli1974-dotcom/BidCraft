@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, Plug } from 'lucide-react'
-import type { Plugin, PluginCatalogEntry, PluginInput } from '../../lib/types'
+import type { Plugin, PluginCatalogEntry } from '../../lib/types'
+import { buildPluginPayload } from './AdminPluginModal.payload'
 import { createPlugin, PLUGIN_CPU_SECONDS, PLUGIN_MEM_LIMIT, updatePlugin } from '../../api/plugins'
 import { messageOf } from '../../lib/http'
 import { className } from '../../lib/format'
@@ -257,24 +258,24 @@ export function AdminPluginModal({
       return
     }
 
-    const payload: PluginInput = {
-      name: name.trim(),
-      transport,
-      enabled,
-      tool_allowlist: allowlist,
-      mem_limit_mb: memLimit ?? PLUGIN_MEM_LIMIT.default,
-      cpu_seconds: cpuSeconds ?? PLUGIN_CPU_SECONDS.default,
-      scope,
-    }
-    if (scope === 'owner') payload.owner_id = ownerIdText.trim()
-    if (transport === 'http') payload.allow_private_net = allowPrivateNet
-    if (transport === 'stdio') {
-      payload.command = command.trim()
-      payload.args = parsedArgs.args
-      payload.env = parsedEnv.env
-    } else {
-      payload.url = url.trim()
-    }
+    const payload = buildPluginPayload(
+      {
+        name,
+        transport,
+        enabled,
+        tool_allowlist: allowlist,
+        mem_limit_mb: memLimit ?? PLUGIN_MEM_LIMIT.default,
+        cpu_seconds: cpuSeconds ?? PLUGIN_CPU_SECONDS.default,
+        scope,
+        owner_id: ownerIdText,
+        allow_private_net: allowPrivateNet,
+        command,
+        args: parsedArgs.args,
+        env: parsedEnv.env,
+        url,
+      },
+      state.mode === 'edit' ? state.plugin : null,
+    )
 
     setSaving(true)
     setError(null)

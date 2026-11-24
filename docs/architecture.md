@@ -55,11 +55,18 @@
 
 1. **内置备份命令**（无需停服）：
    `bidcraft backup` 使用 SQLite 在线备份 API 把 `bidcraft.db` 复制为临时一致性
-   快照，连同 `secret.key`（存在时）与 `manifest.json`（版本、创建时间、库大小、
-   是否含密钥、`BIDCRAFT_HOME`）打包为
-   `BIDCRAFT_HOME/backups/bidcraft-<YYYYmmdd-HHMMSS>.zip`。`-o/--output` 可指定
-   目录（自动命名）或 `.zip` 文件路径，`--list` 列出已有备份。临时快照在结束后
-   自动清理，不写原库。
+   快照（PostgreSQL 走 `pg_dump`），并连同 `secret.key`（存在时）、`BIDCRAFT_HOME`
+   下的数据目录（默认 `BIDCRAFT_BACKUP_DIRS=projects,packages,output,docs`，
+   `--include-dir` 可追加，仅限 `BIDCRAFT_HOME` 内且跳过 `backups/`）
+   与 `manifest.json`（版本、创建时间、库后端/大小、是否含密钥、`BIDCRAFT_HOME`、
+   数据目录列表及逐文件 `sha256` 清单）打包为
+   `BIDCRAFT_HOME/backups/bidcraft-<YYYYmmdd-HHMMSS>.zip`。
+   `-o/--output` 可指定目录（自动命名）或 `.zip` 文件路径，`--list` 列出已有备份；
+   临时快照在结束后自动清理，不写原库。配套
+   `bidcraft backup-verify <zip>`（SQLite `integrity_check` / PG 建表与数据行校验 +
+   逐项核对清单文件存在且 `sha256` 一致，旧备份无清单则跳过）与
+   `bidcraft backup-prune --keep N`（默认保留 10 份）。
+   生产部署目录与演练要求见 `deploy/README.md`「5.2 备份与恢复演练」。
 2. **停服冷备**（最稳妥）：停止服务（或容器）后整目录打包，重启即恢复一致性；
 3. **手工在线 `.backup`**：`sqlite3 $BIDCRAFT_HOME/bidcraft.db ".backup '/backup/bidcraft.db'"`
    取一致库快照，再用 `rsync` 同步 `projects/ packages/ output/ secret.key`。
@@ -187,7 +194,7 @@ SSE 不可用时回退到约 1.6 秒一次的任务轮询。刷新页面后通�
 |---|---|
 | 认证 | `POST /auth/login`、`POST /auth/logout`、`GET /auth/me`、`POST /auth/password` |
 | 管理 | `/admin/models`、`/admin/kbs`、`/admin/users`、`/admin/rule-packages`（含校验/隐藏/恢复）、`/admin/quotas`（CRUD/搜索/匹配测试）、`/admin/plugins`（CRUD/测试/预设目录/`.bidplugin` 包导入导出）、`/admin/terms`（CRUD/搜索/启停）、`/admin/textqa`（错别字词库）、自助 `/my/qualifications` 与 `/my/preflight`、`/admin/kbs/{id}/docs`（文档元数据与可信度判定）、`/admin/wechat`（读取/保存/连通性测试）、`/admin/users/{id}/vip`（VIP 授予/续期/清除，days=0 清除），仅超级管理员；自助计费路由 `/billing/vip/orders`（VIP 套餐购买，续期不加点）、`/account/sub-accounts`（子账号 CRUD，登录主账号自助）；个人文档路由 `/my/docs`（上传→个人 KB→索引 job、列表/下载/删除，登录用户自助） |
-| 元信息 | `GET /health`（**始终公开可达**，默认只返回探活/前端必需字段）、`GET /admin/health`（超管完整运行状态）、`GET /packages`、`GET /docs`。`BIDCRAFT_HEALTH_PUBLIC=minimal/public`（默认）时 `/health` 不返回版本、绝对路径、模型名与库内计数；设为其它值（内网/私有模式）才附带这些敏感字段，完整状态仍应走 `/admin/health` |
+| 元信息 | `GET /health`（**始终公开可达**，默认只返回探活/前端必需字段）、`GET /admin/health`（超管完整运行状态，含 DB 实时聚合的 `global_metrics`）、`GET /packages`、`GET /docs`。`BIDCRAFT_HEALTH_PUBLIC=minimal/public`（默认）时 `/health` 不返回版本、绝对路径、模型名与库内计数；设为其它值（内网/私有模式）才附带这些敏感字段，完整状态仍应走 `/admin/health` |
 | 项目 | `GET/POST /projects`、`GET/PATCH/DELETE /projects/{ref}`（PATCH 改名称/标段/审批链/模板标记）、`POST /projects/{ref}/duplicate`（复制为新项目：原件/台账/大纲/正文必选，清单报价与配图可选，版本与审批记录不复制）、`GET /projects/templates`（模板列表，登录即可）、`POST /projects/templates/{id}/instantiate`（从模板创建，无需成员身份） |
 | 来源 | `GET /projects/{ref}/sources`、`POST /projects/{ref}/sources`、`POST /projects/{ref}/parse` |
 | 台账 | `GET /projects/{ref}/ledger`、`PATCH /projects/{ref}/facts/{key}` |
@@ -207,6 +214,15 @@ SSE 不可用时回退到约 1.6 秒一次的任务轮询。刷新页面后通�
 | 批量 | `POST /projects/batch-check`、`POST /projects/batch-export`（后台 Job，202）、`GET /batch-jobs/{id}/download`（zip，仅任务所有者/超管） |
 | MCP | `bidcraft mcp [--readonly]` stdio JSON-RPC：list_projects/get_project/get_ledger/run_check/export_document/search_knowledge，见 `docs/mcp.md`；`tools/list` = 本征 6 工具 + 启用插件工具（`{插件}__{工具}` 前缀，allowlist 过滤），`tools/call` 按前缀路由，只读模式拒绝插件调用，见 `docs/plugins.md` |
 | 协作 | `GET/POST /projects/{ref}/members`、`PATCH/DELETE /projects/{ref}/members/{user_id}`、`GET /projects/{ref}/audit`、`GET /admin/audit`（仅超级管理员） |
+
+**全局运营指标（`global_metrics`）**：`GET /admin/health`（仅超管）在原有字段之外附带
+`global_metrics` 对象，由 `bidcraft/health.py` 在请求时**直接从数据库聚合**得出，**不新增
+HTTP 路由、不单独建表存储、不做缓存**：`projects_by_status`（项目按状态分组）、
+`jobs_by_status`（任务按状态分组）、`open_findings`（未处置质量 finding 数，状态
+`open`/`new`/`reopened`）、`users`（账号总数）。它与 uptime/磁盘等进程本地字段不同，是多实例
+共享的库内视图。它是全站当前快照，只提供计数而非比率——不保存历史序列、不做趋势对比、
+不是质量评分或考核依据，也不代表单项目口径；数据量大时查询耗时随行数增长。
+公开 `/health` 不含该对象。管理端展示与口径见 `docs/admin-guide.md`。
 
 除 `/health`、`/auth/login` 与静态资源外，API 均要求有效会话；未登录返回 `401`，
 权限不足返回 `403`。错误统一为 `{"detail": ...}`；生成门禁返回 `409`，

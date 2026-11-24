@@ -109,13 +109,19 @@ bidcraft worker
 ```bash
 bidcraft backup                    # 生成 BIDCRAFT_HOME/backups/bidcraft-<时间>.zip
 bidcraft backup --list             # 列出已有备份
-bidcraft backup-verify <备份.zip>  # 校验完整性（SQLite integrity_check / PG 建表+数据行）
+bidcraft backup --include-dir mydata  # 临时追加一个数据目录（相对 BIDCRAFT_HOME，可重复）
+bidcraft backup-verify <备份.zip>  # 校验完整性（DB + 清单里的全部数据文件）
 ```
 
 PostgreSQL 备份走 `pg_dump`（需安装 `postgresql-client`），SQLite 走在线备份 API；
-zip 内含 `secret.key`（存在时）与 `manifest.json`。恢复步骤：**停服 → 解压 →
-把 `bidcraft.db`（或 PG 的 `dump.sql`）与 `secret.key` 放回 → 启动**。命令不会自动
-覆盖线上数据。
+zip 内含 `secret.key`（存在时）、`manifest.json` 以及数据目录中的文件。默认打包
+`projects/`、`packages/`、`output/`、`docs/`（相对 `BIDCRAFT_HOME`），可用
+`BIDCRAFT_BACKUP_DIRS` 调整（逗号分隔，空串表示只备份数据库与密钥）。`manifest.json`
+的 `data_files` 逐项记录路径、大小与 sha256；`backup-verify` 除 SQLite
+integrity_check / PG 建表与数据行外，还会确认这些文件在包内且哈希一致，避免
+"数据库完好但项目文件全丢"仍报通过。没有 `data_files` 的旧备份继续按原逻辑校验。
+恢复步骤：**停服 → 解压 → 把 `bidcraft.db`（或 PG 的 `dump.sql`）、`secret.key`
+与各数据目录放回 `BIDCRAFT_HOME` → 启动**。命令不会自动覆盖线上数据。
 
 **恢复演练**：每季度（或每次大版本升级前）在独立的临时目录/临时 PG 库上做一次
 完整 restore + `bidcraft backup-verify` + 登录与一条项目冒烟检查，记录耗时与结果。
@@ -127,9 +133,9 @@ zip 内含 `secret.key`（存在时）与 `manifest.json`。恢复步骤：**停
 |---|---|---|
 | `/docs`、`/redoc`、`/openapi.json` | **404** | 由 `BIDCRAFT_DOCS_ENABLED=0` 控制；仅排障时临时置 1 并重启 |
 | `/health` | 最小字段 | 只返回 `status` 与前端必需字段，不含版本、绝对路径、库内计数；Docker HEALTHCHECK 仍可用 |
-| `/admin/health` | 超级管理员 | 完整运行状态（版本、uptime、Python/平台、DB 大小与磁盘余量、模型/知识库/用户计数、开关项）；匿名 401、普通成员 403，不会落到公开探活里 |
+| `/admin/health` | 超级管理员 | 完整运行状态（版本、uptime、Python/平台、DB 大小与磁盘余量、模型/知识库/用户计数、开关项）；`global_metrics` 给出全实例共享的库内聚合（各状态项目/任务数、未处置质量问题、用户数），多 worker/多实例看到同一份数据；匿名 401、普通成员 403，不会落到公开探活里 |
 | 安全响应头 | 全站注入 | `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`、CSP（`default-src 'self'`、`frame-ancestors 'none'`、`object-src 'none'`）、`Permissions-Policy`、`Cross-Origin-Opener-Policy: same-origin`、`Cross-Origin-Resource-Policy: same-origin`、HTTPS 下加 HSTS；每响应带回显的 `X-Request-ID` |
-| CSRF 纵深防御 | 带 Cookie 的状态变更请求 | `POST/PUT/PATCH/DELETE` 且带 Cookie 时：显式 `Origin` 必须同源；`Sec-Fetch-Site` 为 `cross-site`/`same-site` 一律 403；不带这两个头的普通脚本/curl 保持兼容。不要依赖它替代反代层 CSRF/WAF |
+| CSRF 纵深防御 | 带 Cookie 的状态变更请求 | `POST/PUT/PATCH/DELETE` 且带 Cookie 时：显式 `Origin` 必须同源或命中 `BIDCRAFT_PUBLIC_ORIGIN`；`Sec-Fetch-Site` 为 `cross-site`/`same-site` 一律 403；不带这两个头的普通脚本/curl 保持兼容。仅在 `BIDCRAFT_TRUST_PROXY=1` 时采信 `X-Forwarded-Proto/Host`。不要依赖它替代反代层 CSRF/WAF |
 | 敏感端点限流 | 进程内滑动窗口 | 登录（用户名维度 8 次/5min 之外）再按 IP + 全局限流；注册、改密/重置、兑换码、模型/知识库/插件测试同样限流。默认见下；多 worker 只在反代层补充限流 |
 
 `.env` 追加：
@@ -144,12 +150,18 @@ BIDCRAFT_RATE_LOGIN_GLOBAL=1000    # 登录：每进程
 BIDCRAFT_RATE_SENSITIVE_IP=30      # 注册/改密/兑换/模型测试：每 IP
 BIDCRAFT_RATE_SENSITIVE_GLOBAL=300
 BIDCRAFT_TRUST_PROXY=1             # 仅当确实位于反代之后；用 X-Forwarded-For 记真实 IP
+BIDCRAFT_PUBLIC_ORIGIN=https://bid.example.com,https://admin.example.com  # 可选：CSRF 额外允许的 Origin
+BIDCRAFT_BACKUP_DIRS=projects,packages,output,docs  # 内置 backup 打包的数据目录
 BIDCRAFT_LOG_LEVEL=INFO            # text | json 由 BIDCRAFT_LOG_FORMAT 控制
 ```
 
-限流是**进程内**计数器：重启清零、多 worker 各算各的，且只覆盖认证敏感端点。
+限流是**进程内**计数器：重启清零、多 worker 各算各的，且只覆盖认证敏感端点；
+bucket 按 TTL 过期并设 LRU 硬上限（最多 2048 个 key），不会被伪造 IP 无限撑大。
 公网部署仍须在 OpenResty/1Panel 层配置全局速率限制与 WAF；`BIDCRAFT_TRUST_PROXY`
 只在请求确实经过你控制的反代时开启，直连时开启会让客户端伪造 IP 绕过限流。
+`bidcraft serve` 会把该开关透传给 uvicorn：关闭时不启用其 ProxyHeadersMiddleware；
+若直接用 `uvicorn bidcraft.api:app` 启动，请显式加 `--no-proxy-headers`（否则
+uvicorn 默认信任来自 127.0.0.1 的转发头，先于应用中间件改写来源 IP）。
 
 ## 7. OpenResty：80 只做跳转，并补齐响应头
 

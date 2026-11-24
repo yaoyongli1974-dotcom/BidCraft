@@ -1,5 +1,5 @@
 import { canForceWrite } from '../../lib/permissions'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   AlertTriangle,
@@ -21,8 +21,9 @@ import { useWorkspace } from '../useWorkspace'
 import { getRiskOverview } from '../../api/compliance'
 import type { ExportForceOptions } from '../../api/generation'
 import { downloadBlob, exportProject } from '../../api/generation'
+import { DEFAULT_EXPORT_TEMPLATE, DEFAULT_EXPORT_TEMPLATE_ID, getExportTemplates, setExportTemplate } from '../../api/project'
 import { ApiError, messageOf } from '../../lib/http'
-import type { ExportFormat, ExportRecord, RiskOverview } from '../../lib/types'
+import type { ExportFormat, ExportRecord, ExportTemplatePreset, RiskOverview } from '../../lib/types'
 import {
   className,
   formatDate,
@@ -92,6 +93,12 @@ export function ExportTab() {
     'bidcraft:exports',
     {},
   )
+  const [exportTemplates, setExportTemplates] = useState<ExportTemplatePreset[]>([
+    DEFAULT_EXPORT_TEMPLATE,
+  ])
+  const [templateId, setTemplateId] = useState(DEFAULT_EXPORT_TEMPLATE_ID)
+  const [templateSaving, setTemplateSaving] = useState(false)
+  const [templateError, setTemplateError] = useState('')
   const projectRecords = records[ref] || []
   const hasBody = stats.written > 0
   const missingRequired = stats.missing_required
@@ -105,6 +112,45 @@ export function ExportTab() {
   const canForce = canForceWrite(project)
   const forceReasonValid = forceReason.trim().length >= 4
 
+  useEffect(() => {
+    let active = true
+    setTemplateError('')
+    getExportTemplates(ref)
+      .then((data) => {
+        if (!active) return
+        setExportTemplates(data.presets)
+        setTemplateId(data.current.id || DEFAULT_EXPORT_TEMPLATE_ID)
+      })
+      .catch((error) => {
+        if (!active) return
+        setExportTemplates([DEFAULT_EXPORT_TEMPLATE])
+        setTemplateId(DEFAULT_EXPORT_TEMPLATE_ID)
+        setTemplateError(messageOf(error))
+      })
+    return () => {
+      active = false
+    }
+  }, [ref])
+
+  const changeTemplate = async (id: string) => {
+    const previous = templateId
+    setTemplateId(id)
+    setTemplateError('')
+    setTemplateSaving(true)
+    try {
+      const saved = await setExportTemplate(ref, id)
+      setExportTemplates(saved.presets)
+      setTemplateId(saved.current.id || id)
+      toast.success('导出模板已更新', saved.current.name)
+    } catch (error) {
+      setTemplateId(previous)
+      setTemplateError(messageOf(error))
+      toast.error('保存导出模板失败', messageOf(error))
+    } finally {
+      setTemplateSaving(false)
+    }
+  }
+
   const runExport = async (format: ExportFormat, force?: ExportForceOptions) => {
     if (!canWrite || exporting) return
     if (format.id !== 'xlsx' && !hasBody) {
@@ -114,6 +160,8 @@ export function ExportTab() {
     setExporting(format.id)
     setErrors((current) => ({ ...current, [format.id]: '' }))
     try {
+      // 导出模板由后端从项目设置读取（PUT /projects/{ref}/export-template 保存），
+      // ExportRequest 只接受 format/force/force_reason，不把 template 拼进导出请求。
       const { blob, filename } = await exportProject(ref, format.id, force)
       downloadBlob(blob, filename)
       const record: ExportRecord = {
@@ -233,6 +281,35 @@ export function ExportTab() {
               <h3>选择导出格式</h3>
             </div>
             <span className="subtle">下载即保存到浏览器默认位置</span>
+          </div>
+
+          <div className="export-template-picker">
+            <label htmlFor="export-template">导出模板</label>
+            <select
+              id="export-template"
+              className="input input--sm"
+              value={templateId}
+              disabled={!canWrite || templateSaving}
+              aria-label="导出模板"
+              onChange={(event) => void changeTemplate(event.target.value)}
+            >
+              {exportTemplates.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.name}
+                  {item.id === DEFAULT_EXPORT_TEMPLATE_ID ? '（默认）' : ''}
+                </option>
+              ))}
+            </select>
+            <span className="export-template-hint">
+              {exportTemplates.find((item) => item.id === templateId)?.description ||
+                '选择后保存到项目设置，Word / PDF 导出时由后端套用排版'}
+              {!canWrite ? ' · 只读成员不能修改' : ''}
+            </span>
+            {templateError && (
+              <span className="export-template-error" role="alert">
+                {templateError}
+              </span>
+            )}
           </div>
 
           <div className="format-grid">

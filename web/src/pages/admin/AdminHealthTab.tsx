@@ -25,6 +25,97 @@ const OPS_METRICS = [
   },
 ] as const
 
+/** 后端全局聚合的常见键 → 中文标签；未知键按片段翻译，保留原键便于排查。 */
+const GLOBAL_METRIC_LABELS: Record<string, string> = {
+  projects: '项目总数',
+  total_projects: '项目总数',
+  active_projects: '活跃项目数',
+  users: '用户总数',
+  total_users: '用户总数',
+  projects_by_status: '项目状态分布',
+  jobs_by_status: '任务状态分布',
+  active_users: '活跃用户数',
+  nodes: '大纲节点数',
+  chapters: '章节总数',
+  outline_nodes: '大纲节点数',
+  sources: '源文件数',
+  findings: '质量检查项',
+  open_findings: '未处置质量问题',
+  issues: '核对问题数',
+  open_issues: '未处置问题数',
+  reports: '报告总数',
+  evaluations: '质量评估次数',
+  manual_edit_rate: '人工修改率',
+  issue_density: '核对问题密度',
+  boq_match_rate: '清单匹配率',
+  avg_score: '平均质量分',
+  average_score: '平均质量分',
+  boq_rows: '清单行数',
+  quotes: '报价版本数',
+  documents: '商务文档数',
+  templates: '模板数量',
+}
+
+const GLOBAL_METRIC_TOKENS: Record<string, string> = {
+  total: '总',
+  active: '活跃',
+  count: '数量',
+  project: '项目',
+  user: '用户',
+  chapter: '章节',
+  node: '节点',
+  issue: '问题',
+  finding: '检查项',
+  report: '报告',
+  evaluation: '评估',
+  score: '得分',
+  rate: '比率',
+  average: '平均',
+  avg: '平均',
+  quote: '报价',
+  material: '材料',
+  document: '文档',
+  template: '模板',
+  open: '未处置',
+}
+
+function globalMetricLabel(key: string): string {
+  if (GLOBAL_METRIC_LABELS[key]) return GLOBAL_METRIC_LABELS[key]
+  const parts = key
+    .toLowerCase()
+    .split(/[_\s-]+/)
+    .map((part) => GLOBAL_METRIC_TOKENS[part] || part)
+  return parts.join('') || key
+}
+
+const METRIC_STATUS_LABELS: Record<string, string> = {
+  draft: '草稿',
+  active: '进行中',
+  done: '已完成',
+  failed: '失败',
+  cancelled: '已取消',
+  queued: '排队中',
+  running: '运行中',
+  waiting_approval: '待审批',
+  open: '未处置',
+  handled: '已处置',
+  ignored: '已忽略',
+}
+
+function metricValue(value: unknown): string {
+  if (typeof value === 'number' && Number.isFinite(value)) return formatNumber(value)
+  if (typeof value === 'string') return value
+  if (value === null || value === undefined) return '—'
+  if (typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+    if (entries.length === 0) return '—'
+    return entries
+      .map(([key, count]) => `${METRIC_STATUS_LABELS[key] || key} ${metricValue(count)}`)
+      .join(' · ')
+  }
+  return JSON.stringify(value)
+}
+
 function bytes(value: number): string {
   if (value >= 1024 * 1024 * 1024) return `${(value / 1024 / 1024 / 1024).toFixed(1)} GB`
   if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`
@@ -51,6 +142,7 @@ export function AdminHealthTab() {
   const query = useQuery('admin:health', () => getAdminHealth())
   const data = query.data
   const metrics = data?.metrics || {}
+  const globalMetrics = data?.global_metrics
 
   if (query.loading && !data) {
     return (
@@ -185,6 +277,37 @@ export function AdminHealthTab() {
           </div>
         </section>
       </div>
+
+      {globalMetrics && Object.keys(globalMetrics).length > 0 && (
+        <section className="admin-billing-card admin-global-metrics">
+          <div className="admin-billing-card-head">
+            <div>
+              <div className="eyebrow">全库统计</div>
+              <h3>全局指标（数据库聚合）</h3>
+            </div>
+            <Badge tone="info" subtle>后端聚合</Badge>
+          </div>
+          <table className="admin-data-table">
+            <thead>
+              <tr>
+                <th>指标</th>
+                <th>数值</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(globalMetrics).map(([key, value]) => (
+                <tr key={key}>
+                  <td>{globalMetricLabel(key)}</td>
+                  <td className="mono">{metricValue(value)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="admin-footnote">
+            由后端对数据库做全库聚合，与上方单进程快照口径不同；老后端未返回该字段时不显示本区块。
+          </div>
+        </section>
+      )}
     </div>
   )
 }

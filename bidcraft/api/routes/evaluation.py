@@ -52,7 +52,11 @@ def evaluation_run(ref: str, payload: QualityRunRequest) -> dict[str, Any]:
             db, project.id, created_by=_actor(), note=payload.note or ""
         )
         audit(db, project.id, "quality.run.http", {"report_id": report.id, "version": report.report_version})
-        return report_payload(report, findings=[])
+        # 同步运行也要带回本次生成的 finding，和 /evaluation/latest 的口径一致。
+        findings = list(
+            db.scalars(select(QualityFinding).where(QualityFinding.report_id == report.id))
+        )
+        return report_payload(report, findings=findings)
 
 
 @router.post("/projects/{ref}/evaluation/run-async", status_code=202)

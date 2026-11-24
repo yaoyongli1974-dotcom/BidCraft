@@ -182,6 +182,13 @@ class Settings:
     #: 反向代理后面才开启：信任 X-Forwarded-For 作为客户端 IP（限流与审计用）。
     #: 直连部署保持关闭，避免伪造 IP 绕过限流。
     trust_proxy: bool = field(default_factory=lambda: _bool("BIDCRAFT_TRUST_PROXY"))
+    #: CSRF 校验额外接受的公开 Origin（逗号分隔，如 https://a.example,https://b.example）。
+    #: 同源判定仍优先；这里只用于反代/多域名场景，且仅在请求带 Cookie 的状态变更时生效。
+    public_origin: str = field(default_factory=lambda: os.getenv("BIDCRAFT_PUBLIC_ORIGIN", ""))
+    #: 内置备份额外打包的数据目录（相对 BIDCRAFT_HOME，逗号分隔）；设为空串可关闭。
+    backup_data_dirs: str = field(
+        default_factory=lambda: os.getenv("BIDCRAFT_BACKUP_DIRS", "projects,packages,output,docs")
+    )
     #: 多实例（PostgreSQL）部署须在所有进程使用同一个 Fernet 主密钥。默认仍从
     #: BIDCRAFT_HOME/secret.key 读取；设置本变量则优先使用环境变量（不落盘）。
     secret_key: str = field(default_factory=lambda: os.getenv("BIDCRAFT_SECRET_KEY", "").strip())
@@ -368,6 +375,32 @@ class Settings:
         """脱敏后的连接串（隐藏口令），供健康检查与日志展示。"""
 
         return redact_db_url(self.db_url)
+
+    @property
+    def public_origins(self) -> tuple[str, ...]:
+        """规范化后的公开 Origin 列表（去空格/尾斜杠/统一小写）。"""
+
+        return tuple(
+            item.strip().rstrip("/").lower()
+            for item in self.public_origin.split(",")
+            if item.strip()
+        )
+
+    @property
+    def backup_data_dirs_list(self) -> list[str]:
+        """需要随备份打包的数据目录名（相对 BIDCRAFT_HOME）。"""
+
+        return [
+            item.strip().strip("/\\")
+            for item in self.backup_data_dirs.split(",")
+            if item.strip()
+        ]
+
+    @property
+    def backup_dirs(self) -> list[str]:
+        """``backup_data_dirs_list`` 的短别名。"""
+
+        return self.backup_data_dirs_list
 
     @property
     def model_configured(self) -> bool:

@@ -171,7 +171,9 @@ def test_project_delete_detaches_audit_instead_of_deleting(db):
         project_id = project.id
         removed = delete_project_rows(session, project_id)
 
-    assert removed["audit_logs"] == 1
+    # 审计行不删除，只解绑项目外键；保留审计计数为 0，另记解绑数。
+    assert removed["audit_logs"] == 0
+    assert removed["audit_logs_detached"] == 1
     with session_scope() as session:
         row = session.scalar(
             select(AuditLog).where(AuditLog.action == "project.create")

@@ -1,5 +1,5 @@
 import { ApiError, asArray, jsonBody, request, uploadForm } from '../lib/http'
-import type { ApprovalChainEntry, ApprovalStage, ApprovalStageInput, BidPackage, BidPackageInput, Member, MemberRole, ParseResult, Project, ProjectDetail, ProjectDuplicateInput, ProjectInstantiateInput, ProjectTemplate, SourceFile, UploadResult } from '../lib/types'
+import type { ApprovalChainEntry, ApprovalStage, ApprovalStageInput, BidPackage, BidPackageInput, ExportTemplatePreset, ExportTemplatesResponse, Member, MemberRole, ParseResult, Project, ProjectDetail, ProjectDuplicateInput, ProjectInstantiateInput, ProjectTemplate, SourceFile, UploadResult } from '../lib/types'
 import { asText, normalizeApprovalConditionList, normalizeBidPackage, normalizeCurrencyToken, normalizeProjectTemplate } from './shared'
 
 // ---------------------------------------------------------------- project domain
@@ -54,6 +54,73 @@ export async function getProjectTemplates(signal?: AbortSignal): Promise<Project
 }
 
 /** 归一化一条模板轻量项；缺 id 的脏数据整体丢弃。 */
+
+/**
+ * 导出排版模板（区别于 /projects/templates 的项目模板）：GET 列出四套预设与当前选择，
+ * PUT 把 id 存进项目设置。真正导出时后端从项目设置读取模板，ExportRequest 不接受
+ * template 字段，因此前端不把模板拼进 /export 请求。
+ * 旧后端没有这两个接口（404 或 SPA 兜底 HTML）时回退到后端默认 standard 预设。
+ */
+export const DEFAULT_EXPORT_TEMPLATE_ID = 'standard'
+
+export const DEFAULT_EXPORT_TEMPLATE: ExportTemplatePreset = {
+  id: DEFAULT_EXPORT_TEMPLATE_ID,
+  name: '默认模板',
+  description: '标准投标文件：宋体小四、1.5 倍行距，后端默认排版',
+}
+
+function normalizeExportTemplate(value: unknown): ExportTemplatePreset | null {
+  if (!value || typeof value !== 'object') return null
+  const raw = value as Record<string, unknown>
+  const id = asText(raw.id).trim()
+  if (!id || id === 'default') return null
+  return {
+    id,
+    name: asText(raw.name) || id,
+    description: asText(raw.description),
+    ...(typeof raw.body_font === 'string' ? { body_font: raw.body_font } : {}),
+    ...(typeof raw.heading_font === 'string' ? { heading_font: raw.heading_font } : {}),
+    ...(typeof raw.body_size === 'number' ? { body_size: raw.body_size } : {}),
+    ...(typeof raw.line_spacing === 'number' ? { line_spacing: raw.line_spacing } : {}),
+    ...(typeof raw.cover === 'boolean' ? { cover: raw.cover } : {}),
+    ...(typeof raw.toc === 'boolean' ? { toc: raw.toc } : {}),
+    ...(typeof raw.page_numbers === 'boolean' ? { page_numbers: raw.page_numbers } : {}),
+  }
+}
+
+export function normalizeExportTemplates(value: unknown): ExportTemplatesResponse {
+  const raw = value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+  const presets = Array.isArray(raw.presets)
+    ? raw.presets.map(normalizeExportTemplate).filter((item): item is ExportTemplatePreset => item !== null)
+    : []
+  const current = normalizeExportTemplate(raw.current) || DEFAULT_EXPORT_TEMPLATE
+  const all = presets.some((item) => item.id === current.id) ? presets : [current, ...presets]
+  return { presets: all.length > 0 ? all : [DEFAULT_EXPORT_TEMPLATE], current }
+}
+
+export async function getExportTemplates(ref: string): Promise<ExportTemplatesResponse> {
+  let data: unknown
+  try {
+    data = await request<unknown>(`/projects/${encodeURIComponent(ref)}/export-templates`)
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      return { presets: [DEFAULT_EXPORT_TEMPLATE], current: DEFAULT_EXPORT_TEMPLATE }
+    }
+    if (error instanceof SyntaxError) {
+      return { presets: [DEFAULT_EXPORT_TEMPLATE], current: DEFAULT_EXPORT_TEMPLATE }
+    }
+    throw error
+  }
+  return normalizeExportTemplates(data)
+}
+
+export async function setExportTemplate(ref: string, id: string): Promise<ExportTemplatesResponse> {
+  const data = await request<unknown>(
+    `/projects/${encodeURIComponent(ref)}/export-template`,
+    { method: 'PUT', body: JSON.stringify({ id }) },
+  )
+  return normalizeExportTemplates(data)
+}
 
 export const instantiateTemplate = (id: string, input: ProjectInstantiateInput = {}) =>
   request<Project>(

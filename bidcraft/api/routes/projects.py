@@ -193,7 +193,7 @@ def projects(limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
             rows = list(
                 db.scalars(
                     select(Project)
-                    .order_by(Project.updated_at.desc(), Project.id)
+                    .order_by(Project.updated_at.desc().nullslast(), Project.id)
                     .limit(capped)
                     .offset(start)
                 )
@@ -206,6 +206,9 @@ def projects(limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
             for row in db.scalars(
                 select(ProjectMember).where(ProjectMember.user_id == user_id)
             )
+            # 与 authorize_projects 的成员分支一致：只有有效成员角色才授予可见性，
+            # 历史脏数据（如 role='super_admin'）不能在列表接口里造成越权展示。
+            if row.role in MEMBER_ROLES
         }
         # 可见性过滤、排序、分页全部下推到 SQL：旧实现把所有可见项目读入
         # Python 再 sort/slice，项目数量增长时内存与延迟线性膨胀。
@@ -216,7 +219,7 @@ def projects(limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
             db.scalars(
                 select(Project)
                 .where(or_(*visible_filter))
-                .order_by(Project.updated_at.desc(), Project.id)
+                .order_by(Project.updated_at.desc().nullslast(), Project.id)
                 .limit(capped)
                 .offset(start)
             )
@@ -369,7 +372,7 @@ def project_templates() -> list[dict[str, Any]]:
             db.scalars(
                 select(Project)
                 .where(Project.is_template.is_(True))
-                .order_by(Project.updated_at.desc())
+                .order_by(Project.updated_at.desc().nullslast(), Project.id)
                 .limit(200)
             )
         )
@@ -1559,6 +1562,11 @@ def generate_chapter(ref: str, node_id: str) -> dict[str, Any]:
             )
         except billing.InsufficientCredits as exc:
             raise HTTPException(status_code=402, detail=str(exc)) from exc
+        # durable marker 与扣费同事务提交：进程在扣费后、写章节前崩溃时，
+        # reconcile_pending_charges 能凭它把费用退还（API 响应保持不变）。
+        pending_id = jobqueue.begin_pending_charge(
+            db, user, project.id, charged, 1, note=f"生成本章：{heading}"
+        )
         project_id = project.id
     # 2) 模型调用。generate_document 需要可写 Session 落地章节（writer.py 直接
     #    写 Section/OutlineNode 并 flush），且 before/after_chapter 钩子也接收
@@ -1577,14 +1585,18 @@ def generate_chapter(ref: str, node_id: str) -> dict[str, Any]:
             )
     except Exception:
         # 原实现里模型调用抛错会回滚整个事务（含扣费）；扣费已提前提交，必须
-        # 显式退还，保持净额与原错误行为一致。
+        # 显式退还，保持净额与原错误行为一致。结算与清 marker 同事务，重复
+        # 调用也不会二次退款。
         with session_scope() as refund_db:
-            billing.refund_chapters(refund_db, user, charged, project_id=project_id)
+            jobqueue.settle_pending_charge(
+                refund_db, pending_id, user, project_id, 1, 0
+            )
         raise
     # 3) 短写事务：未写出章节退还、状态、溯源与审计。
     with session_scope() as db:
-        if charged and not report.written:
-            billing.refund_chapters(db, user, charged, project_id=project_id)
+        jobqueue.settle_pending_charge(
+            db, pending_id, user, project_id, 1, len(report.written or [])
+        )
         project = db.get(Project, project_id)
         project.status = "drafting"
         db.flush()
@@ -1624,6 +1636,9 @@ def write(ref: str) -> dict[str, Any]:
             )
         except billing.InsufficientCredits as exc:
             raise HTTPException(status_code=402, detail=str(exc)) from exc
+        pending_id = jobqueue.begin_pending_charge(
+            db, user, project.id, charged, count, note="同步生成全书正文"
+        )
         project_id = project.id
     try:
         with session_scope() as gen_db:
@@ -1638,14 +1653,14 @@ def write(ref: str) -> dict[str, Any]:
     except Exception:
         # 扣费已提前提交；模型调用失败时显式退还，等价于原来的整事务回滚。
         with session_scope() as refund_db:
-            billing.refund_chapters(refund_db, user, charged, project_id=project_id)
+            jobqueue.settle_pending_charge(
+                refund_db, pending_id, user, project_id, count, 0
+            )
         raise
     with session_scope() as db:
-        if charged and count > len(report.written):
-            unit = charged // count if count else 0
-            billing.refund_chapters(
-                db, user, unit * (count - len(report.written)), project_id=project.id
-            )
+        jobqueue.settle_pending_charge(
+            db, pending_id, user, project_id, count, len(report.written or [])
+        )
         project = db.get(Project, project_id)
         project.status = "drafting"
         db.flush()

@@ -3,6 +3,8 @@ name: CI
 on:
   push:
     branches: ["**"]
+    # 发版 tag 也跑一遍：在 CI 里校验 tag 与版本号/变更记录一致。
+    tags: ["v*"]
   pull_request:
 
 concurrency:
@@ -37,6 +39,76 @@ jobs:
 
       - name: Lint (ruff)
         run: uv run --frozen ruff check bidcraft tests
+
+      - name: Alembic single-head check
+        # 不硬编码 revision 号：扫描版本文件，断言恰好一个 head（无分叉/孤立迁移）。
+        run: |
+          uv run --frozen python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          versions = Path("bidcraft/migrations/versions")
+          revisions: set[str] = set()
+          down_revisions: set[str] = set()
+          for file in sorted(versions.glob("*.py")):
+              if file.name == "__init__.py":
+                  continue
+              tree = ast.parse(file.read_text(encoding="utf-8"), filename=str(file))
+              for node in tree.body:
+                  if not isinstance(node, ast.Assign):
+                      continue
+                  value = node.value
+                  for target in node.targets:
+                      if not isinstance(target, ast.Name):
+                          continue
+                      if target.id == "revision" and isinstance(value, ast.Constant) and isinstance(value.value, str):
+                          revisions.add(value.value)
+                      elif target.id == "down_revision":
+                          if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                              down_revisions.add(value.value)
+                          elif isinstance(value, (ast.Tuple, ast.List)):
+                              for item in value.elts:
+                                  if isinstance(item, ast.Constant) and isinstance(item.value, str):
+                                      down_revisions.add(item.value)
+
+          assert revisions, "未找到任何 Alembic revision"
+          heads = revisions - down_revisions
+          assert len(heads) == 1, f"Alembic 必须恰好一个 head，实际为 {sorted(heads)}"
+          print(f"Alembic single-head OK: {heads.pop()}")
+          PY
+
+      - name: Version / tag / changelog consistency
+        env:
+          CI_GIT_REF: ${{ github.ref }}
+        run: |
+          uv run --frozen python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          init_text = Path("bidcraft/__init__.py").read_text(encoding="utf-8")
+          pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+
+          m_init = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', init_text, re.M)
+          m_py = re.search(r'^version\s*=\s*["\']([^"\']+)["\']', pyproject, re.M)
+          assert m_init and m_py, "无法从 bidcraft/__init__.py 或 pyproject.toml 读取版本号"
+          v_init, v_py = m_init.group(1), m_py.group(1)
+          assert v_init == v_py, f"版本号不一致：__init__.py={v_init}, pyproject.toml={v_py}"
+
+          notes = Path("docs/release-notes") / f"v{v_init}.md"
+          assert notes.is_file(), f"缺少发版说明 {notes}"
+          assert re.search(rf"^## v{re.escape(v_init)}\b", changelog, re.M), (
+              f"CHANGELOG.md 缺少 v{v_init} 条目"
+          )
+
+          ref = os.environ.get("CI_GIT_REF", "")
+          if ref.startswith("refs/tags/"):
+              tag = ref[len("refs/tags/"):]
+              assert tag == f"v{v_init}", f"tag {tag} 与版本号 v{v_init} 不一致"
+              print(f"release tag OK: {tag}")
+          print(f"version consistency OK: v{v_init}")
+          PY
 
       - name: Test (pytest)
         run: uv run --frozen pytest -q

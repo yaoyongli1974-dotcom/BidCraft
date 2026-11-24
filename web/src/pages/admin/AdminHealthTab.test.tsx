@@ -42,6 +42,38 @@ describe('AdminHealthTab', () => {
     expect(screen.getAllByText('暂无全局聚合')).toHaveLength(2)
   })
 
+  it('后端返回 global_metrics 时渲染全局指标区块', async () => {
+    vi.mocked(getAdminHealth).mockResolvedValue({
+      ...health,
+      global_metrics: {
+        projects: 12,
+        active_users: 3,
+        avg_score: 78.5,
+        manual_edit_rate: '12.5%',
+        unknown_key: null,
+        projects_by_status: { draft: 8, active: 4 },
+        jobs_by_status: { done: 20 },
+      },
+    })
+    render(<AdminHealthTab />)
+    expect(await screen.findByText('全局指标（数据库聚合）')).toBeTruthy()
+    expect(screen.getByText('项目总数')).toBeTruthy()
+    expect(screen.getByText('活跃用户数')).toBeTruthy()
+    expect(screen.getByText('平均质量分')).toBeTruthy()
+    expect(screen.getByText('项目状态分布')).toBeTruthy()
+    expect(screen.getByText('草稿 8 · 进行中 4')).toBeTruthy()
+    expect(screen.getByText('12.5%')).toBeTruthy()
+    expect(screen.getByText('—')).toBeTruthy()
+    // 原有单进程快照仍在。
+    expect(screen.getByText('0.27.0')).toBeTruthy()
+  })
+
+  it('没有 global_metrics 时不展示全局指标区块', async () => {
+    render(<AdminHealthTab />)
+    await screen.findByText('0.27.0')
+    expect(screen.queryByText('全局指标（数据库聚合）')).toBeNull()
+  })
+
   it('加载失败可重试', async () => {
     vi.mocked(getAdminHealth).mockRejectedValueOnce(new Error('服务不可达'))
     render(<AdminHealthTab />)

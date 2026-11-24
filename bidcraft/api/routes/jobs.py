@@ -3,6 +3,7 @@
 import asyncio
 import sys
 
+from anyio.to_thread import run_sync
 from fastapi import APIRouter
 
 _core = sys.modules['bidcraft.api.app']  # 运行期查找，保持 monkeypatch 生效
@@ -10,6 +11,19 @@ _core = sys.modules['bidcraft.api.app']  # 运行期查找，保持 monkeypatch 
 from ..shared import Any, Job, Request, StreamingResponse, _job, jobs, session_scope, time  # noqa: F401
 
 router = APIRouter()
+
+
+def _poll_events(job_id: str, cursor: int) -> list:
+    """DB I/O for one SSE poll; always executed in a worker thread."""
+
+    return jobs.events_since(job_id, cursor, limit=200)
+
+
+def _job_status(job_id: str) -> Job | None:
+    """Read the job row in a short session (worker thread, never the loop)."""
+
+    with session_scope() as db:
+        return db.get(Job, job_id)
 
 
 @router.get("/jobs/{job_id}")
@@ -24,6 +38,10 @@ async def job_events(job_id: str, request: Request, after: int = 0) -> Streaming
 
     The browser sends ``Last-Event-ID`` automatically when EventSource
     reconnects; ``?after=`` is available for non-EventSource clients.
+
+    Every DB read in the polling loop runs via ``anyio.to_thread.run_sync`` so
+    a slow SQL statement cannot block the event loop; disconnection checks and
+    the yielded frames stay on the loop with the original payload shape.
     """
 
     header = request.headers.get("last-event-id") or ""
@@ -31,6 +49,8 @@ async def job_events(job_id: str, request: Request, after: int = 0) -> Streaming
         last_id = max(int(header), int(after or 0))
     except ValueError:
         last_id = max(0, int(after or 0))
+    # 一次性快照需要请求身份（_job 读 current_user ContextVar），留在事件循环；
+    # 循环内的轮询不依赖请求上下文，全部下沉到线程。
     with session_scope() as db:
         job = _job(db, job_id)
         snapshot = jobs.job_payload(job)
@@ -46,9 +66,8 @@ async def job_events(job_id: str, request: Request, after: int = 0) -> Streaming
             # 会一直查库直到任务进入终态，长任务期间白白占用连接与 worker。
             if await request.is_disconnected():
                 break
-            rows = jobs.events_since(job_id, cursor, limit=200)
-            with session_scope() as db:
-                current = db.get(Job, job_id)
+            rows = await run_sync(_poll_events, job_id, cursor)
+            current = await run_sync(_job_status, job_id)
             if current is None:
                 break
             for row in rows:
@@ -73,5 +92,3 @@ async def job_events(job_id: str, request: Request, after: int = 0) -> Streaming
             "X-Accel-Buffering": "no",
         },
     )
-
-

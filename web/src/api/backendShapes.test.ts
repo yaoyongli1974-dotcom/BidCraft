@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { normalizeCommercialDoc, normalizeCommercialValidation } from './commercial'
+import { normalizePlugin } from './plugins'
 import { normalizeSimilarityReport } from './similarity'
 
 /**
@@ -81,5 +82,39 @@ describe('backend shape reconciliation', () => {
   it('similarity: skipped 为数字或字符串时仍兼容', () => {
     expect(normalizeSimilarityReport({ skipped: 5 }).skipped).toBe(5)
     expect(normalizeSimilarityReport({ skipped: ['空文档'] }).skipped).toEqual(['空文档'])
+  })
+
+  it('plugins: 保留后端的 scope / owner_id / allow_private_net，避免编辑时降级为全局', () => {
+    const plugin = normalizePlugin({
+      id: 'p1',
+      name: 'private-mcp',
+      transport: 'http',
+      url: 'http://127.0.0.1:8000/mcp',
+      scope: 'owner',
+      owner_id: 'user-7',
+      allow_private_net: true,
+    })
+    expect(plugin.scope).toBe('owner')
+    expect(plugin.owner_id).toBe('user-7')
+    expect(plugin.allow_private_net).toBe(true)
+
+    const global = normalizePlugin({
+      id: 'p2',
+      name: 'public-mcp',
+      scope: 'global',
+      owner_id: 'ignored',
+      allow_private_net: true,
+    })
+    expect(global.scope).toBe('global')
+    expect(global.owner_id).toBe('ignored')
+    // 非 HTTP 插件不允许私网；normalizer 只透传后端值，表单层按 transport 决定是否提交。
+    expect(global.allow_private_net).toBe(true)
+  })
+
+  it('plugins: 缺字段的旧后端数据回退到全局 + 关闭私网', () => {
+    const plugin = normalizePlugin({ id: 'p3', name: 'legacy', command: 'npx' })
+    expect(plugin.scope).toBe('global')
+    expect(plugin.owner_id).toBeNull()
+    expect(plugin.allow_private_net).toBe(false)
   })
 })

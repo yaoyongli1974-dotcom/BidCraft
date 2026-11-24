@@ -12,10 +12,12 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 from sqlalchemy import text
@@ -45,6 +47,32 @@ def pg_engine():
         reset_engine_for_tests(old_url)
 
 
+def _alembic_head() -> str:
+    """Derive the head revision from migration scripts, not a hardcoded string.
+
+    A revision with no child is the head.  Scanning the scripts keeps this opt-in
+    PG suite passing when a new migration is added (CI used to pin 0007).
+    """
+
+    from bidcraft.migrations import __file__ as migrations_init
+
+    versions = Path(migrations_init).parent / "versions"
+    revisions: dict[str, str] = {}
+    parents: set[str] = set()
+    for path in versions.glob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        match = re.search(r"^revision\s*=\s*['\"]([^'\"]+)['\"]", source, re.MULTILINE)
+        if match is None:
+            continue
+        revisions[match.group(1)] = path.name
+        parent = re.search(r"^down_revision\s*=\s*['\"]([^'\"]+)['\"]", source, re.MULTILINE)
+        if parent is not None:
+            parents.add(parent.group(1))
+    heads = set(revisions) - parents
+    assert len(heads) == 1, f"expected a single Alembic head, got {sorted(heads)}"
+    return heads.pop()
+
+
 def _make_jobs(count: int) -> list[str]:
     from bidcraft.db import session_scope
     from bidcraft.models import Job
@@ -63,7 +91,7 @@ def test_schema_created_and_alembic_stamped(pg_engine):
     assert {"projects", "jobs", "sections", "facts", "alembic_version"} <= tables
     with pg_engine.connect() as connection:
         head = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
-    assert head == "0007_yibiao_batch4"
+    assert head == _alembic_head()
 
 
 def test_crud_roundtrip_with_json_and_chinese(pg_engine):

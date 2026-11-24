@@ -60,8 +60,18 @@ BidCraft 默认使用 SQLite（WAL 模式），适合单进程/单机部署。�
 - PostgreSQL：调用 `pg_dump`（需安装 `postgresql-client`），zip 内为 `dump.sql`。
   口令通过 `PGPASSWORD` 传递，不出现在命令行参数里。
 
+两种后端的 zip 都包含 `manifest.json`，并默认打包 `BIDCRAFT_HOME` 下的
+`projects/`、`packages/`、`output/`、`docs/`（可用 `BIDCRAFT_BACKUP_DIRS` 调整，
+或用 `bidcraft backup --include-dir <目录名>` 临时追加）。清单的 `data_files`
+逐项记录相对路径、大小与 sha256。
+
 `bidcraft backup-verify <zip>` 两种格式都能校验：SQLite 跑完整性检查，PG 解析
-SQL 中的建表与数据行。恢复 PG 备份时用 `psql` 导入 `dump.sql`，再放回 `secret.key`。
+SQL 中的建表与数据行；同时会核对清单里的数据文件确实存在且哈希一致，缺文件
+不再误报"备份完整"（无 `data_files` 的旧备份仍按原逻辑读取）。恢复 PG 备份时
+用 `psql` 导入 `dump.sql`，再放回 `secret.key` 与各数据目录。
+
+`/admin/health` 的 `global_metrics` 直接查库聚合各状态的项目/任务数、未处置
+质量问题与用户数，供多实例共享同一份可观测数据（不新增 API 路由）。
 
 ## 多实例的 secret.key（关键）
 

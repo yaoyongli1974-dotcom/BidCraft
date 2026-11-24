@@ -112,7 +112,8 @@ def delete_project_rows(db: Session, project_id: str) -> dict[str, int]:
     不删除 ``Project`` 本体（由调用方决定何时 ``db.delete(project)``），
     也不碰 ``AuditLog.user_id``（留存红线）。审计行只解绑 ``project_id``：
     行本身与其 action/detail 全部保留，仍可在 ``/admin/audit`` 全局查询。
-    ``removed["audit_logs"]`` 为被解绑的审计条数（兼容旧调用方的计数口径）。
+    ``removed["audit_logs"]`` 恒为 0（没有审计行被真正删除），被解绑的条数单独
+    记在 ``removed["audit_logs_detached"]``，避免删除审计详情误称"已删除"。
     """
     removed: dict[str, int] = {}
     node_ids = list(
@@ -137,7 +138,7 @@ def delete_project_rows(db: Session, project_id: str) -> dict[str, int]:
         ).rowcount
         or 0
     )
-    removed["audit_logs"] = detached
+    removed["audit_logs"] = 0
     removed["audit_logs_detached"] = detached
     return removed
 

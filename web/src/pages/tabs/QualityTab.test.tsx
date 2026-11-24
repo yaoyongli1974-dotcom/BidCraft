@@ -98,6 +98,25 @@ describe('QualityTab', () => {
     await waitFor(() => expect(screen.getByText('v2')).toBeTruthy())
   })
 
+  it('运行评估后即使响应缺 findings，也采用重新拉取的最新报告展示问题', async () => {
+    const finding = {
+      id: 'f1', report_id: 'r2', category: '核对项', level: 'major', node_id: null,
+      scoring_item_id: null, requirement_id: null, title: '待补充盖章页', description: '',
+      evidence: {}, recommendation: '', status: 'open',
+    }
+    // 初始加载 → 运行后重新拉取；runEvaluation 的响应故意不带 findings。
+    vi.mocked(getLatestEvaluation)
+      .mockResolvedValueOnce(makeReport())
+      .mockResolvedValueOnce(makeReport({ id: 'r2', report_version: 2, findings: [finding] }))
+    vi.mocked(runEvaluation).mockResolvedValue(makeReport({ id: 'r2', report_version: 2 }))
+    renderTab()
+    await screen.findByText('实质性响应')
+    fireEvent.click(screen.getByRole('button', { name: /运行评估/ }))
+    expect(await screen.findByText('待补充盖章页')).toBeTruthy()
+    expect(screen.getByText('v2')).toBeTruthy()
+    expect(vi.mocked(getLatestEvaluation).mock.calls.length).toBeGreaterThanOrEqual(2)
+  })
+
   it('disables run for read-only members', async () => {
     workspace.canWrite = false
     renderTab()

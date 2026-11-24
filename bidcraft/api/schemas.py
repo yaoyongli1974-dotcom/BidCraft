@@ -5,7 +5,25 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from fastapi import HTTPException
+from pydantic import BaseModel, Field, field_validator
+
+from ..authorization import MEMBER_ROLES
+
+
+def _validate_member_role(role: str) -> str:
+    """Canonical project-member role check (same set as ``authorization``).
+
+    Raise ``HTTPException(400)`` rather than ``ValueError`` deliberately:
+    the handlers already answer an invalid role with 400, and this validator
+    only moves the check to the API boundary as defense in depth.  Pydantic
+    only converts ValueError/AssertionError into a 422 ValidationError; other
+    exceptions propagate, so the public status code stays unchanged.
+    """
+
+    if role not in MEMBER_ROLES:
+        raise HTTPException(status_code=400, detail="role 只能是 editor 或 viewer")
+    return role
 
 
 class ProjectCreate(BaseModel):
@@ -66,9 +84,19 @@ class MemberCreate(BaseModel):
     username: str = Field(min_length=1, max_length=80)
     role: str = "editor"
 
+    @field_validator("role")
+    @classmethod
+    def _role_check(cls, value: str) -> str:
+        return _validate_member_role(value)
+
 
 class MemberUpdate(BaseModel):
     role: str
+
+    @field_validator("role")
+    @classmethod
+    def _role_check(cls, value: str) -> str:
+        return _validate_member_role(value)
 
 
 class RulePackageDocument(BaseModel):

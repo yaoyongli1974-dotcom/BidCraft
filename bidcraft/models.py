@@ -14,6 +14,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -466,6 +467,9 @@ class Job(Base):
     message: Mapped[str] = mapped_column(Text, default="")
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
     result: Mapped[dict] = mapped_column(JSON, default=dict)
+    #: 归一化归属人（背压检查用）。与 payload['owner_id'] 保持一致但带索引；
+    #: 由下面的 before_insert/before_update 事件自动派生，老调用方无需改动。
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     #: 排队优先级：数值越小越先执行（VIP 主账号/子账号=0，普通=1）。
     priority: Mapped[int] = mapped_column(Integer, default=1)
     # DB 驱动队列：Job 行本身就是排队凭据，Worker 用条件 UPDATE 原子认领。
@@ -483,6 +487,26 @@ class Job(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+@event.listens_for(Job, "before_insert")
+@event.listens_for(Job, "before_update")
+def _job_owner_from_payload(mapper, connection, target: Job) -> None:
+    """Derive the indexed owner column from payload without touching callers.
+
+    Job creation sites already put ``owner_id`` in ``payload``.  Mirroring it to
+    a real column lets ``check_backpressure`` use an index (PostgreSQL stores
+    ``payload`` as JSON, not JSONB, so a JSON filter cannot use one).  An
+    explicitly supplied column value always wins.
+    """
+
+    if target.owner_id:
+        return
+    payload = target.payload
+    if isinstance(payload, dict):
+        owner = payload.get("owner_id")
+        if owner:
+            target.owner_id = str(owner)
+
+
 class JobEvent(Base):
     """Append-only progress event for a background job.
 
@@ -497,6 +521,34 @@ class JobEvent(Base):
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
     data: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class PendingCharge(Base):
+    """Durable marker for a credit debit whose generation has not settled yet.
+
+    The row is written in the **same transaction** as the debit, so a crash can
+    never leave a charge without a recoverable record.  ``status`` moves
+    ``pending → cleared`` (chapter written, no refund due) or
+    ``pending → refunded`` (operation aborted / reconciled).  A process that
+    dies in between leaves the row ``pending``; ``reconcile_pending_charges``
+    refunds rows older than its TTL at startup or on demand.
+
+    No foreign keys: this is a short-lived bookkeeping row and must not break
+    account deletion or the append-only credit ledger on PostgreSQL.
+    """
+
+    __tablename__ = "pending_charges"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    credits: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    chapters: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    note: Mapped[str] = mapped_column(Text, default="")
+    refunded_credits: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
 class AppSetting(Base):

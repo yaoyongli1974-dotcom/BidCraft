@@ -274,6 +274,40 @@ run_check、export_document、search_knowledge），供 Claude Desktop / Cursor 
   关键操作写入 `audit_logs`（项目页「协作」与管理端「审计日志」可查）。
   公网多人场景仍建议配合反向代理与网络隔离。
 
+## 备份与恢复
+
+生产部署的目录布局、权限与「每季度做一次恢复演练」的要求见
+[`deploy/README.md`](../deploy/README.md)「5.2 备份与恢复演练」；数据库后端与 WAL 说明见
+[`docs/architecture.md`](architecture.md)「备份与恢复」及
+[`docs/postgresql.md`](postgresql.md)。
+
+内置一致性备份无需停服：
+
+```bash
+bidcraft backup                            # 写入 BIDCRAFT_HOME/backups/bidcraft-<时间>.zip
+bidcraft backup --list                     # 列出已有备份
+bidcraft backup-verify <备份.zip>          # 校验数据库与清单引用文件
+bidcraft backup-prune --keep 10 --dry-run  # 先看轮转名单，再去 --dry-run 执行
+```
+
+- `bidcraft backup` 打包数据库一致性快照（SQLite 在线备份 API；PostgreSQL 走 `pg_dump`，
+  口令经 `PGPASSWORD` 传递，不进命令行）、`secret.key`（存在时），以及 `BIDCRAFT_HOME`
+  下的数据目录——默认由 `BIDCRAFT_BACKUP_DIRS` 指定为 `projects,packages,output,docs`
+  （招标原件/清单原件/配图、规则包覆盖、导出件、条款文档等），可用 `--include-dir` 追加
+  其它相对目录，但只允许 `BIDCRAFT_HOME` 之内、跳过 `backups/` 以防备份递归膨胀。
+  `manifest.json` 记录版本、创建时间、数据库后端与大小、是否含密钥、`BIDCRAFT_HOME`、
+  数据目录列表及逐文件清单（路径/字节数/`sha256`）。
+- `bidcraft backup-verify <zip>` 对 SQLite 跑 `integrity_check`、对 PG dump 检查建表语句与
+  数据行，并逐项确认 `manifest.json` 列出的数据文件**在包内且 sha256 一致**，缺失或哈希
+  不符即报错，避免只验数据库就误报「备份完整」；只读，不执行备份中的 SQL。旧备份没有
+  文件清单时自动跳过这一步。
+- 恢复：**停服 → 解压 → 把数据库、`secret.key` 与数据目录放回同一 `BIDCRAFT_HOME` → 启动**。
+  命令不自动还原，避免误覆盖线上数据；恢复后属主应为运行用户（容器内 uid 10001）。
+- 限制：不要直接 `cp`/`tar` 运行中的 SQLite 文件（WAL 下主库与 `-wal`/`-shm` 可能撕裂）；
+  `secret.key` 必须与库一起保留，否则加密的模型/知识库 API Key 无法解密；多实例共享数据库时
+  必须共享同一密钥或统一设置 `BIDCRAFT_SECRET_KEY`。备份默认保留 10 份，按
+  `bidcraft backup-prune` 轮转。
+
 ## 微信开放平台
 
 `/admin` →「微信开放平台」可配置扫码登录，保存后立即生效（无需重启）：
@@ -393,15 +427,31 @@ run_check、export_document、search_knowledge），供 Claude Desktop / Cursor 
 模型/知识库/账号数量、前端构建产物是否就绪、离线/文档页/注册/安全 Cookie/微信登录与支付
 等开关。页面顶部有手动刷新按钮。
 
-README 声明的三项质量指标由项目数据计算，当前没有全站聚合接口，因此页面只列出定义与
-「暂无全局聚合」，不引用未经测量的数字；后端若在 health 响应中补充 `metrics`
-（`manual_edit_rate` / `issue_density` / `boq_match_rate`），页面会自动显示对应值：
+`GET /admin/health` 的响应中还带有 **`global_metrics`** 对象：这是**数据库支撑（DB-backed）**
+的全站聚合，由 `GET /admin/health` 自身在请求时从库内实时计算，**不新增
+HTTP 路由、不单独落库、不缓存**。它与 uptime/磁盘余量等进程本地字段不同——多实例部署时
+所有实例看到的是同一份库内计数（`bidcraft/health.py`）：
 
-| 指标 | 口径 |
+| 键 | 含义 |
 |---|---|
-| 人工修改率 | 章节 `revision > 1` 的比例，及修改字数 / 生成字数 |
-| 核对问题密度 | 核对产出的问题数 ÷ 正文字数 |
-| 清单匹配率 | 清单行匹配到台账材料的比例，含缺项/多项 |
+| `projects_by_status` | 项目按状态分组的计数 |
+| `jobs_by_status` | 后台任务按状态分组的计数 |
+| `open_findings` | 未处置的质量 finding 数（状态 `open` / `new` / `reopened`） |
+| `users` | 账号总数 |
+
+**口径与限制**：`global_metrics` 只读当前数据库、每次请求实时聚合，反映的是「此刻的全站
+快照」，**不保存历史序列、不做趋势对比、不是质量评分或考核依据**，也不代表单项目口径
+（单项目数据仍以项目页自身展示为准）。它只提供计数，不提供比率；库内项目/任务行数很大时
+查询耗时会随行数增长。该对象随 `/admin/health` 一并返回，公开 `/health` 不包含它。
+
+页面另按下述口径列出三项**质量指标定义**；它们目前是单项目口径，`global_metrics`
+**不包含**这三个比率，页面只有在后端另行提供 `metrics` 时才显示对应值，不引用未经测量的数字：
+
+| 指标（可选 `metrics` 键） | 口径 |
+|---|---|
+| 人工修改率 `manual_edit_rate` | 章节 `revision > 1` 的比例，及修改字数 / 生成字数 |
+| 核对问题密度 `issue_density` | 核对产出的问题数 ÷ 正文字数 |
+| 清单匹配率 `boq_match_rate` | 清单行匹配到台账材料的比例，含缺项/多项 |
 
 ## 开票与条款同意
 

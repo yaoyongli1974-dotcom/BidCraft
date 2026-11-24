@@ -14,7 +14,7 @@ from bidcraft.config import settings
 from bidcraft.db import get_engine, init_db, reset_engine_for_tests
 
 #: 当前 alembic head（新增 revision 时同步这里）。
-HEAD = "0008_job_queue_indexes"
+HEAD = "0009_v028_schema_parity"
 
 
 def _version() -> list[str]:
@@ -146,4 +146,51 @@ def test_job_queue_indexes_created_and_reversible(db):
     assert not (expected & indexes())
     command.upgrade(cfg, "head")
     assert expected <= indexes()
+    assert _version() == [HEAD]
+
+
+def test_v028_parity_columns_and_table_are_reversible(db):
+    """0009 补齐的列/索引/表必须可降级再升级（PG 升级路径的核心保障）。"""
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+
+    from bidcraft.migrations import __file__ as migrations_init
+
+    engine = get_engine()
+    plugin_cols = {
+        "fail_streak", "auto_disabled", "mem_limit_mb", "cpu_seconds",
+        "scope", "owner_id", "allow_private_net",
+    }
+    requirement_cols = {
+        "page", "clause_no",
+        "response_verdict", "response_verdict_label", "response_verdict_reason",
+    }
+
+    def columns(table: str) -> set[str]:
+        return {column["name"] for column in inspect(engine).get_columns(table)}
+
+    assert plugin_cols <= columns("plugins")
+    assert requirement_cols <= columns("requirements")
+    assert "owner_id" in columns("jobs")
+    assert "pending_charges" in set(inspect(engine).get_table_names())
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(Path(migrations_init).parent))
+    cfg.set_main_option(
+        "sqlalchemy.url",
+        engine.url.render_as_string(hide_password=False).replace("%", "%%"),
+    )
+    command.downgrade(cfg, "0008_job_queue_indexes")
+    assert not (plugin_cols & columns("plugins"))
+    assert not (requirement_cols & columns("requirements"))
+    assert "owner_id" not in columns("jobs")
+    assert "pending_charges" not in set(inspect(engine).get_table_names())
+
+    command.upgrade(cfg, "head")
+    assert plugin_cols <= columns("plugins")
+    assert requirement_cols <= columns("requirements")
+    assert "owner_id" in columns("jobs")
+    assert "pending_charges" in set(inspect(engine).get_table_names())
     assert _version() == [HEAD]

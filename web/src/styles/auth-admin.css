@@ -1192,11 +1192,23 @@
   align-items: center;
   gap: 2px;
   overflow-x: auto;
-  scrollbar-width: none;
+  /* 12 个分类在窄屏会溢出；保留细滚动条作为可见的「还有更多」提示。 */
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+  padding-bottom: 3px;
 }
 
 .admin-tabs::-webkit-scrollbar {
-  display: none;
+  height: 6px;
+}
+
+.admin-tabs::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.admin-tabs::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 3px;
 }
 
 .admin-tab {

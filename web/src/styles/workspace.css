@@ -4277,6 +4277,42 @@ button.risk-anchor:hover {
   margin-top: 2px;
 }
 
+.export-template-picker {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.export-template-picker label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.export-template-picker select {
+  min-width: 190px;
+  max-width: 100%;
+}
+
+.export-template-hint {
+  flex: 1 1 260px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.export-template-error {
+  flex: 1 1 100%;
+  font-size: 11px;
+  color: var(--danger);
+}
+
 .format-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -282,7 +282,7 @@ export BIDCRAFT_WECHAT_PAY_MOCK=1         # 本地演示支付
 | 数据库迁移 | ✅ | 引入 Alembic：旧库由 create_all+补列收敛后 stamp 基线，新增/改类型/重命名/索引走幂等 revision；跨进程迁移锁避免 serve/CLI/MCP 并发跑 DDL |
 | 报价金额精度 | ✅ | 统一金额服务内部 Decimal + ROUND_HALF_UP，消除浮点累计误差，JSON/API/Excel 出口仍 float 保持契约；报价版本冻结不可变计算依据（数量/税率/币种/汇率/系数）供审计与复算 |
 | 关联数据清理 | ✅ | 项目删除集中清理全部关联行（含此前漏掉的引用/包件/报价版本）；孤儿引用只读检测与可选清理（`bidcraft db-orphans`）；审计 user_id 悬挂留存供注销追责 |
-| API 架构收尾 | ✅ | `api/app.py` 瘦身为门面与组装器（1933→793 行）：71 个请求模型外迁 `api/schemas.py`、helper/常量/重导出下沉 `api/shared.py`；18 个路由模块改为单向依赖 `schemas`/`shared`，不再反向 import `app`；门面保留全部导出名与对象同一性（runner/helper 与 workers/services 同源），monkeypatch 与运行期查找语义不变 |
+| API 架构收尾 | ✅ | `api/app.py` 瘦身为门面与组装器（原 1933 行单体已按域拆分，不再以行数衡量）：71 个请求模型外迁 `api/schemas.py`、helper/常量/重导出下沉 `api/shared.py`；18 个路由模块改为单向依赖 `schemas`/`shared`，不再反向 import `app`；门面保留全部导出名与对象同一性（runner/helper 与 workers/services 同源），monkeypatch 与运行期查找语义不变 |
 | 前端分层 | ✅ | `web/src/api/` 按业务域拆 14 个模块，传输与统一错误在 `lib/http.ts`；`hooks/watchJob.ts` 统一任务进度（SSE + 断线轮询兜底）、`lib/permissions.ts` 统一权限能力、`lib/format.ts`/`lib/queryCache.ts` 复用；无 Redux、无页面结构改动，SSE 断线续传保留 |
 | 架构分层 | ✅ | API 按业务域拆为 18 个路由模块（`bidcraft/api/routes/`），耗时任务剥离到 `bidcraft/workers/`，共享逻辑在 `bidcraft/services/`；配置启动校验区分 dev/test/prod；URL、请求响应与业务函数完全不变 |
 | 五层判定引擎 | ✅ | 提取/原子拆分/结构化约束/多维验证/四态判定五层：满足·不满足·部分满足·人工复核；数值等级时间由规则引擎判定、语义层可插拔；不满足与部分满足阻塞；人工复核按重要性分级——★ blocking（未确认不得交付，强制导出须独立授权 + 完整审计）、▲ critical、普通 info；确认「已响应/不适用」时快照原始判定与人员/时间/原因入审计；逐层证据写入 issue 与接口 | 
@@ -314,7 +314,7 @@ export BIDCRAFT_WECHAT_PAY_MOCK=1         # 本地演示支付
 | 全局事实设定 | ✅ | 项目级 `writing_profile`（公司/法人/项目/招标人/总价/工期/质保/质量标准/语气/禁用表达/自定义事实）：每次章节生成前注入「全局事实」块；核对时正文取值与设定不符报 `CON-###`（major，附正文值与设定值） |
 | 评分回填与失分复盘 | ✅ | 评分办法逐项回填实际得分（≤分值、可清空）、备注扣分原因；自动算总得分率、按类别聚合强弱、失分 Top20；失分摘要注入生成提示（「历史评分失分项，写作时优先补齐」） |
 | 长文一致性续写 | ✅ | 生成时注入「全书已写章节索引 + 近期章节摘要」，跨章承接术语/数字/承诺并去重；替换原来的 8 条短摘要 |
-| 导出格式模板 | ✅ | 四套预设（标准/政府采购公文/技术方案/商务简洁），项目级选择并记忆；DOCX 按模板设置正文字体字号、行距、页边距与封面/目录/页码 |
+| 导出格式模板 | ✅ | 四套预设（标准/政府采购公文/技术方案/商务简洁），项目级选择并记忆；DOCX 按模板设置正文字体字号、行距、页边距与封面/目录/页码；API `GET /projects/{ref}/export-templates` 列出预设与当前选择、`PUT /projects/{ref}/export-template` 保存，Web「导出」页签提供模板选择 |
 | 合规与账号 | ✅ | 服务条款与隐私政策页；数据导出 ZIP（项目/正文/资质证据/个人文档）；对账单 CSV 与开票信息；账号注销（密码+确认词，子账号需先处理）；`bidcraft backup-verify` 备份可恢复校验 |
 | 合规闭环（同意/开票/保留） | ✅ | 注册须勾选同意条款并留痕版本与时间（`terms_version`/`terms_accepted_at`）；开票申请→管理员开具（上传 PDF/图片）→用户下载，附驳回原因；备份默认保留 10 份并可 `bidcraft backup-prune --keep N` 轮转；隐私政策载明备份保留期限 |
 | 注销冷静期与删除审计 | ✅ | 注销改为**申请制**：校验密码与「注销」确认后进入 7 天冷静期，期间可登录、可撤销；到期由 `bidcraft purge-accounts`（或 `POST /admin/accounts/purge`）执行删除；每次执行写 `account.purge` 审计（含用户名、申请/到期时间、删除数量统计） |
@@ -338,7 +338,7 @@ export BIDCRAFT_WECHAT_PAY_MOCK=1         # 本地演示支付
 | 章节协作 | ✅ | 章节编辑锁与乐观锁、修订历史 diff/恢复、负责人确认/锁定与章节分工 |
 | 质量评估中心 | ✅ | 六维评分、硬性风险一票否决、不可变报告快照与问题人工处置；支持同步运行与 `run-async` 后台任务，历史报告点击后按需加载 findings，处置意见/处置人留痕并可重新打开 |
 | `.bidplugin` 签名验签 | ✅ | 插件包可选 Ed25519 签名（默认兼容未签名，可强制验签），导入时校验完整性并写审计 |
-| 管理端运行状态 | ✅ | 超管页读取完整 `/admin/health`（版本/模型/磁盘/开关）；人工修改率、问题密度、清单匹配率按项目口径展示，不引用未经测量的数字 |
+| 管理端运行状态 | ✅ | 超管页读取完整 `/admin/health`（版本/模型/磁盘/开关）；`global_metrics` 为数据库实时聚合的全站计数（项目/任务按状态分组、未处置 finding、用户数），无新路由、不缓存、不做趋势与考核；三项质量比率仍为单项目口径 |
 
 未做（按评估建议留到完整版）：插件远程市场自动安装与系统级隔离（受控本地插件包导入/导出已支持；无容器/网络隔离）、真实招标件的持续回归基线扩充。
 
@@ -363,7 +363,11 @@ bidcraft/
     packages/   common-bid-facts + 弱电三包 + 消防/安装/土建/暖通/装修
     schema/     fact_ledger.schema.json
   tools/        Schema 再生成
-  api.py        FastAPI：B/S 接口 + 静态客户端托管 + 后台生成任务
+  api/          FastAPI：B/S 接口 + 静态客户端托管 + 后台生成任务
+    app.py      门面/组装器（保留 from bidcraft.api import ... 兼容）
+    schemas.py  请求/响应模型
+    shared.py   helper、常量与重导出
+    routes/     按业务域拆分的路由模块
   web_dist/     Web 客户端构建产物（npm run build 生成）
   cli.py        Typer 命令行
 web/            React + TypeScript + Vite 客户端源码

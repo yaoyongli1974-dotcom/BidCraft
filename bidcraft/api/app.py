@@ -7,7 +7,7 @@ controls when serving a team."""
 
 import ipaddress
 import uuid
-from collections import defaultdict, deque
+from collections import OrderedDict, deque
 from threading import Lock
 
 from ..config import configure_logging, reset_request_id, set_request_id
@@ -316,6 +316,78 @@ from .shared import (  # noqa: F401 - 门面：保持 api.<name> 名字空间与
 dist = Path(__file__).resolve().parent.parent / "web_dist"
 
 
+class _RateLimiter:
+    """进程内滑动窗口限流：TTL 过期 + 硬上限 LRU 淘汰。
+
+    旧实现只删空 deque，但每次检查都会先 append，bucket 永不为空，长期运行
+    会无界增长并在持锁时全表扫描。这里按最近活跃顺序维护 bucket，定期清理
+    过期项，并把 key 总数限制在 ``MAX_KEYS`` 以内（淘汰最久未使用的 bucket）。
+    """
+
+    MAX_KEYS = 2048
+    SWEEP_EVERY_CHECKS = 128
+    SWEEP_INTERVAL_SECONDS = 30.0
+
+    def __init__(self, window_seconds: int | None = None) -> None:
+        self.window_seconds = window_seconds
+        self._buckets: OrderedDict[tuple[str, str], deque[float]] = OrderedDict()
+        self._lock = Lock()
+        self._checks = 0
+        self._swept_at = time.monotonic()
+
+    @property
+    def size(self) -> int:
+        with self._lock:
+            return len(self._buckets)
+
+    def _window(self) -> int:
+        return self.window_seconds or settings.rate_limit_window_seconds
+
+    def check(self, bucket: str, key: str, limit: int) -> bool:
+        now = time.monotonic()
+        cutoff = now - self._window()
+        name = (bucket, key)
+        with self._lock:
+            queue = self._buckets.get(name)
+            if queue is None:
+                queue = deque()
+                self._buckets[name] = queue
+            else:
+                self._buckets.move_to_end(name)
+            while queue and queue[0] <= cutoff:
+                queue.popleft()
+            allowed = len(queue) < limit
+            if allowed:
+                queue.append(now)
+            self._checks += 1
+            if (
+                self._checks % self.SWEEP_EVERY_CHECKS == 0
+                or now - self._swept_at >= self.SWEEP_INTERVAL_SECONDS
+            ):
+                self._sweep(now)
+            return allowed
+
+    def _sweep(self, now: float) -> None:
+        cutoff = now - self._window()
+        for name, values in list(self._buckets.items()):
+            while values and values[0] <= cutoff:
+                values.popleft()
+            if not values:
+                self._buckets.pop(name, None)
+        # LRU 淘汰：最多保留 MAX_KEYS 个 bucket，避免恶意 IP 撑爆内存；
+        # 全局 bucket（key="*"）不参与淘汰，防止刷 IP 绕过全局上限。
+        while len(self._buckets) > self.MAX_KEYS:
+            for name in list(self._buckets):
+                if name[1] == "*":
+                    self._buckets.move_to_end(name)
+                    continue
+                self._buckets.pop(name, None)
+                break
+            else:
+                break
+        self._swept_at = now
+
+
 def create_app():
     # 基础日志先于启动校验配置，确保 prod 校验失败的原因也被记录。
     configure_logging()
@@ -391,8 +463,7 @@ def create_app():
         }
     )
     _model_test_re = re.compile(r"^/admin/(?:models|kbs|plugins)/[^/]+/test$")
-    _rate_buckets: dict[tuple[str, str], deque[float]] = defaultdict(deque)
-    _rate_lock = Lock()
+    _limiter = _RateLimiter()
 
     def _client_address(request: Request) -> str:
         """信任反代时取 X-Forwarded-For 最左值，否则取直连地址。"""
@@ -412,6 +483,15 @@ def create_app():
                         return candidate
         return request.client.host if request.client else ""
 
+    def _expected_origin(request: Request) -> str:
+        """CSRF 同源判定用的公开 origin；转发头只在信任代理时采信。"""
+
+        scheme, host = request.url.scheme, request.url.netloc
+        if settings.trust_proxy:
+            scheme = request.headers.get("x-forwarded-proto", scheme).split(",", 1)[0].strip() or scheme
+            host = request.headers.get("x-forwarded-host", host).split(",", 1)[0].strip() or host
+        return f"{scheme}://{host}".rstrip("/").lower()
+
     def _rate_kind(path: str) -> str | None:
         if path in _login_test_paths:
             return "login"
@@ -420,39 +500,10 @@ def create_app():
         return None
 
     def _rate_check(bucket: str, key: str, limit: int) -> bool:
-        now = time.monotonic()
-        window = settings.rate_limit_window_seconds
-        with _rate_lock:
-            queue = _rate_buckets[(bucket, key)]
-            while queue and queue[0] <= now - window:
-                queue.popleft()
-            if len(queue) >= limit:
-                return False
-            queue.append(now)
-            if len(_rate_buckets) > 1000:  # 防止长期运行后 key 无限增长
-                for name, values in list(_rate_buckets.items()):
-                    if not values:
-                        _rate_buckets.pop(name, None)
-            return True
+        return _limiter.check(bucket, key, limit)
 
-    @app.middleware("http")
-    async def request_id(request: Request, call_next):
-        raw = (
-            request.headers.get("x-request-id")
-            or request.headers.get("x-correlation-id")
-            or uuid.uuid4().hex
-        )
-        # 仅允许可安全回显的 ASCII 字符，避免响应头注入。
-        rid = "".join(char for char in raw[:128] if 33 <= ord(char) <= 126) or uuid.uuid4().hex
-        request.state.request_id = rid
-        token = set_request_id(rid)
-        try:
-            response = await call_next(request)
-            response.headers.setdefault("X-Request-ID", rid)
-            return response
-        finally:
-            reset_request_id(token)
-
+    # 注意：Starlette 的 user_middleware 是"后注册者在外层"。request_id 必须最后
+    # 注册，才能给 edge_guard/auth_guard 提前返回的 403/401/429 也带上 X-Request-ID。
     @app.middleware("http")
     async def edge_guard(request: Request, call_next):
         path = request.url.path
@@ -466,13 +517,8 @@ def create_app():
         if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.headers.get("cookie"):
             origin = request.headers.get("origin")
             if origin:
-                scheme = request.url.scheme
-                host = request.url.netloc
-                if settings.trust_proxy:
-                    scheme = request.headers.get("x-forwarded-proto", scheme).split(",", 1)[0].strip()
-                    host = request.headers.get("x-forwarded-host", host).split(",", 1)[0].strip()
-                expected = f"{scheme}://{host}".rstrip("/").lower()
-                if origin.rstrip("/").lower() != expected:
+                candidate = origin.strip().rstrip("/").lower()
+                if candidate != _expected_origin(request) and candidate not in settings.public_origins:
                     return JSONResponse(status_code=403, content={"detail": "跨站请求被拒绝"})
             else:
                 site = (request.headers.get("sec-fetch-site") or "").strip().lower()
@@ -618,6 +664,26 @@ def create_app():
             )
         return response
 
+    # 最后注册 → 最外层：包括边缘防护与鉴权中间件提前返回的 4xx 在内的所有响应
+    # 都会经过这里，X-Request-ID 与日志关联 id 不再在早期 401/403/429 上丢失。
+    @app.middleware("http")
+    async def request_id(request: Request, call_next):
+        raw = (
+            request.headers.get("x-request-id")
+            or request.headers.get("x-correlation-id")
+            or uuid.uuid4().hex
+        )
+        # 仅允许可安全回显的 ASCII 字符，避免响应头注入。
+        rid = "".join(char for char in raw[:128] if 33 <= ord(char) <= 126) or uuid.uuid4().hex
+        request.state.request_id = rid
+        token = set_request_id(rid)
+        try:
+            response = await call_next(request)
+            response.headers.setdefault("X-Request-ID", rid)
+            return response
+        finally:
+            reset_request_id(token)
+
     @app.exception_handler(LookupError)
     async def not_found(_request, exc: LookupError):
         return JSONResponse(status_code=404, content={"detail": str(exc)})
@@ -695,6 +761,36 @@ def create_app():
     app.include_router(_routes_evaluation.router)
     app.include_router(_routes_orchestration.router)
     app.include_router(_routes_collaboration.router)
+
+    # 聚合可观测性：把 DB 计算的全局指标挂到既有 /admin/health 响应上（不新增路由，
+    # 公开 /health 保持最小化）。若路由侧已提供 global_metrics 则不覆盖。
+    from ..health import global_metrics
+
+    def _iter_routes(_routes):
+        for _route in _routes:
+            yield _route
+            # FastAPI 0.16x 的 include_router 把子路由收在 _IncludedRouter 里，
+            # 真正处理请求的是 effective context 中的 dependant。
+            yield from getattr(_route, "effective_route_contexts", lambda: ())()
+
+    _wrapped: set[int] = set()
+    for _route in _iter_routes(app.routes):
+        if getattr(_route, "path", "") != "/admin/health":
+            continue
+        _dependant = getattr(_route, "dependant", None)
+        if _dependant is None or id(_dependant) in _wrapped:
+            continue
+        _endpoint = _dependant.call
+
+        def _admin_health_with_metrics(*args, _endpoint=_endpoint, **kwargs):
+            payload = _endpoint(*args, **kwargs)
+            if isinstance(payload, dict) and "global_metrics" not in payload:
+                with session_scope() as db:
+                    payload["global_metrics"] = global_metrics(db)
+            return payload
+
+        _dependant.call = _admin_health_with_metrics
+        _wrapped.add(id(_dependant))
 
 
 

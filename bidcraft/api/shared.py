@@ -861,13 +861,42 @@ def _outline_payload(db, project_id: str) -> list[dict[str, Any]]:
     return chapters
 
 
+def _effective_chapter_cost(db, user, raw_cost: int) -> int:
+    """Mirror ``billing.charge_chapters``' effective price for a raw total.
+
+    ``raw_cost`` is ``chapter_cost * count`` (as passed by every guard caller).
+    VIP accounts pay ``ceil(raw_cost * vip_discount)`` from their own/parent
+    balance; staff accounts pay nothing.  Keeping this formula here (instead of
+    duplicating it at each API call site) prevents a VIP user with enough credits
+    for the discounted price from getting a false 402.
+    """
+
+    raw = int(raw_cost or 0)
+    if raw <= 0:
+        return 0
+    account = billing.billing_account(db, user)
+    if billing.billing_exempt(account):
+        return 0
+    cost = raw
+    if billing.is_vip(account):
+        cost = math.ceil(cost * float(billing.billing_settings(db)["vip_discount"]))
+    return cost
+
+
 def _credit_guard(db, user, cost: int) -> None:
-    """Fail with 402 before a missing-model 409 so the UI can offer recharge."""
-    if cost <= 0 or billing.billing_exempt(user):
+    """Fail with 402 before a missing-model 409 so the UI can offer recharge.
+
+    ``cost`` is the undiscounted total; the comparison uses the same effective
+    cost that :func:`billing.charge_chapters` will actually debit.
+    """
+    effective = _effective_chapter_cost(db, user, cost)
+    if effective <= 0:
         return
     balance = billing.summary(db, user)["balance"]
-    if balance < cost:
-        raise _http_error(402, f"点数不足，本次需要 {cost} 点，当前 {balance} 点")
+    if balance < effective:
+        raise _http_error(
+            402, f"点数不足，本次需要 {effective} 点，当前 {balance} 点"
+        )
 
 
 def _http_error(status: int, detail: str):
@@ -1370,6 +1399,7 @@ __all__ = [
     '_clamp_limit',
     '_credit_guard',
     '_discard_source',
+    '_effective_chapter_cost',
     '_fail_job',
     '_generation_client',
     '_http_error',

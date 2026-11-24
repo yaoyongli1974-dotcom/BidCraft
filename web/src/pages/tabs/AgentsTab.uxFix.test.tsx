@@ -119,8 +119,8 @@ describe('AgentsTab 交互修复', () => {
       },
     ] as never)
     withRun('failed')
-    await screen.findByLabelText('审批意见：delivery')
-    fireEvent.change(screen.getByLabelText('审批意见：delivery'), { target: { value: ' 同意 ' } })
+    await screen.findByLabelText('审批意见：交付审批')
+    fireEvent.change(screen.getByLabelText('审批意见：交付审批'), { target: { value: ' 同意 ' } })
     fireEvent.click(screen.getAllByRole('button', { name: '通过' })[0])
     await waitFor(() =>
       expect(reviewWorkflowApproval).toHaveBeenCalledWith('p1', 'ap-1', {

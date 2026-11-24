@@ -193,24 +193,28 @@ async def wechat_notify(request: Request):
                 status_code=400, content={"code": "FAIL", "message": "金额不一致"}
             )
         if data.get("trade_state") == "SUCCESS":
-            billing.mark_paid(
+            paid = billing.mark_paid(
                 db,
                 order,
                 transaction_id=data.get("transaction_id", ""),
                 provider="wechat",
             )
-            audit(
-                db,
-                None,
-                "billing.payment.notify",
-                {
-                    "order_id": order.id,
-                    "out_trade_no": order.out_trade_no,
-                    "amount_cents": order.amount_cents,
-                    "transaction_id": data.get("transaction_id", ""),
-                    "provider": "wechat",
-                },
-            )
+            # mark_paid 对已支付订单幂等返回 False：重复回调不再写重复审计行。
+            if paid:
+                audit(
+                    db,
+                    None,
+                    "billing.payment.notify",
+                    {
+                        "order_id": order.id,
+                        "out_trade_no": order.out_trade_no,
+                        "amount_cents": order.amount_cents,
+                        "transaction_id": data.get("transaction_id", ""),
+                        "provider": "wechat",
+                    },
+                )
+            else:
+                logger.info("微信支付重复通知，忽略审计：%s", order.out_trade_no)
     return {"code": "SUCCESS", "message": "成功"}
 
 

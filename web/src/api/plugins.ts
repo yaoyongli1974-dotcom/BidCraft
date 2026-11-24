@@ -22,6 +22,7 @@ export function normalizePlugin(value: unknown): Plugin {
       : url && !command
         ? 'http'
         : 'stdio'
+  const scope = asText(raw.scope).toLowerCase()
   return {
     id: asText(raw.id),
     name: asText(raw.name),
@@ -44,6 +45,10 @@ export function normalizePlugin(value: unknown): Plugin {
       PLUGIN_CPU_SECONDS.min,
       PLUGIN_CPU_SECONDS.max,
     ),
+    // 作用域必须原样透传：编辑 owner 插件时若丢成 global，PATCH 会静默降级为全局可见。
+    scope: scope === 'owner' || scope === 'global' ? scope : 'global',
+    owner_id: typeof raw.owner_id === 'string' && raw.owner_id ? raw.owner_id : null,
+    allow_private_net: asBool(raw.allow_private_net),
     last_test_at: typeof raw.last_test_at === 'string' ? raw.last_test_at : null,
     last_test_ok:
       typeof raw.last_test_ok === 'boolean'

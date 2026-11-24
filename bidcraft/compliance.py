@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import shutil
@@ -641,14 +642,43 @@ def statement_csv(db, user_id: str, *, start: str = "", end: str = "") -> str:
 # ------------------------------------------------------------ 备份校验
 
 
+def _verify_manifest_files(bundle: zipfile.ZipFile, manifest: dict[str, Any]) -> dict[str, Any]:
+    """确认清单里列出的数据文件都在包内且哈希一致（旧备份无清单则跳过）。"""
+
+    entries = manifest.get("data_files")
+    if not isinstance(entries, list) or not entries:
+        return {"checked": 0, "missing": [], "hash_mismatch": []}
+    names = set(bundle.namelist())
+    missing: list[str] = []
+    mismatched: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("path") or "")
+        if not name or name not in names:
+            missing.append(name or "<empty>")
+            continue
+        expected = str(entry.get("sha256") or "").strip().lower()
+        if expected:
+            actual = hashlib.sha256(bundle.read(name)).hexdigest()
+            if actual != expected:
+                mismatched.append(name)
+    if missing:
+        raise ComplianceError("备份缺少清单中的数据文件：" + "、".join(missing[:10]))
+    if mismatched:
+        raise ComplianceError("备份数据文件哈希不一致：" + "、".join(mismatched[:10]))
+    return {"checked": len(entries), "missing": [], "hash_mismatch": []}
+
+
 def verify_backup(path: str | Path) -> dict[str, Any]:
     """校验备份可恢复：SQLite 跑 integrity_check，PostgreSQL 解析 pg_dump SQL。
 
     两种后端打包出的 zip 分别含 ``bidcraft.db`` 或 ``dump.sql``；旧版纯 .db
-    文件也继续支持。这里只读不执行任何 SQL，避免把备份内容当代码跑。
+    文件也继续支持。带 ``manifest.json`` 的新备份还会逐项确认 data_files
+    确实在包内（并校验 sha256），避免只验 DB 就误报"备份完整"。这里只读，
+    不执行备份里的任何 SQL。
     """
     import re
-    import zipfile
 
     source = Path(path)
     if not source.is_file():
@@ -656,9 +686,19 @@ def verify_backup(path: str | Path) -> dict[str, Any]:
 
     sql_text: str | None = None
     sqlite_source: Path = source
+    manifest: dict[str, Any] = {}
+    data_report: dict[str, Any] | None = None
     if zipfile.is_zipfile(source):
         with zipfile.ZipFile(source) as bundle:
             names = set(bundle.namelist())
+            if "manifest.json" in names:
+                try:
+                    loaded = json.loads(bundle.read("manifest.json").decode("utf-8"))
+                except (ValueError, UnicodeDecodeError) as exc:
+                    raise ComplianceError("备份清单 manifest.json 无法解析") from exc
+                if isinstance(loaded, dict):
+                    manifest = loaded
+            data_report = _verify_manifest_files(bundle, manifest) if manifest else None
             if "dump.sql" in names:
                 sql_text = bundle.read("dump.sql").decode("utf-8", errors="replace")
             elif "bidcraft.db" in names:
@@ -666,7 +706,10 @@ def verify_backup(path: str | Path) -> dict[str, Any]:
                     sqlite_source = Path(tmp) / "restore.db"
                     sqlite_source.write_bytes(bundle.read("bidcraft.db"))
                     # 必须在临时目录仍存在时校验——退出 with 后文件就被删了。
-                    return _verify_sqlite_backup(sqlite_source)
+                    report = _verify_sqlite_backup(sqlite_source)
+                if data_report is not None:
+                    report["data_files"] = data_report
+                return report
             else:
                 raise ComplianceError("备份包里既没有 bidcraft.db 也没有 dump.sql")
     if sql_text is None:
@@ -691,13 +734,16 @@ def verify_backup(path: str | Path) -> dict[str, Any]:
                 in_copy = False
             elif line.strip():
                 rows += 1
-    return {
+    report = {
         "ok": True,
         "backend": "postgresql",
         "tables": len(tables),
         "rows": rows,
         "counts": {},
     }
+    if data_report is not None:
+        report["data_files"] = data_report
+    return report
 
 
 def _verify_sqlite_backup(source: Path) -> dict[str, Any]:

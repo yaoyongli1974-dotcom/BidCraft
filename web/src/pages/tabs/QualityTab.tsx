@@ -164,8 +164,14 @@ export function QualityTab() {
     setRunning(true)
     try {
       const created = await runEvaluation(ref, { note })
-      setReport(created)
-      toast.success(`已生成质量报告 v${created.report_version}`)
+      // 后端可能只在响应里回报告头、findings 由列表接口补齐；重新拉一次最新报告，
+      // 避免刚跑完评估却因 created.findings 为空而展示空白问题列表。
+      const refreshed = await getLatestEvaluation(ref).catch(() => null)
+      const adopted =
+        [created, refreshed, latestQuery.data].find((item) => item && item.findings.length > 0) ??
+        created
+      setReport(adopted)
+      toast.success(`已生成质量报告 v${adopted.report_version}`)
       await Promise.all([latestQuery.refresh(), reportsQuery.refresh()])
     } catch (error) {
       toast.error(messageOf(error))

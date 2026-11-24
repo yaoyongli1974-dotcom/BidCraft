@@ -1010,7 +1010,17 @@ def serve(
 
         url = f"http://{host if host not in {'0.0.0.0', '::'} else '127.0.0.1'}:{port}/"
         threading.Timer(1.0, webbrowser.open, args=(url,)).start()
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    # uvicorn 的 ProxyHeadersMiddleware 即使 trust_proxy=0 也会默认信任来自
+    # 127.0.0.1 的 X-Forwarded-*，在应用中间件之前改写 request.client，导致
+    # 本地伪造 IP 绕过限流/审计。是否启用转发头统一由应用侧的 trust_proxy 决定。
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level="info",
+        proxy_headers=settings.trust_proxy,
+        forwarded_allow_ips="*" if settings.trust_proxy else "",
+    )
 
 
 @app.command("worker")
@@ -1108,6 +1118,45 @@ def _format_bytes(size: int) -> str:
     return f"{size} B"
 
 
+def _backup_data_files(home: Path, directories: list[str]) -> list[tuple[Path, str]]:
+    """收集需要随备份打包的数据文件，返回 ``(源文件, zip 内相对路径)``。
+
+    只允许 home 之内的目录，避免配置错误把整台机器的文件塞进备份；保留
+    ``backups/`` 防止备份递归膨胀。清单元数据里的路径始终相对 BIDCRAFT_HOME，
+    旧备份恢复时按需手动解压即可。
+    """
+
+    home = home.resolve()
+    reserved = {"bidcraft.db", "dump.sql", "secret.key", "manifest.json"}
+    seen: set[str] = set()
+    found: list[tuple[Path, str]] = []
+    for name in directories:
+        candidate = (home / name.strip().strip("/\\")).resolve()
+        if candidate == home or home not in candidate.parents or not candidate.is_dir():
+            continue
+        for path in sorted(candidate.rglob("*")):
+            if not path.is_file() or path.is_symlink():
+                continue
+            arcname = path.resolve().relative_to(home).as_posix()
+            if arcname in reserved or arcname.startswith("backups/"):
+                continue
+            if arcname in seen:
+                continue
+            seen.add(arcname)
+            found.append((path, arcname))
+    return found
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _print_backups(directory: Path) -> None:
     from datetime import datetime
 
@@ -1139,11 +1188,15 @@ def backup(
         None, "--output", "-o", help="输出目录（自动命名）或 .zip 文件路径"
     ),
     list_existing: bool = typer.Option(False, "--list", help="列出已有备份后退出"),
+    include_dir: list[str] = typer.Option(
+        [], "--include-dir", help="额外打包的数据目录（相对 BIDCRAFT_HOME，可重复）"
+    ),
 ) -> None:
-    """在线备份数据库与 secret.key（一致性快照打包为 zip）。
+    """在线备份数据库、secret.key 与项目数据目录（一致性快照打包为 zip）。
 
     SQLite 走在线备份 API；PostgreSQL 走 pg_dump（需 postgresql-client），
-    口令通过 PGPASSWORD 传递，不进入命令行参数。
+    口令通过 PGPASSWORD 传递，不进入命令行参数。默认数据目录由
+    BIDCRAFT_BACKUP_DIRS 指定（projects,packages,output,docs）。
     """
     import os
     import shutil
@@ -1186,6 +1239,11 @@ def backup(
 
     secret_path = settings.home / "secret.key"
     includes_secret = secret_path.is_file()
+    data_dirs = list(settings.backup_data_dirs_list)
+    for extra in include_dir:
+        if extra.strip() and extra not in data_dirs:
+            data_dirs.append(extra.strip())
+    data_entries = _backup_data_files(settings.home, data_dirs)
 
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1229,6 +1287,14 @@ def backup(
                     raise RuntimeError(f"快照完整性校验失败：{detail}")
 
             db_bytes = snapshot.stat().st_size
+            data_manifest = [
+                {
+                    "path": arcname,
+                    "bytes": source.stat().st_size,
+                    "sha256": _sha256_file(source),
+                }
+                for source, arcname in data_entries
+            ]
             manifest = {
                 "version": __version__,
                 "created_at": datetime.now(UTC).isoformat(),
@@ -1237,11 +1303,15 @@ def backup(
                 "db_bytes": db_bytes,
                 "includes_secret_key": includes_secret,
                 "bidcraft_home": str(settings.home),
+                "data_dirs": data_dirs,
+                "data_files": data_manifest,
             }
             with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                 archive.write(snapshot, db_entry)
                 if includes_secret:
                     archive.write(secret_path, "secret.key")
+                for source, arcname in data_entries:
+                    archive.write(source, arcname)
                 archive.writestr(
                     "manifest.json",
                     json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
@@ -1256,17 +1326,18 @@ def backup(
     console.print(f"[green]备份完成[/green] {target}")
     console.print(
         f"大小 {_format_bytes(size)}（{size:,} 字节）· "
-        f"secret.key：{'已包含' if includes_secret else '未找到（跳过）'}"
+        f"secret.key：{'已包含' if includes_secret else '未找到（跳过）'} · "
+        f"数据文件：{len(data_entries)} 个"
     )
     if is_pg:
         console.print(
             "[dim]恢复：停止服务 → 解压出 dump.sql → 用 pg_restore/psql 导入目标库 "
-            "→ 放回 secret.key → 启动服务。[/dim]"
+            "→ 放回 secret.key 与 projects/ 等数据目录 → 启动服务。[/dim]"
         )
     else:
         console.print(
-            "[dim]恢复：停止服务 → 解压 zip → 将 bidcraft.db 与 secret.key 放回 "
-            "BIDCRAFT_HOME → 启动服务。[/dim]"
+            "[dim]恢复：停止服务 → 解压 zip → 将 bidcraft.db、secret.key 与 "
+            "projects/ 等数据目录放回 BIDCRAFT_HOME → 启动服务。[/dim]"
         )
 
 
@@ -1630,8 +1701,10 @@ def backup_verify(
     except ComplianceError as exc:
         typer.echo(f"[red]{exc}[/red]", err=True)
         raise typer.Exit(2) from exc
+    data = report.get("data_files") or {}
+    extra = f"，数据文件 {data['checked']} 个" if data.get("checked") else ""
     typer.echo(
-        f"备份完整：{report['tables']} 张表，{report['rows']} 行数据（{path}）"
+        f"备份完整：{report['tables']} 张表，{report['rows']} 行数据{extra}（{path}）"
     )
 
 

@@ -843,6 +843,26 @@ export interface ExportRecord {
   at: string
 }
 
+/** `GET /projects/{ref}/export-templates` 的预设；后端按 id 在导出时套用排版。 */
+export interface ExportTemplatePreset {
+  id: string
+  name: string
+  description: string
+  body_font?: string
+  heading_font?: string
+  body_size?: number
+  line_spacing?: number
+  cover?: boolean
+  toc?: boolean
+  page_numbers?: boolean
+}
+
+/** 模板列表响应；current 是当前项目保存的模板（缺省为后端 standard）。 */
+export interface ExportTemplatesResponse {
+  presets: ExportTemplatePreset[]
+  current: ExportTemplatePreset
+}
+
 
 export interface BillingPackage {
   id: string
@@ -1030,6 +1050,8 @@ export interface AdminHealth {
   wechat_pay: boolean
   /** 后端未来可按项目聚合的运营指标；未返回时前端显示「暂无全局聚合」。 */
   metrics?: Partial<Record<'manual_edit_rate' | 'issue_density' | 'boq_match_rate', number | string>>
+  /** 后端数据库全库聚合指标（可选）；值为计数或 {状态: 数量} 分布。 */
+  global_metrics?: Record<string, string | number | null | Record<string, number | string | null>> | null
 }
 
 

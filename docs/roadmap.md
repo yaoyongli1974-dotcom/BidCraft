@@ -2,6 +2,7 @@
 
 > 评估原文：`/media/yao/Data/workbuddy/zhibiao/bid-system-redev-assessment.html`
 > 原则：只借规格、不复制代码；上游 AGPL 源码仅作行为参考。
+> 最近更新：v0.28.0（2026-11-23）。下表为已落地能力；未做与延后项见文末。
 
 | 模块 | 状态 | 落地位置 | 说明 |
 |---|---|---|---|
@@ -14,18 +15,18 @@
 | 图片生成与插入 | ✅ | `images.py`、`/projects/{ref}/images`、`web/` | 按章节生成/重生成/上传 PNG·JPEG；提示词、风格、尺寸、章节正文上下文；失败资产保留可重试；图名精确匹配占位符或按光标插入；项目图库跨章节复用；全文配图计划统计各章占位/已匹配/失败/缺失并按字数计算章节预算；按计划后台批量生成缺失/失败配图；一键按预算插入已匹配配图；DOCX 嵌入 |
 | 整篇配图策略与自动排版 | ✅ | `images.py`、`/projects/{ref}/image-policy`、`export/docx.py`、`web/` | 全文上限/默认风格尺寸/图注开关与前缀/版心宽度；计划返回全文预算与超限；按计划插入遵守全文预算；「生成并插入」一键编排；DOCX 跨章连续图注编号与统一宽度 |
 | MCP 服务 | ✅ | `bidcraft/mcp.py`、`bidcraft mcp` | stdio JSON-RPC 2.0（MCP 2024-11-05）；6 工具：项目/详情/台账/核对/导出/知识检索；`--readonly` 只读；见 `docs/mcp.md` |
-| 批量操作与标段 | ✅ | `api.py`、`/projects/batch-check`、`/projects/batch-export`、`web/` | 项目多选批量核对/批量导出（docx/md/xlsx 打包 zip 下载）；标段/包件字段创建/编辑/筛选；后台 Job 逐项目事件与部分失败容忍 |
+| 批量操作与标段 | ✅ | `api/app.py`、`/projects/batch-check`、`/projects/batch-export`、`web/` | 项目多选批量核对/批量导出（docx/md/xlsx 打包 zip 下载）；标段/包件字段创建/编辑/筛选；后台 Job 逐项目事件与部分失败容忍 |
 | 多包件共享台账 | ✅ | `models.py`、`boq.py`、`/projects/{ref}/packages`、`web/` | 同项目多包件独立清单快照与报价、事实台账共享不复制；首包自动收养旧快照；分包导出文件名含包件名 |
 | 项目复制 | ✅ | `duplicate.py`、`POST /projects/{ref}/duplicate`、`web/` | 复制为新项目：招标原件/台账/大纲/正文始终复制，清单报价与配图可选；报价版本与审批记录、问题/任务/成员/审计不复制；失败清理新目录；复制者=新负责人 |
 | 项目模板库 | ✅ | `models.py`（is_template）、`/projects/templates`、`web/` | 负责人设为模板（含存量迁移）；全员浏览模板列表；任何登录用户从模板创建自己的项目（无需成员身份，复用复制引擎）；审计 `project.instantiate` |
 | 企业定额库与调价 | ✅ | `models.py`、`boq.py`、`/admin/quotas`、`web/` | 定额 CRUD/模糊匹配；清单定额套用 dry-run 预览与按勾选写入；项目调价策略（系数/小数位）与按系数调价；报价汇总增调整后合计 |
-| 回归校准 | ✅ | `calibrate.py`、`bidcraft calibrate`、`tests/fixtures/regression/` | 只读扫描目录统计字段命中/必填命中率/材料行/OCR 需求；真实招标别名增量；仿真 fixtures 与报告 JSON；`--save-baseline/--compare-baseline` 基线保存/比对（回归 exit 1、基线缺失/无效 exit 2）；不写库不建项目 |
+| 回归校准 | ✅ | `calibrate.py`、`bidcraft calibrate`、`tests/fixtures/regression/` | 只读扫描目录统计字段命中/必填命中率/材料行/OCR 需求；真实招标别名增量；仿真 fixtures 与报告 JSON；`--save-baseline/--compare-baseline` 基线保存/比对（回归 exit 1、基线缺失/无效 exit 2）；v0.28 增 `--label/--note/--manifest/--baseline-index`、`baselines` 目录命令与指纹核对；不写库不建项目 |
 | 插件市场（MCP 客户端） | ✅ | `plugins.py`、`plugin_pack.py`、`/admin/plugins`、`mcp.py`、`docs/plugins.md` | 超管注册 stdio/http MCP 插件、连通性测试与工具白名单；`bidcraft mcp` 聚合插件工具（`{插件}__{工具}` 前缀），单插件失败跳过，只读模式拒绝插件调用；`.bidplugin` 插件包导入/导出与同名覆盖升级 |
 | 报价版本与汇率 | ✅ | `models.py`、`boq.py`、`/projects/{ref}/boq/versions`、`web/` | 报价版本快照/恢复/删除（上限 20、包件隔离）；版本与当前清单或另一版本 diff（新增/移除/变动 + 两侧汇总）；税率与币种、汇率折算人民币含税合计；导出增税率/税额/汇率/人民币合计行 |
 | 报价审批流 | ✅ | `boq.py`、`/projects/{ref}/boq/versions/{id}/submit|review|unapprove`、`web/` | 版本状态机 draft→submitted→approved/rejected：可编辑成员提交（备注），负责人/超管定稿或驳回（意见），approved 可撤销回草稿；同包件至多一个定稿、定稿新版自动退旧版；rejected 重提清空上轮意见；审计 quote.submit/approve/reject/unapprove；前端状态徽标与双版本并排审阅；项目审批链（≤5 级、每级 1–5 人会签 all/或签 any、成员校验、名称快照）逐级审批，末级定稿、越级 403、超管代审，空链回退负责人单级；审批级可设金额门槛 `min_amount`（总额达到才生效，低价跳过，`approval_stage_count` 按生效级数）；`GET /approvals/pending` 跨项目待我审批（顶栏徽标+只读面板，点击直达项目清单页签）；审批级可按包件 `packages`/币种 `currencies` 白名单限定生效范围（与金额门槛组合，未命中跳过，全过滤回退全部） |
 | 微信开放平台管理 | ✅ | `models.py`、`wechat.py`、`/admin/wechat`、`web/` | 管理端配置 AppID/AppSecret（加密存库不回显）、回调地址、启用与模拟模式；连通性测试；保存即热生效（`/health.wechat_login` 与登录页入口）；审计 `wechat.config` |
 | 企业术语库 | ✅ | `models.py`、`terms.py`、`/admin/terms`、`web/` | 禁用表述与建议替换术语 CRUD/搜索/启停；项目核对逐章扫描产出 `TERM-###`（major/minor，含证据片段与改写建议），跨章去重、上限 200 |
-| C7 可插拔 Agent / API | ✅ | `generation/agent.py`、`bidcraft/api.py`、`bidcraft/mcp.py` | OpenAI 兼容端点；FastAPI + 后台生成任务；MCP stdio 服务 |
+| C7 可插拔 Agent / API | ✅ | `generation/agent.py`、`bidcraft/api/app.py`、`bidcraft/mcp.py` | OpenAI 兼容端点；FastAPI + 后台生成任务；MCP stdio 服务 |
 | C8 行业包 | ✅ 8 个行业包 + 通用基包 | `bidcraft/resources/packages/*.yaml` | 弱电（综合布线/安防/BA）+ 消防、安装、土建、暖通、装修；管理员可在 `/admin` 维护 YAML 覆盖包 |
 | 规则包管理 | ✅ | `rules/store.py`、`/admin/rule-packages`、`web/` | 超级管理员创建/修改/隐藏/恢复规则包；新建时可填写名称、唯一包名并选择工程类型；内置包只读，用户覆盖写入 `BIDCRAFT_HOME/packages`；保存前校验继承、字段、大纲与核对表达式 |
 | C9 回归/部署 | ✅ 基本 | `tests/`、`Dockerfile`、`web/` | 1300+ 个测试（前端 262 tests，typecheck 通过）；Docker 多阶段构建 Web（含 OCR 依赖）；本地/局域网两种部署 |
@@ -64,8 +65,10 @@
 | 多维查重 | ✅ | `similarity/`、`/projects/{ref}/similarity`、`web/SimilarityTab` | 文本/结构/语义/图片四维相似度、命中落库与人工复核；可选 LLM 语义匹配器 `verdict_llm.py`（`BIDCRAFT_VERDICT_LLM=1`，失败/超预算回退规则判定，LLM 不能单独放行 SATISFIED） |
 | Agent 编排 | ✅ | `orchestration/`、`/projects/{ref}/workflows`、`web/tabs/AgentsTab` | 注册表 + DAG 工作流 + 人工审批闸门；仅标准/全流程/投标三种类型可直接从界面启动（custom 需 API 提供 tasks）；恢复仅用于失败重试/审批后；审批要求项目写权限 + 提交人不得自审（超管代审除外），审批意见落 `review_note` |
 | 章节协作 | ✅ | `collaboration/`、`web/components/ChapterCollab` | 章节锁/乐观锁、修订 diff/恢复、负责人确认/锁定与章节分工 |
-| 质量评估中心 | ✅ | `evaluation/`、`/projects/{ref}/evaluation`、`web/tabs/QualityTab` | 六维评分与硬性风险一票否决、不可变报告快照 + finding 人工处置；`run` 同步与 `run-async` 后台任务（SSE/轮询）；历史报告点击时按需取 findings；处置意见/处置人写入 evidence 并可重新打开 |
-| 插件包签名与运营可观测 | ✅ | `plugin_pack.py`、`/admin/health`、`web/admin/AdminHealthTab` | `.bidplugin` 可选 Ed25519 签名验签（默认兼容未签名）；超管页读取完整健康检查，人工修改率/问题密度/清单匹配率按项目口径展示 |
+| 质量评估中心 | ✅ | `evaluation/`、`/projects/{ref}/evaluation`、`web/tabs/QualityTab` | 六维评分与硬性风险一票否决、不可变报告快照 + finding 人工处置；`run` 同步与 `run-async` 后台任务（SSE/轮询）；历史报告点击时按需取 findings；处置意见/处置人写入 evidence 并可重新打开；商务完整性按真实必填项完成率计入 `commercial` 维度，`submit_commercial` 可选 `require_complete` 送审硬门禁（默认关闭） |
+| 插件包签名与运营可观测 | ✅ | `plugin_pack.py`、`/admin/health`、`web/admin/AdminHealthTab` | `.bidplugin` 可选 Ed25519 签名验签（默认兼容未签名）；v0.28 增出站地址防护、scope 归属隔离与审计归属；超管页读取完整健康检查 |
+| 全局运营指标 | ✅ | `health.py`、`bidcraft/api/app.py`（挂到 `GET /admin/health` 的 `global_metrics`） | 数据库实时聚合的全站计数：项目/任务按状态分组、未处置质量 finding（`open`/`new`/`reopened`）、用户数；多实例共享同一库内视图，**不新增路由、不另落库、不缓存**，只给计数不给比率，无趋势/考核含义；三项质量比率仍为单项目口径，详见 `docs/admin-guide.md` |
+| 迁移与发版一致性 | ✅ | `bidcraft/migrations/versions/`、`.github/workflows/ci.yml` | Alembic 单 head（CI 扫描版本文件断言恰好一个 head，不硬编码 revision；新增迁移只需接上前一个 head）；CI 校验 `__init__.py`/`pyproject.toml` 版本一致、CHANGELOG 与发版说明存在，tag 推送时校验 tag 与版本号一致；桌面端构建统一 Node 22 |
 
 ## 已覆盖的 P0
 
@@ -76,6 +79,10 @@
 - 项目类型不再局限于弱电：消防、安装、土建、暖通、装修均有独立规则包与章节骨架。
 
 ## 明确未做（按优先级）
+
+> 已交付、不再列为待办：数据库支撑的全局运营计数（项目/任务按状态、未处置 finding、用户数）
+> 已随 v0.28.0 作为 `global_metrics` 挂到 `GET /admin/health`，多实例共享、无新路由
+> （见 `docs/admin-guide.md`）。人工修改率/问题密度/清单匹配率三项比率仍为单项目口径。
 
 1. **插件远程市场自动安装与系统级隔离**：应用层的沙箱、HTTP 出站地址防护与作用域隔离已完成
    （见 `docs/plugins.md`：资源限制、SSRF 防护、`scope/owner_id/allow_private_net`、审计归属）；
@@ -96,8 +103,8 @@
    `submit_commercial` 已提供可选完整性硬门禁（`require_complete=True`，前端为「严格校验完整性」勾选框），
    默认关闭以保持旧行为；如需强制，可在部署侧约定送审一律传 `require_complete: true`。
 3. 插件远程市场：受控的自动安装与升级流程（远程源校验、依赖声明与回滚），以及容器/网络级隔离；`.bidplugin` 签名验签已完成。
-4. **实质性条款语义增强（已完成）**：条款类型（资质/业绩/参数/承诺）结构化规则、金融数字与同义词归一、
+4. **实质性条款语义增强（已落地，剩余验证）**：条款类型（资质/业绩/参数/承诺）结构化规则、金融数字与同义词归一、
    证据可审计、评分办法分值→章节篇幅分配均已落地（`bidcraft/substantive.py`、`constraint_check.py`、
    `generation/outline.py`）。可选 LLM 语义匹配器 `verdict_llm.py` 已实现（`BIDCRAFT_VERDICT_LLM=1`
    启用，默认规则匹配；调用失败/无模型/超预算自动回退，LLM 不能单独放行 SATISFIED）。
-   剩余方向：用用户提供的真实招标文件基线验证召回。
+   剩余方向：用用户提供的真实招标文件基线验证召回（同第 1 项）。

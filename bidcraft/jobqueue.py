@@ -31,12 +31,18 @@ from typing import Any
 
 from sqlalchemy import func, select, update
 
+from . import billing
 from .clock import utc_now
 from .config import settings
 from .db import session_scope
-from .models import Job
+from .models import Job, PendingCharge, User
 
 logger = logging.getLogger("bidcraft.jobs")
+
+# 背压 check + insert 的跨进程串行化（仅 PostgreSQL；SQLite 单写者天然串行）。
+_BACKPRESSURE_LOCK_KEY = 0x42494352514C4F43  # "BICRQLC"
+#: 超过这个时长仍为 pending 的扣费视为崩溃残留，对账时退还。可被显式参数覆盖。
+PENDING_CHARGE_TTL_SECONDS = 30 * 60
 
 # Fencing token: every claim gets a fresh token.  A worker may only write job
 # state while it still holds that token (a reaper reclaim changes it), so a
@@ -288,6 +294,9 @@ def check_backpressure(db, owner_id: str = "") -> str | None:
     insert are atomic with respect to other writers.
     """
 
+    # 事务级咨询锁覆盖全局与单用户两道计数：调用方在同一事务里 INSERT Job，
+    # 锁持有到提交，杜绝并发检查都通过后再一起入队（PG 专用，SQLite 单写者）。
+    _lock_backpressure(db)
     try:
         global_cap = int(settings.max_queued_jobs)
     except (TypeError, ValueError):
@@ -303,20 +312,29 @@ def check_backpressure(db, owner_id: str = "") -> str | None:
     except (TypeError, ValueError):
         user_cap = 10
     if user_cap > 0 and owner_id:
-        # 直接在 SQL 里按 JSON 字段计数：旧实现把所有 queued 行的 payload 读进
-        # Python 再过滤，队列越大开销越高。as_string() 在 SQLite(->> 等价的
-        # JSON_EXTRACT) 与 PostgreSQL(->>) 上都能编译，语义与原 dict.get 一致。
+        # 归一化列（0009 迁移回填）让 COUNT 走索引；PostgreSQL 的 payload 是
+        # JSON 而非 JSONB，旧版 payload['owner_id'] 过滤无法用索引。
         mine = db.scalar(
             select(func.count())
             .select_from(Job)
             .where(
                 Job.status == "queued",
-                Job.payload["owner_id"].as_string() == owner_id,
+                Job.owner_id == owner_id,
             )
         )
         if int(mine or 0) >= user_cap:
             return f"您的排队任务已达上限（{user_cap}），请等待现有任务完成"
     return None
+
+
+def _lock_backpressure(db) -> None:
+    """Hold a transaction-scoped advisory lock across count+insert on PG."""
+
+    if db.get_bind().dialect.name != "postgresql":
+        return
+    from sqlalchemy import text
+
+    db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _BACKPRESSURE_LOCK_KEY})
 
 
 def position(job_id: str) -> int:
@@ -535,7 +553,149 @@ def recover_on_startup() -> tuple[int, int]:
     # Worker startup is deliberately separate: create_app() runs in every test,
     # and starting poll threads here would race with queued-job assertions.  The
     # real server entry point (CLI `serve`) calls start_workers() explicitly.
+    # 同时收口「已扣费但生成中断」的残留 marker（CLI serve/worker 都会调本函数）。
+    try:
+        reconcile_pending_charges()
+    except Exception:  # noqa: BLE001 - 对账失败不能阻断启动，下次启动会重试
+        logger.exception("未结章节计费对账失败，将在下次启动时重试")
     return requeued, failed
+
+
+def begin_pending_charge(
+    db,
+    user: User | None,
+    project_id: str,
+    credits: int,
+    chapters: int,
+    *,
+    note: str = "",
+) -> str:
+    """Record a just-committed debit in the SAME transaction as the debit.
+
+    Returns the marker id; empty when nothing was charged (billing-exempt user
+    or zero chapters), in which case the settle helper is a no-op.
+    """
+
+    if not credits or user is None or not getattr(user, "id", None):
+        return ""
+    marker = PendingCharge(
+        user_id=str(user.id),
+        project_id=str(project_id or ""),
+        credits=int(credits),
+        chapters=max(1, int(chapters or 1)),
+        note=note[:500],
+        status="pending",
+    )
+    db.add(marker)
+    db.flush()
+    return marker.id
+
+
+def _refund_for(marker: PendingCharge, written: int) -> int:
+    """Refund formula used by the generation endpoints (and crash recovery).
+
+    Partial settles keep the historical ``(credits // chapters) * unwritten``
+    formula; when nothing was written the whole debit is returned (crash window
+    must not under-refund a discounted charge that is not divisible by chapters).
+    """
+
+    total = max(1, int(marker.chapters or 1))
+    done = max(0, min(int(written or 0), total))
+    credits = int(marker.credits or 0)
+    if done == 0:
+        return credits
+    return (credits // total) * (total - done)
+
+
+def settle_pending_charge(
+    db,
+    marker_id: str,
+    user: User | None,
+    project_id: str,
+    chapters: int,
+    written: int,
+) -> int:
+    """Clear a marker and refund the unwritten chapters, atomically & idempotently.
+
+    Returns the number of credits refunded.  Repeated calls (e.g. an exception
+    handler after an already successful settle) are no-ops.
+    """
+
+    if not marker_id:
+        return 0
+    marker = db.get(PendingCharge, marker_id)
+    if marker is None or marker.status != "pending":
+        return 0
+    refund = _refund_for(marker, written)
+    if refund > 0 and user is not None:
+        billing.refund_chapters(db, user, refund, project_id=str(project_id or ""))
+    marker.status = "refunded" if refund > 0 else "cleared"
+    marker.refunded_credits = refund
+    marker.updated_at = utc_now()
+    db.flush()
+    return refund
+
+
+def reconcile_pending_charges(
+    *, older_than_seconds: int | None = None, db=None
+) -> int:
+    """Refund charge markers left ``pending`` by a crash between debit and result.
+
+    The marker is created in the debit transaction (see :func:`begin_pending_charge`)
+    and cleared/refunded in the same transaction as the generation result.  Only
+    a process death (OOM/restart) can leave it pending; this pass settles those
+    rows after a TTL, so a still-running generation is never refunded by mistake.
+    The async ``generate_all`` path is already durable: its charge and Job row
+    commit together and the worker refunds via ``payload['charged']``; it needs
+    no marker here.
+
+    Called automatically from :func:`recover_on_startup` (used by `serve`/`worker`)
+    and safe to call explicitly from a CLI/maintenance job::
+
+        from bidcraft.jobqueue import reconcile_pending_charges
+        refunded_markers = reconcile_pending_charges()
+
+    Returns the number of markers settled.  A transaction-scoped conditional
+    UPDATE claims each row, so concurrent instances never refund twice.
+    """
+
+    ttl = older_than_seconds
+    if ttl is None:
+        ttl = int(getattr(settings, "pending_charge_ttl_seconds", PENDING_CHARGE_TTL_SECONDS))
+    cutoff = utc_now() - timedelta(seconds=max(0, ttl))
+
+    if db is None:
+        with session_scope() as own_db:
+            return reconcile_pending_charges(older_than_seconds=ttl, db=own_db)
+
+    rows = list(
+        db.scalars(
+            select(PendingCharge).where(
+                PendingCharge.status == "pending",
+                PendingCharge.created_at < cutoff,
+            )
+        )
+    )
+    settled = 0
+    for marker in rows:
+        # Claim first; the refund and the status change share this transaction.
+        claimed = db.execute(
+            update(PendingCharge)
+            .where(PendingCharge.id == marker.id, PendingCharge.status == "pending")
+            .values(status="processing", updated_at=utc_now())
+        )
+        if not claimed.rowcount:
+            continue
+        user = db.get(User, marker.user_id)
+        refund = _refund_for(marker, 0)
+        if refund > 0 and user is not None:
+            billing.refund_chapters(db, user, refund, project_id=marker.project_id)
+        marker.status = "refunded"
+        marker.refunded_credits = refund
+        marker.updated_at = utc_now()
+        settled += 1
+    db.flush()
+    return settled
 
 
 def start_workers() -> None:
