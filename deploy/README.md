@@ -27,6 +27,13 @@ sudo cp deploy/docker-compose.yml /opt/bidcraft/compose/
 cd /opt/bidcraft/compose && sudo docker compose up -d
 ```
 
+> [!IMPORTANT]
+> `deploy/docker-compose.yml` **刻意未启用 `env_file:`**：`.env` 只用于 compose 文件里 `${VAR}` 的
+> 宿主机插值，不会整份注入容器。只有 `environment:` 中列出的变量才会进入容器；若要让
+> `BIDCRAFT_ENV`、`BIDCRAFT_DB_URL`、`BIDCRAFT_SECRET_KEY` 等变量生效，必须显式加到
+> `environment:`（或先 `docker compose --env-file /path/to/.env up -d` 指定插值文件，再在
+> `environment:` 引用）。这样升级时原本被忽略的变量不会突然注入，避免非预期的启动校验失败。
+
 ## 3. 1Panel 网站（反向代理）
 
 1Panel → 网站 → 创建网站 → 反向代理：
@@ -48,7 +55,17 @@ HTTP-01 验证无法通过。备案完成后：
 
 ## 5. 运维
 
-- 健康检查：`curl http://127.0.0.1:8000/health`（公开，只返回最小字段）
+- 健康检查（三类端点，用途不同）：
+  - `curl http://127.0.0.1:8000/health/live`：**存活探针**，只确认进程在监听，不查数据库。
+    Dockerfile 的 `HEALTHCHECK` 与 compose 的原生 `healthcheck` 都用它；DB 抖动不会导致容器被重启。
+  - `curl http://127.0.0.1:8000/health/ready`：**就绪探针**，检查 DB 等启动依赖，仅用于判断
+    是否接入流量，不用于触发重启。**未配置模型时该端点可能返回非 200**（例如全新部署尚未在
+    `/admin` 配置模型），此时服务仍可通过 `/health/live`，不必强行让容器重启或把流量切走。
+  - `curl http://127.0.0.1:8000/health`：**遗留兼容端点**，前端仍依赖其字段，保留公开最小字段
+    返回；不再作为容器/编排探活路径。
+  - compose 另有 `x-liveness-probe`（`/health/live`，start 20s / interval 30s / timeout 5s /
+    failure 3）与 `x-readiness-probe`（`/health/ready`，start 20s / interval 10s / timeout 5s /
+    failure 3）扩展块，供 K8s / 反代 / 监控按同样路径配置；Docker Compose 只执行原生 healthcheck。
 - 版本与运行状态（超级管理员）：登录后带 Cookie 访问 `/admin/health`，可看到版本、启动时间与
   uptime、Python/平台、DB 大小与磁盘余量、模型/知识库/用户计数、`docs_enabled` 等开关：
 
@@ -60,9 +77,16 @@ HTTP-01 验证无法通过。备案完成后：
   ```
 - 日志：`docker logs bidcraft`（应用日志为 `时间 级别 logger [req=请求ID] 消息`，
   可用 `BIDCRAFT_LOG_FORMAT=json` 切成单行 JSON 便于采集；级别由 `BIDCRAFT_LOG_LEVEL`
-  控制）。响应会回显 `X-Request-ID`，用它把前端报错与服务端日志对上。
-- 备份：`/opt/bidcraft/data`（业务数据）+ `/opt/bidcraft/compose/.env`（管理员密码）
-- 升级：构建新镜像 → load → 改 compose 的 image 标签 → `docker compose up -d`
+  控制）。后台任务日志的 logger 名为 `bidcraft.workers`，可用它过滤任务执行记录；
+  uvicorn 访问日志也带 `req=<请求ID>`，响应回显 `X-Request-ID`，用它把前端报错、
+  访问日志与应用日志对上。
+- 备份：`/opt/bidcraft/data`（业务数据）+ `/opt/bidcraft/compose/.env`（管理员密码）。
+  **迁移、大版本升级与重启前必须先 `bidcraft backup` 再 `bidcraft backup-verify`**（见 5.2 / 第 8 节），
+  不要直接 `cp` 运行中的 SQLite 文件（WAL 下主库与 `-wal`/`-shm` 可能撕裂）。
+- 资源与隔离：compose 限制 `mem_limit: 4g`、`cpus: "2.0"`、`pids_limit: 256`；
+  `cap_drop: [ALL]` + `security_opt: ["no-new-privileges:true"]`，容器以固定 uid 10001 的非 root
+  用户运行；`stop_grace_period: 45s` 大于应用 30s 优雅退出窗口，避免 SIGKILL 截断在途任务。
+- 升级：先备份并校验 → 构建新镜像 → load → 改 compose 的 image 标签 → `docker compose up -d`
 - 重启持久化：docker/1panel 服务均 enabled；容器 restart=unless-stopped/always
 
 ### 5.1 API 与 Worker 分离部署（可选，v0.12.0+）
@@ -132,7 +156,9 @@ integrity_check / PG 建表与数据行外，还会确认这些文件在包内�
 | 项 | 默认行为 | 说明 |
 |---|---|---|
 | `/docs`、`/redoc`、`/openapi.json` | **404** | 由 `BIDCRAFT_DOCS_ENABLED=0` 控制；仅排障时临时置 1 并重启 |
-| `/health` | 最小字段 | 只返回 `status` 与前端必需字段，不含版本、绝对路径、库内计数；Docker HEALTHCHECK 仍可用 |
+| `/health/live` | 存活探针 | 不查数据库，Docker HEALTHCHECK / compose `healthcheck` 使用；DB 抖动不会触发重启 |
+| `/health/ready` | 就绪探针 | 检查启动依赖，仅决定是否接入流量；模型未配置时可能失败，不用于触发容器重启 |
+| `/health` | 遗留端点（最小字段） | 只返回 `status` 与前端必需字段，不含版本、绝对路径、库内计数；前端/人工排障保留，不再作探活路径 |
 | `/admin/health` | 超级管理员 | 完整运行状态（版本、uptime、Python/平台、DB 大小与磁盘余量、模型/知识库/用户计数、开关项）；`global_metrics` 给出全实例共享的库内聚合（各状态项目/任务数、未处置质量问题、用户数），多 worker/多实例看到同一份数据；匿名 401、普通成员 403，不会落到公开探活里 |
 | 安全响应头 | 全站注入 | `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`、CSP（`default-src 'self'`、`frame-ancestors 'none'`、`object-src 'none'`）、`Permissions-Policy`、`Cross-Origin-Opener-Policy: same-origin`、`Cross-Origin-Resource-Policy: same-origin`、HTTPS 下加 HSTS；每响应带回显的 `X-Request-ID` |
 | CSRF 纵深防御 | 带 Cookie 的状态变更请求 | `POST/PUT/PATCH/DELETE` 且带 Cookie 时：显式 `Origin` 必须同源或命中 `BIDCRAFT_PUBLIC_ORIGIN`；`Sec-Fetch-Site` 为 `cross-site`/`same-site` 一律 403；不带这两个头的普通脚本/curl 保持兼容。仅在 `BIDCRAFT_TRUST_PROXY=1` 时采信 `X-Forwarded-Proto/Host`。不要依赖它替代反代层 CSRF/WAF |
@@ -165,6 +191,16 @@ bucket 按 TTL 过期并设 LRU 硬上限（最多 2048 个 key），不会被�
 `bidcraft serve` 会把该开关透传给 uvicorn：关闭时不启用其 ProxyHeadersMiddleware；
 若直接用 `uvicorn bidcraft.api:app` 启动，请显式加 `--no-proxy-headers`（否则
 uvicorn 默认信任来自 127.0.0.1 的转发头，先于应用中间件改写来源 IP）。
+
+### 6.1 刻意延期项（本版本未实施）
+
+- **基础镜像 digest 固定（P3）**：`node:22-slim` 与 `python:3.13-slim` 仍是浮动标签
+  （`ghcr.io/astral-sh/uv:0.12.17` 已按版本固定）。需先在 CI 固化具体 digest、验证跨架构
+  构建与升级流程后再启用，避免本阶段引入非预期构建失败。
+- **容器 `read_only: true`**：`/data` 卷与 LibreOffice 运行时目录需要写入，尚未梳理完可写
+  白名单，因此暂不启用；已用非 root 用户、`cap_drop: [ALL]` 与
+  `no-new-privileges:true` 收紧权限。
+- **`env_file:` 注入**：刻意不启用（见第 2 节），`.env` 中的变量不会整份进入容器。
 
 ## 7. OpenResty：80 只做跳转，并补齐响应头
 
@@ -214,15 +250,26 @@ docker build -t bidcraft:0.29.0 .
 # docker load < bidcraft-0.29.0.tar.gz                          （服务器）
 
 sed -i 's/image: bidcraft:.*/image: bidcraft:0.29.0/' /opt/bidcraft/compose/docker-compose.yml
+
+# 必做前置：升级会在启动时执行 Alembic 迁移，先做一致性备份并校验，失败则停止升级。
+docker exec bidcraft bidcraft backup
+docker exec bidcraft bidcraft backup-verify <上一步输出的 /data/backups/bidcraft-*.zip>
+# PostgreSQL 后端镜像已内置 postgresql-client，可确认工具可用：
+docker exec bidcraft pg_dump --version
+
 cd /opt/bidcraft/compose && docker compose up -d
 
 sleep 5
-curl -s http://127.0.0.1:8000/health     # 最小字段（不显示版本）
+curl -s http://127.0.0.1:8000/health/live # 存活（容器健康检查用）
+curl -s http://127.0.0.1:8000/health/ready # 就绪（模型未配置时可能非 200）
+curl -s http://127.0.0.1:8000/health     # 遗留端点，最小字段（不显示版本）
 # 超管确认版本：带 Cookie 访问 /admin/health，见「5. 运维」
 docker exec bidcraft python -c "import bidcraft;print(bidcraft.__version__)"   # 0.29.0
 ```
 
-升级后 `/opt/bidcraft/data` 不变，数据库增量列由启动时迁移自动补齐；建议先备份该目录。
+升级后 `/opt/bidcraft/data` 不变，数据库增量列由启动时迁移自动补齐。**启动迁移前必须先
+`bidcraft backup` + `bidcraft backup-verify`**；不要直接 `cp`/`tar` 运行中的数据目录
+（SQLite WAL 下可能撕裂），也不要先 `down` 掉容器再临时拷贝数据库文件。
 
 
 ## 9 可选：启用 MinerU 解析

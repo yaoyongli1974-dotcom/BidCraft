@@ -556,6 +556,8 @@ def create_app():
             path
             in {
                 "/health",
+                "/health/live",
+                "/health/ready",
                 "/auth/login",
                 "/auth/register",
                 "/auth/wechat/start",
@@ -761,46 +763,6 @@ def create_app():
     app.include_router(_routes_evaluation.router)
     app.include_router(_routes_orchestration.router)
     app.include_router(_routes_collaboration.router)
-
-    # 聚合可观测性：把 DB 计算的全局指标挂到既有 /admin/health 响应上（不新增路由，
-    # 公开 /health 保持最小化）。若路由侧已提供 global_metrics 则不覆盖。
-    from ..health import global_metrics
-
-    def _iter_routes(_routes):
-        for _route in _routes:
-            yield _route
-            # FastAPI 0.16x 的 include_router 把子路由收在 _IncludedRouter 里，
-            # 真正处理请求的是 effective context 中的 dependant。
-            yield from getattr(_route, "effective_route_contexts", lambda: ())()
-
-    _wrapped: set[int] = set()
-    for _route in _iter_routes(app.routes):
-        if getattr(_route, "path", "") != "/admin/health":
-            continue
-        _dependant = getattr(_route, "dependant", None)
-        if _dependant is None or id(_dependant) in _wrapped:
-            continue
-        _endpoint = _dependant.call
-
-        def _admin_health_with_metrics(*args, _endpoint=_endpoint, **kwargs):
-            payload = _endpoint(*args, **kwargs)
-            if isinstance(payload, dict) and "global_metrics" not in payload:
-                with session_scope() as db:
-                    payload["global_metrics"] = global_metrics(db)
-            return payload
-
-        _dependant.call = _admin_health_with_metrics
-        _wrapped.add(id(_dependant))
-
-
-
-
-
-
-
-
-
-
 
     # --------------------------------------------------------------- billing
 

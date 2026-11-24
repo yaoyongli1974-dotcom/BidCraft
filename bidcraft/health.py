@@ -13,10 +13,16 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from .clock import utc_now
+from .evaluation.report import FINDING_STATUSES
 from .models import Job, Project, QualityFinding, User
 
-#: 质量 finding 的"未处置"状态；处置完成后不再计入待办。
-OPEN_FINDING_STATUSES = ("open", "new", "reopened")
+#: 质量 finding 的"未处置"状态：只从 QualityFinding 的真实状态集合派生
+#: （``open/handled/ignored``），不再误用 Issue 的 ``new/reopened``。
+#: ``pending`` 仅为兼容历史数据的显式补充。
+OPEN_FINDING_STATUSES = tuple(
+    status for status in FINDING_STATUSES if status == "open"
+) + ("pending",)
 
 
 def _by_status(db: Session, model: Any) -> dict[str, int]:
@@ -46,6 +52,28 @@ def global_metrics(db: Session | None = None) -> dict[str, Any]:
     users = db.scalar(select(func.count()).select_from(User)) or 0
     projects_by_status = _by_status(db, Project)
     jobs_by_status = _by_status(db, Job)
+    # 队列健康度：积压量、最老等待时长与过期未回收的 running 行。
+    now = utc_now()
+    queued_jobs = int(
+        db.scalar(select(func.count()).select_from(Job).where(Job.status == "queued")) or 0
+    )
+    oldest_queued_at = db.scalar(
+        select(func.min(Job.created_at)).where(Job.status == "queued")
+    )
+    oldest_queued_age = (
+        max(0, int((now - oldest_queued_at).total_seconds())) if oldest_queued_at else 0
+    )
+    stale_running_jobs = int(
+        db.scalar(
+            select(func.count())
+            .select_from(Job)
+            .where(Job.status == "running", Job.lease_expires_at < now)
+        )
+        or 0
+    )
+    # 延迟导入：jobqueue 依赖 config/db，避免健康模块在导入期形成环。
+    from . import jobqueue
+
     return {
         # 明细口径
         "projects_by_status": projects_by_status,
@@ -55,6 +83,11 @@ def global_metrics(db: Session | None = None) -> dict[str, Any]:
         "jobs": sum(jobs_by_status.values()),
         "open_findings": int(findings),
         "users": int(users),
+        # 队列/进程运行态势
+        "workers_running": bool(jobqueue.workers_running()),
+        "queued_jobs": queued_jobs,
+        "oldest_queued_age_seconds": oldest_queued_age,
+        "stale_running_jobs": stale_running_jobs,
     }
 
 

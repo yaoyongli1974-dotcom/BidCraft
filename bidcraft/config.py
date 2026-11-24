@@ -15,6 +15,33 @@ request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
     "bidcraft_request_id", default=""
 )
 
+#: 后台任务日志关联字段。由 ``jobqueue.execution_context()`` 在 worker 线程里
+#: 绑定，``_JobContextFilter`` 读取后写到每条 LogRecord 上；未绑定时统一为 "-"。
+JOB_LOG_FIELDS = ("job_id", "kind", "project_id", "worker_id")
+_job_log_vars: dict[str, contextvars.ContextVar[str]] = {
+    name: contextvars.ContextVar(f"bidcraft_{name}", default="") for name in JOB_LOG_FIELDS
+}
+
+
+def job_log_fields() -> dict[str, str]:
+    """当前任务日志字段（未绑定时为 "-"），供日志模板与格式化器共用。"""
+
+    return {name: (_job_log_vars[name].get() or "-") for name in JOB_LOG_FIELDS}
+
+
+def set_job_log_context(**fields: str) -> dict[str, object]:
+    """绑定任务日志字段；返回 token 供 :func:`reset_job_log_context` 复位。"""
+
+    return {
+        name: _job_log_vars[name].set(str(fields.get(name) or ""))
+        for name in JOB_LOG_FIELDS
+    }
+
+
+def reset_job_log_context(tokens: dict[str, object]) -> None:
+    for name, token in tokens.items():
+        _job_log_vars[name].reset(token)  # type: ignore[arg-type]
+
 #: 生产环境管理员口令的最短长度与明显占位值。占位口令一律拒绝，避免
 #: ``deploy/.env.example`` 里的示例值被直接带上生产。
 MIN_ADMIN_PASSWORD_LENGTH = 12
@@ -585,6 +612,16 @@ class _RequestIdFilter(logging.Filter):
         return True
 
 
+class _JobContextFilter(logging.Filter):
+    """把 ``execution_context()`` 绑定的任务字段写到每条 LogRecord 上。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        for name, value in job_log_fields().items():
+            if not hasattr(record, name):
+                setattr(record, name, value)
+        return True
+
+
 class _JsonFormatter(logging.Formatter):
     """最小结构化格式：单行 JSON，不依赖第三方日志库。"""
 
@@ -596,6 +633,9 @@ class _JsonFormatter(logging.Formatter):
             "request_id": getattr(record, "request_id", "-"),
             "message": record.getMessage(),
         }
+        # 任务字段由 _JobContextFilter 注入；调用方显式传入的 extra 优先。
+        for name in JOB_LOG_FIELDS:
+            payload[name] = getattr(record, name, "-") or "-"
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
         return json.dumps(payload, ensure_ascii=False)
@@ -620,6 +660,7 @@ def configure_logging() -> None:
         handler = logging.StreamHandler()
         handler.setFormatter(formatter)
         handler.addFilter(_RequestIdFilter())
+        handler.addFilter(_JobContextFilter())
         handler._bidcraft = True  # type: ignore[attr-defined] - 标记自有 handler
         root.addHandler(handler)
         _logging_configured = True

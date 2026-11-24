@@ -54,6 +54,10 @@ BidCraft 默认使用 SQLite（WAL 模式），适合单进程/单机部署。�
 
 ## 备份与恢复
 
+**任何迁移、大版本升级或重启前都必须先 `bidcraft backup`，再用 `bidcraft backup-verify`
+校验备份通过**；不要直接 `cp` 运行中的 SQLite 文件（WAL 下主库与 `-wal`/`-shm` 可能撕裂）。
+恢复演练应在独立的临时目录/临时 PG 库上进行，不要覆盖线上库。
+
 `bidcraft backup` 按后端自动选择方式：
 
 - SQLite：`sqlite3` 在线备份 API，zip 内为 `bidcraft.db`；
@@ -72,6 +76,24 @@ SQL 中的建表与数据行；同时会核对清单里的数据文件确实存�
 
 `/admin/health` 的 `global_metrics` 直接查库聚合各状态的项目/任务数、未处置
 质量问题与用户数，供多实例共享同一份可观测数据（不新增 API 路由）。
+
+## 容器部署（Docker / Compose）
+
+- 生产镜像已安装 `postgresql-client`，容器内可直接执行 `pg_dump` / `psql`：
+  `docker exec bidcraft pg_dump --version`。因此 PostgreSQL 后端可直接用 `bidcraft backup`
+  生成 `dump.sql`，恢复时用 `psql` 导入；口令仍经 `PGPASSWORD` 传递，不进命令行。
+- 探针分工：`/health/live`（存活，不查 DB）用于 Docker `HEALTHCHECK` / Compose
+  `healthcheck`；`/health/ready`（就绪，检查 DB 等依赖）仅供判断是否接入流量。
+  **未配置模型时 `/health/ready` 可能返回非 200**，不要用它触发容器重启；旧 `/health`
+  保留兼容前端，不再作探活路径。compose 的 `x-readiness-probe` 扩展块给出就绪探针参数，
+  供编排层按同样路径配置。
+- `deploy/docker-compose.yml` **刻意未启用 `env_file:`**：`.env` 仅用于 `${VAR}` 插值，
+  不会整份注入容器。`BIDCRAFT_DB_URL` / `BIDCRAFT_SECRET_KEY` 等必须在 `environment:`
+  显式列出（或用 `docker compose --env-file` 指定插值文件并在 `environment:` 引用），
+  否则 PostgreSQL 连接串和多实例共享密钥不会生效。
+- 容器限制见 `deploy/README.md`：`mem_limit: 4g`、`cpus: "2.0"`、`pids_limit: 256`、
+  `cap_drop: [ALL]`、`no-new-privileges:true` 与 `stop_grace_period: 45s`。
+  基础镜像 digest 固定与 `read_only: true` 为刻意延期项，尚未实施。
 
 ## 多实例的 secret.key（关键）
 

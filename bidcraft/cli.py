@@ -1022,6 +1022,35 @@ def serve(
         console.print(
             "[yellow]Web 客户端未构建：cd web && npm install && npm run build[/yellow]"
         )
+    # 访问日志与业务日志共用结构化格式：request id 由 HTTP 中间件写入 contextvar，
+    # 这里挂同一个 filter 让 uvicorn.access 的每行日志也带上它（响应头逻辑不变）。
+    uvicorn_log_config = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "filters": {
+            "request_id": {"()": "bidcraft.config._RequestIdFilter"},
+            "job_context": {"()": "bidcraft.config._JobContextFilter"},
+        },
+        "formatters": {
+            "default": {"()": "bidcraft.config._JsonFormatter"},
+            "access": {"()": "bidcraft.config._JsonFormatter"},
+        },
+        "handlers": {
+            "access": {
+                "class": "logging.StreamHandler",
+                "formatter": "access",
+                "filters": ["request_id", "job_context"],
+                "stream": "ext://sys.stdout",
+            },
+        },
+        "loggers": {
+            "uvicorn.access": {
+                "handlers": ["access"],
+                "level": "INFO",
+                "propagate": False,
+            },
+        },
+    }
     wildcard_host = _is_wildcard_host(host)
     if wildcard_host:
         console.print(
@@ -1045,6 +1074,7 @@ def serve(
         host=host,
         port=port,
         log_level="info",
+        log_config=uvicorn_log_config,
         proxy_headers=settings.trust_proxy,
         forwarded_allow_ips="*" if settings.trust_proxy else "",
     )

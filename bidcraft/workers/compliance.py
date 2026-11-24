@@ -10,12 +10,18 @@ from typing import Any
 
 from .. import jobs
 from ..db import session_scope
-from ..jobqueue import JobAborted, assert_claim_current, fenced_job, raise_if_aborted
+from ..jobqueue import (
+    JobAborted,
+    assert_claim_current,
+    fenced_job,
+    log_job_failure,
+    raise_if_aborted,
+)
 from ..models import Project
 from ..pipeline import check_project
 from ..services.job_support import _fail_job
 
-logger = logging.getLogger("bidcraft.api")
+logger = logging.getLogger("bidcraft.workers")
 
 
 def _run_batch_check_job(job_id: str, project_ids: list[str]) -> None:
@@ -126,7 +132,7 @@ def _run_batch_check_job(job_id: str, project_ids: list[str]) -> None:
         # 中止不是业务失败：保持 running，由 reaper 重新排队。
         logger.info("批量核对任务 %s 已中止，等待重新排队", job_id)
     except Exception:  # noqa: BLE001 - surfaced to the UI as a stable message
-        logger.exception("批量核对任务 %s 失败", job_id)
+        log_job_failure(logger)
         failed_message = "批量核对失败：服务内部错误，详情见服务日志"
         with session_scope() as db:
             job = fenced_job(db, job_id)

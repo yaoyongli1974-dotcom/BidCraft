@@ -279,7 +279,7 @@ def test_requirements_match_check_project_deadline_verdict(owner, monkeypatch):
 
 
 def test_admin_health_owns_global_metrics_without_double_computation(db, monkeypatch):
-    """Stage6 加固：admin_health 自带 6 键指标，app 兼容包装不再重复计算。"""
+    """Stage6/8：admin_health 自带 10 键指标（含队列健康度），且只计算一次。"""
     from bidcraft import health
 
     calls = {"n": 0}
@@ -300,6 +300,10 @@ def test_admin_health_owns_global_metrics_without_double_computation(db, monkeyp
         "jobs",
         "open_findings",
         "users",
+        "workers_running",
+        "queued_jobs",
+        "oldest_queued_age_seconds",
+        "stale_running_jobs",
     }
     # 原有响应字段一个不少；global_metrics 由端点自身计算，包装层不重复调用。
     assert {

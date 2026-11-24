@@ -55,6 +55,10 @@ const GLOBAL_METRIC_LABELS: Record<string, string> = {
   quotes: '报价版本数',
   documents: '商务文档数',
   templates: '模板数量',
+  workers_running: '工作进程是否运行',
+  queued_jobs: '排队任务数',
+  oldest_queued_age_seconds: '最老排队任务年龄（秒）',
+  stale_running_jobs: '陈旧运行中任务数',
 }
 
 const GLOBAL_METRIC_TOKENS: Record<string, string> = {
@@ -116,6 +120,7 @@ function metricStatusLabel(metricKey: string, key: string): string {
 function metricValue(value: unknown, metricKey = ''): string {
   if (typeof value === 'number' && Number.isFinite(value)) return formatNumber(value)
   if (typeof value === 'string') return value
+  if (typeof value === 'boolean') return value ? '是' : '否'
   if (value === null || value === undefined) return '—'
   if (typeof value === 'object') {
     const entries = Object.entries(value as Record<string, unknown>)
@@ -125,6 +130,15 @@ function metricValue(value: unknown, metricKey = ''): string {
       .join(' · ')
   }
   return JSON.stringify(value)
+}
+
+/** 新增健康键的异常文案：工作进程停摆 / 存在陈旧运行任务时提示管理员。 */
+function globalMetricWarning(key: string, value: unknown): string | null {
+  if (key === 'workers_running' && value === false) return '工作进程未运行'
+  if (key === 'stale_running_jobs' && typeof value === 'number' && value > 0) {
+    return '存在陈旧运行中任务'
+  }
+  return null
 }
 
 function bytes(value: number): string {
@@ -306,16 +320,28 @@ export function AdminHealthTab() {
               </tr>
             </thead>
             <tbody>
-              {Object.entries(globalMetrics).map(([key, value]) => (
-                <tr key={key}>
-                  <td>{globalMetricLabel(key)}</td>
-                  <td className="mono">{metricValue(value, key)}</td>
-                </tr>
-              ))}
+              {Object.entries(globalMetrics).map(([key, value]) => {
+                const warning = globalMetricWarning(key, value)
+                return (
+                  <tr key={key}>
+                    <td>{globalMetricLabel(key)}</td>
+                    <td className="mono">
+                      {metricValue(value, key)}
+                      {warning && (
+                        <>
+                          {' '}
+                          <Badge tone="warn" subtle>{warning}</Badge>
+                        </>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
           <div className="admin-footnote">
             由后端对数据库做全库聚合，与上方单进程快照口径不同；老后端未返回该字段时不显示本区块。
+            工作进程未运行或存在陈旧运行中任务时，数值旁会显示告警标记。
           </div>
         </section>
       )}

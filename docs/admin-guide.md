@@ -267,9 +267,17 @@ run_check、export_document、search_knowledge），供 Claude Desktop / Cursor 
 - 会话 Cookie 为 HttpOnly、SameSite=Lax；密码使用 scrypt 加盐哈希；登录失败按用户名限流。
 - 系统无遥测；除显式配置的模型与知识库端点（以及图片端点返回的临时下载 URL）外
   不发起外部请求。
-- 公开 `/health` 只返回 `status` 与前端必需字段（不含版本、路径、计数），便于探活且不泄露部署细节；
-  排障与确认版本用 `/admin/health`（仅超级管理员，返回版本、启动时间/uptime、Python 与平台、
-  数据库大小与磁盘余量、模型/知识库/用户计数及 `docs_enabled` 等开关）。
+- 探活端点分工：`/health/live`（存活，不查数据库，Docker `HEALTHCHECK` / Compose 原生
+   `healthcheck` 使用，DB 抖动不会触发重启）、`/health/ready`（就绪，检查 DB 等依赖，
+   仅用于判断是否接入流量；**未配置模型时可能返回非 200**，不用于重启容器）。旧 `/health`
+   作为遗留端点保留，只返回 `status` 与前端必需字段（不含版本、路径、计数），不再作探活路径；
+   排障与确认版本用 `/admin/health`（仅超级管理员，返回版本、启动时间/uptime、Python 与平台、
+   数据库大小与磁盘余量、模型/知识库/用户计数及 `docs_enabled` 等开关）。
+- 日志关联：后台任务日志的 logger 名为 `bidcraft.workers`；uvicorn 访问日志带 `req=<请求ID>`，
+   与响应头 `X-Request-ID` 对应，可用它把前端报错、访问日志与任务日志串起来。
+- 容器部署：`deploy/docker-compose.yml` 刻意未启用 `env_file:`，`.env` 只用于 `${VAR}` 插值；
+   额外变量必须显式写入 `environment:`（或配合 `docker compose --env-file`）。资源上限为
+   `4g` 内存 / `2.0` CPU / `256` PID，丢弃全部 capabilities 并禁止提权，详见 `deploy/README.md`。
 - 项目级成员权限与操作审计已内置：owner 管理成员，写操作按 editor/viewer 门禁，
   关键操作写入 `audit_logs`（项目页「协作」与管理端「审计日志」可查）。
   公网多人场景仍建议配合反向代理与网络隔离。
@@ -281,7 +289,8 @@ run_check、export_document、search_knowledge），供 Claude Desktop / Cursor 
 [`docs/architecture.md`](architecture.md)「备份与恢复」及
 [`docs/postgresql.md`](postgresql.md)。
 
-内置一致性备份无需停服：
+内置一致性备份无需停服。**迁移、大版本升级与重启前必须先执行 `bidcraft backup` 并通过
+`bidcraft backup-verify` 校验**，否则不得继续；不要直接 `cp`/`tar` 运行中的 SQLite 文件。
 
 ```bash
 bidcraft backup                            # 写入 BIDCRAFT_HOME/backups/bidcraft-<时间>.zip
@@ -303,9 +312,12 @@ bidcraft backup-prune --keep 10 --dry-run  # 先看轮转名单，再去 --dry-r
   文件清单时自动跳过这一步。
 - 恢复：**停服 → 解压 → 把数据库、`secret.key` 与数据目录放回同一 `BIDCRAFT_HOME` → 启动**。
   命令不自动还原，避免误覆盖线上数据；恢复后属主应为运行用户（容器内 uid 10001）。
-- 恢复演练为可选流程：需要时用 `BIDCRAFT_RESTORE_DRILL=1` 开启演练模式，在临时目录/临时库上
-  还原并校验备份包，不覆盖线上 `BIDCRAFT_HOME`；季度演练步骤见
+- 恢复演练为**必做流程**（每季度或每次大版本升级前）：用 `BIDCRAFT_RESTORE_DRILL=1` 开启
+  演练模式，在临时目录/临时库上还原并校验备份包，不覆盖线上 `BIDCRAFT_HOME`；记录耗时与
+  结果，没演练过的备份不算备份。步骤见
   [`deploy/README.md`](../deploy/README.md)「5.2 备份与恢复演练」。
+- 容器镜像已内置 `postgresql-client`（`pg_dump` / `psql`），PostgreSQL 后端可直接执行
+  `bidcraft backup` 与恢复演练：`docker exec bidcraft pg_dump --version` 可验证工具可用。
 - 限制：不要直接 `cp`/`tar` 运行中的 SQLite 文件（WAL 下主库与 `-wal`/`-shm` 可能撕裂）；
   `secret.key` 必须与库一起保留，否则加密的模型/知识库 API Key 无法解密；多实例共享数据库时
   必须共享同一密钥或统一设置 `BIDCRAFT_SECRET_KEY`。备份默认保留 10 份，按
@@ -425,7 +437,8 @@ bidcraft backup-prune --keep 10 --dry-run  # 先看轮转名单，再去 --dry-r
 
 ## 运行状态与运营指标
 
-管理控制台「运行状态」页读取 `GET /admin/health`（仅超管，公开 `/health` 刻意保持最小化）：
+管理控制台「运行状态」页读取 `GET /admin/health`（仅超管；容器探活见上文的 `/health/live`
+与 `/health/ready`，公开的遗留 `/health` 刻意保持最小化）：
 服务版本与启动时间、运行时长、Python/平台、数据目录与磁盘余量、模型/向量模型配置、
 模型/知识库/账号数量、前端构建产物是否就绪、离线/文档页/注册/安全 Cookie/微信登录与支付
 等开关。页面顶部有手动刷新按钮。

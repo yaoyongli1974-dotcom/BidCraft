@@ -33,11 +33,28 @@ from sqlalchemy import func, select, update
 
 from . import billing
 from .clock import utc_now
-from .config import settings
+from .config import (
+    job_log_fields,
+    reset_job_log_context,
+    set_job_log_context,
+    settings,
+)
 from .db import session_scope
 from .models import Job, OutlineNode, PendingCharge, Section, User
 
 logger = logging.getLogger("bidcraft.jobs")
+
+#: 8 个后台 worker 共用的失败日志模板；字段名与 execution_context / _JsonFormatter 一致。
+JOB_FAILURE_LOG_TEMPLATE = (
+    "后台任务执行失败 job_id=%(job_id)s kind=%(kind)s "
+    "project_id=%(project_id)s worker_id=%(worker_id)s"
+)
+
+
+def log_job_failure(log: logging.Logger) -> None:
+    """在 except 块内记录统一失败日志（保留 exc_info，不改变控制流）。"""
+
+    log.exception(JOB_FAILURE_LOG_TEMPLATE, job_log_fields())
 
 # 背压 check + insert 的跨进程串行化（仅 PostgreSQL；SQLite 单写者天然串行）。
 _BACKPRESSURE_LOCK_KEY = 0x42494352514C4F43  # "BICRQLC"
@@ -129,14 +146,31 @@ def workers_running() -> bool:
 
 
 @contextmanager
-def execution_context(token: str, abort: threading.Event) -> Iterator[None]:
-    """Bind both fencing token and abort signal for a runner thread."""
+def execution_context(
+    token: str,
+    abort: threading.Event,
+    *,
+    job_id: str = "",
+    kind: str = "",
+    project_id: str = "",
+    worker_id: str = "",
+) -> Iterator[None]:
+    """Bind fencing token, abort signal and log fields for a runner thread.
+
+    ``job_id``/``kind``/``project_id``/``worker_id`` are exported to every log
+    record through ``config._JobContextFilter``; the optional keyword-only
+    arguments keep legacy two-argument callers (tests, direct runners) working.
+    """
 
     token_reset = _claim_token.set(token)
     abort_reset = _abort_event.set(abort)
+    log_reset = set_job_log_context(
+        job_id=job_id, kind=kind, project_id=project_id, worker_id=worker_id
+    )
     try:
         yield
     finally:
+        reset_job_log_context(log_reset)
         _abort_event.reset(abort_reset)
         _claim_token.reset(token_reset)
 
@@ -1019,7 +1053,14 @@ def _execute(job: Job) -> None:
     # (step_status/mark_step_done): a resumed run skips units already done.
     token = job.claim_token or ""
     abort = threading.Event()
-    with execution_context(token, abort):
+    with execution_context(
+        token,
+        abort,
+        job_id=job.id,
+        kind=job.kind,
+        project_id=job.project_id or "",
+        worker_id=job.worker_id or _worker_id,
+    ):
         runner = _runner_for(job.kind)
         if runner is None:
             logger.error("未知任务类型 %s (job=%s)", job.kind, job.id)

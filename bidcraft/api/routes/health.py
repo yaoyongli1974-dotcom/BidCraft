@@ -2,7 +2,7 @@
 
 import sys
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 _core = sys.modules['bidcraft.api.app']  # 运行期查找，保持 monkeypatch 生效
 
@@ -56,10 +56,45 @@ def health() -> dict[str, Any]:
                 "knowledge_bases": kbs,
                 "home": str(settings.home),
                 "web_ready": (
-                    Path(__file__).resolve().parent.parent / "web_dist" / "index.html"
+                    Path(__file__).resolve().parents[2] / "web_dist" / "index.html"
                 ).is_file(),
             }
         )
     return body
+
+
+@router.get("/health/live")
+def health_live() -> dict[str, Any]:
+    """容器存活探针：固定 200，不查库、不依赖任何外部组件。"""
+
+    return {"status": "ok"}
+
+
+@router.get("/health/ready")
+def health_ready() -> dict[str, Any]:
+    """就绪探针：DB 可读、模型可用（离线模式豁免）且 Web 客户端已构建。
+
+    任一项不满足返回 503；存活探针不受影响，避免 DB 抖动触发无谓重启。
+    """
+
+    try:
+        with session_scope() as db:
+            db.execute(select(1))
+            endpoint = model_config.resolve_chat_endpoint(db)
+    except Exception:  # noqa: BLE001 - 探针必须返回 503 而不是 500
+        raise HTTPException(status_code=503, detail="依赖检查失败：数据库不可用") from None
+    if endpoint is None and not settings.offline:
+        raise HTTPException(status_code=503, detail="依赖检查失败：对话模型未配置")
+    web_ready = (
+        Path(__file__).resolve().parents[2] / "web_dist" / "index.html"
+    ).is_file()
+    if not web_ready:
+        raise HTTPException(status_code=503, detail="依赖检查失败：Web 客户端未构建")
+    return {
+        "status": "ready",
+        "db": "ok",
+        "model_configured": bool(endpoint),
+        "web_ready": True,
+    }
 
 

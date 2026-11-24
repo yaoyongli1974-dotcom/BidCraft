@@ -1074,8 +1074,26 @@ export interface AdminHealth {
   wechat_pay: boolean
   /** 后端未来可按项目聚合的运营指标；未返回时前端显示「暂无全局聚合」。 */
   metrics?: Partial<Record<'manual_edit_rate' | 'issue_density' | 'boq_match_rate', number | string>>
-  /** 后端数据库全库聚合指标（可选）；值为计数或 {状态: 数量} 分布。 */
-  global_metrics?: Record<string, string | number | null | Record<string, number | string | null>> | null
+  /** 后端数据库全库聚合指标（可选）；新增健康键随版本上线，旧后端可能缺失。 */
+  global_metrics?: AdminGlobalMetrics | null
+}
+
+/**
+ * `/admin/health` 的 `global_metrics`：全库聚合指标。
+ * 既有 6 个键为计数或 {状态: 数量} 分布；以下 4 个健康键为新增，
+ * 均为可选以兼容尚未上线它们的后端。
+ */
+export interface AdminGlobalMetrics {
+  /** 工作进程是否运行；false 表示后台任务无人消费，前端显示告警。 */
+  workers_running?: boolean
+  /** 当前排队中的任务数。 */
+  queued_jobs?: number
+  /** 最老排队任务的等待秒数。 */
+  oldest_queued_age_seconds?: number
+  /** 运行中但长时间无心跳的任务数；>0 时前端显示告警。 */
+  stale_running_jobs?: number
+  /** 既有键与后端未来新增的键；值为计数或 {状态: 数量} 分布。 */
+  [key: string]: string | number | boolean | null | undefined | Record<string, number | string | null>
 }
 
 

@@ -11,10 +11,16 @@ from typing import Any
 from .. import jobs, knowledge, model_config
 from ..config import settings
 from ..db import session_scope
-from ..jobqueue import JobAborted, assert_claim_current, fenced_job, raise_if_aborted
+from ..jobqueue import (
+    JobAborted,
+    assert_claim_current,
+    fenced_job,
+    log_job_failure,
+    raise_if_aborted,
+)
 from ..services.job_support import _fail_job
 
-logger = logging.getLogger("bidcraft.api")
+logger = logging.getLogger("bidcraft.workers")
 
 
 def _run_kb_reindex_job(job_id: str, kb_id: str) -> None:
@@ -112,7 +118,7 @@ def _run_kb_reindex_job(job_id: str, kb_id: str) -> None:
         # 中止不是业务失败：保持 running，由 reaper 重新排队。
         logger.info("知识库索引任务 %s 已中止，等待重新排队", job_id)
     except Exception as exc:  # noqa: BLE001 - surfaced to the UI as a stable message
-        logger.exception("知识库索引任务 %s 失败", job_id)
+        log_job_failure(logger)
         if isinstance(exc, knowledge.KnowledgeError):
             failed_message = "知识库索引失败：本地目录不可用或内容无法解析，详情见服务日志"
         else:

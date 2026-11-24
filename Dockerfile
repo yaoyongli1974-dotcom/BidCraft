@@ -1,5 +1,7 @@
 # syntax=docker/dockerfile:1
 
+# 注：基础镜像仍为浮动标签（node:22-slim / python:3.13-slim），digest 固定属于 P3 延期项：
+# 需先在 CI 固化具体 digest 并验证跨架构构建后再启用，本阶段保留原有 pinning 策略不变。
 # ---- web client build -------------------------------------------------------
 FROM node:22-slim AS webbuild
 WORKDIR /src
@@ -22,10 +24,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:$PATH"
 
 # LibreOffice (PDF field/TOC refresh) + CJK fonts + optional scanned-PDF OCR.
+# postgresql-client 提供 pg_dump/psql：PostgreSQL 部署的 bidcraft backup 与恢复演练需要它们。
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         libreoffice-writer python3-uno fonts-noto-cjk \
         poppler-utils tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng \
+        postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 # 非 root 运行用户（固定 uid，便于挂载卷权限规划）。
@@ -50,8 +54,10 @@ USER bidcraft
 VOLUME ["/data"]
 EXPOSE 8000
 
+# 存活探活走 /health/live：不查数据库，DB 抖动不会触发容器重启；就绪探活 /health/ready
+# 由编排层配置（见 deploy/docker-compose.yml 与 deploy/README.md）。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD python -c "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"
+    CMD python -c "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=4).status == 200 else 1)"
 
 ENTRYPOINT ["bidcraft"]
 CMD ["serve", "--host", "0.0.0.0", "--port", "8000"]

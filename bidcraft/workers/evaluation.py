@@ -16,11 +16,17 @@ from typing import Any
 from .. import jobs
 from ..db import session_scope
 from ..evaluation import build_quality_report, find_report_for_job
-from ..jobqueue import JobAborted, assert_claim_current, fenced_job, raise_if_aborted
+from ..jobqueue import (
+    JobAborted,
+    assert_claim_current,
+    fenced_job,
+    log_job_failure,
+    raise_if_aborted,
+)
 from ..models import QualityReport
 from ..services.job_support import _fail_job
 
-logger = logging.getLogger("bidcraft.api")
+logger = logging.getLogger("bidcraft.workers")
 
 
 def _report_result(report: QualityReport) -> dict[str, Any]:
@@ -106,7 +112,7 @@ def _run_evaluation_job(
         # 中止不是业务失败：保持 running，由 reaper 重新排队。
         logger.info("质量评估任务 %s 已中止，等待重新排队", job_id)
     except Exception as exc:  # noqa: BLE001 - runner 自己落失败状态
-        logger.exception("质量评估任务失败 job=%s", job_id)
+        log_job_failure(logger)
         with session_scope() as db:
             job = fenced_job(db, job_id)
             if job is not None:

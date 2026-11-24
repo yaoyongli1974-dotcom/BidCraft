@@ -14,12 +14,18 @@ from typing import Any
 
 from .. import jobs
 from ..db import session_scope
-from ..jobqueue import JobAborted, assert_claim_current, fenced_job, raise_if_aborted
+from ..jobqueue import (
+    JobAborted,
+    assert_claim_current,
+    fenced_job,
+    log_job_failure,
+    raise_if_aborted,
+)
 from ..models import Job
 from ..orchestration import run_workflow as _drive_workflow
 from ..services.job_support import _fail_job
 
-logger = logging.getLogger("bidcraft.api")
+logger = logging.getLogger("bidcraft.workers")
 
 
 def _terminal_job(job_id: str, status: str, result: dict[str, Any], message: str) -> None:
@@ -93,7 +99,7 @@ def _run_agent_job(job_id: str, run_id: str) -> None:
         # 租约失效/优雅关闭：不写 failed、不退款，留给 reaper 重新排队。
         logger.info("Agent 工作流任务 %s 已中止，等待重新排队", job_id)
     except Exception as exc:  # noqa: BLE001 - job-level surface, never kill the worker
-        logger.exception("Agent 工作流任务 %s 失败", job_id)
+        log_job_failure(logger)
         with session_scope() as db:
             job = fenced_job(db, job_id)
             if job is not None:

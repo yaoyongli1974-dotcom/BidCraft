@@ -89,6 +89,71 @@ jobs:
           print(f"Alembic single-head OK: {heads.pop()}")
           PY
 
+      - name: Alembic preflight (offline SQL / bounded scratch check)
+        # 不连真实库、不改运行时启动行为：先静态编译并检查每个迁移的 upgrade/downgrade，
+        # 再尝试 alembic upgrade head --sql；当前部分历史迁移在 upgrade 里用 inspect(bind)，
+        # 离线 MockConnection 不支持，此时退回临时 SQLite 库执行 create_all + stamp + upgrade。
+        # 两种路径都不触碰生产数据，且迁移损坏时都会让本步骤失败。
+        env:
+          BIDCRAFT_HOME: /tmp/bc-stage8-alembic-home
+        run: |
+          uv run --frozen python - <<'PY'
+          import ast
+          import contextlib
+          import io
+          import tempfile
+          from pathlib import Path
+
+          from alembic import command
+          from alembic.config import Config
+          from sqlalchemy import create_engine
+          from sqlalchemy.exc import NoInspectionAvailable
+
+          from bidcraft.models import Base
+
+          scratch = Path(tempfile.mkdtemp(prefix="bc-alembic-"))
+          versions = Path("bidcraft/migrations/versions")
+          files = sorted(p for p in versions.glob("*.py") if p.name != "__init__.py")
+          assert files, "未找到 Alembic 迁移文件"
+          for file in files:
+              source = file.read_text(encoding="utf-8")
+              tree = ast.parse(source, filename=str(file))
+              compile(source, str(file), "exec")
+              functions = {
+                  node.name
+                  for node in tree.body
+                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+              }
+              assert {"upgrade", "downgrade"} <= functions, f"{file} 缺少 upgrade/downgrade"
+
+          def scratch_cfg(url: str) -> Config:
+              cfg = Config()
+              cfg.set_main_option("script_location", str(Path("bidcraft/migrations").resolve()))
+              cfg.set_main_option("sqlalchemy.url", url)
+              return cfg
+
+          sql = io.StringIO()
+          offline_error = None
+          try:
+              with contextlib.redirect_stdout(sql):
+                  command.upgrade(scratch_cfg("sqlite://"), "head", sql=True)
+          except NoInspectionAvailable as exc:
+              offline_error = exc
+
+          if offline_error is None:
+              assert sql.getvalue().strip(), "离线迁移未生成任何 SQL"
+              print("Alembic offline SQL preflight OK")
+          else:
+              # 仅用临时 SQLite 库执行，与生产启动无关；迁移损坏会在这里失败。
+              db = scratch / "scratch.db"
+              engine = create_engine(f"sqlite:///{db}")
+              Base.metadata.create_all(engine)
+              cfg = scratch_cfg(f"sqlite:///{db}")
+              command.stamp(cfg, "0001_baseline")
+              command.upgrade(cfg, "head")
+              print("Alembic scratch-DB preflight OK (offline SQL: inspect(bind) unsupported)")
+          PY
+
       - name: Version / tag / changelog consistency
         env:
           CI_GIT_REF: ${{ github.ref }}
@@ -203,6 +268,73 @@ jobs:
               print(" -", name)
           if len(failed) > 40:
               print(f" ... and {len(failed) - 40} more; full report in artifact pytest-junit")
+          PY
+
+  docker-image:
+    name: docker (production image + compose hardening)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build production image
+        run: docker build -t bidcraft:v030-check .
+
+      - name: Image invariants (non-root, pg_dump, CLI, /health/live)
+        run: |
+          set -euo pipefail
+          user=$(docker inspect -f '{{.Config.User}}' bidcraft:v030-check)
+          echo "Config.User=${user:-<empty>}"
+          test -n "$user"
+          test "$user" != root
+          test "$user" != 0
+
+          uid=$(docker run --rm --entrypoint id bidcraft:v030-check -u)
+          echo "runtime uid=$uid"
+          test "$uid" != "0"
+
+          health=$(docker inspect -f '{{json .Config.Healthcheck}}' bidcraft:v030-check)
+          echo "Healthcheck=$health"
+          echo "$health" | grep -q '/health/live'
+
+          docker run --rm --entrypoint sh bidcraft:v030-check -c 'pg_dump --version'
+          # CLI 没有 --version 选项；version 子命令同样验证 bidcraft 入口可执行。
+          docker run --rm --entrypoint sh bidcraft:v030-check -c 'bidcraft version'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Compose hardening (static parse)
+        # 静态解析 compose：不启用 env_file、资源/权限限制与双探针路径齐全。
+        run: |
+          uv run --frozen python - <<'PY'
+          import re
+          from pathlib import Path
+
+          import yaml
+
+          text = Path("deploy/docker-compose.yml").read_text(encoding="utf-8")
+          assert not re.search(r"^\s*env_file\s*:", text, re.M), "不得启用 env_file"
+          service = yaml.safe_load(text)["services"]["bidcraft"]
+          assert "env_file" not in service
+
+          grace = service["stop_grace_period"]
+          assert int(grace.rstrip("s")) >= 45, f"stop_grace_period 过短: {grace}"
+          assert float(str(service["cpus"])) >= 2.0
+          assert int(service["pids_limit"]) >= 256
+          assert "ALL" in service["cap_drop"]
+          assert any("no-new-privileges:true" in str(o) for o in service["security_opt"])
+
+          probe = str(service["healthcheck"]["test"])
+          assert "/health/live" in probe
+          assert service["x-liveness-probe"]["httpGet"]["path"] == "/health/live"
+          assert service["x-readiness-probe"]["httpGet"]["path"] == "/health/ready"
+          print("compose hardening OK (no env_file, limits, caps, live/ready probes)")
           PY
 
   web:

@@ -12,11 +12,17 @@ from sqlalchemy import select
 
 from .. import images, jobs
 from ..db import session_scope
-from ..jobqueue import JobAborted, assert_claim_current, fenced_job, raise_if_aborted
+from ..jobqueue import (
+    JobAborted,
+    assert_claim_current,
+    fenced_job,
+    log_job_failure,
+    raise_if_aborted,
+)
 from ..models import ImageAsset, Project
 from ..services.job_support import _fail_job
 
-logger = logging.getLogger("bidcraft.api")
+logger = logging.getLogger("bidcraft.workers")
 
 
 def _run_image_batch_job(job_id: str, project_id: str, targets: list[dict[str, Any]]) -> None:
@@ -185,7 +191,7 @@ def _run_image_batch_job(job_id: str, project_id: str, targets: list[dict[str, A
         # 中止不是业务失败：保持 running，由 reaper 重新排队。
         logger.info("配图任务 %s 已中止，等待重新排队", job_id)
     except Exception:  # noqa: BLE001 - surfaced to the UI as a stable message
-        logger.exception("配图任务 %s 失败", job_id)
+        log_job_failure(logger)
         failed_message = "配图任务失败：图片服务不可用或响应异常，详情见服务日志"
         with session_scope() as db:
             job = fenced_job(db, job_id)

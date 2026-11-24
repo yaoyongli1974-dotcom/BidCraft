@@ -16,6 +16,16 @@ const health: AdminHealth = {
   auth_required: true, registration: true, wechat_login: false, wechat_pay: false,
 }
 
+/** 按指标中文标签定位数值单元格，避免标签本身或别行的数字干扰断言。 */
+function metricCell(label: string): HTMLElement {
+  const cell = screen.getByText(label)
+  const row = cell.closest('tr')
+  if (!row) throw new Error(`找不到指标行：${label}`)
+  const value = row.querySelector('td:last-child')
+  if (!value) throw new Error(`找不到指标数值：${label}`)
+  return value as HTMLElement
+}
+
 describe('AdminHealthTab', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -45,7 +55,7 @@ describe('AdminHealthTab', () => {
   it('后端返回 global_metrics 时按真实后端键渲染全局指标区块', async () => {
     vi.mocked(getAdminHealth).mockResolvedValue({
       ...health,
-      // bidcraft/health.py 实际返回的六个键，状态值也用后端真实口径。
+      // 六个既有键 + 四个新健康键；状态值也用后端真实口径。
       global_metrics: {
         projects_by_status: { intake: 3, drafting: 4, analyzed: 2, parsing: 1, ready: 2 },
         jobs_by_status: { queued: 5, running: 3, done: 20 },
@@ -53,11 +63,15 @@ describe('AdminHealthTab', () => {
         users: 9,
         projects: 12,
         jobs: 28,
+        workers_running: true,
+        queued_jobs: 5,
+        oldest_queued_age_seconds: 12,
+        stale_running_jobs: 0,
       },
     })
     render(<AdminHealthTab />)
     expect(await screen.findByText('全局指标（数据库聚合）')).toBeTruthy()
-    // 六个真实键都有中文标签，其中 jobs 与 job 分词不再显示英文原码。
+    // 六个既有键都有中文标签，其中 jobs 与 job 分词不再显示英文原码。
     expect(screen.getByText('项目状态分布')).toBeTruthy()
     expect(screen.getByText('任务状态分布')).toBeTruthy()
     expect(screen.getByText('未处置质量问题')).toBeTruthy()
@@ -67,8 +81,48 @@ describe('AdminHealthTab', () => {
     // 状态值复用规范标签：项目取 projectStatus()，任务取 JOB_STATUS。
     expect(screen.getByText('待导入 3 · 撰写中 4 · 已解析 2 · 解析中 1 · 可交付 2')).toBeTruthy()
     expect(screen.getByText('排队中 5 · 运行中 3 · 已完成 20')).toBeTruthy()
+    // 四个新健康键按中文标签渲染，布尔值显示为 是/否。
+    expect(screen.getByText('工作进程是否运行')).toBeTruthy()
+    expect(screen.getByText('排队任务数')).toBeTruthy()
+    expect(screen.getByText('最老排队任务年龄（秒）')).toBeTruthy()
+    expect(screen.getByText('陈旧运行中任务数')).toBeTruthy()
+    expect(metricCell('工作进程是否运行').textContent).toContain('是')
+    expect(metricCell('排队任务数').textContent).toContain('5')
+    expect(metricCell('最老排队任务年龄（秒）').textContent).toContain('12')
+    expect(metricCell('陈旧运行中任务数').textContent).toContain('0')
+    // 健康状态下不出现告警标记。
+    expect(screen.queryByText('工作进程未运行')).toBeNull()
+    expect(screen.queryByText('存在陈旧运行中任务')).toBeNull()
     // 原有单进程快照仍在。
     expect(screen.getByText('0.27.0')).toBeTruthy()
+  })
+
+  it('工作进程未运行且存在陈旧任务时显示告警', async () => {
+    vi.mocked(getAdminHealth).mockResolvedValue({
+      ...health,
+      global_metrics: {
+        projects: 12,
+        jobs: 28,
+        workers_running: false,
+        queued_jobs: 3,
+        oldest_queued_age_seconds: 1800,
+        stale_running_jobs: 2,
+      },
+    })
+    render(<AdminHealthTab />)
+    expect(await screen.findByText('全局指标（数据库聚合）')).toBeTruthy()
+    // 工作进程停摆：显示 否 并给出告警。
+    expect(metricCell('工作进程是否运行').textContent).toContain('否')
+    expect(screen.getByText('工作进程未运行')).toBeTruthy()
+    // 陈旧任务 > 0：数值与告警同时出现。
+    expect(metricCell('陈旧运行中任务数').textContent).toContain('2')
+    expect(screen.getByText('存在陈旧运行中任务')).toBeTruthy()
+    // 正常数值不应误报，仍按既有格式渲染。
+    expect(metricCell('排队任务数').textContent).toContain('3')
+    expect(metricCell('最老排队任务年龄（秒）').textContent).toContain('1,800')
+    expect(metricCell('工作进程是否运行').querySelector('.badge--warn')).toBeTruthy()
+    expect(metricCell('陈旧运行中任务数').querySelector('.badge--warn')).toBeTruthy()
+    expect(metricCell('排队任务数').querySelector('.badge--warn')).toBeNull()
   })
 
   it('没有 global_metrics 时不展示全局指标区块', async () => {

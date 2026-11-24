@@ -3,6 +3,8 @@
 #   1. 镜像：docker build -t bidcraft:0.29.0 .   （或 docker load 导入离线镜像）
 #   2. 数据目录：mkdir -p /opt/bidcraft/data && chown -R 10001:10001 /opt/bidcraft/data
 #   3. 在本目录放置 .env（参考 .env.example），然后 docker compose up -d
+#      .env 仅用于本文件中 ${VAR} 的插值，不会整份注入容器；其它变量须在 environment 显式列出
+#      （也可用 docker compose --env-file 指定另一个插值文件）。刻意不启用 env_file:。
 #   4. 1Panel 网站（OpenResty）反向代理 http://127.0.0.1:8000，并启用 HTTPS。
 services:
   bidcraft:
@@ -13,6 +15,8 @@ services:
       - "127.0.0.1:8000:8000"   # 只对本机回环暴露，公网走 OpenResty TLS 反代
     volumes:
       - /opt/bidcraft/data:/data
+    # 刻意不启用 env_file: —— .env 中的变量不会自动进入容器；下面列出的键才会进入。
+    # 新增需要进入容器的变量时，必须在此显式添加（值可用 ${VAR:-默认} 从 .env/--env-file 插值）。
     environment:
       TZ: Asia/Shanghai
       BIDCRAFT_ADMIN_PASSWORD: ${BIDCRAFT_ADMIN_PASSWORD:?在 .env 中设置}
@@ -24,6 +28,44 @@ services:
       # 知识库向量化每批文本数；本地 CPU 向量模型（TEI fp16）较慢，建议 4，避免单批超时
       BIDCRAFT_KB_VECTOR_BATCH: ${BIDCRAFT_KB_VECTOR_BATCH:-16}
     mem_limit: 4g
+    cpus: "2.0"
+    pids_limit: 256
+    # 禁止容器内进程提权，并丢弃全部 Linux capabilities；配合镜像内固定 uid 10001 的非 root 用户。
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    # 应用优雅退出窗口为 30s；45s 让在途任务/后台 worker 收尾，避免被 SIGKILL 截断。
+    stop_grace_period: 45s
+    # Compose 只执行一个原生 healthcheck：绑定存活探针 /health/live（不查 DB）。
+    # 就绪探针 /health/ready 用 x- 扩展字段声明，供 K8s/反代/监控按同样路径配置；
+    # 未配置模型时 /health/ready 可能返回非 200，详见 deploy/README.md。
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=4).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    x-liveness-probe:
+      httpGet:
+        path: /health/live
+        port: 8000
+      initialDelaySeconds: 20
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 3
+    x-readiness-probe:
+      httpGet:
+        path: /health/ready
+        port: 8000
+      initialDelaySeconds: 20
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
     logging:
       driver: json-file
       options:

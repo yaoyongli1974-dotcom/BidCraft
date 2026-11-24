@@ -17,6 +17,7 @@ from ..jobqueue import (
     JobAborted,
     current_claim_token,
     fenced_job,
+    log_job_failure,
     mark_step_done,
     raise_if_aborted,
     step_status,
@@ -33,7 +34,7 @@ from ..services.job_support import (
     _report_payload,
 )
 
-logger = logging.getLogger("bidcraft.api")
+logger = logging.getLogger("bidcraft.workers")
 
 
 def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
@@ -222,7 +223,7 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
         # resumed attempt skips completed chapters via the idempotency ledger.
         logger.info("生成任务 %s 已中止，等待重新排队", job_id)
     except Exception:  # noqa: BLE001 - surfaced to the UI as a stable message
-        logger.exception("生成任务 %s 失败", job_id)
+        log_job_failure(logger)
         failed_message = "生成失败：模型服务不可用或响应异常，详情见服务日志"
         with session_scope() as db:
             row = fenced_job(db, job_id)

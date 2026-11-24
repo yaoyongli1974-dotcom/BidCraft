@@ -15,7 +15,7 @@ from ..db import session_scope
 from ..jobqueue import JobAborted, fenced_job
 from ..services.job_support import _fail_job
 
-logger = logging.getLogger("bidcraft.api")
+logger = logging.getLogger("bidcraft.workers")
 
 
 def _run_similarity_job(job_id: str) -> None:
@@ -85,7 +85,7 @@ def _run_similarity_job(job_id: str) -> None:
         # failed、不发布失败事件，也不要碰报告/命中。
         logger.info("查重任务 %s 已中止，等待重新排队", job_id)
     except Exception as exc:  # noqa: BLE001 - 失败原因落到 Job.result 供 UI 展示
-        logger.exception("查重任务 %s 失败", job_id)
+        jobqueue.log_job_failure(logger)
         with session_scope() as db:
             job = fenced_job(db, job_id)
             if job is not None:

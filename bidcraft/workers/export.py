@@ -17,12 +17,18 @@ from ..db import session_scope
 from ..export.docx import export_docx, export_markdown
 from ..export_gate import ExportGateError, enforce_export_gate
 from ..generation.outline import load_outline
-from ..jobqueue import JobAborted, assert_claim_current, fenced_job, raise_if_aborted
+from ..jobqueue import (
+    JobAborted,
+    assert_claim_current,
+    fenced_job,
+    log_job_failure,
+    raise_if_aborted,
+)
 from ..ledger import load_ledger
 from ..models import Project
 from ..services.job_support import _fail_job
 
-logger = logging.getLogger("bidcraft.api")
+logger = logging.getLogger("bidcraft.workers")
 
 
 def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None:
@@ -178,7 +184,7 @@ def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None
         # 中止不是业务失败：保持 running，由 reaper 重新排队。
         logger.info("批量导出任务 %s 已中止，等待重新排队", job_id)
     except Exception:  # noqa: BLE001 - surfaced to the UI as a stable message
-        logger.exception("批量导出任务 %s 失败", job_id)
+        log_job_failure(logger)
         failed_message = "批量导出失败：服务内部错误，详情见服务日志"
         with session_scope() as db:
             job = fenced_job(db, job_id)
