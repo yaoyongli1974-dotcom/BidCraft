@@ -67,4 +67,13 @@ RuntimeError: 启动配置校验失败：生产环境未配置模型（BIDCRAFT_
 
 ## 4. 修复后 CI 复验
 
-首个修复 SHA `0b3e59ce0699ca4fe9ff03ce089570c676667386` 触发 CI run `45568988988`：8/9 job SUCCESS，`docker (production image + compose hardening)` 仍 FAILED。根因是 YAML `run: |` 中把说明注释放在 `docker run \` 的续行参数之间，shell 把后续行当作注释吞掉，导致 `docker run` 缺少镜像参数（`docker: 'docker run' requires at least 1 argument`）。已将注释移到 `docker run` 之前，env 注入本身保持不变；这是同一获批 CI 冒烟修复的脚本位置修正。再次复验的 SHA 与 CI run 待回填。
+首个修复 SHA `0b3e59ce0699ca4fe9ff03ce089570c676667386` 触发 CI run `45568988988`：8/9 job SUCCESS，`docker (production image + compose hardening)` 仍 FAILED。根因是 YAML `run: |` 中把说明注释放在 `docker run \` 的续行参数之间，shell 把后续行当作注释吞掉，导致 `docker run` 缺少镜像参数（`docker: 'docker run' requires at least 1 argument`）。已将注释移到 `docker run` 之前，env 注入本身保持不变；这是同一获批 CI 冒烟修复的脚本位置修正。
+
+最终修复 SHA `64ab219b5cb61110acece55f4d28718a4ffd7a03` 触发 CI run `45570895467`：
+
+- Run URL：https://github.com/yaoyongli1974-dotcom/BidCraft/actions/runs/45570895467
+- 整体结论：`success`
+- 9/9 job SUCCESS：python-lint、python-tests、web、postgres real integration、docx render、docker image + compose hardening、dependency audit、bandit、secret scan。
+- docker job：https://github.com/yaoyongli1974-dotcom/BidCraft/actions/runs/45570895467/job/139056979532
+
+说明：G0 冻结的业务基线仍为 `978497247f033e79071a7b3e6692f712f58f04cc`；`0b3e59c` 与 `64ab219` 只包含 CI 冒烟脚本及其静态测试修复，不含业务代码、依赖、数据库或生产配置变更。**G1 判定：PASS（以最终 SHA `64ab219` 的 CI 成功为准）。**
