@@ -86,6 +86,10 @@ def test_ci_has_docker_image_job_with_image_assertions():
     # 当前 CLI 提供 version 子命令而非 --version 选项，两者都视为可执行的 CLI 门禁。
     assert "bidcraft --version" in scripts or "bidcraft version" in scripts
     assert "/health/live" in scripts
+    # prod 启动校验要求模型配置；CI smoke 用不可达地址满足配置校验，
+    # 不连接真实模型，也不触发任何生成调用（/health/live 无外部依赖）。
+    assert "BIDCRAFT_MODEL_BASE_URL=http://127.0.0.1:9/v1" in scripts
+    assert "BIDCRAFT_MODEL_NAME=rc-smoke-model" in scripts
     assert "env_file" in scripts, "compose 静态断言应覆盖 env_file"
 
 
