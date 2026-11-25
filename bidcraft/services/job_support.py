@@ -54,27 +54,32 @@ def _fail_job(db: Session, job: Job, message: str, error: str | None = None) -> 
         logger.exception("失败任务计费退还失败 job=%s", job.id)
 
     if not was_terminal:
-        job.status = "failed"
-        job.message = message
-        job.result = {"error": detail}
-        # Fence out a hung worker: its fenced_job() lookup compares the claim
-        # token, so once cleared (and the lease dropped) it can no longer
-        # overwrite this failed row with a late "done" write or event.
-        job.claim_token = None
-        job.lease_expires_at = None
-        job.claimed_at = None
-        job.worker_id = None
-        job.heartbeat_at = None
-        event_detail: dict[str, Any] = {**jobs.job_payload(job), "error": detail}
+        # 与 Reaper 的 _set_failed 使用同一条数据库条件状态转换：只有真正抢到
+        # running/queued → failed 的一方才写终态并发事件，避免两个并发失败路径
+        # 各写一条 failed 事件。clear_claim 同时把 token/租约清空，hung worker
+        # 的 fenced_job() 将不再能覆盖这条终态。
+        fresh = jobqueue.transition_job(
+            db,
+            job.id,
+            from_statuses=("queued", "running"),
+            to_status="failed",
+            token=job.claim_token or None,
+            message=message,
+            result={"error": detail},
+            clear_claim=True,
+        )
+        if fresh is None:
+            return
+        event_detail: dict[str, Any] = {**jobs.job_payload(fresh), "error": detail}
         if refunded:
             event_detail["refunded_credits"] = refunded
-        jobs.publish_event(job.id, "failed", event_detail, db=db)
+        jobs.publish_event(fresh.id, "failed", event_detail, db=db)
         if refund_error is not None:
             jobs.publish_event(
-                job.id,
+                fresh.id,
                 "refund_failed",
                 {
-                    "job_id": job.id,
+                    "job_id": fresh.id,
                     "error": refund_error,
                     "message": "失败任务计费退还失败，请人工对账",
                 },

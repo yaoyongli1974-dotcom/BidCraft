@@ -714,8 +714,12 @@ def transition_job(
         values["progress"] = progress
     if db.execute(statement.values(**values).returning(Job.id)).first() is None:
         return None
-    # Discard any identity-mapped snapshot from before the UPDATE.
-    db.expire_all()
+    # Discard the stale identity-mapped snapshot of THIS job only; expiring the
+    # whole Session would detach unrelated caller-owned objects (e.g. the User
+    # a route still needs after the transaction).
+    mapped = db.get(Job, job_id)
+    if mapped is not None:
+        db.expire(mapped)
     return db.get(Job, job_id)
 
 
@@ -1281,9 +1285,22 @@ def refund_charged_job(db, job: Job, written: int | None = None) -> int:
     job.refund_claimed = True
 
     if refund > 0:
-        billing.refund_chapters(
-            db, payee, refund, project_id=job.project_id or "", origin=f"job:{job.id}"
-        )
+        try:
+            billing.refund_chapters(
+                db, payee, refund, project_id=job.project_id or "", origin=f"job:{job.id}"
+            )
+        except Exception:
+            # A failed ledger write must leave the claim retryable; otherwise a
+            # transient DB error would permanently strand the refund.
+            db.execute(
+                update(Job)
+                .where(Job.id == job.id)
+                .values(refund_claimed=False),
+                execution_options={"synchronize_session": False},
+            )
+            job.refund_claimed = False
+            db.flush()
+            raise
     payload["refunded"] = True
     payload["refunded_credits"] = refund
     job.payload = payload
@@ -1346,9 +1363,20 @@ def settle_pending_charge(
     if not claimed.rowcount:
         return 0
     if refund > 0:
-        billing.refund_chapters(
-            db, payee, refund, project_id=str(project_id or ""), origin=f"marker:{marker.id}"
-        )
+        try:
+            billing.refund_chapters(
+                db, payee, refund, project_id=str(project_id or ""), origin=f"marker:{marker.id}"
+            )
+        except Exception:
+            # Release the marker claim so a later reconcile/settle can retry.
+            db.execute(
+                update(PendingCharge)
+                .where(PendingCharge.id == marker_id)
+                .values(status="pending", updated_at=utc_now())
+            )
+            marker.status = "pending"
+            db.flush()
+            raise
     marker.status = "refunded" if refund > 0 else "cleared"
     marker.refunded_credits = refund
     marker.updated_at = utc_now()
