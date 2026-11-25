@@ -1276,7 +1276,10 @@ def refund_charged_job(db, job: Job, written: int | None = None) -> int:
 
     claimed = db.execute(
         update(Job)
-        .where(Job.id == job.id, Job.refund_claimed == 0)
+        # PostgreSQL stores this as BOOLEAN: comparing with the Python int 0
+        # would render ``refund_claimed = 0`` and fail with "boolean = integer".
+        # .is_(False) is portable on both SQLite and PostgreSQL.
+        .where(Job.id == job.id, Job.refund_claimed.is_(False))
         .values(refund_claimed=True),
         execution_options={"synchronize_session": False},
     )
