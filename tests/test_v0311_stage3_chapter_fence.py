@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from sqlalchemy import select
 
 from bidcraft import jobqueue
+from bidcraft.clock import utc_now
 from bidcraft.config import settings
 from bidcraft.db import session_scope
 from bidcraft.generation.agent import ModelClient
@@ -32,7 +35,12 @@ def _prepare(tender_path):
 
 def _seed_job() -> str:
     with session_scope() as db:
-        job = Job(kind="generate", status="running", claim_token=TOKEN)
+        job = Job(
+            kind="generate",
+            status="running",
+            claim_token=TOKEN,
+            lease_expires_at=utc_now() + timedelta(seconds=300),
+        )
         db.add(job)
         db.flush()
         return job.id

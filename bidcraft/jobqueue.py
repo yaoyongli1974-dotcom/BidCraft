@@ -236,7 +236,10 @@ def commit_fenced_result(job_id: str) -> Iterator[tuple[Any, Job]]:
                 Job.id == job_id,
                 Job.status == "running",
                 Job.claim_token == token,
-                or_(Job.lease_expires_at.is_(None), Job.lease_expires_at >= now),
+                # NULL lease is an expired/unclaimed lease: it must never
+                # authorize a terminal write.  Heartbeat already rejects it.
+                Job.lease_expires_at.is_not(None),
+                Job.lease_expires_at >= now,
             )
             .values(updated_at=now)
             .returning(Job.id)

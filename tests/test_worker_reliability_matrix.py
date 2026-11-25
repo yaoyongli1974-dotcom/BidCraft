@@ -10,12 +10,14 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 from sqlalchemy import select
 
 from bidcraft import jobqueue
+from bidcraft.clock import utc_now
 from bidcraft.db import session_scope
 from bidcraft.jobqueue import JobAborted, claim_context
 from bidcraft.models import Job, JobEvent
@@ -25,7 +27,12 @@ TOKEN = "stage4-terminal-token"
 
 def _seed_job(*, kind: str = "agent") -> str:
     with session_scope() as db:
-        job = Job(kind=kind, status="running", claim_token=TOKEN)
+        job = Job(
+            kind=kind,
+            status="running",
+            claim_token=TOKEN,
+            lease_expires_at=utc_now() + timedelta(seconds=300),
+        )
         db.add(job)
         db.flush()
         return job.id
