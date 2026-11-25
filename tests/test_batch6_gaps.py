@@ -270,7 +270,10 @@ def test_hit_payload_exposes_evidence_and_rerank_order(db, monkeypatch):
 
 
 def test_similarity_check_enqueues_job_without_blocking(db, monkeypatch):
+    from datetime import timedelta
+
     from bidcraft import jobqueue
+    from bidcraft.clock import utc_now
     from bidcraft.db import session_scope
     from bidcraft.models import Job
     from bidcraft.workers.similarity import _run_similarity_job
@@ -292,7 +295,11 @@ def test_similarity_check_enqueues_job_without_blocking(db, monkeypatch):
         job = session.get(Job, body["job_id"])
         assert job.kind == "similarity"
         assert job.payload["report_id"] == report_id
+        # 模拟真实认领：终态写入现在要求 running + token + 有效 lease，
+        # Worker 入口也要求 status == running（阶段1/4 加固）。
+        job.status = "running"
         job.claim_token = "batch6-test-token"
+        job.lease_expires_at = utc_now() + timedelta(seconds=300)
         session.flush()
 
     with jobqueue.claim_context("batch6-test-token"):
