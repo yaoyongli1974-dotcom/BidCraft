@@ -67,4 +67,4 @@ RuntimeError: 启动配置校验失败：生产环境未配置模型（BIDCRAFT_
 
 ## 4. 修复后 CI 复验
 
-待新 SHA 的 CI 完成后回填。
+首个修复 SHA `0b3e59ce0699ca4fe9ff03ce089570c676667386` 触发 CI run `45568988988`：8/9 job SUCCESS，`docker (production image + compose hardening)` 仍 FAILED。根因是 YAML `run: |` 中把说明注释放在 `docker run \` 的续行参数之间，shell 把后续行当作注释吞掉，导致 `docker run` 缺少镜像参数（`docker: 'docker run' requires at least 1 argument`）。已将注释移到 `docker run` 之前，env 注入本身保持不变；这是同一获批 CI 冒烟修复的脚本位置修正。再次复验的 SHA 与 CI run 待回填。
