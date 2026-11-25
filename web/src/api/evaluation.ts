@@ -123,6 +123,12 @@ export function normalizeQualityFinding(value: unknown): QualityFinding {
       raw.resolution_note ?? evidence.resolution_note ?? '',
     ),
     resolved_by: String(raw.resolved_by ?? evidence.resolved_by ?? ''),
+    resolved_at:
+      typeof raw.resolved_at === 'string' && raw.resolved_at.trim()
+        ? raw.resolved_at
+        : typeof evidence.resolved_at === 'string' && evidence.resolved_at.trim()
+          ? evidence.resolved_at
+          : null,
   }
 }
 

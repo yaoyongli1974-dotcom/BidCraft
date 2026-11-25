@@ -27,7 +27,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { useWorkspace } from '../useWorkspace'
-import { getLedger, updateFact } from '../../api/ledger'
+import { getLedger, mergeFactUpdate, updateFact } from '../../api/ledger'
 import { messageOf } from '../../lib/http'
 import type { Fact, Ledger } from '../../lib/types'
 import {
@@ -36,6 +36,7 @@ import {
   confidenceText,
   factGroups,
   factStatus,
+  formatDate,
   formatNumber,
   requirementKind,
   riskLevel,
@@ -68,6 +69,29 @@ interface EditState {
   key: string
   value: string
   status: string
+  /** 来源证据：确认 / 手工录入必需，服务端在写库时校验。 */
+  source_file_id: string
+  source_quote: string
+  source_page: string
+}
+
+const EVIDENCE_REQUIRED_STATUSES = new Set(['confirmed', 'manual'])
+
+function evidenceFromEdit(edit: EditState): {
+  source_file_id?: string
+  source_quote?: string
+  source_page?: number
+} {
+  const evidence: { source_file_id?: string; source_quote?: string; source_page?: number } = {}
+  const fileId = edit.source_file_id.trim()
+  const quote = edit.source_quote.trim()
+  const rawPage = edit.source_page.trim()
+  if (fileId) evidence.source_file_id = fileId
+  if (quote) evidence.source_quote = quote
+  if (rawPage && Number.isFinite(Number(rawPage))) {
+    evidence.source_page = Math.round(Number(rawPage))
+  }
+  return evidence
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {
@@ -92,11 +116,14 @@ export function LedgerTab() {
   const [savingKey, setSavingKey] = useState<string | null>(null)
   const [savedKey, setSavedKey] = useState<string | null>(null)
   const [rowError, setRowError] = useState<{ key: string; message: string } | null>(null)
+  const [staleNotice, setStaleNotice] = useState<{ key: string; headings: string[] } | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({})
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({})
   const lastScrolledRef = useRef<string | null>(null)
   const ledger = ledgerQuery.data
+  /** 只读成员（包括项目 viewer）不能进入编辑或保存事实。 */
+  const writable = canWrite && !readOnly
 
   const hasOpenEdit = Boolean(edit)
 
@@ -259,7 +286,7 @@ export function LedgerTab() {
   }
 
   const startEdit = async (fact: Fact) => {
-    if (!canWrite) return
+    if (!writable) return
     if (edit && edit.key !== fact.key) {
       const accepted = await confirm({
         title: '切换编辑字段？',
@@ -269,36 +296,47 @@ export function LedgerTab() {
       })
       if (!accepted) return
     }
+    // 人工改写一律先按「手工录入」处理；只有服务端能盖章「已确认」。
+    const page = fact.source_page ?? fact.source?.page
     setEdit({
       key: fact.key,
       value: fact.value || '',
-      status: fact.value
-        ? fact.status === 'manual'
-          ? 'manual'
-          : fact.status === 'conflict'
-            ? 'confirmed'
-            : 'confirmed'
-        : 'manual',
+      status: 'manual',
+      source_file_id: fact.source_file_id || '',
+      source_quote: fact.source_quote || fact.source?.quote || '',
+      source_page: page === null || page === undefined ? '' : String(page),
     })
     setRowError(null)
   }
 
   const saveFact = async (fact: Fact) => {
-    if (!canWrite || !edit || savingKey) return
+    if (!writable || !edit || savingKey) return
     const value = edit.value.trim()
-    const status = value ? (edit.status === 'missing' ? 'confirmed' : edit.status) : 'missing'
+    const status = value ? edit.status : 'missing'
+    const evidence = evidenceFromEdit(edit)
+    if (
+      EVIDENCE_REQUIRED_STATUSES.has(status) &&
+      (!evidence.source_file_id ||
+        !evidence.source_quote ||
+        !evidence.source_page ||
+        evidence.source_page <= 0)
+    ) {
+      setRowError({
+        key: fact.key,
+        message: '手工录入 / 已确认必须提供真实来源文件 ID、原文摘录与正整数页码。',
+      })
+      return
+    }
     setSavingKey(fact.key)
     setRowError(null)
     try {
-      const updated = await updateFact(ref, fact.key, value, status)
+      const updated = await updateFact(ref, fact.key, value, status, evidence)
       ledgerQuery.setData((current) =>
         current
           ? {
               ...current,
               facts: current.facts.map((item) =>
-                item.key === fact.key
-                  ? { ...item, value: updated.value, status: updated.status }
-                  : item,
+                item.key === fact.key ? mergeFactUpdate(item, updated) : item,
               ),
             }
           : current,
@@ -306,19 +344,24 @@ export function LedgerTab() {
       setEdit(null)
       setSavedKey(fact.key)
       window.setTimeout(() => setSavedKey(null), 2400)
+      // 只展示服务端真实返回的陈旧引用，不在前端推断「正文可能过期」。
       const stale = updated.stale_sections || []
       if (stale.length > 0) {
         const headings = stale
           .map((item) => item.heading)
           .filter(Boolean)
           .slice(0, 3)
-          .join('、')
+        setStaleNotice({ key: fact.key, headings })
         toast.warning(
           '已标记待复核的章节',
           `${stale.length} 个章节引用过旧值${
-            headings ? `（${headings}${stale.length > 3 ? ' 等' : ''}）` : ''
+            headings.length
+              ? `（${headings.join('、')}${stale.length > 3 ? ' 等' : ''}）`
+              : ''
           }，请按新值核对正文。`,
         )
+      } else {
+        setStaleNotice(null)
       }
       setHighlight((current) => {
         const next = new Set(current)
@@ -581,8 +624,9 @@ export function LedgerTab() {
                 <span role="columnheader">字段</span>
                 <span role="columnheader">取值</span>
                 <span role="columnheader">状态</span>
+                <span role="columnheader">确认信息</span>
                 <span role="columnheader">置信度</span>
-                <span role="columnheader">原文出处</span>
+                <span role="columnheader">来源证据</span>
               </div>
               {groupedFacts.map((group) => {
                 const isCollapsed = Boolean(collapsedGroups[group.id])
@@ -613,13 +657,16 @@ export function LedgerTab() {
                         <FactRow
                           key={fact.key}
                           fact={fact}
-                          readOnly={!canWrite}
+                          readOnly={!writable}
                           editing={edit?.key === fact.key}
                           edit={edit}
                           saving={savingKey === fact.key}
                           saved={savedKey === fact.key}
                           highlighted={highlight.has(fact.key)}
                           error={rowError?.key === fact.key ? rowError.message : null}
+                          staleHeadings={
+                            staleNotice?.key === fact.key ? staleNotice.headings : []
+                          }
                           rowRef={(element) => {
                             rowRefs.current[fact.key] = element
                           }}
@@ -638,6 +685,11 @@ export function LedgerTab() {
                               current ? { ...current, status } : current,
                             )
                           }
+                          onChangeEvidence={(field, value) =>
+                            setEdit((current) =>
+                              current ? { ...current, [field]: value } : current,
+                            )
+                          }
                           onSave={() => void saveFact(fact)}
                         />
                       ))}
@@ -648,7 +700,7 @@ export function LedgerTab() {
           )
         ) : activeTab === 'scoring' ? (
           <div className="tab-stack">
-            <ScoreBackfill projectId={project?.id || ref || ''} canWrite={canWrite} />
+            <ScoreBackfill projectId={project?.id || ref || ''} canWrite={writable} />
             <ReadonlyLedger
               tab={activeTab}
               ledger={ledger}
@@ -671,7 +723,7 @@ export function LedgerTab() {
 
       <p className="ledger-footnote">
         字段状态：已提取（规则命中）、已确认（人工核对）、手工录入（人工补充）、缺失、取值冲突。
-        来源引用保留原文件与页码，可直接回查。
+        人工改写默认为手工录入；确认人与时间由服务端记录。来源证据保留文件、原文与页码，可直接回查。
       </p>
     </div>
   )
@@ -686,11 +738,13 @@ function FactRow({
   saved,
   highlighted,
   error,
+  staleHeadings,
   rowRef,
   onStartEdit,
   onCancelEdit,
   onChange,
   onChangeStatus,
+  onChangeEvidence,
   onSave,
 }: {
   fact: Fact
@@ -701,11 +755,13 @@ function FactRow({
   saved: boolean
   highlighted: boolean
   error: string | null
+  staleHeadings: string[]
   rowRef: (element: HTMLDivElement | null) => void
   onStartEdit: () => void
   onCancelEdit: () => void
   onChange: (value: string) => void
   onChangeStatus: (status: string) => void
+  onChangeEvidence: (field: 'source_file_id' | 'source_quote' | 'source_page', value: string) => void
   onSave: () => void
 }) {
   const status = factStatus(fact.status)
@@ -782,6 +838,42 @@ function FactRow({
                 保存
               </Button>
             </div>
+            <div className="fact-evidence-fields">
+              <label className="fact-evidence-field">
+                <span>源文件 ID</span>
+                <input
+                  className="input input--sm"
+                  aria-label={`来源文件 ID：${fact.label}`}
+                  placeholder="源文件 id（真实值）"
+                  value={edit.source_file_id}
+                  onChange={(event) => onChangeEvidence('source_file_id', event.target.value)}
+                />
+              </label>
+              <label className="fact-evidence-field">
+                <span>原文摘录</span>
+                <input
+                  className="input input--sm"
+                  aria-label={`原文摘录：${fact.label}`}
+                  placeholder="招标文件原文"
+                  value={edit.source_quote}
+                  onChange={(event) => onChangeEvidence('source_quote', event.target.value)}
+                />
+              </label>
+              <label className="fact-evidence-field fact-evidence-field--page">
+                <span>页码</span>
+                <input
+                  className="input input--sm"
+                  aria-label={`来源页码：${fact.label}`}
+                  inputMode="numeric"
+                  placeholder="页码"
+                  value={edit.source_page}
+                  onChange={(event) => onChangeEvidence('source_page', event.target.value)}
+                />
+              </label>
+            </div>
+            <p className="fact-evidence-hint">
+              手工录入 / 已确认必须提供本项目的真实源文件 ID、原文摘录与页码；确认人与时间由服务端记录。
+            </p>
             {error && (
               <div className="row-error" role="alert">
                 {error}
@@ -811,6 +903,12 @@ function FactRow({
             <Check size={12} /> 已保存
           </span>
         )}
+        {staleHeadings.length > 0 && (
+          <span className="stale-warning" role="alert">
+            <AlertTriangle size={12} /> 正文仍引用旧值：{staleHeadings.join('、')}，
+            需人工复核章节。
+          </span>
+        )}
         {fact.required && missingRequired && (
           <span className="missing-hint">
             <AlertTriangle size={12} /> 必填缺失，会阻止生成
@@ -824,6 +922,17 @@ function FactRow({
         </Badge>
         {fact.status === 'conflict' && (
           <span className="fact-conflict">多处取值冲突，请人工裁决</span>
+        )}
+      </div>
+
+      <div className="fact-confirm-cell" role="cell">
+        {fact.confirmed_by || fact.confirmed_at ? (
+          <>
+            <span className="fact-confirm-by">{fact.confirmed_by || '—'}</span>
+            <span className="fact-confirm-at mono">{formatDate(fact.confirmed_at)}</span>
+          </>
+        ) : (
+          <span className="subtle">未确认</span>
         )}
       </div>
 
@@ -850,13 +959,30 @@ function FactRow({
       <div className="fact-source-cell" role="cell">
         <SourceQuote
           compact
-          quote={fact.source?.quote}
-          file={fact.source?.file}
-          page={fact.source?.page}
+          quote={fact.source_quote || fact.source?.quote}
+          file={
+            fact.source?.file ||
+            fact.source_file_name ||
+            fact.source_file_id ||
+            undefined
+          }
+          page={fact.source_page ?? fact.source?.page}
           summaryLabel={
-            fact.source?.page ? `原文 · p.${fact.source.page}` : undefined
+            fact.source_page
+              ? `原文 · p.${fact.source_page}`
+              : fact.source?.page
+                ? `原文 · p.${fact.source.page}`
+                : undefined
           }
         />
+        {fact.source_file_name && (
+          <span className="fact-source-name">{fact.source_file_name}</span>
+        )}
+        {fact.source_file_id && (
+          <span className="fact-source-id mono" title="来源文件 id">
+            ID {fact.source_file_id}
+          </span>
+        )}
       </div>
     </div>
   )

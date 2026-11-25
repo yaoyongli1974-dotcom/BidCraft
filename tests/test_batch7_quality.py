@@ -139,6 +139,39 @@ def test_finding_status_allowlist_returns_422(db, monkeypatch, bad):
     assert resp.status_code == 422, resp.text
 
 
+def test_re_evaluation_carries_prior_finding_disposition(db, monkeypatch):
+    client = _client(monkeypatch)
+    project_id = _project(client, "b7-disposition-carry")
+    finding_id, first_report_id = _finding_in(client, project_id)
+    patched = client.patch(
+        f"/projects/{project_id}/evaluation/findings/{finding_id}",
+        json={"status": "handled", "note": "已在正文补充承诺"},
+    )
+    assert patched.status_code == 200, patched.text
+
+    second = client.post(f"/projects/{project_id}/evaluation/run", json={})
+    assert second.status_code == 201, second.text
+    second_report_id = second.json()["id"]
+    assert second_report_id != first_report_id
+
+    with session_scope() as sess:
+        original = sess.get(QualityFinding, finding_id)
+        assert original.status == "handled"
+        new = sess.scalar(
+            select(QualityFinding).where(
+                QualityFinding.report_id == second_report_id,
+                QualityFinding.title.contains("B7-FINDING"),
+            )
+        )
+        assert new is not None
+        assert new.id != finding_id  # 新报告仍是独立可审计的新行
+        assert new.report_id == second_report_id
+        assert new.status == "handled"
+        assert new.evidence["resolution_note"] == "已在正文补充承诺"
+        assert new.evidence["resolved_by"] == "admin"
+        assert new.evidence["disposition_from_finding_id"] == finding_id
+
+
 # --------------------------------------------------------------------------- #
 # Gap 6: evaluation Job retry must not create a second QualityReport
 # --------------------------------------------------------------------------- #

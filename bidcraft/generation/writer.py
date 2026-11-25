@@ -499,12 +499,16 @@ def generate_document(
     it for chapter-level fencing).  In that mode the long generation session no
     longer writes Section/OutlineNode at all.
     """
+    from ..evaluation.learning import LESSON_LABEL, lessons_block
     from .chapter_plan import plan_context_text
     from .outline import load_outline
 
     nodes = load_outline(db, project_id)
     project = db.get(Project, project_id)
     facts_text = ""
+    # 历史处置经验是「未审核建议」，只作为提示词里的显式附段，绝不并入台账事实。
+    # 只读聚合不写 KB/企业资产；按项目取一次，章节级过滤交给规划提示词。
+    lessons_text = lessons_block(db, project) if project is not None else ""
     if project is not None:
         from ..profile import facts_block
         from ..profile import load as load_profile
@@ -515,6 +519,14 @@ def generate_document(
         extra = score_hints(db, project)
         if extra:
             facts_text = f"{facts_text}\n{extra}" if facts_text else extra
+        if lessons_text:
+            facts_text = (
+                f"{facts_text}\n\n" if facts_text else ""
+            ) + (
+                f"【{LESSON_LABEL}（非核实事实，仅供人工复核参考，不得作为正文事实引用）】\n"
+                f"{lessons_text}\n"
+                "以上建议经验结束；不属于事实台账，正文中不得当作已核实事实使用。"
+            )
     report = GenerationReport()
     previous_texts: list[str] = []
     chapters: list[tuple[str, str]] = []
@@ -528,7 +540,9 @@ def generate_document(
             "target_words": int(node.get("target_words") or 0),
         }
         plan = plan_provider(node["id"]) if plan_provider is not None else None
-        plan_text = plan_context_text(plan) if plan is not None else ""
+        plan_text = (
+            plan_context_text(plan, lessons_text=lessons_text) if plan is not None else ""
+        )
         if plan is not None:
             info.update(
                 {

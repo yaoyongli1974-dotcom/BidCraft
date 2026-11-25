@@ -150,3 +150,13 @@ def test_contract_parsers_are_not_empty() -> None:
     for surface, name in ((backend, "backend"), (vite, "vite"), (desktop_surface, "desktop")):
         missing = _EXPECTED_CORE - surface
         assert not missing, f"{name} contract surface lost: {sorted(missing)}"
+
+
+def test_lessons_endpoint_stays_a_project_scoped_read():
+    """经验摘要挂在既有 projects 命名空间下，且只有 GET（viewer 可读）。"""
+
+    source = (ROUTES_DIR / "projects.py").read_text(encoding="utf-8")
+    assert '@router.get("/projects/{ref}/lessons")' in source
+    for verb in ("post", "put", "patch", "delete"):
+        assert f'@router.{verb}("/projects/{{ref}}/lessons")' not in source
+    assert "projects" in backend_namespaces()

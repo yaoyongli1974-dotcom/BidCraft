@@ -68,4 +68,26 @@ describe('normalizeQualityFinding', () => {
     expect(f.node_id).toBeNull()
     expect(f.level).toBe('major')
   })
+
+  it('reads resolved_at from the finding or its evidence without inventing a time', () => {
+    const topLevel = normalizeQualityFinding({
+      id: 'f1',
+      status: 'handled',
+      resolved_by: 'alice',
+      resolved_at: '2026-11-25T10:00:00Z',
+    })
+    expect(topLevel.resolved_at).toBe('2026-11-25T10:00:00Z')
+    expect(topLevel.resolved_by).toBe('alice')
+
+    const nested = normalizeQualityFinding({
+      id: 'f2',
+      status: 'ignored',
+      evidence: { resolved_by: 'bob', resolved_at: '2026-11-24T09:00:00Z' },
+    })
+    expect(nested.resolved_by).toBe('bob')
+    expect(nested.resolved_at).toBe('2026-11-24T09:00:00Z')
+
+    const open = normalizeQualityFinding({ id: 'f3', status: 'open', resolved_at: null })
+    expect(open.resolved_at).toBeNull()
+  })
 })

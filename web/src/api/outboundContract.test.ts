@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { generateChapterPlan, updateChapterPlan } from './generation'
+import { updateFact } from './ledger'
+import { getProjectLessons, lessonQuery } from './learning'
 import { reviewEnterpriseKnowledgeAsset, resolveEnterpriseKnowledgeAssetDuplicate } from './enterprise'
 import { previewProjectRetrieval } from './retrieval'
 import { resolveKnowledgeAssetDuplicate, reviewKnowledgeAsset } from './knowledge'
@@ -35,6 +37,9 @@ const BACKEND_KEYS = {
   similarityHitReview: ['status', 'note'],
   kbDocIngest: ['source', 'content', 'kind', 'tags', 'valid_to'],
   qualityFindingUpdate: ['status', 'note'],
+  // FactUpdate：确认人 / 确认时间由服务端盖章，绝不下发。
+  factUpdate: ['value', 'status', 'source_file_id', 'source_quote', 'source_page'],
+  lessonQuery: ['node_id', 'limit'],
   commercialReview: ['action', 'note', 'require_complete'],
   chapterPlanGenerate: ['user_instruction', 'package_id', 'regenerate', 'note'],
   chapterPlanUpdate: [
@@ -381,5 +386,84 @@ describe('出站契约：UI payload 对齐后端枚举与字段', () => {
     expect(task.tool_calls![0].audit_id).toBe('a1')
     expect(normalizeWorkflowTask({ id: 't2', output: { tool_calls: 'bad' } })!.tool_calls).toEqual([])
     expect(normalizeWorkflowRun({ id: 'run-2', result: { tool_calls: 42 } })!.tool_calls).toEqual([])
+  })
+
+  it('事实改写只提交后端接受的 value/status/source_*，确认信息不伪造', async () => {
+    const fetchMock = mockFetch({
+      key: 'f1',
+      value: '新值',
+      status: 'manual',
+      confirmed_by: 'alice',
+      confirmed_at: '2026-11-25T10:00:00Z',
+      source_file_id: 'src-1',
+      source_quote: '招标文件原文',
+      source_page: 3,
+    })
+
+    await updateFact('p1', 'f1', '新值', 'manual', {
+      source_file_id: 'src-1',
+      source_quote: '招标文件原文',
+      source_page: 3,
+    })
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('/projects/p1/facts/f1')
+    expect(init?.method).toBe('PATCH')
+    const body = assertBody(
+      JSON.parse(String(init?.body)),
+      BACKEND_KEYS.factUpdate,
+      'fact update',
+    )
+    expect(body).toEqual({
+      value: '新值',
+      status: 'manual',
+      source_file_id: 'src-1',
+      source_quote: '招标文件原文',
+      source_page: 3,
+    })
+    expect(Object.prototype.hasOwnProperty.call(body, 'confirmed_by')).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(body, 'confirmed_at')).toBe(false)
+
+    await updateFact('p1', 'f1', '另一值', 'manual')
+    const minimal = assertBody(
+      JSON.parse(String(fetchMock.mock.calls[1][1]?.body)),
+      BACKEND_KEYS.factUpdate,
+      'fact update (minimal)',
+    )
+    expect(minimal).toEqual({ value: '另一值', status: 'manual' })
+  })
+
+  it('建议经验查询只带 node_id / limit，且只回读服务端状态', async () => {
+    const fetchMock = mockFetch({
+      items: [
+        {
+          id: 'l1',
+          source: 'finding',
+          kind: 'revision',
+          text: '建议补充盖章页',
+          node_id: 'n1',
+          created_at: '2026-11-25T10:00:00Z',
+          author: 'alice',
+          status: '未审核建议经验',
+        },
+      ],
+      node_id: 'n1',
+      status: '未审核建议经验',
+    })
+
+    const result = await getProjectLessons('p 1', { node_id: ' n1 ', limit: 5 })
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('/projects/p%201/lessons?node_id=n1&limit=5')
+    expect(init?.method).toBeUndefined()
+    const params = new URL(url, 'http://localhost').searchParams
+    expect(
+      Array.from(params.keys()).every((key) =>
+        BACKEND_KEYS.lessonQuery.includes(key as (typeof BACKEND_KEYS.lessonQuery)[number]),
+      ),
+    ).toBe(true)
+    expect(lessonQuery({})).toBe('')
+    expect(result.status).toBe('未审核建议经验')
+    expect(result.items[0].text).toBe('建议补充盖章页')
+    expect('verified' in result.items[0]).toBe(false)
+    expect('is_law' in result.items[0]).toBe(false)
   })
 })

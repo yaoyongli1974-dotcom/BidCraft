@@ -12,6 +12,13 @@ from .coverage import (
     calculate_requirement_coverage,
     calculate_scoring_coverage,
 )
+from .learning import (
+    LESSON_LABEL,
+    MAX_LESSONS,
+    lesson_items,
+    lessons_block,
+    lessons_payload,
+)
 from .quality_metrics import collect_quality_metrics
 from .report import (
     FINDING_STATUSES,
@@ -43,6 +50,8 @@ __all__ = [
     "DATASET_SCHEMA",
     "DIMENSION_WEIGHTS",
     "FINDING_STATUSES",
+    "LESSON_LABEL",
+    "MAX_LESSONS",
     "build_quality_report",
     "build_risk_recommendations",
     "calculate_chapter_coverage",
@@ -62,6 +71,9 @@ __all__ = [
     "find_report_for_job",
     "finding_for_project",
     "finding_payload",
+    "lesson_items",
+    "lessons_block",
+    "lessons_payload",
     "list_reports",
     "load_dataset",
     "load_report",

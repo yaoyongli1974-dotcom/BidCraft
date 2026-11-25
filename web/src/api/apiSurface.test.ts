@@ -9,6 +9,7 @@ const API_LITERALS = [
   '/packages',
   '/projects',
   '/projects/ref/commercial',
+  '/projects/ref/lessons',
   '/projects/ref/retrieval/preview',
   '/projects/ref/similarity/reports',
   '/projects/ref/workflows',

@@ -2,8 +2,10 @@
 
 三项指标的分母在这里逐一固定，避免调用方自行推断：
 
-* ``manual_edit_rate`` = 有正文的章节中 ``revision > 1`` 的比例
-  （分母：``body`` 去除空白后非空的章节数；分母为 0 → 0.0）。
+* ``manual_edit_rate`` = 有正文的章节中留下人工修订（且仅有
+  ``SectionRevision.change_type='edit'`` 算人工修改，``restore``/``generate``
+  不算）的比例（分母：``body`` 去除空白后非空的章节数；分母为 0 → 0.0）。
+  有修订快照时只认真实 ``edit`` 行；没有快照的历史章节才回退到 ``revision > 1``。
 * ``issue_density`` = 未处置且级别为 blocking/major 的质量 finding 数 /
   章节正文总词数 × 1000（分母：章节正文词数，按
   ``generation.writer.count_words`` 口径：中日韩字符逐字 + 拉丁字母/数字词块；
@@ -32,7 +34,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import boq
-from ..models import BoqSnapshot, Material, OutlineNode, QualityFinding, QualityReport, Section
+from ..models import (
+    BoqSnapshot,
+    Material,
+    OutlineNode,
+    QualityFinding,
+    QualityReport,
+    Section,
+    SectionRevision,
+)
 
 logger = logging.getLogger("bidcraft.evaluation.quality_metrics")
 
@@ -87,6 +97,7 @@ def _section_metrics(db: Session, project_id: str, metrics: dict[str, Any]) -> N
     rows = db.execute(
         select(
             Section.id,
+            Section.node_id,
             OutlineNode.heading,
             Section.body,
             Section.revision,
@@ -95,12 +106,30 @@ def _section_metrics(db: Session, project_id: str, metrics: dict[str, Any]) -> N
         .where(OutlineNode.project_id == project_id)
     ).all()
     written_rows = [
-        (section_id, heading, str(body or ""), int(revision or 0))
-        for section_id, heading, body, revision in rows
+        (section_id, node_id, heading, str(body or ""), int(revision or 0))
+        for section_id, node_id, heading, body, revision in rows
         if str(body or "").strip()
     ]
-    written = [body for _sid, _heading, body, _rev in written_rows]
-    edited = sum(1 for _sid, _heading, _body, revision in written_rows if revision > 1)
+    written = [body for _sid, _nid, _heading, body, _rev in written_rows]
+    # 人工修改只认真实的 edit 修订；restore/generate 不计。有快照的章节严格按
+    # 快照判定（即使 Section.revision 因回滚/重新生成而 >1）；完全没有快照的
+    # 历史章节沿用旧的 revision > 1 回退口径，避免历史数据全部归零。
+    revision_types: dict[str, set[str]] = {}
+    for node_id, change_type in db.execute(
+        select(SectionRevision.node_id, SectionRevision.change_type).where(
+            SectionRevision.project_id == project_id
+        )
+    ):
+        revision_types.setdefault(str(node_id), set()).add(_normalized(change_type))
+    def is_edited(node_id: str, revision: int) -> bool:
+        types = revision_types.get(str(node_id))
+        return "edit" in types if types else revision > 1
+
+    edited = sum(
+        1
+        for _sid, node_id, _heading, _body, revision in written_rows
+        if is_edited(node_id, revision)
+    )
     metrics["manual_edit_rate"] = _rate(edited, len(written))
     metrics["coverage"]["manual_edit_rate"] = {
         "numerator": edited,
@@ -113,11 +142,15 @@ def _section_metrics(db: Session, project_id: str, metrics: dict[str, Any]) -> N
             "section_id": section_id,
             "heading": heading,
             "revision": revision,
-            "edited": revision > 1,
+            "edited": is_edited(node_id, revision),
         }
-        for section_id, heading, _body, revision in written_rows[:MAX_SAMPLES]
+        for section_id, node_id, heading, _body, revision in written_rows[:MAX_SAMPLES]
     ]
     metrics["notes"].append(f"manual_edit_rate 分母: {len(written)} 个有正文的章节")
+    metrics["notes"].append(
+        "manual_edit_rate 计数: SectionRevision.change_type='edit'（restore/generate 不计）；"
+        "无修订快照的历史章节按 revision>1 回退"
+    )
 
     findings = db.execute(
         select(

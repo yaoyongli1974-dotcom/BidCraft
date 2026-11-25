@@ -109,8 +109,18 @@ class RulePackageValidateRequest(BaseModel):
 
 
 class FactUpdate(BaseModel):
+    """人工修正事实；确认状态必须携带可核验的真实来源证据。
+
+    ``key`` 由路由路径注入（CLI 显式传入），其余字段保持旧客户端兼容。
+    """
+
+    key: str = ""
     value: str
+    unit: str | None = None
     status: Literal["extracted", "confirmed", "manual", "missing", "conflict"] = "confirmed"
+    source_file_id: str | None = None
+    source_quote: str = ""
+    source_page: int = 0
 
 
 class OutlineRequest(BaseModel):
@@ -132,6 +142,8 @@ class OutlineSave(BaseModel):
 class ChapterSave(BaseModel):
     body: str = Field(max_length=200000)
     base_revision: int | None = None
+    #: 人工修改说明：进入修订快照与审计 detail，供经验回流消费；缺省空串保持兼容。
+    change_note: str = Field(default="", max_length=500)
 
 
 class ChapterReview(BaseModel):

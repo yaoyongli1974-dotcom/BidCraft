@@ -31,7 +31,8 @@ from ..models import (
 )
 
 #: 提示词版本：规划格式变化时必须 bump，便于追溯 prompt ↔ 规划版本。
-PROMPT_VERSION = "chapter_plan_v2"
+#: v3：规划提示词新增「历史人工调整 / 未审核建议经验」两段显式 advisory。
+PROMPT_VERSION = "chapter_plan_v3"
 
 # 状态机（大写值便于日志/审计阅读）。
 NOT_CREATED = "NOT_CREATED"
@@ -437,8 +438,14 @@ def build_plan_context(
     knowledge_provider: Callable[[str], Any] | None = None,
     user_id: str | None = None,
     package_id: str | None = None,
+    lessons_text: str = "",
 ) -> dict[str, Any]:
-    """在短会话里构造规划输入；只收集真实行，不含任何生成的 ID。"""
+    """在短会话里构造规划输入；只收集真实行，不含任何生成的 ID。
+
+    ``lessons_text`` 是 :func:`bidcraft.evaluation.learning.lessons_block` 产出的
+    未审核建议经验，原样透传到上下文；它只作为提示词参考，不会被当作真实引用 ID
+    来源，也不参与引用校验。
+    """
 
     node_id = _ident(node)
     project = db.get(Project, project_id)
@@ -513,6 +520,7 @@ def build_plan_context(
         "target_words": int(getattr(node, "target_words", 0) or 0),
         "needs": [str(item) for item in needs],
         "user_instruction": _text(user_instruction),
+        "lessons_text": _text(lessons_text),
         "scoring": [
             {
                 "id": row.id,
@@ -1110,8 +1118,14 @@ def mark_plan_used(db: Session, plan: ChapterPlan | None) -> ChapterPlan | None:
     return plan
 
 
-def plan_context_text(plan: ChapterPlan | None, *, cap: int = _MAX_PLAN_CONTEXT) -> str:
-    """把已确认规划转成正文提示词可插入的纯文本。"""
+def plan_context_text(
+    plan: ChapterPlan | None, *, lessons_text: str = "", cap: int = _MAX_PLAN_CONTEXT
+) -> str:
+    """把已确认规划转成正文提示词可插入的纯文本。
+
+    人工调整与历史经验都放在显式的 advisory 段里：它们提示复核方向，但不是招标
+    事实，正文不得把它们当作事实或真实引用 ID 使用。
+    """
 
     if plan is None:
         return ""
@@ -1180,5 +1194,26 @@ def plan_context_text(plan: ChapterPlan | None, *, cap: int = _MAX_PLAN_CONTEXT)
                 detail.append(f"溯源 {row['trace']}")
             suffix = f"（{' · '.join(detail)}）" if detail else ""
             lines.append(f"- {' '.join(bits)}{suffix}"[:400])
+    adjustments = payload.get("user_adjustments") or []
+    if adjustments:
+        lines.append("【历史人工调整（未审核建议经验，仅供参考，非招标事实）】")
+        for row in adjustments:
+            if not isinstance(row, dict):
+                lines.append(f"- {_text(row)[:300]}")
+                continue
+            note = _text(row.get("note"))
+            if not note:
+                continue
+            meta = " · ".join(
+                part
+                for part in (_text(row.get("by")), _text(row.get("at")))
+                if part
+            )
+            suffix = f"（{meta}）" if meta else ""
+            lines.append(f"- {note[:300]}{suffix}")
+    lessons = _text(lessons_text)
+    if lessons:
+        lines.append("【未审核建议经验（非核实事实，仅供复核参考，不得写入正文作为事实）】")
+        lines.append(lessons[:1200])
     text = "\n".join(lines)
     return text[:cap]

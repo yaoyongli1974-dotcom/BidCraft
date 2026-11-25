@@ -14,7 +14,7 @@ from bidcraft.config import settings
 from bidcraft.db import get_engine, init_db, reset_engine_for_tests
 
 #: 当前 alembic head（新增 revision 时同步这里）。
-HEAD = "0014_kb_asset_metadata"
+HEAD = "0015_fact_confirmation"
 
 
 def _version() -> list[str]:
@@ -523,4 +523,78 @@ def test_0014_kb_asset_metadata_is_reversible_and_idempotent(db):
     assert {"kb_asset_duplicate_groups", "kb_asset_duplicate_members"} <= set(
         inspect(engine).get_table_names()
     )
+    assert _version() == [HEAD]
+
+
+def test_0015_fact_confirmation_is_reversible_and_idempotent(db):
+    """0015 两列必须可降级再升级；历史事实不得被迁移伪造成已确认。"""
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+
+    from bidcraft.db import session_scope
+    from bidcraft.migrations import __file__ as migrations_init
+    from bidcraft.models import Project
+
+    engine = get_engine()
+    confirmation_columns = {"confirmed_by", "confirmed_at"}
+
+    def columns() -> set[str]:
+        with engine.connect() as connection:
+            return {c["name"] for c in inspect(connection).get_columns("facts")}
+
+    assert confirmation_columns <= columns()
+    # 无 server_default：老行保持 NULL，不会被 DDL 盖章成确认过。
+    with engine.connect() as connection:
+        ddl = {
+            row[1]: row[4]
+            for row in connection.execute(text("PRAGMA table_info(facts)")).fetchall()
+        }
+    assert ddl["confirmed_by"] is None
+    assert ddl["confirmed_at"] is None
+
+    with session_scope() as session:
+        session.add(Project(id="migration-fact-project", name="迁移事实项目"))
+        session.flush()
+        session.execute(
+            text(
+                "INSERT INTO facts (id, project_id, key, label, value, unit, status, "
+                "confidence, required, source_file_id, source_page, source_quote, updated_at) "
+                "VALUES ('legacy-fact', 'migration-fact-project', 'legacy', '', '老口径', '', "
+                "'confirmed', 0.0, 0, NULL, 0, '', '2020-01-01 00:00:00')"
+            )
+        )
+    with engine.connect() as connection:
+        row = connection.execute(
+            text(
+                "SELECT confirmed_by, confirmed_at FROM facts "
+                "WHERE key = 'legacy'"
+            )
+        ).fetchone()
+    assert row == (None, None)
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(Path(migrations_init).parent))
+    cfg.set_main_option(
+        "sqlalchemy.url",
+        engine.url.render_as_string(hide_password=False).replace("%", "%%"),
+    )
+    command.downgrade(cfg, "0014_kb_asset_metadata")
+    assert not (confirmation_columns & columns())
+    command.upgrade(cfg, "head")
+    assert confirmation_columns <= columns()
+    with engine.connect() as connection:
+        row = connection.execute(
+            text(
+                "SELECT confirmed_by, confirmed_at FROM facts "
+                "WHERE key = 'legacy'"
+            )
+        ).fetchone()
+    assert row == (None, None)
+
+    # create_all 已建列后重复 init_db + upgrade 均不得报错。
+    init_db()
+    command.upgrade(cfg, "head")
+    assert confirmation_columns <= columns()
     assert _version() == [HEAD]

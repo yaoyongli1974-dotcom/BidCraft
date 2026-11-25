@@ -90,6 +90,14 @@ class Fact(Base):
     source_file_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     source_page: Mapped[int] = mapped_column(Integer, default=0)
     source_quote: Mapped[str] = mapped_column(Text, default="")
+    # 人工确认治理：只有 confirmed/manual 才由服务端盖章；重解析默认保留原确认，
+    # 取值/单位被改写时清空这两个字段并让引用章节退回复核。
+    confirmed_by: Mapped[str | None] = mapped_column(
+        String(80), nullable=True, comment="人工确认人（服务端盖章，不接受客户端传入）"
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, comment="人工确认时间（naive UTC，服务端盖章）"
+    )
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
     project: Mapped[Project] = relationship(back_populates="facts")

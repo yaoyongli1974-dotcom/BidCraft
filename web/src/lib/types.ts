@@ -397,7 +397,18 @@ export interface SourceRef {
   quote?: string
 }
 
-export interface Fact {
+/**
+ * 事实的来源证据（Phase 5）。`source_file_id` 是真实源文件 id，不是文件名；
+ * `source_quote` 为原文摘录，`source_page` 为页码（0 / null 表示无页码）。
+ * 旧后端可能只返回嵌套的 `source`，归一化时两边都读，但出站只发这三个键。
+ */
+export interface FactEvidence {
+  source_file_id?: string | null
+  source_quote?: string | null
+  source_page?: number | null
+}
+
+export interface Fact extends FactEvidence {
   key: string
   label: string
   value: string
@@ -405,7 +416,13 @@ export interface Fact {
   status: FactStatus | string
   confidence?: number
   required: boolean
+  /** 旧契约的扁平来源引用；新契约用上面的 source_* 字段。 */
   source?: SourceRef
+  /** 服务端按 source_file_id 回查的真实文件名；旧后端可能省略。 */
+  source_file_name?: string | null
+  /** 服务端盖章：谁在何时确认了这条事实。前端永不自行写入。 */
+  confirmed_by?: string | null
+  confirmed_at?: string | null
 }
 
 export interface Material {
@@ -695,13 +712,16 @@ export interface ProjectCitations {
   chapters: CitationChapterSummary[]
 }
 
-export interface FactUpdateResult {
+export interface FactUpdateResult extends FactEvidence {
   key: string
   label?: string
   value: string
   status: string
   required?: boolean
-  /** 该字段被改写后，正文仍写着旧值的章节。 */
+  source_file_name?: string | null
+  confirmed_by?: string | null
+  confirmed_at?: string | null
+  /** 该字段被改写后，正文仍写着旧值的章节。仅服务端真实返回时才提示。 */
   stale_sections?: Array<{ node_id: string; heading: string; stale_value: string }>
 }
 
@@ -2507,9 +2527,33 @@ export interface QualityFinding {
   evidence: Record<string, unknown>
   recommendation: string
   status: string
-  /** 人工处置意见与处置人（后端写入 evidence，这里展开便于展示）。 */
+  /** 人工处置意见、处置人与时间（后端写入 evidence，这里展开便于展示）。 */
   resolution_note?: string
   resolved_by?: string
+  resolved_at?: string | null
+}
+
+/**
+ * 建议经验（Phase 5 学习闭环）。只来自人工修改与质量 finding 的薄回流，
+ * 未经审核不得视为已验证事实、法规或企业级规范。
+ */
+export interface Lesson {
+  id: string
+  source: string
+  kind: string
+  text: string
+  /** 服务端可能给 null（尚未锚定章节），界面不伪造节点。 */
+  node_id: string | null
+  created_at: string | null
+  author: string
+  status: string
+}
+
+/** `GET /projects/{ref}/lessons` 的响应。status 描述整批建议的审核状态。 */
+export interface LessonsResponse {
+  items: Lesson[]
+  node_id: string
+  status: string
 }
 
 /** 质量报告快照（不可变，每次运行版本号 +1）。 */

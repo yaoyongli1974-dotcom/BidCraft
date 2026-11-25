@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from sqlalchemy import select
@@ -42,6 +43,59 @@ def _next_version(db: Session, project_id: str) -> int:
         .order_by(QualityReport.report_version.desc())
     )
     return (current or 0) + 1
+
+
+#: 已处置状态（含界面中文写法）；重新评估时这些处置结论必须被沿用。
+_DISPOSED_FINDING_STATUSES = frozenset(
+    {"handled", "ignored", "resolved", "closed", "已处理", "已忽略", "已解决", "已关闭"}
+)
+#: 随 finding 一起结转的人工处置字段（存在 evidence JSON 里）。
+_DISPOSITION_FIELDS = ("resolution_note", "resolved_by", "resolved_at")
+
+
+def _finding_keys(
+    node_id: Any, category: Any, title: Any, evidence: dict[str, Any] | None
+) -> set[tuple[str, str, str]]:
+    """finding 的稳定键：node_id + category + title（有指纹则同时按指纹匹配）。"""
+
+    def normalized(value: Any) -> str:
+        return re.sub(r"\s+", "", str(value or "")).strip().lower()
+
+    base = (str(node_id or ""), str(category or ""))
+    keys = {(*base, normalized(title))}
+    source = (evidence or {}).get("fingerprint") or (evidence or {}).get("stable_key")
+    if source:
+        keys.add((*base, normalized(source)))
+    return keys
+
+
+def _prior_dispositions(
+    db: Session, project_id: str
+) -> dict[tuple[str, str, str], dict[str, Any]]:
+    """快照本项目历史报告里已处置 finding 的结论（新报告版本优先）。"""
+
+    rows = db.execute(
+        select(QualityFinding, QualityReport)
+        .join(QualityReport, QualityReport.id == QualityFinding.report_id)
+        .where(QualityReport.project_id == project_id)
+        .order_by(QualityReport.report_version.desc(), QualityFinding.id.desc())
+    ).all()
+    prior: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for finding, _report in rows:
+        if str(finding.status or "").strip().lower() not in _DISPOSED_FINDING_STATUSES:
+            continue
+        evidence = finding.evidence if isinstance(finding.evidence, dict) else {}
+        carried: dict[str, Any] = {
+            "status": finding.status,
+            "disposition_from_finding_id": finding.id,
+        }
+        for field in _DISPOSITION_FIELDS:
+            value = evidence.get(field)
+            if value not in (None, ""):
+                carried[field] = value
+        for key in _finding_keys(finding.node_id, finding.category, finding.title, evidence):
+            prior.setdefault(key, carried)
+    return prior
 
 
 def find_report_for_job(
@@ -146,6 +200,9 @@ def build_quality_report(
             }
         )
 
+    # 重新评估会生成全新的 finding 行；人工处置状态/意见按稳定键结转，
+    # 不因「报告快照不可变」而丢失（原处置审计仍指向旧 finding id）。
+    prior_dispositions = _prior_dispositions(db, project_id)
     summary: dict[str, Any] = {
         "coverage": coverage,
         "recommendations": build_risk_recommendations(risk_summary),
@@ -172,6 +229,20 @@ def build_quality_report(
     db.flush()
 
     for item in findings:
+        evidence = dict(item.get("evidence") or {})
+        status = "open"
+        keys = _finding_keys(
+            item.get("node_id"), item.get("category"), item.get("title"), evidence
+        )
+        carried = next(
+            (prior_dispositions[key] for key in sorted(keys) if key in prior_dispositions),
+            None,
+        )
+        if carried is not None:
+            status = carried["status"]
+            for field in (*_DISPOSITION_FIELDS, "disposition_from_finding_id"):
+                if field in carried:
+                    evidence[field] = carried[field]
         db.add(
             QualityFinding(
                 report_id=report.id,
@@ -182,9 +253,9 @@ def build_quality_report(
                 requirement_id=item.get("requirement_id"),
                 title=item.get("title", ""),
                 description=item.get("description", ""),
-                evidence=item.get("evidence", {}),
+                evidence=evidence,
                 recommendation=item.get("recommendation", ""),
-                status="open",
+                status=status,
             )
         )
     db.flush()

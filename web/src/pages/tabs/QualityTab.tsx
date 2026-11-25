@@ -16,10 +16,11 @@ import {
   runEvaluationAsync,
   updateQualityFinding,
 } from '../../api/evaluation'
+import { getProjectLessons } from '../../api/learning'
 import { watchJob } from '../../hooks/watchJob'
 import { messageOf } from '../../lib/http'
 import type { QualityDimension, QualityFinding, QualityReport } from '../../lib/types'
-import { className, formatRelative } from '../../lib/format'
+import { className, formatDate, formatRelative } from '../../lib/format'
 import { useQuery } from '../../lib/hooks'
 import { Badge } from '../../components/Badge'
 import { Button } from '../../components/Button'
@@ -113,12 +114,14 @@ function FindingCard({
       {finding.recommendation && (
         <p className="quality-finding-rec"><CheckCircle2 size={13} /> {finding.recommendation}</p>
       )}
-      {!isOpen && (finding.resolution_note || finding.resolved_by) && (
-        <p className="quality-finding-resolution">
-          处置人：{finding.resolved_by || '—'}
-          {finding.resolution_note ? ` · 意见：${finding.resolution_note}` : ''}
-        </p>
-      )}
+      {!isOpen &&
+        (finding.resolution_note || finding.resolved_by || finding.resolved_at) && (
+          <p className="quality-finding-resolution">
+            处置人：{finding.resolved_by || '—'}
+            {finding.resolved_at && ` · 处置时间：${formatDate(finding.resolved_at)}`}
+            {finding.resolution_note ? ` · 意见：${finding.resolution_note}` : ''}
+          </p>
+        )}
       {canWrite && (
         <div className="quality-finding-actions">
           <input
@@ -145,6 +148,120 @@ function FindingCard({
         </div>
       )}
     </article>
+  )
+}
+
+/**
+ * 建议经验（学习闭环）只读面板。内容来自人工修改与质量 finding 的回流，
+ * 未经审核不自动生效，也不是已验证事实或法规；此处不提供写/发布操作。
+ */
+export function LessonsPanel({ projectRef }: { projectRef: string }) {
+  const [nodeFilter, setNodeFilter] = useState('')
+  const [appliedNode, setAppliedNode] = useState('')
+  const lessonsQuery = useQuery(`lessons:${projectRef}:${appliedNode}`, () =>
+    getProjectLessons(projectRef, {
+      ...(appliedNode ? { node_id: appliedNode } : {}),
+      limit: 50,
+    }),
+  )
+  const lessons = lessonsQuery.data?.items || []
+  const status = lessonsQuery.data?.status || '未审核建议经验'
+
+  return (
+    <section className="panel quality-panel" aria-label="建议经验">
+      <div className="config-head">
+        <div>
+          <div className="eyebrow">学习闭环 · 只读</div>
+          <h3>建议经验</h3>
+        </div>
+        <Badge tone="warn" subtle>
+          {status}
+        </Badge>
+        <Button
+          variant="ghost"
+          size="sm"
+          icon={<RefreshCw size={14} className={lessonsQuery.refreshing ? 'spin' : undefined} />}
+          onClick={lessonsQuery.refresh}
+        >
+          刷新
+        </Button>
+      </div>
+      <p className="subtle quality-lessons-note">
+        由人工修改与质量 finding 回流生成；仅作建议，未审核不会写入企业规范，也不代表已验证事实或法规。
+      </p>
+      <form
+        className="quality-lessons-filter"
+        onSubmit={(event) => {
+          event.preventDefault()
+          setAppliedNode(nodeFilter.trim())
+        }}
+      >
+        <label>
+          <span>章节节点筛选</span>
+          <input
+            className="input input--sm"
+            aria-label="经验节点筛选"
+            placeholder="输入 node_id（留空为全部）"
+            value={nodeFilter}
+            onChange={(event) => setNodeFilter(event.target.value)}
+          />
+        </label>
+        <Button type="submit" variant="secondary" size="sm">
+          筛选
+        </Button>
+        {appliedNode && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setAppliedNode('')
+              setNodeFilter('')
+            }}
+          >
+            清除筛选
+          </Button>
+        )}
+      </form>
+      {lessonsQuery.error && (
+        <p className="inline-error">
+          建议经验加载失败：{lessonsQuery.error}
+          <button type="button" className="text-btn" onClick={lessonsQuery.refresh}>
+            重试
+          </button>
+        </p>
+      )}
+      {lessonsQuery.loading && <Skeleton height={90} />}
+      {!lessonsQuery.loading && !lessonsQuery.error && lessons.length === 0 && (
+        <EmptyState
+          icon={ClipboardCheck}
+          title="暂无建议经验"
+          description="当前项目（或所选章节）还没有从人工修改与质量 finding 回流的建议。"
+        />
+      )}
+      {lessons.length > 0 && (
+        <div className="quality-lessons">
+          {lessons.map((lesson) => (
+            <article className="quality-lesson" key={lesson.id}>
+              <div className="quality-lesson-meta">
+                <Badge tone="neutral" subtle>
+                  ID {lesson.id}
+                </Badge>
+                <Badge tone="info" subtle>
+                  来源 {lesson.source || '—'}
+                </Badge>
+                <Badge tone="accent" subtle>
+                  类型 {lesson.kind || '—'}
+                </Badge>
+                {lesson.node_id && <span className="mono">{lesson.node_id}</span>}
+                <span>作者 {lesson.author || '—'}</span>
+                <span>{formatRelative(lesson.created_at)}</span>
+              </div>
+              <p className="quality-lesson-text">{lesson.text}</p>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
   )
 }
 
@@ -419,6 +536,8 @@ export function QualityTab() {
           </section>
         </>
       )}
+
+      <LessonsPanel projectRef={ref} />
 
       {(reportsQuery.data || []).length > 1 && (
         <section className="panel quality-panel">

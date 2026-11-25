@@ -13,6 +13,7 @@ from bidcraft.models import (
     QualityFinding,
     QualityReport,
     Section,
+    SectionRevision,
 )
 
 METRIC_KEYS = {
@@ -33,13 +34,33 @@ def _project(db, name: str) -> Project:
     return row
 
 
-def _section(db, project_id: str, body: str, revision: int) -> Section:
+def _section(
+    db,
+    project_id: str,
+    body: str,
+    revision: int,
+    *,
+    change_type: str | None = None,
+    note: str = "",
+) -> Section:
     node = OutlineNode(project_id=project_id, heading=f"章节-{revision}", position=revision)
     db.add(node)
     db.flush()
     section = Section(node_id=node.id, body=body, revision=revision, words=len(body.split()))
     db.add(section)
     db.flush()
+    if change_type:
+        db.add(
+            SectionRevision(
+                project_id=project_id,
+                node_id=node.id,
+                revision=revision,
+                change_type=change_type,
+                change_note=note,
+                changed_by="tester",
+            )
+        )
+        db.flush()
     return section
 
 
@@ -72,8 +93,8 @@ def _item(row: int, name: str, spec: str = "", unit: str = "个", qty: float = 1
 def _seed_sections_and_findings(db, project_id: str) -> None:
     # 3 个有正文章节，其中 2 个 revision > 1；空白正文不进分母。
     _section(db, project_id, "正文A", 1)
-    _section(db, project_id, "正文B", 2)
-    _section(db, project_id, "正文C", 4)
+    _section(db, project_id, "正文B", 2, change_type="edit", note="人工修订")
+    _section(db, project_id, "正文C", 4, change_type="edit", note="再次修订")
     _section(db, project_id, "   ", 9)
     _section(db, project_id, "", 7)
     # 200 词正文 + 三个短标题（共 209 词）+ 5 条未处置 severe finding。
@@ -136,6 +157,28 @@ def test_manual_edit_rate_exact_ratio_and_zero_denominator(db):
         zero = collect_quality_metrics(sess, empty.id)
         assert zero["manual_edit_rate"] == 0.0
         assert any("0 个有正文的章节" in note for note in zero["notes"])
+
+
+def test_manual_edit_rate_counts_only_edit_revisions_not_restore(db):
+    with session_scope() as sess:
+        project = _project(sess, "metrics-restore-excluded")
+        _section(sess, project.id, "人工修订正文", 3, change_type="edit", note="复核后修订")
+        # revision 被回滚抬高，但快照只有 restore/generate，不能算人工修改。
+        _section(sess, project.id, "恢复正文", 6, change_type="restore", note="回滚到旧版本")
+        _section(sess, project.id, "再生成正文", 4, change_type="generate", note="重新生成")
+
+        metrics = collect_quality_metrics(sess, project.id)
+        assert metrics["manual_edit_rate"] == round(1 / 3, 4)
+        assert metrics["coverage"]["manual_edit_rate"] == {
+            "numerator": 1,
+            "denominator": 3,
+            "sample_count": 3,
+            "ratio": round(1 / 3, 4),
+        }
+        assert sorted(
+            sample["edited"] for sample in metrics["samples"]["manual_edit_rate"]
+        ) == [False, False, True]
+        assert any("restore/generate 不计" in note for note in metrics["notes"])
 
 
 def test_issue_density_counts_severe_unresolved_per_1000_words(db):

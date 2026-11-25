@@ -252,6 +252,11 @@ def _migrate_columns(engine) -> None:
             ("node_id", "VARCHAR(36)"),
             ("auto_covered", "BOOLEAN DEFAULT 0"),
         ],
+        "facts": [
+            # v0.32 Phase 5：人工确认人/时间；无默认值，历史行保持 NULL。
+            ("confirmed_by", "VARCHAR(80)"),
+            ("confirmed_at", "DATETIME"),
+        ],
         "sections": [
             ("revision", "INTEGER DEFAULT 0"),
             ("review_status", "VARCHAR(16) DEFAULT 'draft'"),

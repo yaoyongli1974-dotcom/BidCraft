@@ -538,16 +538,34 @@ def fact(
     ref: str = typer.Argument(..., help="项目 ID/名称"),
     key: str = typer.Argument(..., help="事实 key，例如 project.name"),
     value: str = typer.Option(..., "--value", "-v", help="人工确认后的取值"),
+    source_file_id: str = typer.Option("", "--source-file-id", help="真实来源文件 ID"),
+    source_quote: str = typer.Option("", "--source-quote", help="来源文件中可核验的原文引文"),
+    source_page: int = typer.Option(0, "--source-page", help="引文所在页（从 1 开始）"),
 ) -> None:
-    """人工修正一条事实（抽取结果必须可校订）。"""
+    """人工修正一条事实（抽取结果必须可校订，确认需真实来源证据）。"""
     with _db() as db:
         project = _project_or_exit(db, ref)
         try:
-            row = update_fact(db, project.id, key, value=value, status="confirmed")
+            row = update_fact(
+                db,
+                project,
+                {
+                    "key": key,
+                    "value": value,
+                    "status": "confirmed",
+                    "source_file_id": source_file_id,
+                    "source_quote": source_quote,
+                    "source_page": source_page,
+                },
+                actor="cli",
+            )
         except ValueError as exc:
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(1)
-        console.print(f"[green]{row.label}[/green] = {row.value}（已确认）")
+        console.print(
+            f"[green]{row.label}[/green] = {row.value}"
+            f"（已确认：{row.confirmed_by} / 来源 {row.source_file_id}）"
+        )
 
 
 @app.command()

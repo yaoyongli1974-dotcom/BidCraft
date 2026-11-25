@@ -21,6 +21,7 @@ import type { CheckResult, Issue } from '../../lib/types'
 import {
   className,
   evidenceText,
+  formatDate,
   formatRelative,
   issueLevel,
   issueStatus,
@@ -494,6 +495,13 @@ function IssueCard({ issue }: { issue: Issue }) {
       </header>
       <h4 className="issue-title">{title}</h4>
       {showMessage && <p className="issue-message">{issue.message}</p>}
+      {(issue.resolved_by || issue.resolved_at || issue.resolution_note) && (
+        <p className="issue-resolution">
+          处置人：{issue.resolved_by || '—'}
+          {issue.resolved_at && ` · 处置时间：${formatDate(issue.resolved_at)}`}
+          {issue.resolution_note ? ` · 原因：${issue.resolution_note}` : ''}
+        </p>
+      )}
       {issue.recommendation && (
         <div className="issue-recommendation">
           <span>修订建议</span>

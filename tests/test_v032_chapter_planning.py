@@ -25,6 +25,7 @@ from bidcraft.generation.chapter_plan import (  # noqa: E402
     REJECTED,
     UPDATED,
     USED_FOR_GENERATION,
+    build_plan_context,
     confirm_chapter_plan,
     generate_chapter_plan,
     load_active_plan,
@@ -385,6 +386,37 @@ def test_plan_context_text_contains_strategy_and_real_ids(db):
         assert "先列评分响应矩阵" in text
         assert ids["score"] in text
         assert "写作策略" in text
+
+
+def test_prompt_version_is_exact_v3_for_advisory_sections(db):
+    # 规划提示词新增历史调整/经验段属输出格式变化，版本必须可追溯。
+    assert PROMPT_VERSION == "chapter_plan_v3"
+
+
+def test_plan_context_renders_adjustments_and_lessons_as_advisory(db):
+    lessons = (
+        "【未审核建议经验（仅供复核参考，非核实事实；不会自动写入知识库或企业资产）】\n"
+        "- [章节人工修订 id=rev-advisory source=section_revision] 历史复核意见仅供参考"
+    )
+    with session_scope() as db_session:
+        project = _new_project(db_session, "建议经验提示词项目")
+        ids = _seed(db_session, project.id)
+        node = db_session.get(OutlineNode, ids["node"])
+        generate_chapter_plan(db_session, project, node, created_by="tester")
+        update_chapter_plan(
+            db_session, project, node, {"strategy": ["补充策略"], "note": "人工调整备注"}, "editor"
+        )
+        active = load_active_plan(db_session, project.id, node.id)
+        assert active is not None
+
+        context = build_plan_context(db_session, project.id, node, lessons_text=lessons)
+        assert context["lessons_text"] == lessons
+        text = plan_context_text(active, lessons_text=lessons)
+        assert "【历史人工调整（未审核建议经验，仅供参考，非招标事实）】" in text
+        assert "人工调整备注" in text
+        assert "【未审核建议经验（非核实事实" in text
+        assert "历史复核意见仅供参考" in text
+        assert "不得写入正文作为事实" in text
 
 
 def test_chapter_messages_embed_plan_strategy(db):

@@ -172,6 +172,7 @@ from ..shared import (  # noqa: F401
     judge_for_project,
     ledger_gate,
     ledger_summary,
+    lessons_payload,
     load_active_plan,
     load_ledger,
     load_outline,
@@ -1322,28 +1323,52 @@ def ledger(ref: str) -> dict[str, Any]:
         return {**data.model_dump(), "summary": ledger_summary(data)}
 
 
+@router.get("/projects/{ref}/lessons")
+def project_lessons(
+    ref: str, node_id: str | None = None, limit: int = 20
+) -> dict[str, Any]:
+    """只读经验摘要：viewer 也能看；查询动作本身记 learning.read 审计。"""
+
+    cap = _clamp_limit(limit)
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        data = lessons_payload(db, project, node_id=node_id or None)
+        items = list(data.get("items") or [])[:cap]
+        audit(
+            db,
+            project.id,
+            "learning.read",
+            {"node_id": node_id or "", "limit": cap, "count": len(items)},
+        )
+        return {**data, "items": items, "limit": cap}
+
+
 @router.patch("/projects/{ref}/facts/{key}")
 def set_fact(ref: str, key: str, payload: FactUpdate) -> dict[str, Any]:
     with session_scope() as db:
         project, _role = _project(db, ref)
         _require_write(_role)
+        # 服务端盖章：key 来自路径，不信任请求体；审计由 update_fact 同事务写入。
+        payload = payload.model_copy(update={"key": key})
         try:
-            row = update_fact(db, project.id, key, value=payload.value, status=payload.status)
+            row = update_fact(db, project, payload, actor=current_user())
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         affected = provenance.affected_by_change(db, project.id, row.key, row.value or "")
-        audit(
-            db,
-            project.id,
-            "fact.update",
-            {"key": row.key, "status": row.status, "stale_citations": len(affected)},
-        )
+        source = db.get(SourceFile, row.source_file_id) if row.source_file_id else None
         return {
             "key": row.key,
             "label": row.label,
             "value": row.value,
+            "unit": row.unit,
             "status": row.status,
             "required": row.required,
+            "confirmed_by": row.confirmed_by,
+            "confirmed_at": _iso(row.confirmed_at),
+            "source_file_id": row.source_file_id,
+            "source_file_name": source.filename if source else "",
+            "source_quote": row.source_quote,
+            "source_page": row.source_page,
             "stale_sections": affected,
         }
 
@@ -1773,15 +1798,16 @@ def save_chapter(ref: str, node_id: str, payload: ChapterSave) -> Any:
         # revision 与 Section.revision 对齐；与正文同事务，失败整体回滚。
         from ...collaboration import snapshot_on_save
 
+        change_note = (payload.change_note or "").strip()[:500]
         snapshot_on_save(
             db,
             section,
             project.id,
             (current_user() or {}).get("username") or "system",
-            "",
+            change_note,
         )
         provenance.refresh_node(db, project.id, node.id, payload.body)
-        detail = {"heading": node.heading}
+        detail = {"heading": node.heading, "change_note": change_note}
         if review_before == "review":
             detail["review_reverted"] = True
         # R15：正文变化后，匹配到本章且已人工确认的实质性条款失效——它们是基于旧

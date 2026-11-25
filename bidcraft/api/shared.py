@@ -391,6 +391,18 @@ def audit(
     return record_audit(db, project_id, action, detail)
 
 
+def lessons_payload(db, project, node_id: str | None = None) -> dict:
+    """只读经验摘要：运行时转交 evaluation.learning 的真实实现。
+
+    延迟导入避免学习引擎的可选依赖影响 API 启动；路由层可以 monkeypatch
+    本名字做契约测试，生产路径始终调用 learning.lessons_payload。
+    """
+
+    from ..evaluation.learning import lessons_payload as _lessons_payload
+
+    return _lessons_payload(db, project, node_id=node_id)
+
+
 def _job(db, job_id: str) -> Job:
     """Load a job and enforce the same project ownership as other endpoints.
 
@@ -1607,6 +1619,7 @@ __all__ = [
     'knowledge_assets',
     'ledger_gate',
     'ledger_summary',
+    'lessons_payload',
     'list_packages',
     'load_ledger',
     'load_outline',
