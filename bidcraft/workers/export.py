@@ -54,6 +54,8 @@ def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None
             job = fenced_job(db, job_id)
             if job is None:
                 return
+            if job.status != "running":
+                return
             job.status = "running"
             job.message = f"正在批量导出（0/{total}）…"
             db.flush()

@@ -59,6 +59,8 @@ def _run_agent_job(job_id: str, run_id: str) -> None:
             job = fenced_job(db, job_id)
             if job is None:
                 return
+            if job.status != "running":
+                return
             job.status = "running"
             job.message = "Agent 工作流启动中…"
             db.flush()

@@ -37,6 +37,8 @@ def _run_similarity_job(job_id: str) -> None:
             job = fenced_job(db, job_id)
             if job is None:
                 return
+            if job.status != "running":
+                return
             job.status = "running"
             job.progress = 5
             job.message = "正在执行多维查重…"

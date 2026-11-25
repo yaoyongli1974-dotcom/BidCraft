@@ -42,6 +42,8 @@ def _run_kb_reindex_job(job_id: str, kb_id: str) -> None:
             job = fenced_job(db, job_id)
             if job is None:
                 return
+            if job.status != "running":
+                return
             job.status = "running"
             job.progress = 5
             job.message = "正在重建知识库索引…"

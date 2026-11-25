@@ -56,6 +56,8 @@ def _run_evaluation_job(
             job = fenced_job(db, job_id)
             if job is None:
                 return
+            if job.status != "running":
+                return
             job.status = "running"
             job.progress = 20
             job.message = "质量评估生成中…"

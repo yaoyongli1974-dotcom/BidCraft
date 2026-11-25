@@ -43,6 +43,8 @@ def _run_batch_check_job(job_id: str, project_ids: list[str]) -> None:
             job = fenced_job(db, job_id)
             if job is None:
                 return
+            if job.status != "running":
+                return
             job.status = "running"
             job.message = f"正在批量核对（0/{total}）…"
             db.flush()

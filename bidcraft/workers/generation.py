@@ -128,6 +128,8 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
             job = fenced_job(db, job_id)
             if job is None:
                 return
+            if job.status != "running":
+                return
             job.status = "running"
             job.message = "正在准备事实台账…"
             db.flush()

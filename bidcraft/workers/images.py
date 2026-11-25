@@ -45,7 +45,7 @@ def _run_image_batch_job(job_id: str, project_id: str, targets: list[dict[str, A
         assert_claim_current(job_id)
         with session_scope() as db:
             job = fenced_job(db, job_id)
-            if job is None:
+            if job is None or job.status != "running":
                 return
             project = db.get(Project, project_id)
             if project is not None:
