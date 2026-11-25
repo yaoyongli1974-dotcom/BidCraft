@@ -137,7 +137,32 @@ def _overlap_join(left: str, right: str) -> str:
     return left + "\n" + right
 
 
-def suspicious_numbers(body: str, ledger: FactLedger) -> list[str]:
+def _plan_ref_numbers(plan: Any) -> set[str]:
+    """正文生成时只把规划真实引用涉及的数字当作白名单来源。"""
+
+    from .chapter_plan import chapter_plan_payload
+
+    if plan is None:
+        return set()
+    payload = chapter_plan_payload(plan)
+    allowed: set[str] = set()
+    for field_name in ("fact_refs", "knowledge_refs", "score_points", "requirements"):
+        for row in payload.get(field_name) or []:
+            if not isinstance(row, dict):
+                continue
+            allowed.update(
+                _NUMBER.findall(
+                    " ".join(
+                        str(row.get(key) or "")
+                        for key in ("value", "key", "label", "snippet", "text", "criteria",
+                                    "name", "heading", "source", "trace")
+                    )
+                )
+            )
+    return allowed
+
+
+def suspicious_numbers(body: str, ledger: FactLedger, plan: Any = None) -> list[str]:
     allowed: set[str] = set()
     for item in ledger.facts:
         allowed.update(_NUMBER.findall(f"{item.value} {item.unit}"))
@@ -145,6 +170,10 @@ def suspicious_numbers(body: str, ledger: FactLedger) -> list[str]:
         for row in collection:
             dump = row.model_dump()
             allowed.update(_NUMBER.findall(" ".join(str(v) for v in dump.values())))
+    if plan is not None:
+        # 有已确认规划时收紧白名单：只有规划真实引用（事实/知识/评分锚点）
+        # 覆盖的数字才免于标记；其余台账数字仍需人工复核来源，不阻断生成。
+        allowed = _plan_ref_numbers(plan)
     flagged: list[str] = []
     for token in _NUMBER.findall(body or ""):
         if len(token.replace(".", "")) < 3:
@@ -282,6 +311,40 @@ def fallback_chapter(ledger: FactLedger, heading: str, intent: str, needs: list[
     return body
 
 
+def unused_plan_refs(body: str, plan: Any) -> dict[str, list[str]]:
+    """正文中未落地的规划引用（事实/知识/评分锚点），供复核不阻断生成。"""
+
+    from .chapter_plan import chapter_plan_payload
+
+    if plan is None:
+        return {}
+    payload = chapter_plan_payload(plan)
+    haystack = _normalize_block(body)
+    result: dict[str, list[str]] = {}
+    specs = (
+        ("facts", "fact_refs", ("key", "label", "value")),
+        ("knowledge", "knowledge_refs", ("id", "heading", "source", "snippet")),
+        ("scores", "score_points", ("name", "criteria")),
+    )
+    for name, field_name, keys in specs:
+        missed: list[str] = []
+        for row in payload.get(field_name) or []:
+            if not isinstance(row, dict):
+                continue
+            ident = str(row.get("id") or "")
+            labels = [_text_value(row.get(key)) for key in keys]
+            if any(label and _normalize_block(label) in haystack for label in labels):
+                continue
+            missed.append(ident or (labels[0] if labels else ""))
+        if missed:
+            result[name] = missed
+    return result
+
+
+def _text_value(value: Any) -> str:
+    return str(value or "").strip()
+
+
 @dataclass
 class GenerationReport:
     written: list[str] = field(default_factory=list)
@@ -292,6 +355,8 @@ class GenerationReport:
     knowledge_downgrades: int = 0
     verification: dict[str, dict[str, Any]] = field(default_factory=dict)
     usage: dict[str, int] = field(default_factory=dict)
+    #: 正文未使用的规划引用：{章节: {"facts": [...], "knowledge": [...], "scores": [...]}}
+    unused_plan_refs: dict[str, dict[str, list[str]]] = field(default_factory=dict)
 
 
 def continuity_digest(chapters: list[tuple[str, str]], *, recent: int = 3, cap: int = 4000) -> str:
@@ -502,13 +567,11 @@ def generate_document(
                     retrieved = knowledge_provider(
                         f"{node['heading']} {node.get('intent') or ''}".strip()
                     )
-                    if isinstance(retrieved, tuple):
-                        # Providers may forward the KB downgrade count from
-                        # material_policy.context_block alongside the text.
-                        knowledge_text = str(retrieved[0] or "")
-                        chapter_downgrades = max(0, int(retrieved[1] or 0))
-                    else:
-                        knowledge_text = str(retrieved or "")
+                    # KnowledgeContext exposes attributes; legacy providers
+                    # return (text, downgrades) or plain text.
+                    from .chapter_plan import normalize_retrieval
+
+                    knowledge_text, chapter_downgrades, _, _ = normalize_retrieval(retrieved)
                 except Exception:  # noqa: BLE001 - knowledge is optional context
                     knowledge_text = ""
             report.knowledge_downgrades += chapter_downgrades
@@ -558,10 +621,13 @@ def generate_document(
             report.verification[node["heading"]] = node.get("_verification") or verify_chapter(
                 node, body
             )
-            flagged = suspicious_numbers(body, ledger)
+            flagged = suspicious_numbers(body, ledger, plan)
             if flagged:
                 report.suspicious[node["heading"]] = flagged
                 report.suspicious_count += len(flagged)
+            unused = unused_plan_refs(body, plan)
+            if unused:
+                report.unused_plan_refs[node["heading"]] = unused
         except ModelUnavailable as exc:
             chapter_failed = True
             section = db.scalar(select(Section).where(Section.id == node["section_id"]))

@@ -1,4 +1,5 @@
 import { ApiError, asArray, jsonBody, notifyUnauthorized, readError, request } from '../lib/http'
+import { normalizeKnowledgeRefs, normalizeRetrievalTrace } from '../lib/retrievalTrace'
 import type {
   ChapterCitations,
   ChapterDetail,
@@ -187,6 +188,15 @@ export function normalizeChapterPlan(value: unknown): ChapterPlan | null {
   for (const field of ARRAY_FIELDS) {
     const list = pickPlanField(raw, field)
     if (Array.isArray(list)) plan[field] = list
+  }
+  // 知识引用保留服务端真实 id/块溯源，不把对象压成不可核对的字符串。
+  if (Array.isArray(plan.knowledge_refs)) {
+    plan.knowledge_refs = normalizeKnowledgeRefs(plan.knowledge_refs)
+  }
+  // 计划级溯源信号：只在后端真的给出信号时写入，缺失保持 undefined。
+  const trace = normalizeRetrievalTrace(raw)
+  if (Object.values(trace).some((value) => value !== null)) {
+    Object.assign(plan, trace)
   }
   return Object.keys(plan).length > 0 ? (plan as ChapterPlan) : null
 }

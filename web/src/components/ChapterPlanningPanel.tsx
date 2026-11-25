@@ -16,6 +16,7 @@ import {
 } from '../api/generation'
 import { Badge } from './Badge'
 import { Button } from './Button'
+import { KnowledgeRefList } from './RetrievalTraceBadges'
 import { useToast } from '../context/useToast'
 import {
   chapterPlanGate,
@@ -386,7 +387,9 @@ export function ChapterPlanningPanel({
                     <div className="plan-field" key={key}>
                       <dt>{label}</dt>
                       <dd>
-                        {items.length > 0 ? (
+                        {key === 'knowledge_refs' ? (
+                          <KnowledgeRefList refs={plan.knowledge_refs} />
+                        ) : items.length > 0 ? (
                           <ul>
                             {items.map((item, index) => (
                               <li key={`${key}-${index}`}>{item}</li>

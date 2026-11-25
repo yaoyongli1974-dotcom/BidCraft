@@ -437,11 +437,22 @@ def kb_preview(kb_id: str, request: Request, q: str = "", limit: int = 5) -> dic
                 passages = knowledge.search_api(db, row, query, max(1, min(20, limit)))
         except knowledge.KnowledgeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # 溯源信号由检索核心按版本逐步补齐；getattr 让旧 Passage 仍能预览，
+        # 缺失的信号一律回传 None，不伪造 0 分、trusted 或未降级。
+        def trace_of(passage: Any, *names: str) -> Any:
+            for name in names:
+                value = getattr(passage, name, None)
+                if value is not None:
+                    return value
+            return None
+
+        diagnostics = getattr(passages, "diagnostics", None)
         return {
             "kb_id": kb_id,
             "query": query,
             "items": [
                 {
+                    # 旧字段原样保留，老调用方无需改动。
                     "kb_id": passage.kb_id or kb_id,
                     "source": passage.source,
                     "text": passage.text,
@@ -449,6 +460,17 @@ def kb_preview(kb_id: str, request: Request, q: str = "", limit: int = 5) -> dic
                     "document_id": passage.document_id,
                     "page": passage.page,
                     "heading": passage.heading,
+                    # Phase 3 溯源信号：缺失即 null。
+                    "rerank_score": trace_of(passage, "rerank_score"),
+                    "trust_tier": trace_of(passage, "trust_tier", "tier"),
+                    "tier": trace_of(passage, "tier", "trust_tier"),
+                    "degraded": trace_of(passage, "degraded", "downgraded"),
+                    "chunk_id": trace_of(passage, "chunk_id"),
+                    "chunk_index": trace_of(passage, "chunk_index"),
+                    "score_source": trace_of(passage, "score_source") or "",
+                    "diagnostics": (
+                        dict(diagnostics) if isinstance(diagnostics, dict) else None
+                    ),
                 }
                 for passage in passages
             ],

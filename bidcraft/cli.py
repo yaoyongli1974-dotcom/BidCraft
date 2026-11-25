@@ -11,7 +11,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from . import __version__, knowledge, model_config
+from . import __version__, model_config
 from .config import settings
 from .db import init_db, session_scope
 from .export_gate import ExportGateError, enforce_export_gate
@@ -55,8 +55,12 @@ def _generation_client(db) -> ModelClient:
 
 
 def _knowledge_provider(db):
-    def provide(query: str) -> str:
-        return knowledge.context_block(knowledge.search(db, query, limit=4))
+    # 生成链统一走 job_support：内部用 material_policy.context_block 做分档注入，
+    # 绝不把未分级的 knowledge.context_block 正文直接喂给模型。
+    from .services.job_support import knowledge_context
+
+    def provide(query: str):
+        return knowledge_context(db, query)
 
     return provide
 

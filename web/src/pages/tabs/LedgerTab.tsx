@@ -42,6 +42,7 @@ import {
 } from '../../lib/format'
 import { useQuery, useUnsavedGuard } from '../../lib/hooks'
 import { Badge } from '../../components/Badge'
+import { RetrievalPreviewPanel } from '../../components/RetrievalPreviewPanel'
 import { ScoreBackfill } from '../../components/ScoreBackfill'
 import { Button } from '../../components/Button'
 import { ErrorState, Skeleton } from '../../components/Feedback'
@@ -75,7 +76,7 @@ function isEditableTarget(target: EventTarget | null): boolean {
 }
 
 export function LedgerTab() {
-  const { ref, project, reloadProject, setUnsaved, canWrite } = useWorkspace()
+  const { ref, project, reloadProject, setUnsaved, canWrite, readOnly } = useWorkspace()
   const confirm = useConfirm()
   const toast = useToast()
   const navigate = useNavigate()
@@ -665,6 +666,8 @@ export function LedgerTab() {
         )}
         </div>
       </section>
+
+      <RetrievalPreviewPanel projectRef={ref} readOnly={readOnly || !canWrite} />
 
       <p className="ledger-footnote">
         字段状态：已提取（规则命中）、已确认（人工核对）、手工录入（人工补充）、缺失、取值冲突。

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Self
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -191,37 +191,127 @@ def _generation_client(db) -> ModelClient:
     return ModelClient(endpoint if endpoint is not None else settings)
 
 
-def _knowledge_provider(db, user_id: str | None = None):
-    """Build the generation retrieval callback for one user.
+class KnowledgeContext(tuple):
+    """生成链检索结果：兼容旧的 ``(text, downgrades)`` 二元组，并携带溯源。
 
-    Global knowledge bases stay available to everyone; the caller's personal
-    knowledge base is added explicitly (and therefore included even though
-    :func:`knowledge.search` otherwise skips personal bases).
+    旧调用方（writer / chapter_plan）通过 ``isinstance(..., tuple)`` 与下标取文本；
+    ``__iter__`` 同样只产出 ``(text, downgrades)``。新调用方读 ``refs`` /
+    ``diagnostics`` 做逐条审计。
     """
 
-    extra_kb_ids: list[str] = []
+    def __new__(
+        cls,
+        *,
+        text: str,
+        downgrades: int,
+        refs: list[dict[str, Any]],
+        diagnostics: dict[str, Any],
+    ) -> Self:
+        result = super().__new__(cls, (text, downgrades))
+        result.text = text
+        result.downgrades = int(downgrades)
+        result.refs = list(refs)
+        result.diagnostics = dict(diagnostics)
+        return result
+
+    def __iter__(self):
+        return iter((self.text, self.downgrades))
+
+
+def _passage_ref(passage, verdict) -> dict[str, Any]:
+    """Passage → 真实溯源引用；没有 provider ID 时留空，不编造归属。"""
+
+    return {
+        "id": passage.chunk_id or passage.document_id or "",
+        "kb": passage.kb,
+        "kb_id": passage.kb_id,
+        "chunk_id": passage.chunk_id,
+        "chunk_index": passage.chunk_index,
+        "document_id": passage.document_id,
+        "page": passage.page,
+        "heading": passage.heading or "",
+        "source": passage.source or "",
+        "snippet": str(passage.text or "")[:300],
+        "score": passage.score,
+        "rerank_score": passage.rerank_score,
+        "trust_tier": verdict.tier,
+        "degraded": bool(verdict.downgraded),
+    }
+
+
+def knowledge_context(
+    db,
+    query: str,
+    *,
+    limit: int = 4,
+    user_id: str | None = None,
+    project_id: str | None = None,
+    package_id: str | None = None,
+    extra_kb_ids: list[str] | None = None,
+) -> KnowledgeContext:
+    """Public retrieval entry for generation and downstream agents.
+
+    Returns :class:`KnowledgeContext`: ``(text, downgrades)`` for legacy callers,
+    plus ``text`` / ``downgrades`` / ``refs`` / ``diagnostics`` attributes.
+    ``project_id`` / ``package_id`` are forwarded to :func:`knowledge.search` so
+    scoped knowledge bases are gated fail-closed.
+    """
+
+    extra = [str(item) for item in (extra_kb_ids or []) if item]
     if user_id:
-        extra_kb_ids.append(user_docs.personal_kb(db, str(user_id)).id)
+        extra.append(user_docs.personal_kb(db, str(user_id)).id)
         try:
             from ..enterprise.assets import enterprise_kb_ids
 
-            extra_kb_ids.extend(enterprise_kb_ids(db, str(user_id)))
+            extra.extend(enterprise_kb_ids(db, str(user_id)))
         except Exception:  # noqa: BLE001 - 企业库不可用不应阻断生成
             logger.debug("解析企业知识库失败", exc_info=True)
 
-    def provide(query: str) -> str:
-        # 用追加语义：全局已启用企业库照常参与，再纳入当前用户个人库。
-        # 旧写法把个人库 id 塞进 kb_ids（排他）导致全局库被排除，与注释矛盾。
-        passages = knowledge.search(
+    # 用追加语义：全局已启用企业库照常参与，再纳入当前用户个人库。
+    found = knowledge.search(
+        db,
+        query,
+        limit=limit,
+        extra_kb_ids=extra or None,
+        project_id=project_id,
+        package_id=package_id,
+        with_diagnostics=True,
+    )
+    passages = list(found)
+    diagnostics = dict(getattr(found, "diagnostics", {}) or {})
+    block, downgraded = material_policy.context_block(db, passages)
+    verdicts = (
+        material_policy.passage_verdicts(db, passages) if passages else []
+    )
+    refs = [
+        _passage_ref(passage, verdict)
+        for passage, verdict in zip(passages, verdicts, strict=True)
+    ]
+    return KnowledgeContext(
+        text=block,
+        downgrades=downgraded,
+        refs=refs,
+        diagnostics=diagnostics,
+    )
+
+
+def _knowledge_provider(
+    db,
+    user_id: str | None = None,
+    *,
+    project_id: str | None = None,
+    package_id: str | None = None,
+):
+    """Build the generation retrieval callback for one user (and optional scope)."""
+
+    def provide(query: str) -> KnowledgeContext:
+        return knowledge_context(
             db,
             query,
-            limit=4,
-            extra_kb_ids=extra_kb_ids or None,
+            user_id=user_id,
+            project_id=project_id,
+            package_id=package_id,
         )
-        block, downgraded = material_policy.context_block(db, passages)
-        # Forward the advisory downgrade count to the writer so it reaches the
-        # generation report instead of being silently discarded.
-        return block, downgraded
 
     return provide
 

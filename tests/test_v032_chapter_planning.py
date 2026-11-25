@@ -148,6 +148,32 @@ def _new_project(db, name: str) -> Project:
     return project
 
 
+def _retrieval_context(ids: dict[str, str], *, text: str = "技术方案需要逐条响应评分标准"):
+    """模拟检索侧 KnowledgeContext：真实 passage 引用 + 诊断。"""
+
+    return SimpleNamespace(
+        text=text,
+        downgrades=1,
+        refs=[
+            {
+                "id": ids["chunk"],
+                "chunk_id": ids["chunk"],
+                "kb_id": ids["kb"],
+                "document_id": ids["document"],
+                "page": 3,
+                "heading": "技术方案",
+                "source": "企业技术资料.pdf",
+                "snippet": "技术方案需要逐条响应评分标准",
+                "score": 0.91,
+                "rerank_score": 0.87,
+                "trust_tier": " trusted ",
+                "degraded": False,
+            }
+        ],
+        diagnostics=[{"kb_id": ids["kb"], "status": "ok"}],
+    )
+
+
 def _report(heading: str = "技术方案"):
     return SimpleNamespace(
         written=[heading], fallback=[], failed=[], suspicious={}, suspicious_count=0,
@@ -169,7 +195,7 @@ def test_generate_plan_accepts_only_real_ids(db):
             node,
             "突出实施路径",
             "tester",
-            knowledge_provider=lambda _q: "技术方案需要逐条响应评分标准",
+            knowledge_provider=lambda _q: _retrieval_context(ids),
         )
         assert plan.version == 1
         assert plan.status == DRAFT
@@ -178,6 +204,19 @@ def test_generate_plan_accepts_only_real_ids(db):
         assert ids["requirement"] in [row["id"] for row in plan.requirements]
         assert ids["fact"] in [row["id"] for row in plan.fact_refs]
         assert ids["chunk"] in [row["id"] for row in plan.knowledge_refs]
+        knowledge_row = next(
+            row for row in plan.knowledge_refs if row["id"] == ids["chunk"]
+        )
+        assert knowledge_row["chunk_id"] == ids["chunk"]
+        assert knowledge_row["document_id"] == ids["document"]
+        assert knowledge_row["page"] == 3
+        assert knowledge_row["heading"] == "技术方案"
+        assert knowledge_row["score"] == 0.91
+        assert knowledge_row["rerank_score"] == 0.87
+        assert knowledge_row["trust_tier"] == " trusted "
+        assert knowledge_row["degraded"] is False
+        assert ids["document"] in knowledge_row["trace"]
+        assert "页码 3" in knowledge_row["trace"]
         assert plan.validation_errors == []
         assert "fallback" in plan.raw_response
 
@@ -629,3 +668,86 @@ def test_async_generation_job_carries_plan_metadata(monkeypatch):
         assert payload["planning_status"] == CONFIRMED
         assert payload["prompt_version"] == PROMPT_VERSION
     assert submitted["args"][0] == job_id
+
+
+def test_model_output_refs_without_real_uuid_are_dropped(db):
+    with session_scope() as db_session:
+        project = _new_project(db_session, "伪造 ID 治理项目")
+        ids = _seed(db_session, project.id)
+        node = db_session.get(OutlineNode, ids["node"])
+        output = json.dumps(
+            {
+                "score_points": [{"name": "无 ID 评分"}, {"id": "not-a-uuid", "name": "伪造"}],
+                "requirements": [{"id": str(uuid.uuid4()), "text": "虚构 UUID"}],
+                "fact_refs": [{"key": "fake.key", "label": "伪造字段"}],
+                "knowledge_refs": [{"chunk_id": str(uuid.uuid4()), "kb_id": ids["kb"]}],
+                "strategy": ["真实策略"],
+            },
+            ensure_ascii=False,
+        )
+        plan = generate_chapter_plan(
+            db_session, project, node, created_by="tester", model_output=output
+        )
+        assert plan.score_points == []
+        assert plan.requirements == []
+        assert plan.fact_refs == []
+        assert plan.knowledge_refs == []
+        assert len([e for e in plan.validation_errors if "剔除" in e]) >= 4
+
+
+def test_personal_knowledge_from_other_user_never_enters_plan(db):
+    with session_scope() as db_session:
+        project = _new_project(db_session, "个人库隔离项目")
+        ids = _seed(db_session, project.id)
+        own_kb = KnowledgeBase(
+            name=f"own-kb-{uuid.uuid4().hex}", kind="local", enabled=True,
+            options={"personal": True, "user_id": "u-owner"},
+        )
+        foreign_kb = KnowledgeBase(
+            name=f"foreign-kb-{uuid.uuid4().hex}", kind="local", enabled=True,
+            options={"personal": True, "user_id": "u-someone-else"},
+        )
+        db_session.add_all([own_kb, foreign_kb])
+        db_session.flush()
+        own_chunk = KbChunk(kb_id=own_kb.id, text="授权个人资料", heading="授权个人资料")
+        foreign_chunk = KbChunk(kb_id=foreign_kb.id, text="他人个人资料", heading="他人个人资料")
+        db_session.add_all([own_chunk, foreign_chunk])
+        db_session.flush()
+        context = SimpleNamespace(
+            text="资料", downgrades=0, diagnostics=[],
+            refs=[
+                {
+                    "id": own_chunk.id, "chunk_id": own_chunk.id, "kb_id": own_kb.id,
+                    "snippet": "授权个人资料", "score": 0.7,
+                },
+                {
+                    "id": foreign_chunk.id, "chunk_id": foreign_chunk.id,
+                    "kb_id": foreign_kb.id, "snippet": "他人个人资料", "score": 0.9,
+                },
+            ],
+        )
+        node = db_session.get(OutlineNode, ids["node"])
+        plan = generate_chapter_plan(
+            db_session, project, node, created_by="tester", user_id="u-owner",
+            knowledge_provider=lambda _q: context,
+        )
+        kept = [row["id"] for row in plan.knowledge_refs]
+        assert own_chunk.id in kept
+        assert foreign_chunk.id not in kept
+        assert any("授权知识库" in error for error in plan.validation_errors)
+
+
+def test_plan_context_text_renders_knowledge_trace(db):
+    with session_scope() as db_session:
+        project = _new_project(db_session, "知识溯源提示词项目")
+        ids = _seed(db_session, project.id)
+        node = db_session.get(OutlineNode, ids["node"])
+        plan = generate_chapter_plan(
+            db_session, project, node, created_by="tester",
+            knowledge_provider=lambda _q: _retrieval_context(ids),
+        )
+        text = plan_context_text(plan)
+        assert ids["chunk"] in text
+        assert "文档 " in text
+        assert "页码 3" in text
+        assert "可信度" in text

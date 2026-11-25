@@ -232,3 +232,28 @@ def test_context_block_downgrades_unattributed_other(monkeypatch):
         None, [Passage(kb="k", source="/kb/paper.md", text="行业背景正文", score=0.9)]
     )
     assert downgraded2 == 0 and "行业背景正文" in block2
+
+
+def test_verdict_tiers_and_passage_verdict_helper(monkeypatch):
+    full = material_policy.assess(
+        {"kind": "qualification", "cert_no": "D-1", "valid_to": "2099-01-01"}
+    )
+    assert full.tier == "full" and full.ok and not full.downgraded
+
+    excerpt = material_policy.assess(
+        {"kind": "qualification", "cert_no": "D-2", "source_url": "https://x"}
+    )
+    assert excerpt.tier == "excerpt" and not excerpt.ok and excerpt.downgraded
+
+    monkeypatch.setattr(
+        material_policy,
+        "find_meta",
+        lambda db, source, **kwargs: (None, {"kind": "other", "title": "白皮书"}),
+    )
+    passage = Passage(kb="k", source="x.md", text="正文", score=0.5)
+    meta, verdict = material_policy.passage_verdict(None, passage)
+    assert meta["title"] == "白皮书"
+    assert verdict.tier == "title_only" and verdict.downgraded
+    assert [item.tier for item in material_policy.passage_verdicts(None, [passage])] == [
+        "title_only"
+    ]

@@ -1,4 +1,5 @@
 import { ApiError, asArray, jsonBody, request } from '../lib/http'
+import { isRecord, normalizeRetrievalTrace, traceBool, traceDiagnostics } from '../lib/retrievalTrace'
 import type { KbDocMetaInput, KbDocMetaItem, KbDocMetaResponse, KbDocPolicy, KbDocSource, KbDocumentItem, KbSearchPassage, KbVectorResult, KnowledgeAsset, KnowledgeAssetChunk, KnowledgeAssetDecision, KnowledgeAssetDuplicateDecision, KnowledgeAssetDuplicateGroup, KnowledgeAssetDuplicateMember, KnowledgeBase, KnowledgeBaseInput, TermInput, TermItem, TestResult } from '../lib/types'
 import { TERM_KINDS, TERM_NOTE_MAX, TERM_SOURCE_MAX, TERM_TARGET_MAX, asBool, asLooseBool, asNumber, asText, isoOrNull, kbDocsPath, normalizeKbDocFields, normalizeKbDocPolicyEntry, normalizeKbDocSource, normalizeKbVector, normalizeTermKind, termItems, termPayload } from './shared'
 
@@ -98,6 +99,7 @@ export function normalizeKbPassage(value: unknown): KbSearchPassage | null {
   if (!source && !text) return null
   return {
     ...raw,
+    ...normalizeRetrievalTrace(raw),
     kb_id: asText(raw.kb_id),
     source,
     text,
@@ -108,6 +110,9 @@ export function normalizeKbPassage(value: unknown): KbSearchPassage | null {
     heading: asText(raw.heading),
   }
 }
+
+/** 项目级检索预览与 admin KB 预览共用同一片段契约。 */
+export const normalizeRetrievalPassage = normalizeKbPassage
 
 export async function listKnowledgeDocuments(id: string): Promise<KbDocumentItem[]> {
   return listKbDocuments(id)
@@ -493,6 +498,7 @@ export function normalizeKnowledgeAsset(value: unknown): KnowledgeAsset {
       : asText(raw.review_status).trim().toLowerCase() || null
   return {
     ...raw,
+    ...normalizeRetrievalTrace(raw),
     id,
     document_id: nullableText(raw.document_id),
     kb_id: nullableText(raw.kb_id),
@@ -519,6 +525,7 @@ function normalizeKnowledgeAssetChunk(value: unknown): KnowledgeAssetChunk | nul
   if (!id && !heading) return null
   return {
     ...raw,
+    ...normalizeRetrievalTrace(raw),
     id: id || undefined,
     page: nullableFinite(raw.page),
     heading,
@@ -656,4 +663,75 @@ export async function resolveKnowledgeAssetDuplicate(
     jsonBody(knowledgeAssetDuplicateResolvePayload(input)),
   )
   return normalizeKnowledgeAssetDuplicateGroup(data)
+}
+
+// ---------------------------------------------------------------- 项目级检索预览（Phase 3）
+
+const RETRIEVAL_PREVIEW_UNREADABLE = '服务端返回的检索预览无法识别，请刷新后重试。'
+
+export interface RetrievalPreview {
+  query: string
+  items: KbSearchPassage[]
+  diagnostics: Record<string, unknown> | unknown[] | null
+  degraded: boolean | null
+}
+
+/**
+ * `GET /projects/{ref}/retrieval/preview?q=&limit=`。
+ * 治理层片段与 admin KB 预览同构，另可携带 diagnostics / degraded。
+ * 这是同步读取（不使用 watchJob）；无法识别的响应直接失败，不返回空数组冒充成功。
+ */
+export async function previewProjectRetrieval(
+  ref: string,
+  query: string,
+  limit = 5,
+): Promise<RetrievalPreview> {
+  const q = query.trim()
+  if (!q) throw new ApiError(400, null, '检索内容不能为空')
+  const bounded = Math.max(1, Math.min(20, Math.round(limit)))
+  const params = new URLSearchParams({ q, limit: String(bounded) })
+  const data = await request<unknown>(
+    `/projects/${encodeURIComponent(ref)}/retrieval/preview?${params.toString()}`,
+  )
+  const raw = isRecord(data)
+    ? data
+    : Array.isArray(data)
+      ? ({ items: data } as Record<string, unknown>)
+      : null
+  if (!raw) throw new ApiError(500, null, RETRIEVAL_PREVIEW_UNREADABLE)
+  const source = Array.isArray(raw.items)
+    ? raw.items
+    : Array.isArray(raw.passages)
+      ? raw.passages
+      : Array.isArray(raw.results)
+        ? raw.results
+        : null
+  if (!source) throw new ApiError(500, null, RETRIEVAL_PREVIEW_UNREADABLE)
+  const diagnostics = traceDiagnostics(raw.diagnostics)
+  return {
+    query: asText(raw.query) || q,
+    items: source
+      .map(normalizeKbPassage)
+      .filter((item): item is KbSearchPassage => item !== null),
+    diagnostics,
+    degraded: traceBool(
+      raw.degraded !== undefined
+        ? raw.degraded
+        : diagnostics && !Array.isArray(diagnostics)
+          ? diagnostics.degraded
+          : undefined,
+    ),
+  }
+}
+
+/** 兼容不同页面对同一端点的命名习惯。 */
+export const getRetrievalPreview = previewProjectRetrieval
+export const previewRetrieval = previewProjectRetrieval
+
+export async function previewRetrievalPassages(
+  ref: string,
+  query: string,
+  limit = 5,
+): Promise<KbSearchPassage[]> {
+  return (await previewProjectRetrieval(ref, query, limit)).items
 }

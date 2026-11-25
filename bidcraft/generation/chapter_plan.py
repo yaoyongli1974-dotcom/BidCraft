@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 from collections.abc import Callable
@@ -30,7 +31,7 @@ from ..models import (
 )
 
 #: 提示词版本：规划格式变化时必须 bump，便于追溯 prompt ↔ 规划版本。
-PROMPT_VERSION = "chapter_plan_v1"
+PROMPT_VERSION = "chapter_plan_v2"
 
 # 状态机（大写值便于日志/审计阅读）。
 NOT_CREATED = "NOT_CREATED"
@@ -131,6 +132,129 @@ def _similarity(a: str, b: str) -> float:
     return len(left & right) / len(left | right)
 
 
+# ------------------------------------------------------------ 检索引用归一化
+# 检索提供方（services.job_support）会给出 KnowledgeContext：text / downgrades /
+# refs / diagnostics。旧提供方只给 (text, downgrades) 或纯文本，这里同时兼容，
+# 且绝不在本模块按文本相似度重新"猜"知识 ID。
+
+_REF_ATTRS = (
+    "id", "kind", "chunk_id", "kb_id", "document_id", "page", "heading", "source",
+    "snippet", "score", "rerank_score", "trust_tier", "degraded", "trace",
+)
+
+
+def _attr(item: Any, name: str, default: Any = None) -> Any:
+    if isinstance(item, dict):
+        return item.get(name, default)
+    return getattr(item, name, default)
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value if value is not None else default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(item) for item in value]
+    return str(value)
+
+
+def retrieval_ref_payload(item: Any) -> dict[str, Any]:
+    """把 provider 的真实 passage 引用转成可持久化/可审计的普通字典。"""
+
+    ref: dict[str, Any] = {name: _jsonable(_attr(item, name)) for name in _REF_ATTRS}
+    ref["id"] = _text(ref.get("id") or ref.get("chunk_id") or ref.get("document_id"))
+    ref["page"] = _as_int(ref.get("page"), 0) if ref.get("page") is not None else None
+    ref["score"] = _as_float(ref.get("score"))
+    ref["rerank_score"] = (
+        _as_float(ref.get("rerank_score")) if ref.get("rerank_score") is not None else None
+    )
+    # 未知降级状态保留 None，避免把“未知”误报为明确的“未降级”。
+    ref["degraded"] = None if ref.get("degraded") is None else bool(ref["degraded"])
+    trace = _text(ref.get("trace"))
+    if not trace:
+        bits = []
+        if ref.get("document_id"):
+            bits.append(f"文档 {ref['document_id']}")
+        if ref.get("page"):
+            bits.append(f"页码 {ref['page']}")
+        if ref.get("heading"):
+            bits.append(f"标题 {ref['heading']}")
+        if ref.get("source"):
+            bits.append(f"来源 {ref['source']}")
+        trace = " · ".join(bits)
+    ref["trace"] = trace
+    return ref
+
+
+def normalize_retrieval(retrieved: Any) -> tuple[str, int, list[dict[str, Any]], Any]:
+    """统一 provider 返回值 → (文本, 降级数, 真实引用, 诊断)。
+
+    对象有属性时优先读属性；否则退回旧的 ``(text, downgrades)`` / 文本元组。
+    诊断保持 provider 的形态（KnowledgeContext 给出 dict）。
+    """
+
+    if retrieved is None:
+        return "", 0, [], []
+    if isinstance(retrieved, str):
+        return retrieved, 0, [], []
+    if isinstance(retrieved, dict) or hasattr(retrieved, "refs") or hasattr(retrieved, "text"):
+        raw_refs = _list(_attr(retrieved, "refs"))
+        raw_diagnostics = _attr(retrieved, "diagnostics")
+        if isinstance(raw_diagnostics, dict):
+            diagnostics: Any = _jsonable(raw_diagnostics)
+        else:
+            diagnostics = [_jsonable(item) for item in _list(raw_diagnostics)]
+        return (
+            _text(_attr(retrieved, "text")),
+            _as_int(_attr(retrieved, "downgrades")),
+            [retrieval_ref_payload(item) for item in raw_refs],
+            diagnostics,
+        )
+    try:
+        values = tuple(retrieved)
+    except TypeError:
+        values = (retrieved,)
+    text = _text(values[0]) if values else ""
+    downgrades = _as_int(values[1]) if len(values) > 1 else 0
+    return text, downgrades, [], []
+
+
+def scoped_knowledge_provider(
+    factory: Callable[..., Any],
+    db: Session,
+    user_id: str | None,
+    project_id: str,
+    package_id: str | None,
+) -> Any:
+    """调用检索工厂并尽量传入项目/标段作用域；旧工厂保持兼容。"""
+
+    try:
+        parameters = inspect.signature(factory).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    accepts_scope = "project_id" in parameters or any(
+        param.kind is inspect.Parameter.VAR_KEYWORD for param in parameters.values()
+    )
+    if accepts_scope:
+        return factory(db, user_id, project_id=project_id, package_id=package_id)
+    return factory(db, user_id)
+
+
 def chapter_plan_payload(row: ChapterPlan) -> dict[str, Any]:
     """把规划行序列化成 API/审计共用的字典（JSON 字段统一为 list）。"""
 
@@ -193,7 +317,71 @@ def load_plan_history(db: Session, project_id: str, node_id: str) -> list[Chapte
     return list(db.scalars(_plan_query(db, project_id, node_id)))
 
 
-def _project_valid_ids(db: Session, project_id: str) -> dict[str, set[str]]:
+def _kb_scope_allowed(kb: KnowledgeBase, project_id: str | None, package_id: str | None) -> bool:
+    """与 knowledge.search 一致的项目/标段声明校验（缺声明即失败关闭）。"""
+
+    options = kb.options if isinstance(kb.options, dict) else {}
+    for key, requested in (("project_id", project_id), ("package_id", package_id)):
+        declared = options.get(key)
+        if declared in (None, ""):
+            continue
+        if isinstance(declared, bool) or not isinstance(declared, (str, int)):
+            return False
+        requested_text = str(requested or "").strip()
+        if not requested_text or requested_text != str(declared).strip():
+            return False
+    return True
+
+
+def _allowed_kb_ids(
+    db: Session,
+    user_id: str | None = None,
+    project_id: str | None = None,
+    package_id: str | None = None,
+) -> set[str]:
+    """本项目规划可引用的知识库范围。
+
+    默认只有已启用的非个人共享库；仅当给出 ``user_id`` 时才追加该用户本人
+    的个人库与所属企业的授权库，绝不按全局 ID 放行。带项目/标段声明的库
+    必须与本次生成的作用域一致。
+    """
+
+    rows = list(db.scalars(select(KnowledgeBase).where(KnowledgeBase.enabled.is_(True))))
+    allowed = {
+        kb.id
+        for kb in rows
+        if not (kb.options or {}).get("personal")
+        and _kb_scope_allowed(kb, project_id, package_id)
+    }
+    uid = str(user_id or "")
+    if not uid:
+        return allowed
+    enterprise_ids: set[str] = set()
+    try:
+        from ..enterprise.assets import enterprise_kb_ids
+
+        enterprise_ids = {str(item) for item in enterprise_kb_ids(db, uid)}
+    except Exception:  # noqa: BLE001 - 企业库不可用时只保留共享与个人库
+        import logging
+
+        logging.getLogger(__name__).debug("解析授权企业知识库失败", exc_info=True)
+    for kb in rows:
+        options = kb.options or {}
+        if not options.get("personal") or not _kb_scope_allowed(kb, project_id, package_id):
+            continue
+        if str(options.get("user_id") or "") == uid or (
+            str(options.get("enterprise_id") or "") in enterprise_ids
+        ):
+            allowed.add(kb.id)
+    return allowed
+
+
+def _project_valid_ids(
+    db: Session,
+    project_id: str,
+    user_id: str | None = None,
+    package_id: str | None = None,
+) -> dict[str, set[str]]:
     scoring = set(db.scalars(select(ScoringItem.id).where(ScoringItem.project_id == project_id)))
     requirements = set(
         db.scalars(select(Requirement.id).where(Requirement.project_id == project_id))
@@ -201,84 +389,44 @@ def _project_valid_ids(db: Session, project_id: str) -> dict[str, set[str]]:
     facts = set(db.scalars(select(Fact.id).where(Fact.project_id == project_id)))
     fact_keys = set(db.scalars(select(Fact.key).where(Fact.project_id == project_id)))
     nodes = set(db.scalars(select(OutlineNode.id).where(OutlineNode.project_id == project_id)))
-    chunks = set(db.scalars(select(KbChunk.id)))
-    documents = set(db.scalars(select(KbDocument.id)))
+    kb_ids = _allowed_kb_ids(db, user_id, project_id, package_id)
+    chunks = (
+        set(db.scalars(select(KbChunk.id).where(KbChunk.kb_id.in_(kb_ids)))) if kb_ids else set()
+    )
+    documents = (
+        set(db.scalars(select(KbDocument.id).where(KbDocument.kb_id.in_(kb_ids))))
+        if kb_ids
+        else set()
+    )
     return {
         "scoring_ids": {str(item) for item in scoring if item},
         "requirement_ids": {str(item) for item in requirements if item},
         "fact_ids": {str(item) for item in facts if item},
         "fact_keys": {str(item) for item in fact_keys if item},
         "node_ids": {str(item) for item in nodes if item},
+        "kb_ids": {str(item) for item in kb_ids if item},
         "knowledge_ids": {str(item) for item in chunks | documents if item},
     }
 
 
-def _knowledge_refs(
-    db: Session, query: str, knowledge_text: str
-) -> tuple[list[dict[str, Any]], str]:
-    """把检索文本映射回真实 KbChunk/KbDocument；映射不到就不产生引用 ID。"""
+def _provider_knowledge_refs(
+    refs: list[dict[str, Any]], valid: dict[str, set[str]], errors: list[str]
+) -> list[dict[str, Any]]:
+    """只保留 provider 给出的、落在授权知识库内的真实引用。"""
 
-    refs: list[dict[str, Any]] = []
-    if not knowledge_text:
-        return refs, ""
-    # 只映射已启用的共享知识库；个人库按 options.personal 隔离，避免把
-    # 其他用户的知识 ID 写进项目规划。
-    enabled_kb_ids = [
-        kb.id
-        for kb in db.scalars(select(KnowledgeBase))
-        if kb.enabled and not (kb.options or {}).get("personal")
-    ]
-    if not enabled_kb_ids:
-        return refs, "知识检索结果无法映射到真实知识条目，已忽略知识引用，正文不得据此编造资料"
-    chunks = list(
-        db.scalars(
-            select(KbChunk)
-            .where(KbChunk.kb_id.in_(enabled_kb_ids))
-            .order_by(KbChunk.created_at.desc())
-            .limit(300)
-        )
-    )
-    scored: list[tuple[float, KbChunk]] = []
-    for chunk in chunks:
-        score = _similarity(query, f"{chunk.heading or ''} {str(chunk.text or '')[:300]}")
-        if score > 0.05:
-            scored.append((score, chunk))
-    scored.sort(key=lambda pair: pair[0], reverse=True)
-    for _score, chunk in scored[:4]:
-        refs.append(
-            {
-                "id": chunk.id,
-                "kind": "chunk",
-                "kb_id": chunk.kb_id or "",
-                "heading": chunk.heading or "",
-                "source": chunk.source or "",
-                "snippet": str(chunk.text or "")[:240],
-            }
-        )
-    if not refs:
-        documents = list(
-            db.scalars(
-                select(KbDocument)
-                .where(KbDocument.kb_id.in_(enabled_kb_ids))
-                .order_by(KbDocument.created_at.desc())
-                .limit(50)
-            )
-        )
-        for document in documents[:2]:
-            refs.append(
-                {
-                    "id": document.id,
-                    "kind": "document",
-                    "kb_id": document.kb_id or "",
-                    "heading": document.source or "",
-                    "source": document.source or "",
-                    "snippet": "",
-                }
-            )
-    warning = ""
-    if not refs:
-        warning = "知识检索结果无法映射到真实知识条目，已忽略知识引用，正文不得据此编造资料"
-    return refs, warning
+    kept: list[dict[str, Any]] = []
+    for ref in refs:
+        ident = _text(ref.get("id"))
+        kb_id = _text(ref.get("kb_id"))
+        if not _UUID_RE.fullmatch(ident) or (
+            ident not in valid["knowledge_ids"] and kb_id not in valid["kb_ids"]
+        ):
+            continue
+        kept.append(ref)
+    dropped = len(refs) - len(kept)
+    if dropped:
+        errors.append(f"已剔除 {dropped} 条不属于本项目授权知识库的检索引用")
+    return kept
 
 
 def build_plan_context(
@@ -287,6 +435,8 @@ def build_plan_context(
     node: OutlineNode,
     user_instruction: str = "",
     knowledge_provider: Callable[[str], Any] | None = None,
+    user_id: str | None = None,
+    package_id: str | None = None,
 ) -> dict[str, Any]:
     """在短会话里构造规划输入；只收集真实行，不含任何生成的 ID。"""
 
@@ -325,16 +475,26 @@ def build_plan_context(
         reverse=True,
     )
     knowledge_text = ""
+    knowledge_downgrades = 0
+    knowledge_diagnostics: list[Any] = []
+    provider_refs: list[dict[str, Any]] = []
     if knowledge_provider is not None:
         try:
             retrieved = knowledge_provider(anchor or _text(getattr(node, "heading", "")))
-            if isinstance(retrieved, tuple):
-                knowledge_text = str(retrieved[0] or "")
-            else:
-                knowledge_text = str(retrieved or "")
+            knowledge_text, knowledge_downgrades, provider_refs, knowledge_diagnostics = (
+                normalize_retrieval(retrieved)
+            )
         except Exception:  # noqa: BLE001 - 检索是可选上下文，失败不阻断规划
             knowledge_text = ""
-    knowledge, knowledge_warning = _knowledge_refs(db, anchor, knowledge_text)
+    package_id = package_id or str((project.meta or {}).get("package_id") or "") or None
+    valid = _project_valid_ids(db, project_id, user_id, package_id)
+    ref_errors: list[str] = []
+    knowledge = _provider_knowledge_refs(provider_refs, valid, ref_errors)
+    knowledge_warning = ""
+    if ref_errors:
+        knowledge_warning = ref_errors[0]
+    # provider 的真实引用（含外部 API 库）可作为模型引用的合法 ID 来源。
+    valid["knowledge_ids"] |= {str(ref["id"]) for ref in knowledge if ref.get("id")}
     other_nodes = list(
         db.scalars(
             select(OutlineNode).where(
@@ -346,7 +506,7 @@ def build_plan_context(
     context: dict[str, Any] = {
         "project_id": project_id,
         "node_id": node_id,
-        "package_id": str((project.meta or {}).get("package_id") or "") or None,
+        "package_id": package_id,
         "package": _text(getattr(project, "package", "")),
         "heading": _text(getattr(node, "heading", "")),
         "intent": _text(getattr(node, "intent", "")),
@@ -386,12 +546,14 @@ def build_plan_context(
         ],
         "knowledge": knowledge,
         "knowledge_text": knowledge_text,
+        "knowledge_downgrades": knowledge_downgrades,
+        "knowledge_diagnostics": knowledge_diagnostics,
         "knowledge_warning": knowledge_warning,
         "other_nodes": [
             {"id": row.id, "heading": row.heading or ""} for row in other_nodes[:20]
         ],
     }
-    context.update(_project_valid_ids(db, project_id))
+    context.update(valid)
     return context
 
 
@@ -568,10 +730,13 @@ def _validated_model_fields(
             "knowledge_refs": "knowledge_ids",
         }[field]
         valid = context[valid_key]
-        if field == "fact_refs":
-            valid = valid | set(context["fact_keys"])
         result[field] = _filter_refs(
-            result[field], valid, field, errors, context["node_ids"]
+            result[field],
+            valid,
+            field,
+            errors,
+            context["node_ids"],
+            fact_keys=context["fact_keys"],
         )
     return result
 
@@ -582,27 +747,43 @@ def _filter_refs(
     label: str,
     errors: list[str],
     node_ids: set[str] | None = None,
+    *,
+    fact_keys: set[str] | None = None,
 ) -> list[Any]:
+    """所有引用必须有真实 ID；无 ID / 非 UUID / 不在本项目范围内的一律剔除。"""
+
     nodes = valid if node_ids is None else node_ids
+    keys = fact_keys or set()
     kept: list[Any] = []
     dropped = 0
     for item in rows:
         if isinstance(item, dict):
             ident = _text(item.get("id") or item.get(f"{label}_id"))
+            if label == "fact_refs" and not ident:
+                ident = _text(item.get("key"))
+            valid_ref = ident in keys if label == "fact_refs" and not _UUID_RE.fullmatch(ident) else (
+                bool(_UUID_RE.fullmatch(ident)) and ident in valid
+            )
             node_id = _text(item.get("node_id"))
-            if (ident and ident not in valid) or (node_id and node_id not in nodes):
+            if (not valid_ref) or (node_id and node_id not in nodes):
                 dropped += 1
                 continue
         elif isinstance(item, str):
             stripped = item.strip()
-            if _UUID_RE.fullmatch(stripped) and stripped not in valid:
+            if label == "fact_refs" and stripped in keys:
+                kept.append(item)
+                continue
+            if not _UUID_RE.fullmatch(stripped) or stripped not in valid:
                 dropped += 1
                 continue
+        else:
+            dropped += 1
+            continue
         kept.append(item)
     if dropped:
         errors.append(
             f"已剔除 {dropped} 条无效的{_ID_LABELS.get(label, label)}引用"
-            "（ID 不属于本项目真实数据）"
+            "（ID 不属于本项目真实数据或不是真实 ID）"
         )
     return kept
 
@@ -614,7 +795,14 @@ def _add_error(plan: ChapterPlan, message: str) -> None:
         plan.validation_errors = current
 
 
-def validate_chapter_plan(db: Session, plan: ChapterPlan) -> list[str]:
+def validate_chapter_plan(
+    db: Session,
+    plan: ChapterPlan,
+    *,
+    user_id: str | None = None,
+    package_id: str | None = None,
+    valid_ids: dict[str, set[str]] | None = None,
+) -> list[str]:
     """校验并就地修复规划：剔除无效引用，返回中文问题列表。
 
     这是"可修复"校验：坏的引用被删掉而不是让流程失败；调用方在确认前必须
@@ -628,7 +816,7 @@ def validate_chapter_plan(db: Session, plan: ChapterPlan) -> list[str]:
         if plan.status != REJECTED:
             plan.status = REJECTED
         return _list(plan.validation_errors)
-    valid = _project_valid_ids(db, project_id)
+    valid = valid_ids or _project_valid_ids(db, project_id, user_id, package_id)
     for field in ID_REF_FIELDS:
         valid_ids = valid[{
             "score_points": "scoring_ids",
@@ -636,11 +824,23 @@ def validate_chapter_plan(db: Session, plan: ChapterPlan) -> list[str]:
             "fact_refs": "fact_ids",
             "knowledge_refs": "knowledge_ids",
         }[field]]
-        if field == "fact_refs":
-            valid_ids = valid_ids | valid["fact_keys"]
+        if field == "knowledge_refs":
+            # 已落库的 provider 引用（如外部 API 库 passage）可在复核阶段保留。
+            valid_ids = valid_ids | {
+                _text(row.get("id"))
+                for row in _list(getattr(plan, field))
+                if isinstance(row, dict)
+                and _UUID_RE.fullmatch(_text(row.get("id")))
+                and _text(row.get("kb_id")) in valid["kb_ids"]
+            }
         repair_errors: list[str] = []
         rows = _filter_refs(
-            _list(getattr(plan, field)), valid_ids, field, repair_errors, valid["node_ids"]
+            _list(getattr(plan, field)),
+            valid_ids,
+            field,
+            repair_errors,
+            valid["node_ids"],
+            fact_keys=valid["fact_keys"],
         )
         for message in repair_errors:
             _add_error(plan, message)
@@ -749,6 +949,7 @@ def generate_chapter_plan(
     model_output: str = "",
     knowledge_provider: Callable[[str], Any] | None = None,
     package_id: str | None = None,
+    user_id: str | None = None,
 ) -> ChapterPlan:
     """为一章生成新版本规划（实数据回退 + 可选模型 JSON 覆盖）。
 
@@ -762,7 +963,9 @@ def generate_chapter_plan(
     if fresh_node is None or fresh_node.project_id != project_id:
         raise LookupError("章节不存在或不属于该项目")
     node = fresh_node
-    context = build_plan_context(db, project_id, node, user_instruction, knowledge_provider)
+    context = build_plan_context(
+        db, project_id, node, user_instruction, knowledge_provider, user_id, package_id
+    )
     data: dict[str, Any] = _deterministic_plan(context)
     errors: list[str] = []
     shape = context.get("package_id") or package_id
@@ -797,7 +1000,7 @@ def generate_chapter_plan(
         raw_response=raw_response,
         model_id=model_id,
     )
-    validate_chapter_plan(db, row)
+    validate_chapter_plan(db, row, user_id=user_id, valid_ids=context)
     return row
 
 
@@ -808,6 +1011,7 @@ def update_chapter_plan(
     updates: Any,
     created_by: str = "",
     package_id: str | None = None,
+    user_id: str | None = None,
 ) -> ChapterPlan:
     """按当前有效版本追加 UPDATED 新版本；旧版本同时标记为被取代。"""
 
@@ -860,7 +1064,7 @@ def update_chapter_plan(
         raw_response=f"update: 基于版本 {current.version} 的人工调整",
         model_id="user-update",
     )
-    validate_chapter_plan(db, row)
+    validate_chapter_plan(db, row, user_id=user_id, package_id=package_id)
     return row
 
 
@@ -869,10 +1073,13 @@ def confirm_chapter_plan(
     plan: ChapterPlan,
     confirmed_by: str = "",
     note: str = "",
+    user_id: str | None = None,
 ) -> ChapterPlan:
     """校验通过后确认规划；不可修复的错误（如节点越权）直接拒绝。"""
 
-    validate_chapter_plan(db, plan)
+    project = db.get(Project, plan.project_id)
+    package_id = str((project.meta or {}).get("package_id") or "") or None if project else None
+    validate_chapter_plan(db, plan, user_id=user_id, package_id=package_id)
     if plan.status == REJECTED:
         raise ValueError("规划绑定章节无效，不能确认")
     if plan.status != CONFIRMED:
@@ -944,6 +1151,34 @@ def plan_context_text(plan: ChapterPlan | None, *, cap: int = _MAX_PLAN_CONTEXT)
     section("禁止假设", "forbidden_assumptions")
     section("质量口径", "quality_criteria")
     section("事实引用", "fact_refs", with_id=True)
-    section("知识引用", "knowledge_refs", with_id=True)
+    # 知识引用带原文 ID 与溯源链；正文只能引用这里列出的真实条目。
+    knowledge_rows = payload.get("knowledge_refs") or []
+    if knowledge_rows:
+        lines.append("知识引用：")
+        for row in knowledge_rows:
+            if not isinstance(row, dict):
+                lines.append(f"- {_text(row)[:300]}")
+                continue
+            bits = [f"[ID:{_text(row.get('id'))}]"]
+            for key in ("heading", "source", "snippet"):
+                if _text(row.get(key)):
+                    bits.append(_text(row.get(key)))
+            detail = []
+            if row.get("document_id"):
+                detail.append(f"文档 {row['document_id']}")
+            if row.get("page"):
+                detail.append(f"页码 {row['page']}")
+            if row.get("score") not in (None, ""):
+                detail.append(f"检索分 {row['score']}")
+            if row.get("rerank_score") not in (None, ""):
+                detail.append(f"重排分 {row['rerank_score']}")
+            if row.get("trust_tier"):
+                detail.append(f"可信度 {row['trust_tier']}")
+            if row.get("degraded"):
+                detail.append("已降级，仅可引用出处")
+            if row.get("trace"):
+                detail.append(f"溯源 {row['trace']}")
+            suffix = f"（{' · '.join(detail)}）" if detail else ""
+            lines.append(f"- {' '.join(bits)}{suffix}"[:400])
     text = "\n".join(lines)
     return text[:cap]

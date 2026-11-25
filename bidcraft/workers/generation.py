@@ -11,12 +11,14 @@ from typing import Any
 
 from sqlalchemy import select
 
-from .. import jobs
+from .. import jobs, provenance
 from ..db import session_scope
 from ..generation.chapter_plan import (
+    CONFIRMED_STATUSES,
     chapter_plan_payload,
     load_active_plan,
     mark_plan_used,
+    scoped_knowledge_provider,
 )
 from ..generation.outline import build_outline, load_outline, save_outline
 from ..generation.writer import generate_document
@@ -76,6 +78,35 @@ def _plan_meta(plan) -> dict[str, Any]:
     }
 
 
+def _resolve_worker_plan(
+    db,
+    project_id: str,
+    package_id: str | None,
+    node_id: str,
+    recorded: dict[str, Any] | None,
+    mode: str,
+) -> ChapterPlan | None:
+    """使用 enqueue 时门禁记录的规划；非 auto 模式下绝不消费未确认版本。"""
+
+    plan: ChapterPlan | None = None
+    plan_id = str((recorded or {}).get("planning_id") or "")
+    if plan_id:
+        candidate = db.get(ChapterPlan, plan_id)
+        if (
+            candidate is not None
+            and candidate.project_id == project_id
+            and candidate.node_id == node_id
+            and not (package_id and candidate.package_id and candidate.package_id != package_id)
+        ):
+            plan = candidate
+    if plan is None:
+        # 老 Job 没有 plans 映射时退回当前有效规划，仍执行同样的状态门禁。
+        plan = load_active_plan(db, project_id, node_id, package_id)
+    if plan is not None and plan.status not in CONFIRMED_STATUSES and mode != "auto":
+        raise ValueError(f"章节 {node_id} 的规划尚未确认，worker 拒绝生成正文")
+    return plan
+
+
 def commit_generation_chapter(
     job_id: str,
     project_id: str,
@@ -120,6 +151,9 @@ def commit_generation_chapter(
         outline_node = chapter_db.get(OutlineNode, node_id)
         if outline_node is not None:
             outline_node.status = status
+        # 事实引用与正文同事务重建：worker 生成的章节必须有真实 FactCitation，
+        # 否则导出/provenance 侧看不到任何可复核的来源链。
+        provenance.refresh_node(chapter_db, project_id, node_id, body)
         # 规划与正文同事务标记已使用；幂等，重复投递不会二次改写状态。
         plan_id = str(info.get("chapter_plan_id") or "")
         if plan_id:
@@ -157,6 +191,8 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
     while ``job_events`` is the resumable SSE feed used by the browser.
     """
     marker_id = ""
+    recorded_plans: dict[str, Any] = {}
+    planning_mode = "review"
     try:
         raise_if_aborted()
         with session_scope() as db:
@@ -172,6 +208,8 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
             project = db.get(Project, project_id)
             if project is None:
                 raise ValueError("项目不存在")
+            recorded_plans = dict((job.payload or {}).get("plans") or {})
+            planning_mode = str((project.meta or {}).get("chapter_planning_mode") or "review")
             owner_id = str((job.payload or {}).get("user_id") or project.owner_id or "")
             marker_id = str((job.payload or {}).get("pending_charge_id") or "")
             lease_token = str((job.payload or {}).get("generation_lease_token") or "")
@@ -198,9 +236,22 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
             package_id = str((project.meta or {}).get("package_id") or "") or None
             plans_by_node: dict[str, ChapterPlan] = {}
             for node_row in load_outline(work_db, project_id):
-                active = load_active_plan(work_db, project_id, node_row["id"], package_id)
-                if active is not None:
-                    plans_by_node[node_row["id"]] = active
+                plan = _resolve_worker_plan(
+                    work_db,
+                    project_id,
+                    package_id,
+                    node_row["id"],
+                    recorded_plans.get(node_row["id"]),
+                    planning_mode,
+                )
+                if plan is not None:
+                    plans_by_node[node_row["id"]] = plan
+            # 审计元数据必须以 writer 实际使用的规划为准，不能按 node 二次查库。
+            plans_by_id = {plan.id: plan for plan in plans_by_node.values()}
+
+            def _plan_for(info: dict[str, Any]) -> ChapterPlan | None:
+                return plans_by_id.get(str(info.get("chapter_plan_id") or ""))
+
             current = {"heading": ""}
             delta = {"text": "", "last": time.monotonic()}
 
@@ -232,7 +283,7 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
                     if row is None:
                         return
                     row.message = f"正在生成：{current['heading']}"
-                    plan = plans_by_node.get(str(info.get("node_id") or ""))
+                    plan = _plan_for(info)
                     row.payload = {
                         **(row.payload or {}),
                         "heading": current["heading"],
@@ -261,7 +312,7 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
                     if row is None:
                         return
                     row.progress = int(info.get("progress") or 0)
-                    plan = plans_by_node.get(str(info.get("node_id") or ""))
+                    plan = _plan_for(info)
                     row.payload = {
                         **(row.payload or {}),
                         "heading": info.get("heading", ""),
@@ -319,6 +370,10 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
 
             def commit_chapter(info: dict[str, Any], body: str, source: str) -> None:
                 """Production chapter write path; tested directly by stage 3 suite."""
+                # SQLite has a single writer: the long generation session must
+                # release its transaction before the fenced short transaction
+                # writes the chapter, plan usage and provenance rows.
+                work_db.commit()
                 commit_generation_chapter(job_id, project_id, lease_token, info, body, source)
 
             report = generate_document(
@@ -332,7 +387,9 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
                 on_progress=on_progress,
                 on_chapter_start=on_chapter_start,
                 force=force,
-                knowledge_provider=_knowledge_provider(work_db, owner_id),
+                knowledge_provider=scoped_knowledge_provider(
+                    _knowledge_provider, work_db, owner_id, project_id, package_id
+                ),
                 before_chapter=before_chapter,
                 after_chapter=after_chapter,
                 commit_chapter=commit_chapter,
@@ -370,7 +427,11 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
             jobs.publish_event(
                 job_id,
                 "done",
-                {**jobs.job_payload(row), "report": result},
+                {
+                **jobs.job_payload(row),
+                "report": result,
+                "unused_plan_refs": getattr(report, "unused_plan_refs", {}),
+            },
                 db=done_db,
             )
         _release_lease(project_id, lease_token)

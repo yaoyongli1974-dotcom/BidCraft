@@ -303,7 +303,10 @@ def _tool_search_knowledge(db, args: dict[str, Any]) -> list[dict[str, Any]]:
             "document_id": passage.document_id,
             "page": passage.page,
             "heading": passage.heading,
+            "chunk_id": passage.chunk_id,
+            "chunk_index": passage.chunk_index,
             "score": passage.score,
+            "rerank_score": passage.rerank_score,
             "text": (passage.text or "")[:800],
         }
         for passage in passages

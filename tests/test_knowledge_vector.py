@@ -626,3 +626,22 @@ def test_migrate_columns_adds_embedding_to_legacy_table(tmp_path):
     _migrate_columns(engine)
     columns = {column["name"] for column in inspect(engine).get_columns("kb_chunks")}
     assert {"embedding", "embed_key", "embed_dim"} <= columns
+
+
+def test_search_exposes_chunk_trace_and_rerank_score(db, tmp_path, monkeypatch):
+    from bidcraft import knowledge
+    from bidcraft.db import session_scope
+
+    kb_id = _make_local_kb(tmp_path, ["综合布线 Cat6A 测试"])
+    with session_scope() as session:
+        hits = knowledge.search(session, "综合布线", limit=4, kb_ids=[kb_id])
+        assert hits and hits[0].chunk_id
+        assert hits[0].chunk_index == 0
+        assert hits[0].rerank_score is not None
+        assert f"块 {hits[0].chunk_id}" in knowledge.trace_label(hits[0])
+
+        diagnostics = knowledge.search(
+            session, "综合布线", limit=4, kb_ids=[kb_id], with_diagnostics=True
+        )
+        assert isinstance(diagnostics, knowledge.SearchResult)
+        assert diagnostics.diagnostics["searched"][0]["kb_id"] == kb_id

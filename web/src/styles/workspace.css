@@ -7807,3 +7807,21 @@ button.risk-anchor:hover {
   .quality-overview { grid-template-columns: repeat(2, 1fr); }
   .quality-dim-head { flex-wrap: wrap; }
 }
+
+/* ---------- 检索溯源（v0.32 Phase 3） ---------- */
+.trace-badges { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.trace-badges.is-compact .badge { font-size: 10.5px; padding: 1px 6px; }
+.trace-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 4px 14px; margin: 8px 0 0; font-size: 12px; }
+.trace-meta.is-compact { gap: 2px 12px; font-size: 11.5px; }
+.trace-meta > div { display: flex; min-width: 0; gap: 6px; }
+.trace-meta dt { flex: 0 0 auto; color: var(--muted); }
+.trace-meta dd { margin: 0; overflow-wrap: anywhere; }
+.trace-ref-list { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.trace-ref-list li { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 7px 9px; border: 1px solid var(--line-soft); border-radius: 6px; font-size: 12.5px; }
+.trace-ref-title { font-weight: 600; }
+.retrieval-preview { margin-top: 16px; }
+.retrieval-preview-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.retrieval-preview-summary { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0 4px; font-size: 12px; }
+.retrieval-preview-list { display: flex; flex-direction: column; gap: 8px; margin: 8px 0 0; padding: 0; list-style: none; }
+.retrieval-preview-list > li { padding: 10px 12px; border: 1px solid var(--line-soft); border-radius: 8px; }
+.retrieval-preview-text { margin: 0 0 7px; font-size: 12.5px; line-height: 1.6; color: var(--ink-soft); }

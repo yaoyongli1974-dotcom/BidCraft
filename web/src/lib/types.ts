@@ -522,6 +522,36 @@ export interface OutlineChapter {
   review_status?: string
 }
 
+/**
+ * 检索溯源信号（v0.32 Phase 3）。全部可选且可空：旧后端不带这些字段时
+ * 界面显示「未知」，绝不把 null/undefined 伪装成 0 分 / trusted / 未降级。
+ */
+export interface RetrievalTrace {
+  rerank_score?: number | null
+  trust_tier?: string | null
+  degraded?: boolean | null
+  chunk_id?: string | null
+  chunk_index?: number | null
+  /** 服务端诊断：对象或列表都可能出现（项目级预览返回列表）。 */
+  diagnostics?: Record<string, unknown> | unknown[] | null
+  score_source?: string | null
+}
+
+/** 章节规划中的知识引用：真实 id + 可选溯源信号；旧后端可能只给字符串。 */
+export interface KnowledgeRef extends RetrievalTrace {
+  id?: string | null
+  kind?: string | null
+  kb_id?: string | null
+  document_id?: string | null
+  heading?: string | null
+  source?: string | null
+  snippet?: string | null
+  text?: string | null
+  page?: number | null
+  score?: number | null
+  [key: string]: unknown
+}
+
 /** 章节规划状态；后端可能继续扩展，UI 只按已知值渲染标签。 */
 export type ChapterPlanStatus =
   | 'DRAFT'
@@ -535,7 +565,7 @@ export type ChapterPlanStatus =
  * 章节规划（Phase 1）。字段全部可选：后端缺字段时前端显示「未填写」，
  * 绝不补造目标、评分点或校验结果。
  */
-export interface ChapterPlan {
+export interface ChapterPlan extends RetrievalTrace {
   id?: string
   project_id?: string
   node_id?: string
@@ -549,7 +579,8 @@ export interface ChapterPlan {
   challenges?: unknown[]
   strategy?: unknown[]
   measures?: unknown[]
-  knowledge_refs?: unknown[]
+  /** 归一化后保留服务端的真实引用对象（含溯源信号）；纯文本引用仍为字符串。 */
+  knowledge_refs?: Array<KnowledgeRef | string>
   fact_refs?: unknown[]
   planned_tables?: unknown[]
   planned_diagrams?: unknown[]
@@ -1736,7 +1767,7 @@ export type KnowledgeAssetReviewStatus =
   | 'archived'
 
 /** 资产溯源片段。page 可空，heading 可空串；未知字段按原样保留。 */
-export interface KnowledgeAssetChunk {
+export interface KnowledgeAssetChunk extends RetrievalTrace {
   id?: string
   page?: number | null
   heading?: string
@@ -1747,7 +1778,7 @@ export interface KnowledgeAssetChunk {
  * `/admin/kbs/{id}/assets` 与 `/enterprise/{id}/assets` 共用的资产视图。
  * 服务端可随版本增减字段，因此除 id 外全部可选，未知字段由归一化器保留。
  */
-export interface KnowledgeAsset {
+export interface KnowledgeAsset extends RetrievalTrace {
   id: string
   document_id?: string | null
   kb_id?: string | null
@@ -2227,8 +2258,8 @@ export interface KbDocumentItem {
   updated_at: string | null
 }
 
-/** 知识库检索预览片段，含文档/页码/标题溯源。 */
-export interface KbSearchPassage {
+/** 知识库检索预览片段，含文档/页码/标题与 Phase 3 溯源信号。 */
+export interface KbSearchPassage extends RetrievalTrace {
   kb_id: string
   source: string
   text: string

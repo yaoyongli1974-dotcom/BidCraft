@@ -11,6 +11,11 @@ from sqlalchemy import case, or_
 
 _core = sys.modules['bidcraft.api.app']  # 运行期查找，保持 monkeypatch 生效
 
+from ...generation.chapter_plan import (  # noqa: E402
+    normalize_retrieval,
+    retrieval_ref_payload,
+    scoped_knowledge_provider,
+)
 from ...generation.coverage import (  # noqa: E402
     calculate_score_coverage,
     validate_scoring_coverage,
@@ -1460,8 +1465,11 @@ def _generate_chapter_plan(
         _require_write(role)
         node = authorize_node(db, project.id, node_id)
         user = current_user() or {}
+        package_id = str((project.meta or {}).get("package_id") or "") or None
         try:
-            provider = _knowledge_provider(db, user.get("id"))
+            provider = scoped_knowledge_provider(
+                _knowledge_provider, db, user.get("id"), project.id, package_id
+            )
         except Exception:  # noqa: BLE001 - 知识检索失败不阻断规划
             provider = None
         context = build_plan_context(
@@ -1472,6 +1480,7 @@ def _generate_chapter_plan(
         node_id_value = node.id
         package_id = payload.package_id or context.get("package_id")
         created_by = str(user.get("username") or "")
+        user_id_value = str(user.get("id") or "")
 
     # 2) 模型调用在事务之外；不可用时回退确定性规划，原始返回留在 raw_response。
     model_output = ""
@@ -1501,6 +1510,7 @@ def _generate_chapter_plan(
             regenerate,
             model_output=model_output,
             package_id=package_id,
+            user_id=user_id_value,
         )
         result = chapter_plan_payload(plan)
         audit(
@@ -1576,6 +1586,7 @@ def modify_chapter_plan(
             payload,
             str((current_user() or {}).get("username") or ""),
             payload.package_id or (project.meta or {}).get("package_id"),
+            str((current_user() or {}).get("id") or ""),
         )
         result = chapter_plan_payload(plan)
         audit(
@@ -1608,7 +1619,7 @@ def approve_chapter_plan(
         if plan is None:
             raise _http_error(409, "该章节没有可确认的规划")
         username = str((current_user() or {}).get("username") or "")
-        confirm_chapter_plan(db, plan, username, payload.note)
+        confirm_chapter_plan(db, plan, username, payload.note, str((current_user() or {}).get("id") or ""))
         result = chapter_plan_payload(plan)
         audit(
             db,
@@ -1637,6 +1648,73 @@ def chapter_plan_history(ref: str, node_id: str) -> dict[str, Any]:
             "node_id": node.id,
             "heading": node.heading,
             "plans": [chapter_plan_payload(row) for row in rows],
+        }
+
+
+@router.get("/projects/{ref}/retrieval/preview")
+def retrieval_preview(ref: str, q: str = "", limit: int = 4) -> dict[str, Any]:
+    """只读检索预览：viewer 可用，返回真实 passage 溯源与诊断，不改任何正文。"""
+
+    query = str(q or "").strip()
+    cap = max(1, min(20, int(limit or 4)))
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        user = current_user() or {}
+        package_id = str((project.meta or {}).get("package_id") or "") or None
+        try:
+            provider = scoped_knowledge_provider(
+                _knowledge_provider, db, user.get("id"), project.id, package_id
+            )
+            retrieved = provider(query) if query else None
+            text, downgrades, refs, diagnostics = normalize_retrieval(retrieved)
+        except Exception:  # noqa: BLE001 - 检索不可用返回空预览，不阻断页面
+            text, downgrades, refs, diagnostics = "", 0, [], []
+        passages: list[dict[str, Any]] = []
+        for row in refs[:cap]:
+            item = retrieval_ref_payload(row)
+            passages.append(
+                {
+                    "id": item.get("id") or "",
+                    "score": item.get("score") or 0.0,
+                    "rerank_score": item.get("rerank_score"),
+                    # 未知信号保留 null，前端才能区分“未知”与明确的“未降级”。
+                    "trust_tier": item.get("trust_tier"),
+                    "degraded": item.get("degraded"),
+                    "chunk_id": item.get("chunk_id") or "",
+                    "document_id": item.get("document_id") or "",
+                    "page": item.get("page") or 0,
+                    "heading": item.get("heading") or "",
+                    "source": item.get("source") or "",
+                    "text": item.get("snippet") or item.get("text") or "",
+                    "trace": item.get("trace") or "",
+                    "kb_id": item.get("kb_id") or "",
+                }
+            )
+        if not passages and text:
+            # Old (text-only) providers still yield a reviewable text block.
+            passages.append(
+                {
+                    "id": "", "score": 0.0, "rerank_score": None, "trust_tier": None,
+                    "degraded": bool(downgrades) if downgrades else None,
+                    "chunk_id": "", "document_id": "",
+                    "page": 0, "heading": "", "source": "", "text": text[:2000],
+                    "trace": "", "kb_id": "",
+                }
+            )
+        audit(
+            db,
+            project.id,
+            "retrieval.preview",
+            {"query": query[:200], "limit": cap, "count": len(passages),
+             "downgrades": downgrades},
+        )
+        return {
+            "project_id": project.id,
+            "query": query,
+            "limit": cap,
+            "passages": passages,
+            "diagnostics": diagnostics,
+            "downgrades": downgrades,
         }
 
 
@@ -1907,6 +1985,7 @@ def generate_chapter(ref: str, node_id: str) -> dict[str, Any]:
             db, user, project.id, charged, 1, note=f"生成本章：{heading}"
         )
         project_id = project.id
+        package_id = str((project.meta or {}).get("package_id") or "") or None
     # 2) 模型调用。generate_document 需要可写 Session 落地章节（writer.py 直接
     #    写 Section/OutlineNode 并 flush），且 before/after_chapter 钩子也接收
     #    该 Session；在不动 writer.py 的前提下无法把 HTTP 模型调用再挪出会话，
@@ -1929,7 +2008,9 @@ def generate_chapter(ref: str, node_id: str) -> dict[str, Any]:
                 ledger,
                 package,
                 only_node=node_id_value,
-                knowledge_provider=_knowledge_provider(gen_db, user.id),
+                knowledge_provider=scoped_knowledge_provider(
+                    _knowledge_provider, gen_db, user.id, project_id, package_id
+                ),
                 plan_provider=lambda nid: load_active_plan(gen_db, project_id, nid),
             )
         # 心跳线程发现租约失效后只置事件；生成会话可能已写出部分章节，按已写
@@ -1974,6 +2055,7 @@ def generate_chapter(ref: str, node_id: str) -> dict[str, Any]:
                 **plan_meta,
                 "heading": heading,
                 "chapter_plan_warnings": planning_warnings,
+                "unused_plan_refs": getattr(report, "unused_plan_refs", {}),
             },
         )
         jobqueue.release_generation_lease(db, project_id, lease_token)
@@ -2041,6 +2123,7 @@ def write(ref: str) -> dict[str, Any]:
             db, user, project.id, charged, count, note="同步生成全书正文"
         )
         project_id = project.id
+        package_id = str((project.meta or {}).get("package_id") or "") or None
     settled = False
     heartbeat_abort = threading.Event()
     try:
@@ -2056,7 +2139,9 @@ def write(ref: str) -> dict[str, Any]:
                 client,
                 ledger,
                 package,
-                knowledge_provider=_knowledge_provider(gen_db, user.id),
+                knowledge_provider=scoped_knowledge_provider(
+                    _knowledge_provider, gen_db, user.id, project_id, package_id
+                ),
                 plan_provider=lambda nid: load_active_plan(gen_db, project_id, nid),
             )
         if heartbeat_abort.is_set():
@@ -2097,6 +2182,7 @@ def write(ref: str) -> dict[str, Any]:
                 "planning_ids": plan_ids,
                 "plans": plan_meta_list,
                 "chapter_plan_warnings": planning_warnings,
+                "unused_plan_refs": getattr(report, "unused_plan_refs", {}),
                 "chapters": len(report.written),
             },
         )

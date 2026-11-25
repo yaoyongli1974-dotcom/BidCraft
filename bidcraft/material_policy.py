@@ -21,6 +21,10 @@ from .knowledge import KnowledgeError, Passage  # noqa: F401 (便于调用方捕
 
 POLICY_KEY = "material_policy"
 
+#: 注入档位：正文全量 → 有限摘录 → 仅题录 → 完全抑制。
+TIERS = ("full", "excerpt", "title_only", "suppressed")
+EXCERPT_CHARS = 160
+
 DEFAULT_POLICY: dict[str, dict[str, Any]] = {
     "qualification": {
         "label": "资质证书",
@@ -71,6 +75,13 @@ class Verdict:
     missing: list[str] = field(default_factory=list)
     expired: bool = False
     reason: str = ""
+    # 新增字段都带默认值：旧的 ok/reason/构造调用保持不变。
+    tier: str = "full"
+    downgraded: bool = False
+
+    @property
+    def trust_tier(self) -> str:
+        return self.tier
 
 
 def load_policy(packages_dir: Path | None = None) -> dict[str, dict[str, Any]]:
@@ -131,26 +142,66 @@ def _as_date(value: Any) -> dt.date | None:
         return None
 
 
+def _trust_tier(meta: dict[str, Any], *, missing: list[str], expired: bool, status: str, reason: str) -> str:
+    """按可用出处与缺陷程度选择注入档位（失败时绝不自动放行全文）。"""
+
+    if not missing and not expired and not reason:
+        return "full"
+    attributable = any(
+        str(meta.get(key) or "").strip()
+        for key in ("title", "source", "source_url", "document_id", "cert_no", "contract_no")
+    )
+    if not attributable:
+        return "suppressed"
+    if (status and status != "ready") or reason.startswith(("未知素材类型", "缺少素材类型")):
+        return "title_only"
+    # 仅单项必填缺失且有可核验出处时允许有限摘录；过期一律只出题录。
+    verifiable = bool(
+        str(meta.get("source_url") or "").strip() or str(meta.get("document_id") or "").strip()
+    )
+    if not expired and verifiable and missing and len(missing) == 1:
+        return "excerpt"
+    return "title_only"
+
+
 def assess(meta: dict[str, Any] | None, policy: dict[str, dict[str, Any]] | None = None) -> Verdict:
-    """判断一条素材是否可全文引用。"""
+    """判断一条素材的可引用档位。
+
+    ``ok`` / ``reason`` 的原有语义保持不变；新增 ``tier`` 用于 graduated injection。
+    """
+
     rules = policy or load_policy()
     meta = dict(meta or {})
     kind = str(meta.get("kind") or "").strip()
+    status = str(meta.get("status") or "").strip().lower()
+
+    def _result(verdict: Verdict) -> Verdict:
+        verdict.tier = _trust_tier(
+            meta,
+            missing=verdict.missing,
+            expired=verdict.expired,
+            status=status,
+            reason=verdict.reason,
+        )
+        verdict.downgraded = verdict.tier != "full"
+        return verdict
+
     # 未知/缺失的类型不能落回 other（required 为空会整段放行）。写入侧本就硬校验，
     # 读取侧同样按失败关闭处理，避免旧元数据或拼错的 kind 绕过生命周期检查。
     if not kind:
-        return Verdict(ok=False, kind="unknown", reason="缺少素材类型，未注入正文")
+        return _result(Verdict(ok=False, kind="unknown", reason="缺少素材类型，未注入正文"))
     if kind not in rules:
-        return Verdict(ok=False, kind=kind, reason="未知素材类型，未注入正文")
+        return _result(Verdict(ok=False, kind=kind, reason="未知素材类型，未注入正文"))
     spec = rules[kind]
     missing = [key for key in spec.get("required", []) if not str(meta.get(key) or "").strip()]
-    status = str(meta.get("status") or "").strip().lower()
     if status and status != "ready":
-        return Verdict(
-            ok=False,
-            kind=kind,
-            missing=missing,
-            reason=f"素材尚未就绪（{status}），未注入正文",
+        return _result(
+            Verdict(
+                ok=False,
+                kind=kind,
+                missing=missing,
+                reason=f"素材尚未就绪（{status}），未注入正文",
+            )
         )
     expired = False
     valid_to = _as_date(meta.get("valid_to"))
@@ -163,7 +214,9 @@ def assess(meta: dict[str, Any] | None, policy: dict[str, dict[str, Any]] | None
         reason = f"有效期至 {valid_to.isoformat()} 已过期"
     else:
         reason = ""
-    return Verdict(ok=not missing and not expired, kind=kind, missing=missing, expired=expired, reason=reason)
+    return _result(
+        Verdict(ok=not missing and not expired, kind=kind, missing=missing, expired=expired, reason=reason)
+    )
 
 
 def doc_map(kb) -> dict[str, dict[str, Any]]:
@@ -336,6 +389,40 @@ def _passage_meta(db, passage: Passage) -> tuple[Any, dict[str, Any]]:
     return find_meta(db, passage.source)
 
 
+def passage_verdict(
+    db,
+    passage: Passage,
+    *,
+    policy: dict[str, dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any], Verdict]:
+    """返回单条 Passage 的素材元数据与可引用裁决（含 ``tier``）。"""
+
+    _, meta = _passage_meta(db, passage)
+    rules = policy or load_policy()
+    if meta:
+        return meta, assess(meta, rules)
+    # 没有元数据时只认 provider 真实给出的 source；连 source 都没有则整体抑制。
+    tier = "title_only" if str(getattr(passage, "source", "") or "").strip() else "suppressed"
+    return {}, Verdict(
+        ok=False,
+        kind="other",
+        reason="未登记素材元数据",
+        tier=tier,
+        downgraded=True,
+    )
+
+
+def passage_verdicts(
+    db,
+    passages: Iterable[Passage],
+    *,
+    policy: dict[str, dict[str, Any]] | None = None,
+) -> list[Verdict]:
+    """批量暴露逐条裁决，供生成 provider / Agent 标注 trust_tier 与 degraded。"""
+
+    return [passage_verdict(db, passage, policy=policy)[1] for passage in passages]
+
+
 def set_meta(db, kb, source: str, meta: dict[str, Any]) -> dict[str, Any]:
     """写入/更新单个来源的文档元数据（存于 knowledge_bases.options）。"""
 
@@ -389,29 +476,43 @@ def citation(source: str, meta: dict[str, Any], reason: str) -> str:
 
 
 def context_block(db, passages: Iterable[Passage], *, policy: dict[str, dict[str, Any]] | None = None) -> tuple[str, int]:
-    """构造带可信度分级的检索注入块，返回 (文本, 降级条数)。"""
+    """构造分档注入块，返回 ``(文本, 降级条数)``（旧二元组契约不变）。
+
+    档位：``full`` 注入全文；``excerpt`` 仅注入有限摘录；``title_only`` 只出题录；
+    ``suppressed`` 不输出正文与出处。除 ``full`` 外统一计入降级数。
+    """
     from .knowledge import trace_label
 
     rules = policy or load_policy()
     rows: list[str] = []
     downgraded = 0
     for index, passage in enumerate(passages, start=1):
-        _, meta = _passage_meta(db, passage)
+        meta, verdict = passage_verdict(db, passage, policy=rules)
         trace = trace_label(passage)
         suffix = f"[{trace}]" if trace else ""
-        verdict = assess(meta, rules) if meta else Verdict(ok=False, kind="other", reason="未登记素材元数据")
-        if verdict.ok:
+        tier = verdict.tier if verdict.tier in TIERS else "title_only"
+        if tier == "full":
             rows.append(f"[{index}] （{passage.source}）{suffix}\n{passage.text}")
-        else:
-            downgraded += 1
+            continue
+        downgraded += 1
+        if tier == "excerpt":
+            excerpt = str(passage.text or "")[:EXCERPT_CHARS]
+            rows.append(
+                f"[{index}] 【摘录·{verdict.reason}】{citation(passage.source, meta, '')}{suffix}"
+                f"\n{excerpt}（节选，不得视为完整证明）"
+            )
+        elif tier == "title_only":
             rows.append(f"[{index}] {citation(passage.source, meta, verdict.reason)}{suffix}")
+        else:
+            rows.append(f"[{index}] [已抑制] 无可核验出处，未注入正文")
     if not rows:
         return "", 0
     block = (
         "【知识库参考】\n"
         "以下资料只用于补充行业背景、产品能力与实施方法；资质、业绩、价格、人员与参数"
         "仍必须以事实台账为准，不得据此编造。\n"
-        "标记为「题录」的素材因缺少生命周期字段或已过期，只提供出处，不得据其复述细节。\n\n"
+        "标记为「题录」的素材因缺少生命周期字段或已过期，只提供出处，不得据其复述细节；"
+        "「摘录」只作有限参考。\n\n"
         + "\n\n".join(rows)
     )
     return block, downgraded

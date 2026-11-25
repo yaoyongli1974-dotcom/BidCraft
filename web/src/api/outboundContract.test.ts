@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { generateChapterPlan, updateChapterPlan } from './generation'
+import { reviewEnterpriseKnowledgeAsset, resolveEnterpriseKnowledgeAssetDuplicate } from './enterprise'
+import { previewProjectRetrieval } from './retrieval'
+import { resolveKnowledgeAssetDuplicate, reviewKnowledgeAsset } from './knowledge'
 import { checkSimilarity, updateSimilarityHit } from './similarity'
 
 /**
@@ -10,6 +14,8 @@ import { checkSimilarity, updateSimilarityHit } from './similarity'
  * - KbDocumentIngest: bidcraft/api/schemas.py:564-570
  * - QualityFindingUpdate: bidcraft/api/schemas.py:644-648
  * - CommercialReview: bidcraft/api/schemas.py:600-604
+ * - ChapterPlanGenerateRequest / ChapterPlanUpdate: schemas.py:652-684
+ * - KbAssetReview / KbDuplicateGroupResolve: schemas.py:691-702
  */
 const BACKEND_ENUMS = {
   similarityScope: ['project', 'history'] as const,
@@ -24,7 +30,34 @@ const BACKEND_KEYS = {
   kbDocIngest: ['source', 'content', 'kind', 'tags', 'valid_to'],
   qualityFindingUpdate: ['status', 'note'],
   commercialReview: ['action', 'note', 'require_complete'],
+  chapterPlanGenerate: ['user_instruction', 'package_id', 'regenerate', 'note'],
+  chapterPlanUpdate: [
+    'note',
+    'package_id',
+    'updates',
+    'objective',
+    'user_instruction',
+    'score_points',
+    'requirements',
+    'conditions',
+    'challenges',
+    'strategy',
+    'measures',
+    'knowledge_refs',
+    'fact_refs',
+    'planned_tables',
+    'planned_diagrams',
+    'forbidden_assumptions',
+    'quality_criteria',
+    'user_adjustments',
+  ],
+  kbAssetReview: ['decision', 'note'],
+  duplicateResolve: ['decision', 'note'],
+  retrievalPreviewQuery: ['q', 'limit'],
 } as const
+
+const ASSET_DECISIONS = ['review', 'approve', 'publish', 'reject', 'archive'] as const
+const DUPLICATE_DECISIONS = ['resolve', 'dismiss'] as const
 
 function assertBody(
   body: unknown,
@@ -163,5 +196,108 @@ describe('出站契约：UI payload 对齐后端枚举与字段', () => {
       'commercial review (default)',
     )
     expect(Object.prototype.hasOwnProperty.call(withoutComplete, 'require_complete')).toBe(false)
+  })
+
+  it('章节规划生成只提交后端接受的输入字段', async () => {
+    const fetchMock = mockFetch({ id: 'plan-1', status: 'DRAFT' })
+
+    await generateChapterPlan('p1', 'n1', {
+      user_instruction: '突出交付能力',
+      package_id: 'pkg-1',
+    })
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('/projects/p1/chapters/n1/plan/generate')
+    expect(init?.method).toBe('POST')
+    const body = assertBody(
+      JSON.parse(String(init?.body)),
+      BACKEND_KEYS.chapterPlanGenerate,
+      'chapter plan generate',
+    )
+    expect(body).toEqual({ user_instruction: '突出交付能力', package_id: 'pkg-1' })
+    expect(Object.prototype.hasOwnProperty.call(body, 'regenerate')).toBe(false)
+  })
+
+  it('章节规划更新的扁平字段与 updates 字典都在后端允许集合内', async () => {
+    const fetchMock = mockFetch({ id: 'plan-1', status: 'UPDATED' })
+
+    await updateChapterPlan('p1', 'n1', {
+      updates: { objective: '新目标', strategy: ['突出交付能力'] },
+      package_id: 'pkg-2',
+    })
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('/projects/p1/chapters/n1/plan')
+    expect(init?.method).toBe('PUT')
+    const body = assertBody(
+      JSON.parse(String(init?.body)),
+      BACKEND_KEYS.chapterPlanUpdate,
+      'chapter plan update',
+    )
+    expect(body.updates).toEqual({ objective: '新目标', strategy: ['突出交付能力'] })
+    expect(body.objective).toBe('新目标')
+    expect(body.package_id).toBe('pkg-2')
+    expect(Object.prototype.hasOwnProperty.call(body, 'regenerate')).toBe(false)
+  })
+
+  it('知识资产审核与重复组裁决只提交 decision / note', async () => {
+    const fetchMock = mockFetch({ id: 'g-1', status: 'pending' })
+
+    await reviewKnowledgeAsset('kb-1', 'd1', { decision: 'approve', note: '材料有效' })
+    const [adminUrl, adminInit] = fetchMock.mock.calls[0]
+    expect(adminUrl).toBe('/admin/kbs/kb-1/assets/d1/review')
+    const reviewBody = assertBody(
+      JSON.parse(String(adminInit?.body)),
+      BACKEND_KEYS.kbAssetReview,
+      'kb asset review',
+    )
+    expect(ASSET_DECISIONS).toContain(reviewBody.decision)
+    expect(reviewBody.note).toBe('材料有效')
+
+    await reviewEnterpriseKnowledgeAsset('e-1', 'd1', { decision: 'publish', note: '' })
+    const [enterpriseUrl, enterpriseInit] = fetchMock.mock.calls[1]
+    expect(enterpriseUrl).toBe('/enterprise/e-1/assets/d1/review')
+    assertBody(
+      JSON.parse(String(enterpriseInit?.body)),
+      BACKEND_KEYS.kbAssetReview,
+      'enterprise asset review',
+    )
+
+    await resolveKnowledgeAssetDuplicate('kb-1', 'g-1', { decision: 'dismiss', note: '忽略' })
+    const draftResolve = assertBody(
+      JSON.parse(String(fetchMock.mock.calls[2][1]?.body)),
+      BACKEND_KEYS.duplicateResolve,
+      'duplicate resolve',
+    )
+    expect(DUPLICATE_DECISIONS).toContain(draftResolve.decision)
+
+    await resolveEnterpriseKnowledgeAssetDuplicate('e-1', 'g-1', {
+      decision: 'resolve',
+      note: '',
+    })
+    const enterpriseResolve = assertBody(
+      JSON.parse(String(fetchMock.mock.calls[3][1]?.body)),
+      BACKEND_KEYS.duplicateResolve,
+      'enterprise duplicate resolve',
+    )
+    expect(enterpriseResolve.note).toBe('')
+  })
+
+  it('检索预览请求只带 q / limit 两个查询参数', async () => {
+    const fetchMock = mockFetch({ items: [] })
+
+    await previewProjectRetrieval('p 1', '  布线规范  ', 3)
+
+    const [url] = fetchMock.mock.calls[0]
+    expect(url).toBe(
+      `/projects/p%201/retrieval/preview?q=${encodeURIComponent('布线规范')}&limit=3`,
+    )
+    const params = new URL(url, 'http://localhost').searchParams
+    expect(Array.from(params.keys()).every((key) => BACKEND_KEYS.retrievalPreviewQuery.includes(key as (typeof BACKEND_KEYS.retrievalPreviewQuery)[number]))).toBe(true)
+    expect(params.get('q')).toBe('布线规范')
+    expect(params.get('limit')).toBe('3')
+
+    await expect(previewProjectRetrieval('p1', '   ')).rejects.toThrow('检索内容不能为空')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 })

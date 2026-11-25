@@ -41,6 +41,7 @@ import type {
 import { Badge } from './Badge'
 import { Button } from './Button'
 import { EmptyState, ErrorState, LoadingBlock } from './Feedback'
+import { RetrievalTraceBadges, RetrievalTraceMeta } from './RetrievalTraceBadges'
 
 interface KnowledgeAssetApi {
   listAssets: () => Promise<KnowledgeAsset[]>
@@ -434,6 +435,22 @@ export function KnowledgeAssetPanel({
                     <dd className="mono">{selected.sha256 || '—'}</dd>
                   </div>
                 </dl>
+                <RetrievalTraceBadges
+                  rerank_score={selected.rerank_score}
+                  trust_tier={selected.trust_tier}
+                  degraded={selected.degraded}
+                  compact
+                />
+                <RetrievalTraceMeta
+                  chunk_id={selected.chunk_id}
+                  chunk_index={selected.chunk_index}
+                  document_id={selected.document_id}
+                  page={typeof selected.page === 'number' ? selected.page : null}
+                  heading={typeof selected.heading === 'string' ? selected.heading : null}
+                  source={selected.source}
+                  kb_id={selected.kb_id}
+                  compact
+                />
                 {!selected.chunks || selected.chunks.length === 0 ? (
                   <p className="subtle">服务端未返回片段溯源。</p>
                 ) : (
@@ -445,6 +462,12 @@ export function KnowledgeAssetPanel({
                         <span className="subtle">
                           {typeof chunk.page === 'number' ? `第 ${chunk.page} 页` : '页码未知'}
                         </span>
+                        {chunk.chunk_index !== null && chunk.chunk_index !== undefined && (
+                          <span className="subtle">块序号 {chunk.chunk_index}</span>
+                        )}
+                        {typeof chunk.source === 'string' && chunk.source && (
+                          <span className="subtle">{chunk.source}</span>
+                        )}
                       </li>
                     ))}
                   </ul>

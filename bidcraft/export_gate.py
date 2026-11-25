@@ -13,6 +13,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from . import provenance
 from .audit import record_audit
 from .models import Issue, OutlineNode, Section
 
@@ -138,6 +139,50 @@ def blocked_substantive_evidence(db: Session, project_id: str) -> list[dict[str,
     return result
 
 
+def stale_section_evidence(db: Session, project_id: str) -> list[dict[str, Any]]:
+    """正文仍引用旧台账取值的章节证据（来自 provenance 的真实引用行）。
+
+    事实台账改写后，正文里的旧值不会自动更新；这些段落必须人工复核后才能
+    进入交付件。返回逐条证据供门禁提示与强制导出审计留痕。
+    """
+
+    report = provenance.report(db, project_id)
+    citations = [item for item in report.get("citations") or [] if item.get("stale")]
+    if not citations:
+        return []
+    grouped: dict[str, dict[str, Any]] = {}
+    for item in citations:
+        node_id = str(item.get("node_id") or "")
+        chapter = grouped.setdefault(
+            node_id,
+            {
+                "node_id": node_id,
+                "heading": item.get("heading") or "",
+                "stale": 0,
+                "evidence": [],
+            },
+        )
+        chapter["stale"] += 1
+        chapter["evidence"].append(
+            {
+                "fact_key": item.get("fact_key"),
+                "value": item.get("value"),
+                "current_value": item.get("current_value"),
+            }
+        )
+    return sorted(grouped.values(), key=lambda item: (item["heading"], item["node_id"]))
+
+
+def stale_gate_message(stale: list[dict[str, Any]]) -> str:
+    names = "、".join(f"《{item['heading']}》" for item in stale[:3])
+    suffix = " 等" if len(stale) > 3 else ""
+    count = sum(int(item["stale"]) for item in stale)
+    return (
+        f"有 {count} 处正文仍引用已变更的台账取值（涉及 {len(stale)} 章）：{names}{suffix}。"
+        "请先复核并更新正文后导出"
+    )
+
+
 def enforce_export_gate(
     db: Session,
     project_id: str,
@@ -160,12 +205,16 @@ def enforce_export_gate(
     章节确认是人工检查点，``require_confirmed_chapters=False`` 只给
     ``bidcraft run``（一条命令解析→生成→导出、没有复核环节）使用；
     其余入口一律强制。强制导出**不能**绕过章节确认。
+
+    正文里仍引用旧台账取值的章节由 provenance 报告：普通导出直接拦截；
+    强制导出允许越过，但逐条证据必须写入 ``export.force`` 审计。
     """
 
     if fmt not in EXPORT_GATE_FORMATS:
         return 0
     blocking_open = count_open_blocking(db, project_id)
-    if not blocking_open:
+    stale = stale_section_evidence(db, project_id)
+    if not blocking_open and not stale:
         # 只剩章节确认这一道；未确认的正文不得进入交付件（xlsx 已在上方豁免）。
         if require_confirmed_chapters:
             pending = unconfirmed_chapters(db, project_id)
@@ -173,13 +222,15 @@ def enforce_export_gate(
                 raise ExportGateError(409, chapter_gate_message(pending))
         return 0
     if not force:
-        raise ExportGateError(409, gate_blocked_message(blocking_open))
+        if blocking_open:
+            raise ExportGateError(409, gate_blocked_message(blocking_open))
+        raise ExportGateError(409, stale_gate_message(stale))
     if authorize_force is not None:
         authorize_force()
     reason = (force_reason or "").strip()
     if len(reason) < FORCE_REASON_MIN_CHARS:
         raise ExportGateError(400, FORCE_REASON_REQUIRED)
-    # 强制导出只覆盖「未处置阻断风险」；章节未确认仍然拦截——强制导出不能绕过人工检查点。
+    # 强制导出只覆盖「未处置阻断风险」和已留痕的过期引用；章节未确认仍然拦截。
     # 关键：所有门禁（含章节确认）必须全部通过，才能写 export.force 审计。
     # 否则「导出因章节未确认而失败」仍会留下成功的强制导出审计（R07 事务边界 bug）。
     if require_confirmed_chapters:
@@ -198,5 +249,7 @@ def enforce_export_gate(
     substantives = blocked_substantive_evidence(db, project_id)
     if substantives:
         detail["overridden_substantives"] = substantives
+    if stale:
+        detail["stale_sections"] = stale
     record_audit(db, project_id, "export.force", detail)
     return blocking_open

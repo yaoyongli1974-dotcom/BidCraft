@@ -17,7 +17,7 @@ import math
 import mimetypes
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -42,6 +42,9 @@ MAX_API_RESPONSE_BYTES = 2 * 1024 * 1024
 # 检索候选上限：SQL 先按 token/LIKE 与文档生命周期收窄，再在 Python 里精确打分。
 SEARCH_CANDIDATE_CAP = 2000
 MAX_QUERY_TOKENS = 32
+# RRF 常数与“库内归一化分”的权重：跨库 score 不可直接比较，只比较名次。
+RRF_K = 60
+RRF_NORMALIZED_WEIGHT = 0.25
 
 _CJK = re.compile(r"[\u3400-\u9fff]+")
 _WORD = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.+-]*")
@@ -63,12 +66,35 @@ class Passage:
     heading: str = ""
     # 溯源到具体知识库，避免同名 source 在多个库中互相错配元数据。
     kb_id: str | None = None
+    # 块级溯源：真实 KbChunk.id / ordinal；上游无法提供时保持 None。
+    chunk_id: str | None = None
+    chunk_index: int | None = None
+    # 打分来源与分量：不同 provider / 算法的原始 score 不可互相比较。
+    score_source: str = ""
+    score_components: dict[str, float] = field(default_factory=dict)
+    # rerank_hybrid 写入的融合分；不覆盖调用方持有的原始 score。
+    rerank_score: float | None = None
+    # 就绪/新鲜度信号，仅用于同分时的稳定 tie-break。
+    freshness: float = 0.5
+    readiness: float = 0.5
 
     @property
     def page_no(self) -> int | None:
         """Alias used by callers that speak in ``KbChunk.page_no`` terms."""
 
         return self.page
+
+
+class SearchResult(list):
+    """普通 ``list[Passage]`` 的子类；``with_diagnostics=True`` 时附带诊断。"""
+
+    def __init__(self, passages=(), *, diagnostics: dict | None = None) -> None:
+        super().__init__(passages)
+        self.diagnostics: dict = diagnostics if diagnostics is not None else {}
+
+    @property
+    def passages(self) -> list[Passage]:
+        return list(self)
 
 
 def _embed_key(endpoint) -> str:
@@ -522,6 +548,136 @@ def _cosine(left, right) -> float | None:
     return dot / (left_norm * right_norm)
 
 
+def _as_freshness(valid_to) -> float:
+    """归一化有效期剩余天数：无有效期取中性 0.5，过期取 0。"""
+
+    if valid_to is None:
+        return 0.5
+    if isinstance(valid_to, datetime):
+        due = valid_to.date()
+    elif isinstance(valid_to, date):
+        due = valid_to
+    else:
+        text = str(valid_to).strip()[:10]
+        try:
+            due = date.fromisoformat(text)
+        except ValueError:
+            return 0.5
+    remaining = (due - clock.today()).days
+    if remaining <= 0:
+        return 0.0
+    return min(1.0, remaining / 365.0)
+
+
+def _as_readiness(row) -> float:
+    """就绪度：ready 且 NULL/published 的资产优先，无文档取中性 0.5。"""
+
+    if row is None:
+        return 0.5
+    status = str(getattr(row, "status", "") or "")
+    review = getattr(row, "review_status", None)
+    if status == "ready" and review in (None, "published"):
+        return 1.0
+    return 0.0
+
+
+def _document_signals(db, rows: list[KbChunk]) -> dict[str, tuple[float, float]]:
+    """批量取块所属文档的 (freshness, readiness)，不改动查询本身。"""
+
+    wanted = {row.document_id for row in rows if row.document_id}
+    if not wanted or db is None:
+        return {}
+    try:
+        docs = list(db.scalars(select(KbDocument).where(KbDocument.id.in_(wanted))))
+    except Exception:  # noqa: BLE001 - 轻量假 DB 没有真实文档表时保持中性信号
+        logger.debug("读取知识文档生命周期信号失败", exc_info=True)
+        return {}
+    return {
+        doc.id: (_as_freshness(getattr(doc, "valid_to", None)), _as_readiness(doc))
+        for doc in docs
+    }
+
+
+def _score_lists(passages: list[Passage]) -> dict[tuple[str, str], list[int]]:
+    """按 (知识库, 打分来源/分量) 拆成可比名次表；跨库跨算法不混排。"""
+
+    lists: dict[tuple[str, str], list[int]] = {}
+    for index, passage in enumerate(passages):
+        kb_key = passage.kb_id or f"name:{passage.kb}"
+        components = {
+            name: float(value)
+            for name, value in (passage.score_components or {}).items()
+            if isinstance(value, (int, float))
+        }
+        if not components:
+            components = {passage.score_source or "score": float(passage.score)}
+        for name in components:
+            lists.setdefault((kb_key, name), []).append(index)
+        # 本地主分是 bigram/cosine 的加权和，单列一表保证至少一次 RRF 命中。
+        if len(components) > 1:
+            lists.setdefault((kb_key, f"{passage.score_source or 'local'}:score"), []).append(index)
+    return lists
+
+
+def rerank_hybrid(
+    passages,
+    *,
+    limit: int | None = None,
+) -> list[Passage]:
+    """跨知识库融合排序（纯函数，不查库、不改输入对象）。
+
+    每库和每种打分分量各自按 score 排名，用 RRF ``1/(K+rank)`` 融合，再加一个
+    库内归一化分（同一知识库内才可比较）保留分数强度。同分时按有效期新鲜度、
+    就绪度、原顺序稳定打破平局。原始 ``score`` 保持不变，融合分写入 ``rerank_score``。
+    """
+
+    items = list(passages)
+    if not items:
+        return []
+    fused = [0.0] * len(items)
+    for indices in _score_lists(items).values():
+        ordered = sorted(
+            indices,
+            key=lambda idx: (
+                -float(items[idx].score),
+                -items[idx].freshness,
+                -items[idx].readiness,
+                idx,
+            ),
+        )
+        for rank, idx in enumerate(ordered, start=1):
+            fused[idx] += 1.0 / (RRF_K + rank)
+
+    # 库内归一化：只在同一 kb_id 内做 min-max，避免跨库量纲污染。
+    by_kb: dict[str, list[int]] = {}
+    for index, passage in enumerate(items):
+        by_kb.setdefault(passage.kb_id or f"name:{passage.kb}", []).append(index)
+    for indices in by_kb.values():
+        scores = [float(items[idx].score) for idx in indices]
+        low, high = min(scores), max(scores)
+        spread = high - low
+        for idx in indices:
+            normalized = (float(items[idx].score) - low) / spread if spread > 0 else 1.0
+            fused[idx] += RRF_NORMALIZED_WEIGHT * normalized
+
+    order = sorted(
+        range(len(items)),
+        key=lambda idx: (
+            -fused[idx],
+            -items[idx].freshness,
+            -items[idx].readiness,
+            idx,
+        ),
+    )
+    ranked = [
+        replace(items[idx], rerank_score=round(fused[idx], 6))
+        for idx in order
+    ]
+    if limit is None:
+        return ranked
+    return ranked[: max(0, int(limit))]
+
+
 def embed_texts(endpoint, texts: list[str]) -> list[list[float]]:
     """Embed ``texts`` in configured batches; raise ``KnowledgeError`` on failure."""
     items = [text or "" for text in texts]
@@ -734,35 +890,48 @@ def search_local(db, kb: KnowledgeBase, query: str, limit: int) -> list[Passage]
         for row in db.scalars(stmt):
             candidates[row.id] = row
 
-    scored: list[tuple[float, KbChunk]] = []
+    scored: list[tuple[float, dict[str, float], KbChunk]] = []
     for row in candidates.values():
         bigram = _score(set(query_tokens), set((row.tokens or "").split()), query, row.text)
+        components = {"bigram": round(bigram, 3)}
         if query_vector is None:
             # Pure bigram fallback keeps the historical ``score > 0`` semantics.
             if bigram > 0:
-                scored.append((bigram, row))
+                scored.append((bigram, components, row))
             continue
         score = bigram
         if key and row.embed_key == key and row.embedding:
             similarity = _cosine(query_vector, row.embedding)
             if similarity is not None:
+                components["cosine"] = round(max(0.0, similarity), 3)
                 score = (1 - weight) * bigram + weight * max(0.0, similarity)
         if score >= min_score:
-            scored.append((score, row))
+            scored.append((score, components, row))
     scored.sort(key=lambda item: item[0], reverse=True)
-    return [
-        Passage(
-            kb=kb.name,
-            kb_id=kb.id,
-            source=row.source,
-            text=row.text,
-            score=round(score, 3),
-            document_id=row.document_id,
-            page=row.page_no,
-            heading=row.heading or "",
+    selected = scored[:limit]
+    signals = _document_signals(db, [row for _, _, row in selected])
+    passages: list[Passage] = []
+    for score, components, row in selected:
+        freshness, readiness = signals.get(row.document_id, (0.5, 0.5))
+        passages.append(
+            Passage(
+                kb=kb.name,
+                kb_id=kb.id,
+                source=row.source,
+                text=row.text,
+                score=round(score, 3),
+                document_id=row.document_id,
+                page=row.page_no,
+                heading=row.heading or "",
+                chunk_id=row.id,
+                chunk_index=row.chunk_index,
+                score_source="local",
+                score_components=components,
+                freshness=freshness,
+                readiness=readiness,
+            )
         )
-        for score, row in scored[:limit]
-    ]
+    return passages
 
 
 def _api_headers(kb: KnowledgeBase) -> dict[str, str]:
@@ -773,29 +942,87 @@ def _api_headers(kb: KnowledgeBase) -> dict[str, str]:
     return headers
 
 
+def _real_field(source: dict | None, keys: tuple[str, ...]) -> str:
+    """只取上游真实字段；取不到就留空，绝不拿知识库名伪造出处。"""
+
+    if not isinstance(source, dict):
+        return ""
+    for key in keys:
+        value = source.get(key)
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
+            text = str(value).strip()
+            if text:
+                return text[:300]
+    return ""
+
+
+def _real_page(value) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value > 0:
+        return value
+    if isinstance(value, str) and value.strip().isdigit() and int(value) > 0:
+        return int(value)
+    if isinstance(value, list):
+        for entry in value:
+            if isinstance(entry, dict):
+                page = _real_page(
+                    entry.get("page") or entry.get("page_no") or entry.get("page_number")
+                )
+                if page:
+                    return page
+    return None
+
+
+def _real_index(value) -> int | None:
+    """Provider 的 position/index 允许 0；非数字留空。"""
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value)
+    return None
+
+
 def _passages_from_items(kb: KnowledgeBase, items: list, limit: int) -> list[Passage]:
+    """Dify / RAGFlow / 通用接口结果 → Passage（只透传真实 provider 溯源字段）。"""
+
     passages: list[Passage] = []
     for item in items[:limit]:
         if not isinstance(item, dict):
             continue
         chunk = item.get("segment") or item.get("chunk") or item
+        if not isinstance(chunk, dict):
+            chunk = {}
         text = ""
         for key in ("content", "text", "answer", "snippet", "content_with_weight"):
-            value = chunk.get(key) if isinstance(chunk, dict) else None
+            value = chunk.get(key)
             if isinstance(value, str) and value.strip():
                 text = value.strip()
                 break
         if not text:
             continue
-        source = ""
-        for key in ("document_keyword", "document_name", "title", "source", "doc_name"):
-            value = chunk.get(key) if isinstance(chunk, dict) else None
-            if isinstance(value, str) and value.strip():
-                source = value.strip()
-                break
-        if not source and isinstance(chunk.get("document"), dict):
-            source = str(chunk["document"].get("name") or "")
-        score = chunk.get("score") or item.get("score") or 0
+        nested = chunk.get("document") if isinstance(chunk.get("document"), dict) else {}
+        source = _real_field(
+            chunk, ("document_name", "document_keyword", "doc_name", "file_name", "source", "name", "title")
+        ) or _real_field(nested, ("name", "source", "title"))
+        document_id = _real_field(chunk, ("document_id", "doc_id")) or _real_field(
+            nested, ("id", "document_id")
+        )
+        chunk_id = _real_field(chunk, ("id", "chunk_id", "segment_id")) or _real_field(
+            item, ("id", "chunk_id", "segment_id")
+        )
+        page = _real_page(
+            chunk.get("page") or chunk.get("page_no") or chunk.get("page_number")
+            or chunk.get("positions")
+        )
+        heading = _real_field(chunk, ("heading", "section", "chunk_title", "title"))
+        chunk_index = _real_index(
+            chunk.get("chunk_index", chunk.get("position", chunk.get("index")))
+        )
+        score = chunk.get("score", chunk.get("similarity", chunk.get("relevance", item.get("score", 0))))
         try:
             score_value = float(score)
         except (TypeError, ValueError):
@@ -804,9 +1031,16 @@ def _passages_from_items(kb: KnowledgeBase, items: list, limit: int) -> list[Pas
             Passage(
                 kb=kb.name,
                 kb_id=kb.id,
-                source=source or kb.name,
+                source=source,
                 text=text[:1500],
                 score=score_value,
+                document_id=document_id or None,
+                page=page,
+                heading=heading,
+                chunk_id=chunk_id or None,
+                chunk_index=chunk_index,
+                score_source=str(kb.provider or "api"),
+                score_components={"api": round(score_value, 3)},
             )
         )
     return passages
@@ -883,6 +1117,27 @@ def search_api(db, kb: KnowledgeBase, query: str, limit: int) -> list[Passage]:
         raise KnowledgeError(f"知识库接口失败：{exc}") from exc
 
 
+def _kb_scope(kb: KnowledgeBase, *, project_id, package_id) -> tuple[bool, str]:
+    """按 ``kb.options`` 的项目/标段声明过滤，声明与调用方缺一即失败关闭。"""
+
+    options = kb.options if isinstance(kb.options, dict) else {}
+    for key, requested in (("project_id", project_id), ("package_id", package_id)):
+        declared = options.get(key)
+        if declared in (None, ""):
+            continue
+        if isinstance(declared, bool) or not isinstance(declared, (str, int)):
+            return False, f"知识库 {key} 声明无效"
+        declared_text = str(declared).strip()
+        if not declared_text:
+            continue
+        requested_text = str(requested).strip() if requested is not None else ""
+        if not requested_text:
+            return False, f"知识库限定 {key}，调用方未提供"
+        if requested_text != declared_text:
+            return False, f"知识库限定 {key} 不匹配"
+    return True, ""
+
+
 def search(
     db,
     query: str,
@@ -891,6 +1146,9 @@ def search(
     kb_ids: list[str] | None = None,
     include_personal: bool = False,
     extra_kb_ids: list[str] | None = None,
+    project_id: str | None = None,
+    package_id: str | None = None,
+    with_diagnostics: bool = False,
 ) -> list[Passage]:
     """Retrieve passages from enabled knowledge bases.
 
@@ -901,10 +1159,21 @@ def search(
     ``kb_ids`` 保持**排他**语义（调用方显式限定检索范围）。``extra_kb_ids`` 是
     **追加**语义：在全局已启用库之外再纳入这些库，且被追加的个人库可豁免
     ``include_personal`` 过滤——用于「全局库 + 当前用户个人库」联合检索。
+
+    ``project_id`` / ``package_id`` 是可选检索范围：``kb.options`` 声明了同名
+    值的库只在该范围匹配时参与检索（声明缺失/类型非法/不匹配一律跳过，失败关闭）。
+    ``with_diagnostics=True`` 返回 :class:`SearchResult`，其 ``diagnostics`` 含
+    ``searched`` / ``skipped`` / ``failed``，默认调用方仍得到普通 list。
     """
 
+    diagnostics: dict = {
+        "scope": {"project_id": project_id, "package_id": package_id},
+        "searched": [],
+        "skipped": [],
+        "failed": [],
+    }
     if not (query or "").strip():
-        return []
+        return SearchResult([], diagnostics=diagnostics) if with_diagnostics else []
     statement = select(KnowledgeBase).where(KnowledgeBase.enabled.is_(True))
     if kb_ids:
         statement = statement.where(KnowledgeBase.id.in_(kb_ids))
@@ -931,19 +1200,41 @@ def search(
         ]
     passages: list[Passage] = []
     for kb in bases:
+        allowed, reason = _kb_scope(kb, project_id=project_id, package_id=package_id)
+        if not allowed:
+            diagnostics["skipped"].append(
+                {"kb_id": kb.id, "kb": kb.name, "reason": reason}
+            )
+            continue
         try:
             if kb.kind == "local":
-                passages.extend(search_local(db, kb, query, limit))
+                found = search_local(db, kb, query, limit)
             else:
-                passages.extend(search_api(db, kb, query, limit))
-        except (KnowledgeError, OSError):
+                found = search_api(db, kb, query, limit)
+        except (KnowledgeError, OSError) as exc:
+            # 单库失败不再静默丢失：诊断里留痕，同时记录 warning。
+            logger.warning("知识库检索失败 kb=%s: %s", kb.id, exc)
+            diagnostics["failed"].append(
+                {
+                    "kb_id": kb.id,
+                    "kb": kb.name,
+                    "provider": kb.provider,
+                    "error": f"{exc.__class__.__name__}: {exc}"[:300],
+                }
+            )
             continue
-    passages.sort(key=lambda item: item.score, reverse=True)
-    return passages[:limit]
+        diagnostics["searched"].append(
+            {"kb_id": kb.id, "kb": kb.name, "provider": kb.provider, "count": len(found)}
+        )
+        passages.extend(found)
+    ranked = rerank_hybrid(passages, limit=limit)
+    if with_diagnostics:
+        return SearchResult(ranked, diagnostics=diagnostics)
+    return ranked
 
 
 def trace_label(passage: Passage) -> str:
-    """文档溯源标签：文档 ID / 页码 / 标题，缺失字段自动省略。"""
+    """文档溯源标签：文档 ID / 页码 / 标题 / 块 ID，缺失字段自动省略。"""
 
     bits: list[str] = []
     if passage.document_id:
@@ -952,6 +1243,11 @@ def trace_label(passage: Passage) -> str:
         bits.append(f"页码 {passage.page}")
     if passage.heading:
         bits.append(f"标题 {passage.heading}")
+    if passage.chunk_id:
+        chunk = f"块 {passage.chunk_id}"
+        if passage.chunk_index is not None:
+            chunk += f"#{passage.chunk_index}"
+        bits.append(chunk)
     return " · ".join(bits)
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ... import knowledge
+from ... import knowledge, material_policy
 from ..registry import AgentOutput
 from .base import BaseAgent, excerpt
 
@@ -31,14 +31,24 @@ class KnowledgeAgent(BaseAgent):
                 result={"query": query, "error": f"知识库检索失败：{exc}"},
                 warnings=["知识库检索失败"],
             )
+        verdicts = material_policy.passage_verdicts(db, passages)
         items = [
             {
                 "kb": passage.kb,
+                "kb_id": passage.kb_id,
                 "source": passage.source,
+                "document_id": passage.document_id,
+                "page": passage.page,
+                "heading": passage.heading or "",
+                "chunk_id": passage.chunk_id,
+                "chunk_index": passage.chunk_index,
                 "score": passage.score,
+                "rerank_score": passage.rerank_score,
+                "trust_tier": verdict.tier,
+                "degraded": bool(verdict.downgraded),
                 "text": excerpt(passage.text, 500),
             }
-            for passage in passages
+            for passage, verdict in zip(passages, verdicts, strict=True)
         ]
         warnings: list[str] = []
         if not items:

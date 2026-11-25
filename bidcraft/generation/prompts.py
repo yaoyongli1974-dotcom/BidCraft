@@ -225,9 +225,11 @@ def continue_messages(previous: str, tail: str) -> list[dict[str, str]]:
 SYSTEM_CHAPTER_PLANNER = """你是一名资深技术标编制规划师。只依据输入的项目真实数据做章节规划，
 禁止编造评分项、事实、知识或章节 ID。输出严格 JSON 对象，不要 Markdown 代码块，
 不要解释文字。可用字段：objective（字符串），score_points / requirements / fact_refs /
-knowledge_refs（对象数组，每项可带输入中给出的真实 id），conditions / challenges /
-strategy / measures / planned_tables / planned_diagrams / forbidden_assumptions /
-quality_criteria（字符串或对象数组）。strategy 必须是可直接指导正文写作的具体条目。"""
+knowledge_refs（对象数组；每一项必须带输入中给出的真实 id，没有 id 的引用会被剔除），
+conditions / challenges / strategy / measures / planned_tables / planned_diagrams /
+forbidden_assumptions / quality_criteria（字符串或对象数组）。知识引用必须沿用输入中的
+实体 ID、文档/页码、溯源、分值、可信度与降级标记，不得凭检索文本另行生成 ID。
+strategy 必须是可直接指导正文写作的具体条目。"""
 
 
 def chapter_plan_messages(context: dict) -> list[dict[str, str]]:
@@ -248,7 +250,8 @@ def chapter_plan_messages(context: dict) -> list[dict[str, str]]:
         f"真实评分项（只能引用这里的 id）：\n{brief('scoring', 12)}\n\n"
         f"真实招标要求（只能引用这里的 id）：\n{brief('requirements', 15)}\n\n"
         f"真实事实台账（只能引用这里的 id/key）：\n{brief('facts', 12)}\n\n"
-        f"真实知识条目（只能引用这里的 id）：\n{brief('knowledge', 4)}\n\n"
+        f"真实知识条目（只能引用这里的 id，含文档/页码/溯源/可信度）：\n"
+        f"{chr(10).join(json.dumps(row, ensure_ascii=False)[:600] for row in (context.get('knowledge') or [])[:4])}\n\n"
         f"检索文本（仅供参考，不能据此造出 ID）：\n{str(context.get('knowledge_text') or '')[:1200]}\n\n"
         "请输出 JSON 规划。"
     )
