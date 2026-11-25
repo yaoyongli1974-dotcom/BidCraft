@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from bidcraft.generation.agent import ModelClient
 from bidcraft.model_config import Endpoint
 
@@ -155,3 +157,33 @@ def test_complete_with_tools_parses_tool_calls(monkeypatch):
     assert result.finish_reason == "tool_calls"
     # 原 complete 仍返回字符串（签名不变）
     assert isinstance(client.complete([{"role": "user", "content": "hi"}]), str)
+
+
+def test_tool_loop_enforces_text_budget():
+    """文本超限时明确抛错，不把半截观测伪装成成功。"""
+
+    from bidcraft.generation.agent import ChatResult, ToolCall
+    from bidcraft.generation.tool_loop import ToolLoopBudgetError, run_tool_loop
+
+    class _Client:
+        def complete_with_tools(self, _messages, _tools, **_kwargs):
+            return ChatResult(
+                content="",
+                tool_calls=[ToolCall(id="c1", name="get_project", arguments={"ref": "p"})],
+            )
+
+    calls = []
+
+    def _executor(_name, _args):
+        calls.append(True)
+        return {"content": [{"type": "text", "text": "x" * 100}]}
+
+    with pytest.raises(ToolLoopBudgetError, match="文本超过上限"):
+        run_tool_loop(
+            _Client(),
+            messages=[],
+            tools=[{"name": "get_project"}],
+            executor=_executor,
+            max_chars=20,
+        )
+    assert len(calls) == 1

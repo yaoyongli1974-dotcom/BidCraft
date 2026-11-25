@@ -6,10 +6,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+from sqlalchemy import select
+
 from bidcraft import __version__
 from bidcraft.db import session_scope
 from bidcraft.mcp import TOOL_SPECS, handle_line, handle_message
-from bidcraft.models import OutlineNode, Section
+from bidcraft.models import OutlineNode, Project, Section
 from bidcraft.pipeline import create_project
 
 TOOL_NAMES = {
@@ -208,6 +211,104 @@ def test_unknown_tool_is_error(db):
     result, text = _call("no_such_tool")
     assert result["isError"] is True
     assert "未知工具" in text
+
+
+def test_builtin_tool_actor_authorization_and_audit(db):
+    """Agent 路径：actor + 绑定项目授权，每次调用落真实 agent.tool.call 审计。"""
+
+    from bidcraft import authorization, mcp
+    from bidcraft.models import AuditLog, ProjectMember, User
+    from bidcraft.security import hash_password
+
+    pid = _new_project("scope-owned")
+    with session_scope() as db_session:
+        actor = User(
+            username="mcp-owner", password_hash=hash_password("pass-123"), role="viewer"
+        )
+        db_session.add(actor)
+        db_session.flush()
+        db_session.get(Project, pid).owner_id = actor.id
+        db_session.add(
+            ProjectMember(project_id=pid, user_id=actor.id, role="viewer")
+        )
+        user = {
+            "id": actor.id,
+            "username": actor.username,
+            "role": actor.role,
+        }
+
+    result = mcp._call_tool(
+        "get_project", {"ref": pid}, readonly=True, actor=user, project_id=pid
+    )
+    assert result["id"] == pid
+
+    other = _new_project("scope-other")
+    with pytest.raises(mcp.ToolError, match="项目范围不符"):
+        mcp._call_tool(
+            "get_project", {"ref": other}, readonly=True, actor=user, project_id=pid
+        )
+    with session_scope() as db_session:
+        readonly_user = User(
+            username="mcp-readonly",
+            password_hash=hash_password("pass-123"),
+            role="viewer",
+        )
+        db_session.add(readonly_user)
+        db_session.flush()
+        db_session.add(
+            ProjectMember(project_id=pid, user_id=readonly_user.id, role="viewer")
+        )
+        read_only_actor = {
+            "id": readonly_user.id,
+            "username": readonly_user.username,
+            "role": readonly_user.role,
+        }
+    with pytest.raises(authorization.Forbidden):
+        mcp._call_tool(
+            "run_check",
+            {"ref": pid},
+            readonly=False,
+            actor=read_only_actor,
+            project_id=pid,
+        )
+
+    with session_scope() as db_session:
+        logs = list(
+            db_session.scalars(
+                select(AuditLog).where(AuditLog.action == "agent.tool.call")
+            )
+        )
+    assert len(logs) >= 2
+    assert any(log.user_id == user["id"] and log.detail["tool"] == "get_project" for log in logs)
+    assert any(
+        log.user_id == read_only_actor["id"]
+        and log.detail["tool"] == "run_check"
+        and log.detail["isError"] is True
+        for log in logs
+    )
+
+
+def test_list_projects_with_actor_only_returns_visible(db):
+    from bidcraft import mcp
+    from bidcraft.models import ProjectMember, User
+    from bidcraft.security import hash_password
+
+    visible = _new_project("visible-one")
+    hidden = _new_project("hidden-one")
+    with session_scope() as db_session:
+        viewer = User(
+            username="mcp-viewer", password_hash=hash_password("pass-123"), role="viewer"
+        )
+        db_session.add(viewer)
+        db_session.flush()
+        db_session.add(
+            ProjectMember(project_id=visible, user_id=viewer.id, role="viewer")
+        )
+        user = {"id": viewer.id, "username": viewer.username, "role": viewer.role}
+
+    payload = mcp._call_tool("list_projects", {}, readonly=True, actor=user)
+    assert [row["id"] for row in payload] == [visible]
+    assert hidden not in [row["id"] for row in payload]
 
 
 def test_stdio_subprocess_smoke(tmp_path):

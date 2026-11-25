@@ -92,3 +92,40 @@ def test_approval_endpoint_lifecycle(db, monkeypatch):
     r = client.post(f"/projects/{pid}/workflow-approvals/{aid}/review", json={"decision": "approve", "note": "同意"})
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "approved"
+
+
+def test_tool_calls_trace_persists_in_task_and_run_payload(db):
+    """轨迹走既有 JSON 字段落库，不经新增表或新接口。"""
+
+    from bidcraft.models import WorkflowTask
+    from bidcraft.orchestration.orchestrator import run_payload, task_payload
+
+    client = _client(db)
+    pid = _project(client, "wf-http-tools")
+    rid = client.post(f"/projects/{pid}/workflows", json={}).json()["id"]
+    trace = {
+        "name": "get_project",
+        "args": {"ref": pid},
+        "result": "ok",
+        "verification": "verified",
+        "audit_id": "audit-1",
+        "ts": "2026-11-25T00:00:00+00:00",
+        "is_error": False,
+        "ms": 3,
+    }
+    with session_scope() as sess:
+        task = sess.scalar(
+            select(WorkflowTask).where(WorkflowTask.run_id == rid)
+        )
+        task.output = {**(task.output or {}), "tool_calls": [trace]}
+        run = sess.get(WorkflowRun, rid)
+        run.result = {**(run.result or {}), "tool_calls": [trace]}
+        sess.flush()
+        assert task_payload(task)["output"]["tool_calls"] == [trace]
+        assert run_payload(sess.get(WorkflowRun, rid))["result"]["tool_calls"] == [trace]
+
+    r = client.get(f"/projects/{pid}/workflows/{rid}/tasks")
+    assert r.status_code == 200
+    assert any(
+        item["output"].get("tool_calls") == [trace] for item in r.json()["items"]
+    )

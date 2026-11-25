@@ -818,11 +818,15 @@ def record_call(
     *,
     username: str | None = None,
     project_id: str | None = None,
+    user_id: str | None = None,
+    package_id: str = "",
+    run_id: str = "",
+    task_id: str = "",
 ) -> None:
     """MCP 聚合调用后落库失败计数并写审计（独立短事务由调用方提供）。
 
-    ``username`` / ``project_id`` 来自真实调用上下文；缺省保持旧行为的
-    ``system`` 占位，兼容本地 MCP 与既有测试。
+    身份与运行范围均来自真实调用上下文；缺省保持旧行为的 ``system`` 占位，
+    兼容本地 MCP 与既有测试。
     """
     from .models import AuditLog, Plugin
 
@@ -843,6 +847,10 @@ def record_call(
                 "ok": ok,
                 "scope": row.scope,
                 "owner_id": row.owner_id or "",
+                "user_id": user_id or "",
+                "package_id": package_id or "",
+                "run_id": run_id or "",
+                "task_id": task_id or "",
             },
         )
     )

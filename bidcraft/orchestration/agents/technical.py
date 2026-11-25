@@ -7,10 +7,12 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 
 from ... import scoring
 from ...generation.outline import load_outline
+from .. import registry
 from ..registry import AgentOutput
 from .base import BaseAgent
 
@@ -54,6 +56,24 @@ class TechnicalAgent(BaseAgent):
         if not written:
             warnings.append("尚无已写正文，技术标仅完成规划检查")
 
+        tool_calls: list[dict[str, Any]] = []
+        policy = dict((context.get("run") or {}).get("tool_policy") or {})
+        if policy.get("enabled") and policy.get("allowed"):
+            tool_outcome = self._tool_assisted(
+                project, context, policy, nodes, hints, passages
+            )
+            tool_calls = tool_outcome["tool_calls"]
+            warnings.extend(tool_outcome["warnings"])
+            result.update(tool_outcome["result"])
+            if tool_outcome["status"] != "ok":
+                return AgentOutput(
+                    status=tool_outcome["status"],
+                    result=result,
+                    evidence=passages[:5],
+                    warnings=warnings,
+                    tool_calls=tool_calls,
+                )
+
         if payload.get("use_model"):
             model = self._model_draft(project, nodes, hints, passages)
             result.update(model["result"])
@@ -64,6 +84,7 @@ class TechnicalAgent(BaseAgent):
                     result=result,
                     evidence=passages[:5],
                     warnings=warnings,
+                    tool_calls=tool_calls,
                 )
 
         return AgentOutput(
@@ -71,7 +92,107 @@ class TechnicalAgent(BaseAgent):
             result=result,
             evidence=passages[:5],
             warnings=warnings,
+            tool_calls=tool_calls,
         )
+
+    @staticmethod
+    def _tool_assisted(
+        project,
+        context: dict[str, Any],
+        policy: dict[str, Any],
+        nodes: list[dict[str, Any]],
+        hints: str,
+        passages: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """唯一启用工具循环的 Agent 路径；工具集与只读性均由服务端策略决定。"""
+
+        from ...config import settings
+        from ...generation.agent import ModelClient, ModelUnavailable
+        from ...generation.tool_loop import (
+            ToolLoopBudgetError,
+            ToolVerificationError,
+            run_tool_loop,
+        )
+
+        empty: dict[str, Any] = {
+            "status": "ok", "result": {}, "warnings": [], "tool_calls": []
+        }
+        actor = context.get("actor") or None
+        allowed = set(policy.get("allowed") or [])
+        tools = [
+            spec for spec in registry.list_tools(actor=actor) if spec.get("name") in allowed
+        ]
+        if not tools:
+            return empty
+        client = ModelClient(settings)
+        if not client.available:
+            return {
+                **empty,
+                "warnings": ["工具增强未启用：模型未配置，按确定性分析继续"],
+            }
+
+        traces: list[dict[str, Any]] = []
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是投标技术方案专家。只能调用服务端提供的工具；"
+                    "工具的项目范围由服务端绑定，参数中不得指定其他项目或包名。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"项目：{project.name}\n"
+                    "大纲：\n" + "\n".join(node["heading"] for node in nodes[:30]) + "\n"
+                    + (f"评分提示：\n{hints}\n" if hints else "")
+                    + (
+                        "知识库参考：\n"
+                        + "\n".join(str(item.get("text") or "")[:300] for item in passages[:3])
+                        if passages
+                        else ""
+                    )
+                    + "\n请先用可用工具核对项目事实，再输出 5 条技术标写作要点。"
+                ),
+            },
+        ]
+        executor = partial(
+            registry.call_tool_with_trace,
+            readonly=bool(policy.get("readonly", True)),
+            actor=actor,
+            project_id=project.id,
+            package_id=str(context.get("payload", {}).get("package_id") or ""),
+            run_id=str((context.get("run") or {}).get("id") or ""),
+            task_id=str((context.get("run") or {}).get("task_id") or ""),
+        )
+        try:
+            loop = run_tool_loop(
+                client,
+                messages=messages,
+                tools=tools,
+                executor=executor,
+                max_rounds=int(policy.get("max_rounds", 6)),
+                max_chars=int(policy.get("max_chars", 8000)),
+                required_tools=tuple(policy.get("required") or ()),
+                on_trace=traces.append,
+            )
+        except (ToolLoopBudgetError, ToolVerificationError, ModelUnavailable) as exc:
+            return {
+                "status": "failed",
+                "result": {"error": f"工具增强失败：{exc}"},
+                "warnings": ["工具增强失败，任务不得标记为成功"],
+                "tool_calls": traces,
+            }
+        return {
+            "status": "ok",
+            "result": {
+                "model_draft": loop.content,
+                "tool_rounds": loop.rounds,
+                "degraded": False,
+            },
+            "warnings": [],
+            "tool_calls": loop.tool_calls,
+        }
 
     @staticmethod
     def _model_draft(project, nodes, hints: str, passages: list[dict[str, Any]]) -> dict[str, Any]:

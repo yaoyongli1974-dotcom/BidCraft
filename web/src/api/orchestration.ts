@@ -1,7 +1,9 @@
 import { ApiError, asArray, jsonBody, request } from '../lib/http'
 import type {
   AgentInfo,
+  AgentTool,
   PendingWorkflowApproval,
+  ToolCallTrace,
   WorkflowApproval,
   WorkflowApprovalReviewInput,
   WorkflowCreateInput,
@@ -46,6 +48,56 @@ function unwrap(value: unknown, keys: string[]): unknown {
   return value
 }
 
+/**
+ * 归一化一条工具调用轨迹。只保留后端真实字段，缺失值一律 null，
+ * 绝不把缺省 verification 推断成 verified，也不合成 ok/success 标记。
+ */
+export function normalizeToolCallTrace(value: unknown): ToolCallTrace | null {
+  const raw = asRecord(value)
+  if (!raw) return null
+  const name = asText(raw.name ?? raw.tool ?? raw.tool_name).trim()
+  if (!name) return null
+  const verification = raw.verification === undefined || raw.verification === null
+    ? null
+    : asText(raw.verification) || null
+  const auditId = raw.audit_id === undefined || raw.audit_id === null
+    ? null
+    : asText(raw.audit_id) || null
+  const ms = typeof raw.ms === 'number' && Number.isFinite(raw.ms) ? raw.ms : null
+  return {
+    name,
+    args: asRecord(raw.args ?? raw.arguments),
+    result: raw.result === undefined ? null : raw.result,
+    verification,
+    audit_id: auditId,
+    ts: isoOrNull(raw.ts ?? raw.timestamp),
+    is_error: typeof raw.is_error === 'boolean' ? raw.is_error : null,
+    ms,
+  }
+}
+
+/** 轨迹可能嵌套在 output/result 中；只接受数组，脏值按“无轨迹”处理。 */
+export function normalizeToolCalls(value: unknown): ToolCallTrace[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map(normalizeToolCallTrace)
+    .filter((item): item is ToolCallTrace => item !== null)
+}
+
+export function normalizeAgentTool(value: unknown): AgentTool | null {
+  const raw = asRecord(value)
+  if (!raw) return null
+  const name = asText(raw.name).trim()
+  if (!name) return null
+  return {
+    name,
+    description: asText(raw.description),
+    input_schema: asRecord(raw.input_schema ?? raw.inputSchema) ?? {},
+    side_effect: asText(raw.side_effect) || 'write',
+    readonly: raw.readonly === true,
+  }
+}
+
 export function normalizeAgent(value: unknown): AgentInfo | null {
   const raw = asRecord(value)
   if (!raw) return null
@@ -79,6 +131,9 @@ export function normalizeWorkflowRun(value: unknown): WorkflowRun | null {
     status: asText(raw.status, 'queued') || 'queued',
     goal: asText(raw.goal ?? raw.objective ?? raw.title),
     result: asRecord(raw.result),
+    tool_calls: normalizeToolCalls(
+      raw.tool_calls ?? asRecord(raw.result)?.tool_calls ?? asRecord(raw.output)?.tool_calls,
+    ),
     stats: asRecord(raw.stats),
     budget: asRecord(raw.budget),
     created_at: isoOrNull(raw.created_at),
@@ -102,6 +157,7 @@ export function normalizeWorkflowTask(value: unknown): WorkflowTask | null {
     agent_type: agentType,
     status: asText(raw.status, 'pending') || 'pending',
     error: asText(raw.error),
+    tool_calls: normalizeToolCalls(raw.tool_calls ?? asRecord(raw.output)?.tool_calls),
     attempts: Math.max(0, Math.round(asNumber(raw.attempts, 0))),
     started_at: isoOrNull(raw.started_at),
     completed_at: isoOrNull(raw.completed_at),
@@ -137,6 +193,35 @@ function mapList<T>(value: unknown, keys: string[], normalizer: (item: unknown) 
 export async function listAgents(signal?: AbortSignal): Promise<AgentInfo[]> {
   const data = await request<unknown>('/agents', undefined, signal)
   return mapList(data, ['agents', 'items'], normalizeAgent)
+}
+
+/**
+ * 读取某个 Agent 的工具目录（只读）。两种调用方式都支持：
+ * `getAgentTools(agentType, signal)` 或 `getAgentTools(ref, agentType, signal)`。
+ * 传 ref 时走项目上下文，只读成员也能查看；不传 ref 时后端要求全局写权限。
+ */
+export function getAgentTools(agentType: string, signal?: AbortSignal): Promise<AgentTool[]>
+export function getAgentTools(
+  ref: string | null | undefined,
+  agentType: string,
+  signal?: AbortSignal,
+): Promise<AgentTool[]>
+export async function getAgentTools(
+  refOrAgentType: string | null | undefined,
+  agentTypeOrSignal?: string | AbortSignal,
+  signal?: AbortSignal,
+): Promise<AgentTool[]> {
+  const twoArgs = typeof agentTypeOrSignal === 'string'
+  const ref = twoArgs ? refOrAgentType : undefined
+  const agentType = twoArgs ? agentTypeOrSignal : refOrAgentType
+  const effectiveSignal = twoArgs ? signal : (agentTypeOrSignal as AbortSignal | undefined)
+  const query = ref ? `?ref=${encodeURIComponent(ref)}` : ''
+  const data = await request<unknown>(
+    `/agents/${encodeURIComponent(String(agentType || ''))}/tools${query}`,
+    undefined,
+    effectiveSignal,
+  )
+  return mapList(data, ['tools', 'items'], normalizeAgentTool)
 }
 
 export async function listWorkflows(ref: string, signal?: AbortSignal): Promise<WorkflowRun[]> {

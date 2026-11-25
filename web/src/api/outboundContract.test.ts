@@ -5,6 +5,12 @@ import { reviewEnterpriseKnowledgeAsset, resolveEnterpriseKnowledgeAssetDuplicat
 import { previewProjectRetrieval } from './retrieval'
 import { resolveKnowledgeAssetDuplicate, reviewKnowledgeAsset } from './knowledge'
 import { checkSimilarity, updateSimilarityHit } from './similarity'
+import {
+  getAgentTools,
+  normalizeToolCallTrace,
+  normalizeWorkflowRun,
+  normalizeWorkflowTask,
+} from './orchestration'
 
 /**
  * 出站契约的 JS 镜像（只读引用后端声明，不修改后端）：
@@ -54,6 +60,9 @@ const BACKEND_KEYS = {
   kbAssetReview: ['decision', 'note'],
   duplicateResolve: ['decision', 'note'],
   retrievalPreviewQuery: ['q', 'limit'],
+  agentTool: ['name', 'description', 'input_schema', 'side_effect', 'readonly'],
+  // 只读投影：轨迹字段严格来自后端，前端不得合成 ok / verified。
+  toolCallTrace: ['name', 'args', 'result', 'verification', 'audit_id', 'ts', 'is_error', 'ms'],
 } as const
 
 const ASSET_DECISIONS = ['review', 'approve', 'publish', 'reject', 'archive'] as const
@@ -299,5 +308,78 @@ describe('出站契约：UI payload 对齐后端枚举与字段', () => {
 
     await expect(previewProjectRetrieval('p1', '   ')).rejects.toThrow('检索内容不能为空')
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('工具目录只发 GET，带项目 ref 时按项目上下文读取', async () => {
+    const fetchMock = mockFetch({
+      agent_type: 'technical',
+      tools: [
+        {
+          name: 'get_ledger',
+          description: '读取台账',
+          input_schema: { type: 'object' },
+          side_effect: 'none',
+          readonly: true,
+        },
+      ],
+    })
+
+    const tools = await getAgentTools('p 1', 'technical')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('/agents/technical/tools?ref=p%201')
+    expect(init?.method).toBeUndefined()
+    expect(Object.keys(tools[0]).every((key) => BACKEND_KEYS.agentTool.includes(key as never))).toBe(true)
+    expect(tools[0].readonly).toBe(true)
+
+    await getAgentTools('technical')
+    expect(fetchMock.mock.calls[1][0]).toBe('/agents/technical/tools')
+  })
+
+  it('工具轨迹严格使用后端字段，缺失 verification 不推断成功', () => {
+    const raw = {
+      name: 'get_project',
+      args: { ref: 'p1' },
+      result: { id: 'p1' },
+      verification: null,
+      audit_id: null,
+      ts: null,
+      is_error: false,
+      ms: 4,
+      injected: 'must-not-leak',
+      ok: true,
+    }
+    const call = normalizeToolCallTrace(raw)
+    expect(call).not.toBeNull()
+    expect(Object.keys(call!).every((key) => BACKEND_KEYS.toolCallTrace.includes(key as never))).toBe(true)
+    expect(call!.verification).toBeNull()
+    expect(call!.audit_id).toBeNull()
+    expect('ok' in call!).toBe(false)
+    expect('injected' in call!).toBe(false)
+
+    expect(normalizeToolCallTrace({ name: 'x', verification: 'failed' })!.verification).toBe('failed')
+    expect(normalizeToolCallTrace('not-an-object')).toBeNull()
+    expect(normalizeToolCallTrace({ args: {} })).toBeNull()
+  })
+
+  it('工作流与任务归一化都携带 tool_calls，脏值回退空数组', () => {
+    const trace = { name: 'run_check', args: {}, verification: 'verified', audit_id: 'a1' }
+    const run = normalizeWorkflowRun({
+      id: 'run-1',
+      status: 'done',
+      tool_calls: [trace],
+    })!
+    const task = normalizeWorkflowTask({
+      id: 't1',
+      seq: 1,
+      task_key: 'check',
+      agent_type: 'compliance',
+      output: { tool_calls: [trace] },
+    })!
+    expect(Object.keys(run.tool_calls![0]).every((key) => BACKEND_KEYS.toolCallTrace.includes(key as never))).toBe(true)
+    expect(run.tool_calls![0].verification).toBe('verified')
+    expect(task.tool_calls![0].audit_id).toBe('a1')
+    expect(normalizeWorkflowTask({ id: 't2', output: { tool_calls: 'bad' } })!.tool_calls).toEqual([])
+    expect(normalizeWorkflowRun({ id: 'run-2', result: { tool_calls: 42 } })!.tool_calls).toEqual([])
   })
 })

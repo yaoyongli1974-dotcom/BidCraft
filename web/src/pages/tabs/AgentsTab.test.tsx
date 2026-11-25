@@ -4,6 +4,7 @@ import { AgentsTab } from './AgentsTab'
 import {
   cancelWorkflow,
   createWorkflow,
+  getAgentTools,
   getWorkflow,
   listAgents,
   listWorkflowApprovals,
@@ -34,6 +35,7 @@ vi.mock('../useWorkspace', () => ({ useWorkspace: () => workspace }))
 vi.mock('../../context/useToast', () => ({ useToast: () => toast }))
 vi.mock('../../api/orchestration', () => ({
   listAgents: vi.fn(),
+  getAgentTools: vi.fn(async () => []),
   listWorkflows: vi.fn(),
   createWorkflow: vi.fn(),
   getWorkflow: vi.fn(),
@@ -138,5 +140,74 @@ describe('AgentsTab', () => {
     expect(await screen.findByText('暂无 Agent')).toBeTruthy()
     expect(screen.getByText('暂无工作流')).toBeTruthy()
     expect(screen.getByText('无待审批项')).toBeTruthy()
+  })
+
+  it('渲染任务下的工具调用轨迹，缺失 verification 显示 unverified', async () => {
+    vi.mocked(listWorkflowTasks).mockResolvedValue([
+      {
+        ...TASKS[1],
+        tool_calls: [
+          {
+            name: 'get_ledger',
+            args: { ref: 'p1' },
+            result: { facts: 2 },
+            verification: 'verified',
+            audit_id: 'audit-1',
+            ts: '2026-11-25T00:00:00Z',
+            is_error: false,
+            ms: 12,
+          },
+          { name: 'export_document', args: {}, result: 'boom', is_error: true },
+        ],
+      },
+    ] as never)
+    render(<AgentsTab />)
+    fireEvent.click(await screen.findByText('编技术标'))
+    await screen.findByText('write')
+    fireEvent.click(screen.getByRole('button', { name: '工具调用轨迹：write' }))
+    expect(await screen.findByText('get_ledger')).toBeTruthy()
+    expect(screen.getByText('verified')).toBeTruthy()
+    expect(screen.getByText('unverified')).toBeTruthy()
+    expect(screen.getByText('audit-1')).toBeTruthy()
+    expect(screen.getByText('2026-11-25T00:00:00Z')).toBeTruthy()
+    expect(screen.getByText('is_error=true')).toBeTruthy()
+    expect(screen.getByText('12 ms')).toBeTruthy()
+    expect(screen.getByText(/\{"ref":"p1"\}/)).toBeTruthy()
+    expect(screen.getByText('export_document')).toBeTruthy()
+  })
+
+  it('注册表卡片按 agent 类型懒加载只读工具目录', async () => {
+    vi.mocked(getAgentTools).mockResolvedValue([
+      {
+        name: 'get_project',
+        description: '读取项目',
+        input_schema: { type: 'object' },
+        side_effect: 'none',
+        readonly: true,
+      },
+      {
+        name: 'export_document',
+        description: '导出',
+        input_schema: { type: 'object' },
+        side_effect: 'write',
+        readonly: false,
+      },
+    ] as never)
+    render(<AgentsTab />)
+    await screen.findByText('技术标 Agent')
+    expect(getAgentTools).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: '工具目录：technical' }))
+    expect(await screen.findByText('get_project')).toBeTruthy()
+    expect(screen.getByText('只读')).toBeTruthy()
+    expect(screen.getByText('write')).toBeTruthy()
+    expect(vi.mocked(getAgentTools).mock.calls[0].slice(0, 2)).toEqual(['p1', 'technical'])
+  })
+
+  it('审批操作后回读任务列表', async () => {
+    render(<AgentsTab />)
+    await screen.findByText('交付审批')
+    fireEvent.click(screen.getByRole('button', { name: '通过' }))
+    await waitFor(() => expect(reviewWorkflowApproval).toHaveBeenCalled())
+    await waitFor(() => expect(listWorkflowTasks).toHaveBeenCalledWith('p1', 'run-1'))
   })
 })

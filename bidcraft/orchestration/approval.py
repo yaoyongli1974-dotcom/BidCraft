@@ -280,6 +280,20 @@ def resume_after_approval(db: Session, run_id: str) -> WorkflowRun:
     return run
 
 
+def pending_approval_exists(db: Session, run_id: str) -> bool:
+    """是否存在待审批项；写工具在审批挂起期间必须拒绝执行。"""
+
+    return (
+        db.scalar(
+            select(WorkflowApproval.id).where(
+                WorkflowApproval.run_id == run_id,
+                WorkflowApproval.status == "pending",
+            )
+        )
+        is not None
+    )
+
+
 def approval_payload(approval: WorkflowApproval) -> dict[str, Any]:
     return {
         "id": approval.id,
@@ -299,6 +313,7 @@ __all__ = [
     "ApprovalError",
     "approval_payload",
     "approve_task",
+    "pending_approval_exists",
     "reject_task",
     "request_approval",
     "resume_after_approval",

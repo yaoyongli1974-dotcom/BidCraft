@@ -12,6 +12,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from sqlalchemy import select
+
 from .. import jobs
 from ..db import session_scope
 from ..jobqueue import (
@@ -22,7 +24,7 @@ from ..jobqueue import (
     log_job_failure,
     raise_if_aborted,
 )
-from ..models import Job
+from ..models import Job, User
 from ..orchestration import run_workflow as _drive_workflow
 from ..services.job_support import _fail_job
 
@@ -33,6 +35,29 @@ def _terminal_job(job_id: str, status: str, result: dict[str, Any], message: str
     # Terminal write: the fencing UPDATE and event share one transaction, so a
     # reclaimed lease cannot slip in between the check and the commit.
     finalize_job_result(job_id, status=status, result=result, message=message)
+
+
+def _actor_from_job(db, job: Job) -> dict[str, Any] | None:
+    """从 Job.payload 的 owner_id/user_id 还原真实提交人；找不到返回 None。
+
+    ``owner_id`` 是用户 id（API schedule_workflow 写入），``user_id`` 历史上
+    是用户名；两者都查不到时保持匿名，写工具随后会 fail closed。
+    """
+
+    payload = job.payload or {}
+    owner_id = str(payload.get("owner_id") or "").strip()
+    login = str(payload.get("user_id") or "").strip()
+    user = db.get(User, owner_id) if owner_id else None
+    if user is None and login:
+        user = db.scalar(select(User).where(User.username == login))
+    if user is None:
+        return None
+    return {
+        "id": user.id,
+        "username": user.username,
+        "role": user.role,
+        "display_name": user.display_name or user.username,
+    }
 
 
 def _run_agent_job(job_id: str, run_id: str) -> None:
@@ -61,12 +86,15 @@ def _run_agent_job(job_id: str, run_id: str) -> None:
                 return
             if job.status != "running":
                 return
+            actor = _actor_from_job(db, job)
             job.status = "running"
             job.message = "Agent 工作流启动中…"
             db.flush()
             jobs.publish_event(job_id, "status", jobs.job_payload(job), db=db)
 
-        result = _drive_workflow(run_id, job_id=job_id, progress=on_progress)
+        result = _drive_workflow(
+            run_id, job_id=job_id, actor=actor, progress=on_progress
+        )
         raise_if_aborted()
         run = result.get("run") or {}
         status = str(run.get("status") or "")

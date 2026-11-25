@@ -14,7 +14,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from . import __version__, knowledge, plugins
+from . import __version__, audit, authorization, knowledge, plugins
 from .config import settings
 from .db import init_db, session_scope
 from .export_gate import ExportGateError, enforce_export_gate
@@ -173,10 +173,14 @@ def _project_payload(project: Project) -> dict[str, Any]:
     return item
 
 
-def _tool_list_projects(db) -> list[dict[str, Any]]:
+def _tool_list_projects(
+    db, *, allowed_ids: set[str] | None = None
+) -> list[dict[str, Any]]:
     projects = list(
         db.scalars(select(Project).order_by(Project.updated_at.desc()).limit(100))
     )
+    if allowed_ids is not None:
+        projects = [project for project in projects if project.id in allowed_ids]
     return [_project_payload(project) for project in projects]
 
 
@@ -313,7 +317,107 @@ def _tool_search_knowledge(db, args: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def _call_tool(name: str, args: dict[str, Any], *, readonly: bool) -> Any:
+#: 写工具：必须显式 actor + write 授权，且不能通过 readonly=False 绕过 export_gate。
+_MUTATING_TOOLS = frozenset({"run_check", "export_document"})
+
+
+def _safe_args(args: dict[str, Any]) -> dict[str, Any]:
+    """审计 detail 里的参数只留短字符串，绝不写长正文。"""
+    safe: dict[str, Any] = {}
+    for key, value in (args or {}).items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            safe[str(key)] = str(value)[:200]
+    return safe
+
+
+def _audit_builtin_call(
+    *,
+    name: str,
+    args: dict[str, Any],
+    project_id: str,
+    actor: dict[str, Any],
+    error: BaseException | None,
+    readonly: bool,
+    run_id: str,
+    task_id: str,
+    package_id: str,
+) -> None:
+    """每次 agent 内置工具调用都落一条真实 audit_logs 行（成功/失败都记）。"""
+
+    detail = {
+        "tool": name,
+        "name": name,
+        "args": _safe_args(args),
+        "isError": error is not None,
+        "readonly": bool(readonly),
+        "run_id": run_id or "",
+        "task_id": task_id or "",
+        "package_id": package_id or "",
+    }
+    try:
+        with session_scope() as db:
+            audit.record_audit(
+                db, project_id or None, "agent.tool.call", detail, actor=actor
+            )
+    except Exception as exc:  # noqa: BLE001 - 审计失败不能伪装成工具成功
+        plugins.warn(f"工具 {name} 审计写入失败：{exc}")
+
+
+def _authorize_builtin_access(
+    db,
+    name: str,
+    args: dict[str, Any],
+    actor: dict[str, Any] | None,
+    project_id: str,
+) -> tuple[Any, set[str] | None]:
+    """返回 (绑定项目或 None, list_projects 的可见 id 集合)。
+
+    有显式 actor（Agent 路径）才施加授权；本地 stdio 的 ``actor=None`` 沿用
+    "本机可信操作者" 的既有语义。模型给出的 ref 绝不能越过绑定项目。
+    """
+
+    if actor is None:
+        return None, None
+    if not isinstance(actor, dict) or not actor.get("id"):
+        raise ToolError("缺少调用身份，无法授权工具调用")
+    action = "write" if name in _MUTATING_TOOLS else "read"
+    if name == "list_projects":
+        ids = [str(row) for row in db.scalars(select(Project.id))]
+        allowed = authorization.authorize_projects(db, ids, user=actor)
+        return None, {project.id for project in allowed}
+    if name == "search_knowledge":
+        # 企业知识检索不携带项目 ref；只要求一个可识别的登录身份。
+        return None, None
+    if project_id:
+        bound, _role = authorization.authorize_project(
+            db, project_id, action=action, user=actor
+        )
+        ref = str(args.get("ref") or "").strip()
+        if ref:
+            try:
+                requested = resolve_project(db, ref)
+            except ValueError as exc:
+                raise ToolError(str(exc)) from exc
+            if requested.id != bound.id:
+                raise ToolError("项目范围不符：ref 不属于本次工作流绑定的项目")
+        return bound, None
+    bound, _role = authorization.authorize_project(
+        db, str(args.get("ref") or ""), action=action, user=actor
+    )
+    return bound, None
+
+
+def _call_tool(
+    name: str,
+    args: dict[str, Any],
+    *,
+    readonly: bool,
+    actor: dict[str, Any] | None = None,
+    project_id: str = "",
+    package_id: str = "",
+    run_id: str = "",
+    task_id: str = "",
+) -> Any:
     if name not in _TOOL_NAMES:
         raise ToolError(f"未知工具: {name}")
     handlers: dict[str, Callable[[Any, dict[str, Any]], Any]] = {
@@ -324,8 +428,43 @@ def _call_tool(name: str, args: dict[str, Any], *, readonly: bool) -> Any:
         "export_document": lambda db, a: _tool_export_document(db, a, readonly),
         "search_knowledge": _tool_search_knowledge,
     }
-    with session_scope() as db:
-        return handlers[name](db, args)
+    error: BaseException | None = None
+    payload: Any = None
+    bound_id = ""
+    try:
+        with session_scope() as db:
+            try:
+                bound, allowed_ids = _authorize_builtin_access(
+                    db, name, args, actor, project_id
+                )
+                bound_id = getattr(bound, "id", "") or ""
+                handler_args = (
+                    {**args, "ref": bound.id} if bound is not None else dict(args)
+                )
+                if name == "list_projects" and allowed_ids is not None:
+                    payload = _tool_list_projects(db, allowed_ids=allowed_ids)
+                else:
+                    payload = handlers[name](db, handler_args)
+            except Exception as exc:  # noqa: BLE001 - 统一转成 isError 审计与回灌
+                error = exc
+    except Exception as exc:  # noqa: BLE001 - session_scope 本身失败（连接/提交）
+        error = exc
+
+    if actor is not None:
+        _audit_builtin_call(
+            name=name,
+            args=args,
+            project_id=project_id or bound_id,
+            actor=actor,
+            error=error,
+            readonly=readonly,
+            run_id=run_id,
+            task_id=task_id,
+            package_id=package_id,
+        )
+    if error is not None:
+        raise error
+    return payload
 
 
 def _enabled_plugins(
@@ -413,6 +552,42 @@ def _plugin_result(result: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _audit_plugin_rejection(
+    full_name: str,
+    actor: dict[str, Any] | None,
+    project_id: str | None,
+    message: str,
+    *,
+    package_id: str = "",
+    run_id: str = "",
+    task_id: str = "",
+) -> None:
+    """只读拒绝也留痕，但不能计入插件连续失败（避免误自动停用）。"""
+
+    if actor is None:
+        return
+    try:
+        with session_scope() as db:
+            audit.record_audit(
+                db,
+                project_id or None,
+                "agent.tool.call",
+                {
+                    "tool": full_name,
+                    "name": full_name,
+                    "isError": True,
+                    "ok": False,
+                    "reason": message[:200],
+                    "package_id": package_id,
+                    "run_id": run_id,
+                    "task_id": task_id,
+                },
+                actor=actor,
+            )
+    except Exception as exc:  # noqa: BLE001 - 审计失败不得伪造工具结果
+        plugins.warn(f"插件 {full_name} 拒绝审计写入失败：{exc}")
+
+
 def _call_plugin_tool(
     plugin: plugins.PluginRef,
     tool_name: str,
@@ -421,10 +596,24 @@ def _call_plugin_tool(
     readonly: bool,
     username: str | None = None,
     project_id: str | None = None,
+    actor: dict[str, Any] | None = None,
+    package_id: str = "",
+    run_id: str = "",
+    task_id: str = "",
 ) -> dict[str, Any]:
     full_name = f"{plugin.name}__{tool_name}"
     if readonly:
-        return _tool_error_text(f"只读模式：已禁用插件工具 {full_name}")
+        message = f"只读模式：已禁用插件工具 {full_name}"
+        _audit_plugin_rejection(
+            full_name,
+            actor,
+            project_id,
+            message,
+            package_id=package_id,
+            run_id=run_id,
+            task_id=task_id,
+        )
+        return _tool_error_text(message)
     if not plugin.enabled:
         return _tool_error_text(f"插件 {plugin.name} 已禁用")
     if not plugins.allows(plugin, tool_name):
@@ -445,7 +634,16 @@ def _call_plugin_tool(
 
     with session_scope() as db:
         plugins.record_call(
-            db, plugin.id, tool_name, ok, username=username, project_id=project_id
+            db,
+            plugin.id,
+            tool_name,
+            ok,
+            username=username,
+            project_id=project_id,
+            user_id=str((actor or {}).get("id") or "") or None,
+            package_id=package_id,
+            run_id=run_id,
+            task_id=task_id,
         )
     return payload
 
@@ -458,6 +656,10 @@ def _handle_tools_call(
     is_super_admin: bool = False,
     username: str | None = None,
     project_id: str | None = None,
+    actor: dict[str, Any] | None = None,
+    package_id: str = "",
+    run_id: str = "",
+    task_id: str = "",
 ) -> dict[str, Any]:
     if not isinstance(params, dict):
         return _tool_error_text("tools/call 参数必须是对象")
@@ -482,13 +684,28 @@ def _handle_tools_call(
                 readonly=readonly,
                 username=username,
                 project_id=project_id,
+                actor=actor,
+                package_id=package_id,
+                run_id=run_id,
+                task_id=task_id,
             )
     try:
-        payload = _call_tool(name, arguments, readonly=readonly)
+        payload = _call_tool(
+            name,
+            arguments,
+            readonly=readonly,
+            actor=actor,
+            project_id=project_id or "",
+            package_id=package_id,
+            run_id=run_id,
+            task_id=task_id,
+        )
     except ToolError as exc:
         return _tool_error_text(str(exc))
     except (LookupError, ValueError) as exc:
         return _tool_error_text(str(exc) or "项目或数据不存在")
+    except authorization.Forbidden as exc:
+        return _tool_error_text(f"无权调用工具：{exc}")
     except Exception as exc:  # noqa: BLE001 - 工具异常不得中断服务
         return _tool_error_text(f"工具执行失败：{exc}")
     return _tool_content(payload)
@@ -502,6 +719,10 @@ def handle_message(
     is_super_admin: bool = False,
     username: str | None = None,
     project_id: str | None = None,
+    actor: dict[str, Any] | None = None,
+    package_id: str = "",
+    run_id: str = "",
+    task_id: str = "",
 ) -> dict | None:
     """处理单条 JSON-RPC 消息；notification 返回 None。"""
     if not isinstance(msg, dict):
@@ -549,6 +770,10 @@ def handle_message(
                 is_super_admin=is_super_admin,
                 username=username,
                 project_id=project_id,
+                actor=actor,
+                package_id=package_id,
+                run_id=run_id,
+                task_id=task_id,
             ),
         )
     return _error(request_id, -32601, f"未知方法: {method}")
@@ -562,6 +787,10 @@ def handle_line(
     is_super_admin: bool = False,
     username: str | None = None,
     project_id: str | None = None,
+    actor: dict[str, Any] | None = None,
+    package_id: str = "",
+    run_id: str = "",
+    task_id: str = "",
 ) -> dict | None:
     """解析并处理一行输入；JSON 解析失败返回 -32700 错误响应。"""
     text = (line or "").strip()
@@ -578,6 +807,10 @@ def handle_line(
         is_super_admin=is_super_admin,
         username=username,
         project_id=project_id,
+        actor=actor,
+        package_id=package_id,
+        run_id=run_id,
+        task_id=task_id,
     )
 
 

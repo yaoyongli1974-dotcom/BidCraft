@@ -35,6 +35,7 @@ vi.mock('../useWorkspace', () => ({ useWorkspace: () => workspace }))
 vi.mock('../../context/useToast', () => ({ useToast: () => toast }))
 vi.mock('../../api/orchestration', () => ({
   listAgents: vi.fn(),
+  getAgentTools: vi.fn(async () => []),
   listWorkflows: vi.fn(),
   createWorkflow: vi.fn(),
   getWorkflow: vi.fn(),

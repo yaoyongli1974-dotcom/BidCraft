@@ -26,7 +26,7 @@ from ..db import session_scope
 from ..models import Job, Project, WorkflowApproval, WorkflowRun, WorkflowTask
 from .approval import approval_payload, request_approval, resume_after_approval
 from .clock_budget import active_seconds, pause_active_clock, start_active_clock
-from .planner import build_workflow
+from .planner import build_workflow, tool_policy
 from .registry import AgentOutput, get_agent
 
 logger = logging.getLogger("bidcraft.orchestration")
@@ -302,18 +302,31 @@ def _budget_error(run: WorkflowRun) -> str:
 
 
 def _authorize_actor(
-    db: Session, run: WorkflowRun, actor: dict[str, Any] | None
+    db: Session,
+    run: WorkflowRun,
+    actor: dict[str, Any] | None,
+    *,
+    task: WorkflowTask | None = None,
 ) -> None:
+    """Read-only/no-tool 路径保持旧行为；写工具没有显式 actor 时直接拒绝。"""
+
     if not actor:
+        if task is not None and tool_policy(run.workflow_type, task.agent_type).mutating:
+            raise OrchestrationError("写工具需要显式用户身份，禁止匿名执行")
         return
     authorize_project(db, run.project_id, action="write", user=actor)
 
 
-def _fail_run(db: Session, run: WorkflowRun, message: str) -> None:
+def _fail_run(
+    db: Session, run: WorkflowRun, message: str, *, tool_calls: list[dict] | None = None
+) -> None:
     pause_active_clock(run)
     run.status = "failed"
     run.completed_at = utc_now()
-    run.result = {**(run.result or {}), "error": message}
+    result = {**(run.result or {}), "error": message}
+    if tool_calls:
+        result["tool_calls"] = tool_calls
+    run.result = result
     stats = dict(run.stats or {})
     stats["error"] = message
     run.stats = stats
@@ -339,12 +352,26 @@ def _complete_run(db: Session, run: WorkflowRun, tasks: list[WorkflowTask]) -> N
         "tasks_failed": sum(1 for task in tasks if task.status == "failed"),
         "completed_at": utc_now().isoformat(),
     }
+    tool_calls: list[dict[str, Any]] = []
+    for task in tasks:
+        for trace in (task.output or {}).get("tool_calls") or []:
+            if len(tool_calls) >= 100:
+                break
+            if isinstance(trace, dict):
+                tool_calls.append(trace)
     run.result = {
         "tasks": {task.task_key: task.status for task in tasks},
         "warnings": warnings[:50],
         "goal": run.goal or "",
+        "tool_calls": tool_calls,
     }
     db.flush()
+
+
+#: 用户请求体里任何试图控制工具策略的键都必须丢弃；策略只来自服务端配置。
+_USER_TOOL_CONTROL_KEYS = frozenset(
+    {"tools", "tool_policy", "tool_calls", "allowed_tools", "required_tools"}
+)
 
 
 def _task_payload_for_agent(
@@ -353,7 +380,19 @@ def _task_payload_for_agent(
     snapshot = dict(run.input_snapshot or {})
     snapshot.pop("tasks", None)
     snapshot.pop("_tasks", None)
-    return {**snapshot, **(task.input or {})}
+    snapshot = {
+        key: value
+        for key, value in snapshot.items()
+        if key not in _USER_TOOL_CONTROL_KEYS
+        and not str(key).startswith("_tool")
+    }
+    task_input = {
+        key: value
+        for key, value in (task.input or {}).items()
+        if key not in _USER_TOOL_CONTROL_KEYS
+        and not str(key).startswith("_tool")
+    }
+    return {**snapshot, **task_input}
 
 
 def _upstream_outputs(
@@ -439,7 +478,7 @@ def dispatch_task(
         _fail_run(db, run, reason)
         raise BudgetExceeded(reason)
 
-    _authorize_actor(db, run, actor)
+    _authorize_actor(db, run, actor, task=task)
 
     # 审批闸门：不执行 Agent，只创建审批并挂起。
     if (task.input or {}).get("approval"):
@@ -494,6 +533,7 @@ def dispatch_task(
 
     upstream = _upstream_outputs(db, run, task)
     payload = _task_payload_for_agent(run, task)
+    policy = tool_policy(run.workflow_type, task.agent_type)
     try:
         output = agent.run(
             db,
@@ -502,10 +542,13 @@ def dispatch_task(
             upstream=upstream,
             run={
                 "id": run.id,
+                "task_id": task.id,
                 "goal": run.goal,
                 "workflow_type": run.workflow_type,
                 "project_id": run.project_id,
+                "tool_policy": policy.as_dict(),
             },
+            actor=actor,
         )
     except Exception as exc:  # noqa: BLE001 - surfaced as a failed task
         logger.exception("Agent 任务失败 run=%s task=%s", run.id, task.task_key)
@@ -521,7 +564,12 @@ def dispatch_task(
         task.status = "failed"
         task.error = str(output.result.get("error") or "Agent 执行失败")
         task.completed_at = utc_now()
-        _fail_run(db, run, f"任务 {task.task_key} 失败：{task.error}")
+        _fail_run(
+            db,
+            run,
+            f"任务 {task.task_key} 失败：{task.error}",
+            tool_calls=output.tool_calls,
+        )
         return task
 
     if output.requires_approval:

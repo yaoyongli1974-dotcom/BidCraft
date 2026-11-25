@@ -176,3 +176,65 @@ def test_agent_worker_registered_and_rebuild_args(db):
     job = Job(kind="agent", status="queued", project_id="p", payload={"run_id": "r1"})
     assert jobqueue._rebuild_args(job) == (job.id, "r1")
     assert "agent" in jobqueue._API_RUNNER_NAMES
+
+
+def test_mutating_tool_policy_fails_closed_without_actor(db, monkeypatch):
+    """写工具策略下匿名工作流必须拒绝；只读/无工具路径保持旧行为。"""
+
+    from bidcraft.orchestration.orchestrator import dispatch_task
+    from bidcraft.orchestration.planner import TOOL_POLICIES, ToolPolicy
+    from bidcraft.orchestration.registry import AgentOutput
+
+    pid = _project("wf-mutating")
+    rid = _start(pid, workflow_type="custom", input_payload={
+        "tasks": [{"task_key": "t1", "agent_type": "technical"}]
+    })
+    write_policy = ToolPolicy(enabled=True, allowed=("run_check",), readonly=False)
+    monkeypatch.setitem(TOOL_POLICIES["custom"], "technical", write_policy)
+
+    with session_scope() as sess:
+        task = sess.scalar(select(WorkflowTask).where(WorkflowTask.run_id == rid))
+        with pytest.raises(Exception, match="显式用户身份"):
+            dispatch_task(sess, task)
+
+    # 非法轨迹不得冒充合法 AgentOutput。
+    with pytest.raises(Exception, match="轨迹字段"):
+        AgentOutput(tool_calls=[{"name": "get_project"}])
+
+    # 只读策略下匿名执行不受影响。
+    monkeypatch.setitem(
+        TOOL_POLICIES["custom"], "technical", ToolPolicy(enabled=False)
+    )
+    rid2 = _start(pid, workflow_type="custom", input_payload={
+        "tasks": [{"task_key": "t1", "agent_type": "technical"}]
+    })
+    result = run_workflow(rid2)
+    assert result["status"] in {"waiting_approval", "done", "failed"}
+
+
+def test_worker_actor_comes_from_job_payload(db):
+    from bidcraft.models import User
+    from bidcraft.security import hash_password
+    from bidcraft.workers.agent import _actor_from_job
+
+    with session_scope() as sess:
+        user = User(
+            username="job-owner", password_hash=hash_password("pass-123"), role="editor"
+        )
+        sess.add(user)
+        sess.flush()
+        job = Job(
+            kind="agent",
+            status="running",
+            project_id="p",
+            payload={"owner_id": user.id, "user_id": user.username},
+        )
+        sess.add(job)
+        sess.flush()
+        actor = _actor_from_job(sess, job)
+    assert actor == {
+        "id": user.id,
+        "username": "job-owner",
+        "role": "editor",
+        "display_name": "job-owner",
+    }

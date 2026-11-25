@@ -275,3 +275,96 @@ def test_registry_identity_from_context(monkeypatch):
         "is_super_admin": False,
         "username": None,
     }
+
+
+# ------------------------------------------------------------ Agent 插件工具审计
+
+
+_ECHO_SERVER = r'''
+import json
+import sys
+
+for raw in sys.stdin:
+    raw = raw.strip()
+    if not raw:
+        continue
+    try:
+        msg = json.loads(raw)
+    except ValueError:
+        continue
+    method = msg.get("method")
+    rid = msg.get("id")
+    if method == "initialize":
+        result = {"protocolVersion": "2024-11-05", "capabilities": {},
+                  "serverInfo": {"name": "echo", "version": "0.1"}}
+    elif method == "tools/list":
+        result = {"tools": [{"name": "echo", "description": "echo",
+                             "inputSchema": {"type": "object", "properties": {}}}]}
+    elif method == "tools/call":
+        text = str(((msg.get("params") or {}).get("arguments") or {}).get("text", ""))
+        result = {"content": [{"type": "text", "text": text}], "isError": False}
+    else:
+        continue
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": rid, "result": result}) + "\n")
+    sys.stdout.flush()
+'''
+
+
+def test_agent_plugin_tool_real_execution_and_audit(db, tmp_path):
+    """真实 stdio 插件进程 + 真实 registry/mcp；审计带 project_id/user_id。"""
+
+    import sys
+
+    from bidcraft.models import User
+    from bidcraft.orchestration import registry
+    from bidcraft.pipeline import create_project
+    from bidcraft.security import hash_password
+
+    script = tmp_path / "echo_server.py"
+    script.write_text(_ECHO_SERVER, encoding="utf-8")
+    with session_scope() as session:
+        owner = User(
+            username="plugin-agent-owner",
+            password_hash=hash_password("pass-123"),
+            role="super_admin",
+        )
+        session.add(owner)
+        session.flush()
+        project = create_project(session, "plugin-agent-project")
+        project.owner_id = owner.id
+        session.add(
+            Plugin(name="agent_echo", transport="stdio", command=sys.executable,
+                   args=[str(script)], enabled=True)
+        )
+        actor = {"id": owner.id, "username": owner.username, "role": owner.role}
+        pid = project.id
+
+    result = registry.call_tool(
+        "agent_echo__echo",
+        {"text": "真实插件执行"},
+        readonly=False,
+        actor=actor,
+        project_id=pid,
+        run_id="run-plugin",
+        task_id="task-plugin",
+    )
+    assert result["isError"] is False
+    assert "真实插件执行" in result["content"][0]["text"]
+
+    denied = registry.call_tool(
+        "agent_echo__echo", {"text": "拒绝"}, readonly=True, actor=actor, project_id=pid
+    )
+    assert denied["isError"] is True
+
+    with session_scope() as session:
+        logs = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.action.in_(("plugin.call", "agent.tool.call"))
+                )
+            )
+        )
+    assert any(log.project_id == pid and log.username == actor["username"] for log in logs)
+    assert any(log.detail["tool"] == "echo" and log.detail["user_id"] == actor["id"] for log in logs)
+    assert any(log.detail["ok"] is True for log in logs)
+    assert any(log.detail["ok"] is False for log in logs)

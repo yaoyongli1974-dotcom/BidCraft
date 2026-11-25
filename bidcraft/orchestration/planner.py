@@ -16,6 +16,7 @@ debug 日志，让请求种类在审计/排障中可辨认。
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from .. import scoring
@@ -41,6 +42,71 @@ def canonical_workflow_type(workflow_type: str) -> str:
 
 class PlanError(ValueError):
     """工作流图不合法（重复 key / 未知依赖 / 成环 / 孤立节点）。"""
+
+
+# --------------------------------------------------------------------------- #
+# 服务端工具策略：只由本模块的代码配置决定，绝不读取用户 goal/input 里的自由文本。
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class ToolPolicy:
+    enabled: bool = False
+    allowed: tuple[str, ...] = ()
+    readonly: bool = True
+    required: tuple[str, ...] = ()
+    max_rounds: int = 6
+    max_chars: int = 8000
+
+    @property
+    def mutating(self) -> bool:
+        """是否包含需要写授权/审批的写工具（含所有插件工具）。"""
+
+        return bool(self.enabled and not self.readonly and self.allowed)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "allowed": list(self.allowed),
+            "readonly": self.readonly,
+            "required": list(self.required),
+            "max_rounds": self.max_rounds,
+            "max_chars": self.max_chars,
+            "mutating": self.mutating,
+        }
+
+
+def _policy(**values: Any) -> ToolPolicy:
+    allowed = tuple(str(item).strip() for item in (values.get("allowed") or ()) if str(item).strip())
+    return ToolPolicy(
+        enabled=bool(values.get("enabled", bool(allowed))),
+        allowed=allowed,
+        readonly=bool(values.get("readonly", True)),
+        required=tuple(str(item).strip() for item in (values.get("required") or ()) if str(item).strip()),
+        max_rounds=max(1, int(values.get("max_rounds", 6))),
+        max_chars=max(1, int(values.get("max_chars", 8000))),
+    )
+
+
+#: 服务端配置的策略表（可按部署修改代码/配置，不接受请求体注入）。
+#: 标准工作流仅给 technical_draft 开放只读项目工具；写工具默认不在任何策略中。
+TOOL_POLICIES: dict[str, dict[str, ToolPolicy]] = {
+    "standard": {
+        "technical": _policy(
+            allowed=("get_project", "get_ledger", "search_knowledge"), readonly=True
+        ),
+    },
+    "custom": {},
+}
+
+EMPTY_TOOL_POLICY = ToolPolicy()
+
+
+def tool_policy(workflow_type: str, agent_type: str) -> ToolPolicy:
+    """按工作流类型与 Agent 类型解析服务端策略；无配置则完全关闭工具。"""
+
+    kind = canonical_workflow_type(str(workflow_type or "standard"))
+    return TOOL_POLICIES.get(kind, {}).get(
+        str(agent_type or ""), EMPTY_TOOL_POLICY
+    )
 
 
 def _normalize_task(raw: dict[str, Any], seq: int) -> dict[str, Any]:
@@ -338,12 +404,15 @@ register_agent(PlanningAgent)
 
 __all__ = [
     "CANONICAL_WORKFLOWS",
+    "TOOL_POLICIES",
     "WORKFLOW_ALIASES",
     "PlanError",
     "PlanningAgent",
+    "ToolPolicy",
     "build_task_dependencies",
     "build_workflow",
     "canonical_workflow_type",
+    "tool_policy",
     "validate_workflow_graph",
     "workflow_order",
 ]

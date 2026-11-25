@@ -9,6 +9,7 @@ Agent 注册表、工作流运行/任务/审批。业务实现位于
 from __future__ import annotations
 
 import sys
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -32,17 +33,23 @@ from ...orchestration.orchestrator import (  # noqa: E402
     task_payload,
 )
 from ...orchestration.planner import PlanError  # noqa: E402
-from ...orchestration.registry import get_agent, list_agents  # noqa: E402
+from ...orchestration.registry import get_agent, list_agents, list_tools  # noqa: E402
 from ..schemas import WorkflowApprovalReview, WorkflowCreate  # noqa: E402
 from ..shared import (  # noqa: E402,F401
     _project,
     _require_write,
     audit,
+    auth,
     current_user,
     session_scope,
 )
 
 router = APIRouter()
+
+# MCP 内置工具中只读的四项；其余内置工具与插件工具都可能有副作用。
+_READONLY_TOOL_NAMES = frozenset(
+    {"list_projects", "get_project", "get_ledger", "search_knowledge"}
+)
 
 
 def _actor() -> dict:
@@ -66,6 +73,50 @@ def _error(exc: Exception) -> HTTPException:
 
 def _detail(exc: Exception) -> HTTPException:
     return HTTPException(status_code=409, detail=str(exc))
+
+
+def _tool_payload(spec: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a registry tool spec into the public catalog shape.
+
+    MCP specs use ``inputSchema`` while the HTTP contract exposes
+    ``input_schema``; ``readonly`` / ``side_effect`` are derived from the
+    built-in tool names when the spec does not declare them.
+    """
+
+    name = str(spec.get("name") or "")
+    readonly = spec.get("readonly")
+    if readonly is None:
+        readonly = name in _READONLY_TOOL_NAMES
+    readonly = bool(readonly)
+    side_effect = spec.get("side_effect")
+    if side_effect is None:
+        side_effect = "none" if readonly else "write"
+    input_schema = spec.get("input_schema") or spec.get("inputSchema")
+    if not isinstance(input_schema, dict):
+        input_schema = {"type": "object", "properties": {}, "additionalProperties": False}
+    return {
+        "name": name,
+        "description": str(spec.get("description") or ""),
+        "input_schema": input_schema,
+        "side_effect": str(side_effect),
+        "readonly": readonly,
+    }
+
+
+def _tool_calls(value: Any) -> list[dict[str, Any]]:
+    """Copy only real trace dicts; never synthesize verification or success."""
+
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _trace_from(payload: Any) -> list[dict[str, Any]]:
+    """Read ``tool_calls`` from an output/result dict without trusting its shape."""
+
+    if not isinstance(payload, dict):
+        return []
+    return _tool_calls(payload.get("tool_calls"))
 
 
 def _check_backpressure(db, owner_id: str) -> None:
@@ -98,6 +149,30 @@ def agent_detail(agent_type: str) -> dict:
     except Exception as exc:  # noqa: BLE001
         raise _error(exc) from exc
     return {"agent_type": agent_type, "description": getattr(agent, "description", "")}
+
+
+@router.get("/agents/{agent_type}/tools")
+def agent_tools(agent_type: str, ref: str | None = Query(default=None)) -> dict:
+    """Read-only tool catalog for one agent type.
+
+    With ``?ref=`` the caller only needs project visibility (viewers included).
+    Without a project context, global write roles are required. Like every
+    other GET route here, the read is *not* audited (no mutating side effect).
+    """
+
+    try:
+        get_agent(agent_type)
+    except Exception as exc:  # noqa: BLE001
+        raise _error(exc) from exc
+    with session_scope() as db:
+        if ref is not None:
+            _project(db, ref)
+        else:
+            actor = _actor()
+            if actor.get("role") not in {auth.ROLE_MANAGER, auth.ROLE_SUPER_ADMIN}:
+                raise HTTPException(status_code=403, detail="只读成员需提供项目上下文")
+        tools = [_tool_payload(spec) for spec in list_tools()]
+    return {"agent_type": agent_type, "tools": tools}
 
 
 # --------------------------------------------------------------------------- #
@@ -150,7 +225,13 @@ def workflow_detail(ref: str, run_id: str) -> dict:
     with session_scope() as db:
         project, _role = _project(db, ref)
         run = _run_for_project(db, project.id, run_id)
-        return get_workflow_status(db, run.id)
+        status = get_workflow_status(db, run.id)
+        # 轨迹落在 WorkflowTask.output / run.result；在 HTTP 边界额外暴露
+        # 顶层 tool_calls，前端无需猜测嵌套位置（缺失一律空列表）。
+        for task in status.get("tasks") or []:
+            task["tool_calls"] = _trace_from(task.get("output"))
+        status["tool_calls"] = _trace_from(status.get("result"))
+        return status
 
 
 @router.get("/projects/{ref}/workflows/{run_id}/tasks")
@@ -165,7 +246,10 @@ def workflow_tasks(ref: str, run_id: str) -> dict:
             .filter(WorkflowTask.run_id == run.id)
             .order_by(WorkflowTask.seq)
         )
-        return {"items": [task_payload(t) for t in tasks]}
+        items = [task_payload(t) for t in tasks]
+        for item in items:
+            item["tool_calls"] = _trace_from(item.get("output"))
+        return {"items": items}
 
 
 @router.post("/projects/{ref}/workflows/{run_id}/cancel")

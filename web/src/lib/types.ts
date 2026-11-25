@@ -2271,6 +2271,27 @@ export interface KbSearchPassage extends RetrievalTrace {
 
 // ---------------------------------------------------------------- Agent 编排（第三批）
 
+/** Phase 4：一条真实工具调用轨迹；缺失字段保持 null，禁止推断成功/已验证。 */
+export interface ToolCallTrace {
+  name: string
+  args: Record<string, unknown> | null
+  result: unknown
+  verification: string | null
+  audit_id: string | null
+  ts: string | null
+  is_error: boolean | null
+  ms: number | null
+}
+
+/** GET /agents/{agent_type}/tools 的工具目录条目（只读展示，不能调用）。 */
+export interface AgentTool {
+  name: string
+  description: string
+  input_schema: Record<string, unknown>
+  side_effect: string
+  readonly: boolean
+}
+
 /** Agent 注册表条目；注册表可扩展，早期后端可能只返回 agent_type / name。 */
 export interface AgentInfo {
   agent_type: string
@@ -2332,6 +2353,8 @@ export interface WorkflowRun {
   status: WorkflowStatus | string
   goal: string
   result?: Record<string, unknown> | null
+  /** 顶层轨迹投影；缺失或脏值归一为 []，每条记录保持后端原值。 */
+  tool_calls?: ToolCallTrace[]
   stats?: WorkflowStats | null
   budget?: WorkflowBudget | null
   created_at?: string | null
@@ -2346,6 +2369,8 @@ export interface WorkflowTask {
   agent_type: string
   status: WorkflowTaskStatus | string
   error?: string
+  /** 来自 output.tool_calls 的真实轨迹；缺省为空数组。 */
+  tool_calls?: ToolCallTrace[]
   attempts?: number
   started_at?: string | null
   completed_at?: string | null

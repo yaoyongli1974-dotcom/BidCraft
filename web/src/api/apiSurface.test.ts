@@ -34,6 +34,7 @@ const API_LITERALS = [
   '/admin/kbs/kb-1/assets/duplicates',
   '/admin/kbs/kb-1/assets/duplicates/group-1/resolve',
   '/agents',
+  '/agents/technical/tools',
   '/enterprise',
   '/enterprise/e-1/assets',
   '/enterprise/e-1/assets/doc-1/extract',

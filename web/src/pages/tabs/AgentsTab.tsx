@@ -1,9 +1,19 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { Bot, CheckCircle2, CircleSlash, Play, RefreshCw, XCircle } from 'lucide-react'
+import {
+  Bot,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  CircleSlash,
+  Play,
+  RefreshCw,
+  XCircle,
+} from 'lucide-react'
 import { useWorkspace } from '../useWorkspace'
 import {
   cancelWorkflow,
   createWorkflow,
+  getAgentTools,
   getWorkflow,
   listAgents,
   listWorkflowApprovals,
@@ -16,6 +26,8 @@ import { messageOf } from '../../lib/http'
 import { approvalTypeLabel } from './AgentsTab.meta'
 import type {
   AgentInfo,
+  AgentTool,
+  ToolCallTrace,
   WorkflowApproval,
   WorkflowRun,
   WorkflowTask,
@@ -70,6 +82,79 @@ function statLine(run: WorkflowRun): string {
   return parts.join(' · ')
 }
 
+type VerificationState = 'verified' | 'unverified' | 'failed'
+
+const VERIFICATION_META: Record<VerificationState, { label: string; tone: Tone }> = {
+  verified: { label: 'verified', tone: 'success' },
+  unverified: { label: 'unverified', tone: 'warn' },
+  failed: { label: 'failed', tone: 'danger' },
+}
+
+/** 只认后端真实给出的值；缺失一律 unverified，不推断成功或 ok。 */
+function verificationState(call: ToolCallTrace): VerificationState {
+  const value = (call.verification || '').trim().toLowerCase()
+  if (value === 'verified') return 'verified'
+  if (value === 'failed') return 'failed'
+  return 'unverified'
+}
+
+function traceText(value: unknown): string {
+  if (value === undefined || value === null) return '—'
+  try {
+    const text = JSON.stringify(value)
+    return text === undefined ? String(value) : text
+  } catch {
+    return String(value)
+  }
+}
+
+function truncate(text: string, limit = 180): string {
+  return text.length > limit ? `${text.slice(0, limit)}…` : text
+}
+
+/** 注册表卡片上的只读工具目录；传入项目 ref，viewer 也可查看。 */
+function AgentToolCatalog({ projectRef, agentType }: { projectRef: string; agentType: string }) {
+  const [open, setOpen] = useState(false)
+  const query = useQuery(
+    `agent-tools:${projectRef}:${agentType}`,
+    () => getAgentTools(projectRef, agentType),
+    { enabled: open },
+  )
+  const tools: AgentTool[] = query.data || []
+  return (
+    <div className="agent-tools">
+      <button
+        type="button"
+        className="agent-tools-toggle"
+        aria-label={`工具目录：${agentType}`}
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        工具目录{tools.length ? ` (${tools.length})` : ''}
+      </button>
+      {open && (
+        query.loading ? (
+          <small className="agent-tools-hint">加载中…</small>
+        ) : query.error ? (
+          <small className="agent-tools-hint is-error" role="alert">加载失败：{query.error}</small>
+        ) : tools.length === 0 ? (
+          <small className="agent-tools-hint">无可用工具</small>
+        ) : (
+          <ul className="agent-tool-list">
+            {tools.map((tool) => (
+              <li key={tool.name} className="agent-tool-item" title={tool.description}>
+                <code>{tool.name}</code>
+                <span>{tool.readonly ? '只读' : tool.side_effect}</span>
+              </li>
+            ))}
+          </ul>
+        )
+      )}
+    </div>
+  )
+}
+
 /** Agent 编排：注册表、工作流列表/新建、任务时间线、人工审批。 */
 export function AgentsTab() {
   const { ref, readOnly } = useWorkspace()
@@ -88,6 +173,7 @@ export function AgentsTab() {
   const [detailError, setDetailError] = useState<string | null>(null)
   const [detailNonce, setDetailNonce] = useState(0)
   const [reviewNotes, setReviewNotes] = useState<Record<string, string>>({})
+  const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({})
 
   const workflows = workflowsQuery.data || []
   const approvals = approvalsQuery.data || []
@@ -137,6 +223,15 @@ export function AgentsTab() {
     }
   }, [ref, selected, detailNonce])
 
+  /** resume / 审批会推进任务轨迹，动作成功后回读任务列表（失败保留旧列表）。 */
+  const refreshTasks = async (runId: string) => {
+    try {
+      setTasks(await listWorkflowTasks(ref, runId))
+    } catch {
+      // 详情轮询仍会重试；此处不把成功的动作标成失败。
+    }
+  }
+
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (readOnly || creating || !goal.trim()) return
@@ -169,6 +264,7 @@ export function AgentsTab() {
       await fn(ref, runId)
       toast.success(action === 'cancel' ? '已取消工作流' : '已恢复工作流', runId)
       await workflowsQuery.refresh()
+      await refreshTasks(runId)
       if (selectedId === runId) {
         try {
           setDetail(await getWorkflow(ref, runId))
@@ -196,6 +292,8 @@ export function AgentsTab() {
       )
       setReviewNotes((current) => ({ ...current, [approval.id]: '' }))
       await Promise.all([approvalsQuery.refresh(), workflowsQuery.refresh()])
+      const reviewedRunId = detail?.id || approval.run_id
+      if (reviewedRunId) await refreshTasks(reviewedRunId)
       if (selectedId && detail) {
         try {
           setDetail(await getWorkflow(ref, detail.id))
@@ -273,6 +371,7 @@ export function AgentsTab() {
                         ))}
                       </div>
                     )}
+                    <AgentToolCatalog projectRef={ref} agentType={agent.agent_type} />
                   </div>
                 ))}
               </div>
@@ -490,11 +589,71 @@ export function AgentsTab() {
                       return (
                         <li key={task.id} className="agents-timeline-item">
                           <span className="agents-task-seq">{task.seq}</span>
-                          <span className="agents-task-main">
+                          <div className="agents-task-main">
                             <strong>{task.task_key || task.agent_type}</strong>
                             <small>{task.agent_type}{task.attempts ? ` · 第 ${task.attempts} 次` : ''}</small>
                             {task.error && <span className="agents-task-error">{task.error}</span>}
-                          </span>
+                            {!!task.tool_calls?.length && (() => {
+                              const toggleKey = `${task.id}:trace`
+                              const open = expandedTools[toggleKey] === true
+                              return (
+                                <div className="agents-tool-traces">
+                                  <button
+                                    type="button"
+                                    className="agents-tool-toggle"
+                                    aria-label={`工具调用轨迹：${task.task_key || task.agent_type}`}
+                                    aria-expanded={open}
+                                    onClick={() =>
+                                      setExpandedTools((current) => ({
+                                        ...current,
+                                        [toggleKey]: !current[toggleKey],
+                                      }))
+                                    }
+                                  >
+                                    {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                                    工具轨迹 ({task.tool_calls.length})
+                                  </button>
+                                  {open && (
+                                    <ul className="agents-tool-trace-list">
+                                      {task.tool_calls.map((call, index) => {
+                                        const state = verificationState(call)
+                                        const meta = VERIFICATION_META[state]
+                                        return (
+                                          <li
+                                            key={`${call.name}-${index}-${call.audit_id || ''}`}
+                                            className={className(
+                                              'agents-tool-trace',
+                                              state === 'unverified' && 'is-unverified',
+                                              (state === 'failed' || call.is_error === true) && 'is-error',
+                                            )}
+                                          >
+                                            <div className="agents-tool-trace-head">
+                                              <strong>{call.name}</strong>
+                                              <Badge tone={meta.tone} subtle>{meta.label}</Badge>
+                                              {call.is_error !== null && (
+                                                <small>is_error={String(call.is_error)}</small>
+                                              )}
+                                              {call.ms !== null && <small>{call.ms} ms</small>}
+                                            </div>
+                                            <dl className="agents-tool-trace-meta">
+                                              <dt>args</dt>
+                                              <dd><code>{traceText(call.args)}</code></dd>
+                                              <dt>result</dt>
+                                              <dd><code>{truncate(traceText(call.result))}</code></dd>
+                                              <dt>audit_id</dt>
+                                              <dd>{call.audit_id || '—'}</dd>
+                                              <dt>ts</dt>
+                                              <dd>{call.ts || '—'}</dd>
+                                            </dl>
+                                          </li>
+                                        )
+                                      })}
+                                    </ul>
+                                  )}
+                                </div>
+                              )
+                            })()}
+                          </div>
                           <Badge tone={tm.tone} subtle>{tm.label}</Badge>
                         </li>
                       )
