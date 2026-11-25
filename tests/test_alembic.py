@@ -14,7 +14,7 @@ from bidcraft.config import settings
 from bidcraft.db import get_engine, init_db, reset_engine_for_tests
 
 #: 当前 alembic head（新增 revision 时同步这里）。
-HEAD = "0012_generation_lease"
+HEAD = "0013_chapter_planning"
 
 
 def _version() -> list[str]:
@@ -361,3 +361,69 @@ def test_0011_stage3_accounting_columns_are_reversible(tmp_path, monkeypatch):
         scratch.parent.mkdir(parents=True, exist_ok=True)
         reset_engine_for_tests(f"sqlite+pysqlite:///{scratch}")
         init_db()
+
+
+def test_0013_chapter_planning_table_is_reversible(db):
+    """0013 的规划表/索引/唯一约束必须可降级再升级，且重复执行依然幂等。"""
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+
+    from bidcraft.migrations import __file__ as migrations_init
+
+    engine = get_engine()
+    expected_columns = {
+        "id", "project_id", "node_id", "package_id", "version", "status",
+        "objective", "raw_response", "model_id", "prompt_version",
+        "user_instruction", "created_by", "confirmed_by", "created_at",
+        "updated_at", "confirmed_at", "used_at", "score_points",
+        "requirements", "conditions", "challenges", "strategy", "measures",
+        "knowledge_refs", "fact_refs", "planned_tables", "planned_diagrams",
+        "forbidden_assumptions", "quality_criteria", "user_adjustments",
+        "validation_errors",
+    }
+    expected_indexes = {
+        "ix_chapter_plans_project_node_status",
+        "ix_chapter_plans_project_package",
+    }
+
+    def columns() -> set[str]:
+        with engine.connect() as connection:
+            return {c["name"] for c in inspect(connection).get_columns("chapter_plans")}
+
+    def indexes() -> set[str]:
+        with engine.connect() as connection:
+            return {i["name"] for i in inspect(connection).get_indexes("chapter_plans") if i.get("name")}
+
+    assert "chapter_plans" in set(inspect(engine).get_table_names())
+    assert expected_columns <= columns()
+    assert expected_indexes <= indexes()
+    with engine.connect() as connection:
+        uniques = {
+            item["name"]
+            for item in inspect(connection).get_unique_constraints("chapter_plans")
+            if item.get("name")
+        }
+    assert "uq_chapter_plan_project_node_version" in uniques
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(Path(migrations_init).parent))
+    cfg.set_main_option(
+        "sqlalchemy.url",
+        engine.url.render_as_string(hide_password=False).replace("%", "%%"),
+    )
+
+    command.downgrade(cfg, "0012_generation_lease")
+    assert "chapter_plans" not in set(inspect(engine).get_table_names())
+
+    command.upgrade(cfg, "head")
+    assert "chapter_plans" in set(inspect(engine).get_table_names())
+    assert expected_columns <= columns()
+    assert expected_indexes <= indexes()
+
+    # 幂等：create_all 已经建表后重复 upgrade 不得报错。
+    init_db()
+    command.upgrade(cfg, "head")
+    assert expected_columns <= columns()
+    assert _version() == [HEAD]

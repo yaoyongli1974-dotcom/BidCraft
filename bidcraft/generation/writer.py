@@ -334,6 +334,8 @@ def write_chapter(
     on_delta: Callable[[str], None] | None = None,
     knowledge_text: str = "",
     facts_text: str = "",
+    chapter_plan: Any = None,
+    plan_text: str = "",
 ) -> tuple[str, str]:
     heading = str(node["heading"])
     intent = str(node.get("intent") or "")
@@ -355,6 +357,8 @@ def write_chapter(
         knowledge_text=knowledge_text,
         facts_text=facts_text,
         needs=node.get("needs") or [],
+        chapter_plan=chapter_plan,
+        plan_text=plan_text,
         context_tokens=getattr(getattr(client, "settings", None), "model_context_tokens", None),
         max_tokens=max(2000, min(8000, target * 2)),
     )
@@ -414,6 +418,7 @@ def generate_document(
     before_chapter: Callable[[dict[str, Any], Session], bool] | None = None,
     after_chapter: Callable[[dict[str, Any], Session], None] | None = None,
     commit_chapter: Callable[[dict[str, Any], str, str], None] | None = None,
+    plan_provider: Callable[[str], Any] | None = None,
 ) -> GenerationReport:
     """Generate chapters in outline order.
 
@@ -429,6 +434,7 @@ def generate_document(
     it for chapter-level fencing).  In that mode the long generation session no
     longer writes Section/OutlineNode at all.
     """
+    from .chapter_plan import plan_context_text
     from .outline import load_outline
 
     nodes = load_outline(db, project_id)
@@ -456,6 +462,17 @@ def generate_document(
             "total": len(nodes),
             "target_words": int(node.get("target_words") or 0),
         }
+        plan = plan_provider(node["id"]) if plan_provider is not None else None
+        plan_text = plan_context_text(plan) if plan is not None else ""
+        if plan is not None:
+            info.update(
+                {
+                    "chapter_plan_id": plan.id,
+                    "planning_version": int(plan.version or 0),
+                    "planning_status": plan.status or "",
+                    "planning_prompt_version": plan.prompt_version or "",
+                }
+            )
         if only_node and node["id"] != only_node:
             if node.get("body"):
                 previous_texts.append(node["body"])
@@ -506,6 +523,8 @@ def generate_document(
                 on_delta=on_delta,
                 knowledge_text=knowledge_text,
                 facts_text=facts_text,
+                chapter_plan=plan,
+                plan_text=plan_text,
             )
             body = dedupe_body(body, previous_texts)
             if not body.strip():

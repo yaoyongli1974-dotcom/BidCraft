@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+from typing import Any
 
 logger = logging.getLogger("bidcraft.generation.prompts")
 
@@ -50,6 +52,8 @@ def build_chapter_context(
     needs: list[str] | None = None,
     context_tokens: int | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    chapter_plan: Any = None,
+    plan_text: str = "",
 ) -> str:
     """Assemble the chapter user prompt within a model context budget.
 
@@ -98,8 +102,15 @@ def build_chapter_context(
         if facts_text
         else ""
     )
+    if not plan_text and chapter_plan is not None:
+        from .chapter_plan import plan_context_text
+
+        plan_text = plan_context_text(chapter_plan)
+    plan_block = f"{plan_text}\n" if plan_text else ""
+
     # (text, priority) - lower priority number is protected first.
     blocks: list[tuple[str, int]] = [
+        (plan_block, 0),
         (facts_block, 0),
         (needs_block, 1),
         (str(ledger_text or ""), 2),
@@ -174,6 +185,8 @@ def chapter_messages(
     needs: list[str] | None = None,
     context_tokens: int | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    chapter_plan: Any = None,
+    plan_text: str = "",
 ) -> list[dict[str, str]]:
     user = build_chapter_context(
         project_name=project_name,
@@ -189,6 +202,8 @@ def chapter_messages(
         needs=needs,
         context_tokens=context_tokens,
         max_tokens=max_tokens,
+        chapter_plan=chapter_plan,
+        plan_text=plan_text,
     )
     return [
         {"role": "system", "content": SYSTEM_WRITER},
@@ -204,4 +219,40 @@ def continue_messages(previous: str, tail: str) -> list[dict[str, str]]:
     return [
         {"role": "system", "content": SYSTEM_WRITER},
         {"role": "user", "content": f"已生成内容（末尾）：\n...{tail[-1200:]}\n\n{CONTINUE_PROMPT}"},
+    ]
+
+
+SYSTEM_CHAPTER_PLANNER = """你是一名资深技术标编制规划师。只依据输入的项目真实数据做章节规划，
+禁止编造评分项、事实、知识或章节 ID。输出严格 JSON 对象，不要 Markdown 代码块，
+不要解释文字。可用字段：objective（字符串），score_points / requirements / fact_refs /
+knowledge_refs（对象数组，每项可带输入中给出的真实 id），conditions / challenges /
+strategy / measures / planned_tables / planned_diagrams / forbidden_assumptions /
+quality_criteria（字符串或对象数组）。strategy 必须是可直接指导正文写作的具体条目。"""
+
+
+def chapter_plan_messages(context: dict) -> list[dict[str, str]]:
+    """构造章节规划的模型输入（在 DB 短事务之外调用）。"""
+
+    def brief(key: str, limit: int) -> str:
+        rows = context.get(key) or []
+        return "\n".join(
+            json.dumps(row, ensure_ascii=False)[:400] for row in rows[:limit]
+        )
+
+    user = (
+        f"项目：{context.get('project_id', '')}（行业包 {context.get('package', '')}）\n"
+        f"章节：{context.get('heading', '')}\n"
+        f"意图：{context.get('intent', '')}\n"
+        f"目标字数：{context.get('target_words', 0)}\n"
+        f"用户指令：{context.get('user_instruction', '')}\n\n"
+        f"真实评分项（只能引用这里的 id）：\n{brief('scoring', 12)}\n\n"
+        f"真实招标要求（只能引用这里的 id）：\n{brief('requirements', 15)}\n\n"
+        f"真实事实台账（只能引用这里的 id/key）：\n{brief('facts', 12)}\n\n"
+        f"真实知识条目（只能引用这里的 id）：\n{brief('knowledge', 4)}\n\n"
+        f"检索文本（仅供参考，不能据此造出 ID）：\n{str(context.get('knowledge_text') or '')[:1200]}\n\n"
+        "请输出 JSON 规划。"
+    )
+    return [
+        {"role": "system", "content": SYSTEM_CHAPTER_PLANNER},
+        {"role": "user", "content": user},
     ]

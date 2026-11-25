@@ -52,6 +52,11 @@ FRONTEND_NON_API = frozenset(
         "revisions",
         "workflow-approvals",
         "workflows",
+        # Chapter-planning path suffixes handed to planPath().
+        "confirm",
+        "generate",
+        "history",
+        "regenerate",
         # Placeholder filesystem paths and regex/template artifacts.
         "data",
         "g",

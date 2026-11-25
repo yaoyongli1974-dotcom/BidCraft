@@ -18,6 +18,7 @@ from ...generation.coverage import (  # noqa: E402
 from ..shared import (  # noqa: F401
     BATCH_STALE_SECONDS,
     BOQ_UPLOAD_SUFFIXES,
+    CONFIRMED_STATUSES,
     ISSUE_BULK_LIMIT,
     MEMBER_ROLES,
     SEVERITY_ORDER,
@@ -36,6 +37,10 @@ from ..shared import (  # noqa: F401
     BoqVersionCreate,
     BoqVersionReview,
     BoqVersionSubmit,
+    ChapterPlan,
+    ChapterPlanConfirm,
+    ChapterPlanGenerateRequest,
+    ChapterPlanUpdate,
     ChapterReview,
     ChapterSave,
     Delivery,
@@ -134,13 +139,17 @@ from ..shared import (  # noqa: F401
     add_source,
     audit,
     auth,
+    authorize_node,
     billing,
     billing_user,
     boq,
     build_outline,
+    build_plan_context,
     build_requirement_context,
+    chapter_plan_payload,
     check_project,
     clock,
+    confirm_chapter_plan,
     count_words,
     create_project,
     current_user,
@@ -149,20 +158,26 @@ from ..shared import (  # noqa: F401
     enforce_export_gate,
     export_docx,
     export_markdown,
+    generate_chapter_plan,
     generate_document,
     images,
+    is_pending,
     jobqueue,
     jobs,
     judge_for_project,
     ledger_gate,
     ledger_summary,
+    load_active_plan,
     load_ledger,
     load_outline,
     load_package,
+    load_plan_history,
+    mark_plan_used,
     math,
     parse_documents,
     parse_project,
     persist_parse,
+    plan_context_text,
     profile,
     provenance,
     re,
@@ -174,7 +189,9 @@ from ..shared import (  # noqa: F401
     settings,
     shutil,
     tempfile,
+    update_chapter_plan,
     update_fact,
+    validate_chapter_plan,
 )
 
 router = APIRouter()
@@ -190,6 +207,72 @@ def _release_generation_lease(project_id: str, token: str) -> None:
             jobqueue.release_generation_lease(db, project_id, token)
     except Exception:  # noqa: BLE001 - 释放失败由 reaper 的过期清理兜底
         logging.getLogger(__name__).exception("生成租约释放失败: %s", project_id)
+
+
+def _planning_mode(project: Project) -> str:
+    """项目级章节规划模式：默认 review（确认后才可写正文）。"""
+
+    return str((project.meta or {}).get("chapter_planning_mode") or "review")
+
+
+def _plan_metadata(plan: ChapterPlan | None) -> dict[str, Any]:
+    """规划溯源字段，同步写审计、异步写 Job.payload。"""
+
+    if plan is None:
+        return {
+            "planning_id": "",
+            "planning_version": 0,
+            "planning_status": "",
+            "knowledge_reference_ids": [],
+            "fact_reference_ids": [],
+            "scoring_reference_ids": [],
+            "generation_strategy": [],
+            "prompt_version": "",
+        }
+    payload = chapter_plan_payload(plan)
+
+    def ids(field: str) -> list[str]:
+        return [
+            str(row.get("id") or "")
+            for row in payload.get(field) or []
+            if isinstance(row, dict) and row.get("id")
+        ]
+
+    return {
+        "planning_id": plan.id,
+        "planning_version": int(plan.version or 0),
+        "planning_status": plan.status or "",
+        "knowledge_reference_ids": ids("knowledge_refs"),
+        "fact_reference_ids": ids("fact_refs"),
+        "scoring_reference_ids": ids("score_points"),
+        "generation_strategy": payload.get("strategy") or [],
+        "prompt_version": plan.prompt_version or "",
+    }
+
+
+def _chapter_plan_gate(
+    db, project: Project, node: OutlineNode, warnings: list[str]
+) -> ChapterPlan | None:
+    """正文生成前的章节规划门禁。
+
+    老项目从未生成过规划时按"未启用规划"放行并记 warning；一旦该章节出现过
+    规划记录，review/review_strict 模式必须先确认有效规划；review_strict
+    对从未规划的新章节也强制阻断；auto 模式放行但记 warning。
+    """
+    mode = _planning_mode(project)
+
+    plan = load_active_plan(db, project.id, node.id)
+    if plan is not None and plan.status in CONFIRMED_STATUSES:
+        return plan
+    history = db.scalar(
+        select(ChapterPlan.id)
+        .where(ChapterPlan.project_id == project.id, ChapterPlan.node_id == node.id)
+        .limit(1)
+    )
+    if mode in {"review", "review_strict"} and (history or mode == "review_strict"):
+        raise _http_error(409, "本章章节规划尚未确认，请先生成并确认规划后再生成正文")
+    warnings.append(f"章节「{node.heading}」缺少已确认规划（模式：{mode}）")
+    return plan
 
 
 def _enqueue_or_429(db, owner_id: str) -> None:
@@ -1347,6 +1430,216 @@ def chapter_citations(ref: str, node_id: str) -> dict[str, Any]:
         }
 
 
+@router.get("/projects/{ref}/chapters/{node_id}/plan")
+def get_chapter_plan(ref: str, node_id: str) -> dict[str, Any]:
+    """读取本章当前有效规划（无规划时 plan=null，status=NOT_CREATED）。"""
+
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        node = authorize_node(db, project.id, node_id)
+        plan = load_active_plan(db, project.id, node.id)
+        return {
+            "node_id": node.id,
+            "heading": node.heading,
+            "mode": _planning_mode(project),
+            "status": plan.status if plan else "NOT_CREATED",
+            "plan": chapter_plan_payload(plan) if plan else None,
+        }
+
+
+def _generate_chapter_plan(
+    ref: str,
+    node_id: str,
+    payload: ChapterPlanGenerateRequest,
+    *,
+    regenerate: bool,
+) -> dict[str, Any]:
+    # 1) 短事务：鉴权 + 构造模型输入（只读真实行，不含模型长调用）。
+    with session_scope() as db:
+        project, role = _project(db, ref)
+        _require_write(role)
+        node = authorize_node(db, project.id, node_id)
+        user = current_user() or {}
+        try:
+            provider = _knowledge_provider(db, user.get("id"))
+        except Exception:  # noqa: BLE001 - 知识检索失败不阻断规划
+            provider = None
+        context = build_plan_context(
+            db, project.id, node, payload.user_instruction, provider
+        )
+        client = _generation_client(db)
+        project_id = project.id
+        node_id_value = node.id
+        package_id = payload.package_id or context.get("package_id")
+        created_by = str(user.get("username") or "")
+
+    # 2) 模型调用在事务之外；不可用时回退确定性规划，原始返回留在 raw_response。
+    model_output = ""
+    if client.available:
+        try:
+            from ...generation.prompts import chapter_plan_messages
+
+            model_output = str(
+                client.complete(
+                    chapter_plan_messages(context), max_tokens=1800, temperature=0.1
+                )
+                or ""
+            )
+        except Exception:  # noqa: BLE001 - 统一按回退处理
+            model_output = ""
+
+    # 3) 短事务：落库 + 审计。
+    with session_scope() as db:
+        project = db.get(Project, project_id)
+        node = db.get(OutlineNode, node_id_value)
+        plan = generate_chapter_plan(
+            db,
+            project,
+            node,
+            payload.user_instruction,
+            created_by,
+            regenerate,
+            model_output=model_output,
+            package_id=package_id,
+        )
+        result = chapter_plan_payload(plan)
+        audit(
+            db,
+            project_id,
+            "chapter_plan.generate",
+            {
+                "node_id": node_id_value,
+                "heading": node.heading,
+                "version": plan.version,
+                "status": plan.status,
+                "regenerate": bool(regenerate),
+                "validation_errors": result["validation_errors"],
+            },
+        )
+        return {"plan": result}
+
+
+@router.post("/projects/{ref}/chapters/{node_id}/plan")
+def create_chapter_plan(
+    ref: str, node_id: str, payload: ChapterPlanGenerateRequest
+) -> dict[str, Any]:
+    """生成章节规划新版本；模型不可用时使用真实项目数据的确定性回退。"""
+
+    return _generate_chapter_plan(ref, node_id, payload, regenerate=False)
+
+
+@router.post("/projects/{ref}/chapters/{node_id}/plan/generate")
+def create_chapter_plan_alias(
+    ref: str, node_id: str, payload: ChapterPlanGenerateRequest
+) -> dict[str, Any]:
+    """统一契约别名：与 POST /plan 等价，便于前端只使用文档化路径。"""
+
+    return _generate_chapter_plan(ref, node_id, payload, regenerate=False)
+
+
+@router.post("/projects/{ref}/chapters/{node_id}/plan/regenerate")
+def regenerate_chapter_plan(
+    ref: str, node_id: str, payload: ChapterPlanGenerateRequest
+) -> dict[str, Any]:
+    """废弃当前有效规划并追加新版本（旧规划标记为 REGENERATING）。"""
+
+    return _generate_chapter_plan(ref, node_id, payload, regenerate=True)
+
+
+@router.put("/projects/{ref}/chapters/{node_id}/plan")
+def modify_chapter_plan(
+    ref: str, node_id: str, payload: ChapterPlanUpdate
+) -> dict[str, Any]:
+    """人工调整：追加 UPDATED 新版本，旧版本自动失效。"""
+
+    if payload.updates:
+        merged = payload.model_dump(exclude={"updates"})
+        wrappable = {
+            key: value
+            for key, value in payload.updates.items()
+            if key in ChapterPlanUpdate.model_fields
+            and key not in {"updates", "note", "package_id"}
+        }
+        for key, value in wrappable.items():
+            if merged.get(key) is None:
+                merged[key] = value
+        payload = ChapterPlanUpdate(**merged)
+
+    with session_scope() as db:
+        project, role = _project(db, ref)
+        _require_write(role)
+        node = authorize_node(db, project.id, node_id)
+        plan = update_chapter_plan(
+            db,
+            project,
+            node,
+            payload,
+            str((current_user() or {}).get("username") or ""),
+            payload.package_id or (project.meta or {}).get("package_id"),
+        )
+        result = chapter_plan_payload(plan)
+        audit(
+            db,
+            project.id,
+            "chapter_plan.update",
+            {
+                "node_id": node.id,
+                "heading": node.heading,
+                "version": plan.version,
+                "note": payload.note,
+            },
+        )
+        return {"plan": result}
+
+
+@router.post("/projects/{ref}/chapters/{node_id}/plan/confirm")
+def approve_chapter_plan(
+    ref: str, node_id: str, payload: ChapterPlanConfirm
+) -> dict[str, Any]:
+    """确认当前有效规划；校验通过后才允许正文生成。"""
+
+    with session_scope() as db:
+        project, role = _project(db, ref)
+        _require_write(role)
+        node = authorize_node(db, project.id, node_id)
+        plan = load_active_plan(
+            db, project.id, node.id, (project.meta or {}).get("package_id")
+        )
+        if plan is None:
+            raise _http_error(409, "该章节没有可确认的规划")
+        username = str((current_user() or {}).get("username") or "")
+        confirm_chapter_plan(db, plan, username, payload.note)
+        result = chapter_plan_payload(plan)
+        audit(
+            db,
+            project.id,
+            "chapter_plan.confirm",
+            {
+                "node_id": node.id,
+                "heading": node.heading,
+                "plan_id": plan.id,
+                "version": plan.version,
+                "note": payload.note,
+            },
+        )
+        return {"plan": result}
+
+
+@router.get("/projects/{ref}/chapters/{node_id}/plan/history")
+def chapter_plan_history(ref: str, node_id: str) -> dict[str, Any]:
+    """按版本倒序返回一章的全部规划（含被取代与被拒绝的版本）。"""
+
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        node = authorize_node(db, project.id, node_id)
+        rows = load_plan_history(db, project.id, node.id)
+        return {
+            "node_id": node.id,
+            "heading": node.heading,
+            "plans": [chapter_plan_payload(row) for row in rows],
+        }
+
+
 @router.get("/projects/{ref}/citations")
 def project_citations(ref: str) -> dict[str, Any]:
     """全书来源追溯：哪些章节引用了台账哪个字段、哪些已与台账不一致。"""
@@ -1569,6 +1862,9 @@ def generate_chapter(ref: str, node_id: str) -> dict[str, Any]:
         node = _node(db, project.id, node_id)
         node_id_value = node.id
         heading = node.heading
+        planning_warnings: list[str] = []
+        active_plan = _chapter_plan_gate(db, project, node, planning_warnings)
+        plan_meta = _plan_metadata(active_plan)
         existing = db.scalar(select(Section).where(Section.node_id == node.id))
         if existing is not None and (existing.review_status or "draft") in {
             "confirmed",
@@ -1634,6 +1930,7 @@ def generate_chapter(ref: str, node_id: str) -> dict[str, Any]:
                 package,
                 only_node=node_id_value,
                 knowledge_provider=_knowledge_provider(gen_db, user.id),
+                plan_provider=lambda nid: load_active_plan(gen_db, project_id, nid),
             )
         # 心跳线程发现租约失效后只置事件；生成会话可能已写出部分章节，按已写
         # 章节数结算而不是全额退款，避免把已完成的工作白送。
@@ -1667,7 +1964,18 @@ def generate_chapter(ref: str, node_id: str) -> dict[str, Any]:
         project.status = "drafting"
         db.flush()
         provenance.refresh_node(db, project_id, node_id_value)
-        audit(db, project_id, "chapter.generate", {"heading": heading})
+        if plan_meta["planning_id"]:
+            mark_plan_used(db, db.get(ChapterPlan, plan_meta["planning_id"]))
+        audit(
+            db,
+            project_id,
+            "chapter.generate",
+            {
+                **plan_meta,
+                "heading": heading,
+                "chapter_plan_warnings": planning_warnings,
+            },
+        )
         jobqueue.release_generation_lease(db, project_id, lease_token)
     return _report_payload(report)
 
@@ -1690,6 +1998,21 @@ def write(ref: str) -> dict[str, Any]:
         if not load_outline(db, project.id):
             save_outline(db, project.id, build_outline(ledger, package))
             db.flush()
+        planning_warnings: list[str] = []
+        plan_meta_list: list[dict[str, Any]] = []
+        for outline_row in load_outline(db, project.id):
+            if not is_pending(outline_row):
+                continue
+            node_row = db.get(OutlineNode, outline_row["id"])
+            if node_row is None:
+                continue
+            active = _chapter_plan_gate(db, project, node_row, planning_warnings)
+            if active is not None:
+                plan_meta_list.append(_plan_metadata(active))
+        plan_meta = plan_meta_list[0] if plan_meta_list else _plan_metadata(None)
+        plan_ids = [
+            item["planning_id"] for item in plan_meta_list if item["planning_id"]
+        ]
         user = billing_user(db)
         client = _generation_client(db)
         count = _pending_chapters(db, project.id)
@@ -1734,6 +2057,7 @@ def write(ref: str) -> dict[str, Any]:
                 ledger,
                 package,
                 knowledge_provider=_knowledge_provider(gen_db, user.id),
+                plan_provider=lambda nid: load_active_plan(gen_db, project_id, nid),
             )
         if heartbeat_abort.is_set():
             raise RuntimeError("项目生成租约已失效，生成中止")
@@ -1762,6 +2086,20 @@ def write(ref: str) -> dict[str, Any]:
         project = db.get(Project, project_id)
         project.status = "drafting"
         db.flush()
+        for plan_id in plan_ids:
+            mark_plan_used(db, db.get(ChapterPlan, plan_id))
+        audit(
+            db,
+            project_id,
+            "project.write",
+            {
+                **plan_meta,
+                "planning_ids": plan_ids,
+                "plans": plan_meta_list,
+                "chapter_plan_warnings": planning_warnings,
+                "chapters": len(report.written),
+            },
+        )
         jobqueue.release_generation_lease(db, project_id, lease_token)
     return _report_payload(report)
 
@@ -1790,6 +2128,24 @@ def generate_all(ref: str, payload: GenerateRequest | None = None) -> dict[str, 
         count = _pending_chapters(db, project.id, force=force)
         if count <= 0:
             raise HTTPException(status_code=409, detail="没有待生成的章节")
+        planning_warnings: list[str] = []
+        plan_meta_list: list[dict[str, Any]] = []
+        plans_by_node: dict[str, dict[str, Any]] = {}
+        for outline_row in load_outline(db, project.id):
+            if not (force or is_pending(outline_row)):
+                continue
+            node_row = db.get(OutlineNode, outline_row["id"])
+            if node_row is None:
+                continue
+            active = _chapter_plan_gate(db, project, node_row, planning_warnings)
+            if active is not None:
+                meta = _plan_metadata(active)
+                plan_meta_list.append(meta)
+                plans_by_node[node_row.id] = meta
+        plan_meta = plan_meta_list[0] if plan_meta_list else _plan_metadata(None)
+        plan_ids = [
+            item["planning_id"] for item in plan_meta_list if item["planning_id"]
+        ]
         _credit_guard(db, user, billing.billing_settings(db)["chapter_cost"] * max(0, count))
         if user.is_external and not client.available:
             raise HTTPException(
@@ -1838,6 +2194,12 @@ def generate_all(ref: str, payload: GenerateRequest | None = None) -> dict[str, 
                 "cost_per": charged // count if count else 0,
                 # DB 驱动派发：worker 从 payload 重建 force 参数。
                 "force": bool(force),
+                # v0.32 章节规划溯源：worker 按 node_id 使用同一份规划，
+                # 顶层字段兼容单章查询，plans 保存逐章完整映射。
+                **plan_meta,
+                "planning_ids": plan_ids,
+                "plans": plans_by_node,
+                "chapter_plan_warnings": planning_warnings,
             },
         )
         db.add(job)
@@ -1845,7 +2207,17 @@ def generate_all(ref: str, payload: GenerateRequest | None = None) -> dict[str, 
         job.priority = billing.queue_priority(db, user)
         priority = job.priority
         jobs.publish_event(job_id, "queued", jobs.job_payload(job), db=db)
-        audit(db, project.id, "project.generate", {"chapters": count})
+        audit(
+            db,
+            project.id,
+            "project.generate",
+            {
+                "chapters": count,
+                **plan_meta,
+                "planning_ids": plan_ids,
+                "chapter_plan_warnings": planning_warnings,
+            },
+        )
     jobqueue.submit(
         _run_generation_job,
         (job_id, project.id, force),

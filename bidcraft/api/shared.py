@@ -83,6 +83,21 @@ from ..export_gate import (  # noqa: F401,E402
     enforce_export_gate,
     issue_is_open,
 )
+from ..generation.chapter_plan import (  # noqa: F401,E402
+    CONFIRMED_STATUSES,
+    DRAFT,
+    PROMPT_VERSION,
+    build_plan_context,
+    chapter_plan_payload,
+    confirm_chapter_plan,
+    generate_chapter_plan,
+    load_active_plan,
+    load_plan_history,
+    mark_plan_used,
+    plan_context_text,
+    update_chapter_plan,
+    validate_chapter_plan,
+)
 from ..generation.outline import build_outline, load_outline, save_outline  # noqa: F401,E402
 from ..generation.writer import count_words, generate_document, is_pending  # noqa: F401,E402
 from ..ledger import ledger_summary, load_ledger, update_fact  # noqa: F401,E402
@@ -91,6 +106,7 @@ from ..models import (  # noqa: F401,E402
     AuthSession,
     BidPackage,
     BoqSnapshot,
+    ChapterPlan,
     Delivery,
     Fact,
     ImageAsset,
@@ -182,6 +198,9 @@ from .schemas import (  # noqa: F401,E402
     BoqVersionCreate,
     BoqVersionReview,
     BoqVersionSubmit,
+    ChapterPlanConfirm,
+    ChapterPlanGenerateRequest,
+    ChapterPlanUpdate,
     ChapterReview,
     ChapterSave,
     CreditAdjust,

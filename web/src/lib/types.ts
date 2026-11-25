@@ -522,6 +522,78 @@ export interface OutlineChapter {
   review_status?: string
 }
 
+/** 章节规划状态；后端可能继续扩展，UI 只按已知值渲染标签。 */
+export type ChapterPlanStatus =
+  | 'DRAFT'
+  | 'REVIEW_REQUIRED'
+  | 'CONFIRMED'
+  | 'USED_FOR_GENERATION'
+  | 'UPDATED'
+  | 'REGENERATING'
+
+/**
+ * 章节规划（Phase 1）。字段全部可选：后端缺字段时前端显示「未填写」，
+ * 绝不补造目标、评分点或校验结果。
+ */
+export interface ChapterPlan {
+  id?: string
+  project_id?: string
+  node_id?: string
+  package_id?: string | null
+  version?: number
+  status?: ChapterPlanStatus | string
+  objective?: string
+  score_points?: unknown[]
+  requirements?: unknown[]
+  conditions?: unknown[]
+  challenges?: unknown[]
+  strategy?: unknown[]
+  measures?: unknown[]
+  knowledge_refs?: unknown[]
+  fact_refs?: unknown[]
+  planned_tables?: unknown[]
+  planned_diagrams?: unknown[]
+  forbidden_assumptions?: unknown[]
+  quality_criteria?: unknown[]
+  user_adjustments?: unknown[]
+  validation_errors?: unknown[]
+  raw_response?: string | null
+  user_instruction?: string | null
+  used_at?: string | null
+  model_id?: string | null
+  prompt_version?: string | null
+  created_by?: string | null
+  updated_by?: string | null
+  confirmed_by?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+  confirmed_at?: string | null
+}
+
+export interface ChapterPlanResponse {
+  plan: ChapterPlan | null
+  mode: 'auto' | 'review'
+}
+
+export interface ChapterPlanGenerateInput {
+  user_instruction?: string
+  package_id?: string
+}
+
+export interface ChapterPlanUpdateInput {
+  /** 透传给后端的更新字典，例如 `strategy`、`objective`、`measures`。 */
+  updates: Record<string, unknown>
+  package_id?: string
+}
+
+export interface ChapterPlanConfirmInput {
+  note?: string
+}
+
+export interface ChapterPlanListResponse {
+  plans: ChapterPlan[]
+}
+
 export interface ChapterDetail {
   id: string
   heading: string

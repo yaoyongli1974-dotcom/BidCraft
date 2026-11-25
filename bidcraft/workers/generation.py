@@ -13,6 +13,11 @@ from sqlalchemy import select
 
 from .. import jobs
 from ..db import session_scope
+from ..generation.chapter_plan import (
+    chapter_plan_payload,
+    load_active_plan,
+    mark_plan_used,
+)
 from ..generation.outline import build_outline, load_outline, save_outline
 from ..generation.writer import generate_document
 from ..jobqueue import (
@@ -33,7 +38,7 @@ from ..jobqueue import (
     step_status,
 )
 from ..ledger import load_ledger
-from ..models import OutlineNode, Project, Section
+from ..models import ChapterPlan, OutlineNode, Project, Section
 from ..rules.engine import ledger_gate
 from ..rules.loader import load_package
 from ..services.job_support import (
@@ -45,6 +50,30 @@ from ..services.job_support import (
 )
 
 logger = logging.getLogger("bidcraft.workers")
+
+
+def _plan_meta(plan) -> dict[str, Any]:
+    """章节规划溯源字段（与同步审计口径一致）。"""
+
+    payload = chapter_plan_payload(plan)
+
+    def ids(field: str) -> list[str]:
+        return [
+            str(row.get("id") or "")
+            for row in payload.get(field) or []
+            if isinstance(row, dict) and row.get("id")
+        ]
+
+    return {
+        "planning_id": payload["id"],
+        "planning_version": payload["version"],
+        "planning_status": payload["status"],
+        "knowledge_reference_ids": ids("knowledge_refs"),
+        "fact_reference_ids": ids("fact_refs"),
+        "scoring_reference_ids": ids("score_points"),
+        "generation_strategy": payload.get("strategy") or [],
+        "prompt_version": payload.get("prompt_version") or "",
+    }
 
 
 def commit_generation_chapter(
@@ -91,6 +120,12 @@ def commit_generation_chapter(
         outline_node = chapter_db.get(OutlineNode, node_id)
         if outline_node is not None:
             outline_node.status = status
+        # 规划与正文同事务标记已使用；幂等，重复投递不会二次改写状态。
+        plan_id = str(info.get("chapter_plan_id") or "")
+        if plan_id:
+            plan = chapter_db.get(ChapterPlan, plan_id)
+            if plan is not None:
+                mark_plan_used(chapter_db, plan)
         mark_step_done(
             chapter_db,
             job_id,
@@ -160,6 +195,12 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
             project = work_db.get(Project, project_id)
             ledger = load_ledger(work_db, project_id)
             package = load_package(project.package)
+            package_id = str((project.meta or {}).get("package_id") or "") or None
+            plans_by_node: dict[str, ChapterPlan] = {}
+            for node_row in load_outline(work_db, project_id):
+                active = load_active_plan(work_db, project_id, node_row["id"], package_id)
+                if active is not None:
+                    plans_by_node[node_row["id"]] = active
             current = {"heading": ""}
             delta = {"text": "", "last": time.monotonic()}
 
@@ -191,11 +232,13 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
                     if row is None:
                         return
                     row.message = f"正在生成：{current['heading']}"
+                    plan = plans_by_node.get(str(info.get("node_id") or ""))
                     row.payload = {
                         **(row.payload or {}),
                         "heading": current["heading"],
                         "done": max(0, int(info.get("index") or 1) - 1),
                         "total": int(info.get("total") or 0),
+                        **(_plan_meta(plan) if plan is not None else {}),
                     }
                     jobs.publish_event(
                         job_id,
@@ -205,6 +248,7 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
                             "index": int(info.get("index") or 0),
                             "total": int(info.get("total") or 0),
                             "target_words": int(info.get("target_words") or 0),
+                            **(_plan_meta(plan) if plan is not None else {}),
                         },
                         db=start_db,
                     )
@@ -217,11 +261,13 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
                     if row is None:
                         return
                     row.progress = int(info.get("progress") or 0)
+                    plan = plans_by_node.get(str(info.get("node_id") or ""))
                     row.payload = {
                         **(row.payload or {}),
                         "heading": info.get("heading", ""),
                         "done": info.get("done", 0),
                         "total": info.get("total", 0),
+                        **(_plan_meta(plan) if plan is not None else {}),
                     }
                     prefix = "本章失败" if info.get("failed") else "已完成"
                     row.message = (
@@ -290,6 +336,7 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
                 before_chapter=before_chapter,
                 after_chapter=after_chapter,
                 commit_chapter=commit_chapter,
+                plan_provider=lambda node_id: plans_by_node.get(str(node_id)),
             )
             flush_delta()
             project.status = "drafting"

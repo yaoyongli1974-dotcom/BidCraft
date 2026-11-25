@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   AlertTriangle,
@@ -37,6 +37,9 @@ import {
   projectStats,
 } from '../../lib/format'
 import { ScoreCoverage } from '../../components/ScoreCoverage'
+import { ChapterPlanningPanel } from '../../components/ChapterPlanningPanel'
+import { useChapterPlans } from '../../hooks/useChapterPlans'
+import { chapterPlanGate } from '../../lib/chapterPlan'
 import { useQuery, useSaveShortcut, useUnsavedGuard } from '../../lib/hooks'
 import { Badge } from '../../components/Badge'
 import { Button, IconButton } from '../../components/Button'
@@ -94,7 +97,7 @@ function snapshot(chapters: EditableChapter[]): string {
 }
 
 export function OutlineTab() {
-  const { ref, basePath, project, reloadProject, setUnsaved, canWrite } = useWorkspace()
+  const { ref, basePath, project, reloadProject, setUnsaved, canWrite, readOnly } = useWorkspace()
   const outlineQuery = useQuery(`outline:${ref}`, () => getOutline(ref))
   const coverageQuery = useQuery(`scoring-coverage:${ref}`, () => getScoringCoverage(ref))
   const confirm = useConfirm()
@@ -136,6 +139,14 @@ export function OutlineTab() {
   const totalTarget = chapters.reduce((sum, chapter) => sum + (chapter.target_words || 0), 0)
   const stats = projectStats(project)
   const missingRequired = stats.missing_required || (project.missing_required?.length || 0)
+  const planChapterIds = useMemo(
+    () =>
+      chapters
+        .map((chapter) => chapter.id)
+        .filter((id): id is string => Boolean(id)),
+    [chapters],
+  )
+  const chapterPlans = useChapterPlans(ref, planChapterIds)
 
   useEffect(() => {
     setUnsaved(dirty)
@@ -314,6 +325,15 @@ export function OutlineTab() {
 
   const runChapter = async (chapter: EditableChapter) => {
     if (!canWrite || !chapter.id || generatingId) return
+    const gate = chapterPlanGate(
+      chapterPlans.mode,
+      chapter.id ? chapterPlans.plans.get(chapter.id) : null,
+      chapter.heading,
+    )
+    if (gate.blocked) {
+      toast.warning('章节规划尚未确认', gate.reason)
+      return
+    }
     if (dirty) {
       toast.info('请先保存大纲', '有未保存的大纲修改，生成本章会使用已保存的章节设置。')
       return
@@ -510,6 +530,20 @@ export function OutlineTab() {
         </div>
       </section>
 
+      <ChapterPlanningPanel
+        projectRef={ref}
+        chapters={chapters}
+        project={project}
+        canWrite={canWrite}
+        readOnly={readOnly}
+        entries={chapterPlans.entries}
+        mode={chapterPlans.mode}
+        loading={chapterPlans.loading}
+        error={chapterPlans.error}
+        onRefresh={chapterPlans.refresh}
+        onPlanChange={chapterPlans.setPlan}
+      />
+
       <ScoreCoverage report={coverageQuery.data} loading={coverageQuery.loading} />
 
       <section className="panel outline-editor">
@@ -590,6 +624,11 @@ export function OutlineTab() {
               const wordsWritten = chapter.words || 0
               const progress = percent(wordsWritten, chapter.target_words || 0)
               const invalid = invalidUids.has(chapter.uid)
+              const planGate = chapterPlanGate(
+                chapterPlans.mode,
+                chapter.id ? chapterPlans.plans.get(chapter.id) : null,
+                chapter.heading,
+              )
               return (
                 <article
                   key={chapter.uid}
@@ -695,22 +734,35 @@ export function OutlineTab() {
                       variant={chapter.has_body ? 'secondary' : 'ghost'}
                       icon={<Sparkles size={13} />}
                       loading={generatingId === chapter.id}
-                      disabled={!canWrite || !chapter.id || dirty || Boolean(generatingId)}
+                      disabled={
+                        !canWrite ||
+                        !chapter.id ||
+                        dirty ||
+                        Boolean(generatingId) ||
+                        planGate.blocked
+                      }
                       title={
                         !canWrite
                           ? '只读成员不能生成本章'
-                          : dirty
-                            ? '请先保存大纲再生成'
-                            : !chapter.id
-                              ? '请先保存新章节'
-                              : chapter.has_body
-                                ? '重新生成本章'
-                                : '生成本章'
+                          : planGate.blocked
+                            ? planGate.reason
+                            : dirty
+                              ? '请先保存大纲再生成'
+                              : !chapter.id
+                                ? '请先保存新章节'
+                                : chapter.has_body
+                                  ? '重新生成本章'
+                                  : '生成本章'
                       }
                       onClick={() => void runChapter(chapter)}
                     >
                       {chapter.has_body ? '重新生成' : '生成本章'}
                     </Button>
+                    {(planGate.blocked || planGate.warning) && (
+                      <p className="chapter-plan-hint" role="note">
+                        {planGate.reason || planGate.warning}
+                      </p>
+                    )}
                     <IconButton
                       label="删除章节"
                       tone="danger"

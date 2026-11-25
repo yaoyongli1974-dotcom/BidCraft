@@ -1,5 +1,20 @@
 import { ApiError, asArray, jsonBody, notifyUnauthorized, readError, request } from '../lib/http'
-import type { ChapterCitations, ChapterDetail, GenerationReport, Job, OutlineChapter, OutlineResponse, ProjectCitations, ScoringCoverageReport } from '../lib/types'
+import type {
+  ChapterCitations,
+  ChapterDetail,
+  ChapterPlan,
+  ChapterPlanConfirmInput,
+  ChapterPlanGenerateInput,
+  ChapterPlanListResponse,
+  ChapterPlanResponse,
+  ChapterPlanUpdateInput,
+  GenerationReport,
+  Job,
+  OutlineChapter,
+  OutlineResponse,
+  ProjectCitations,
+  ScoringCoverageReport,
+} from '../lib/types'
 
 // ---------------------------------------------------------------- generation domain
 export async function getOutline(ref: string): Promise<OutlineChapter[]> {
@@ -44,6 +59,255 @@ export async function getChapter(ref: string, nodeId: string): Promise<ChapterDe
   )
   if (data && typeof data === 'object' && 'chapter' in data && data.chapter) return data.chapter
   return data as ChapterDetail
+}
+
+// ------------------------------------------------------------ chapter planning
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+}
+
+/**
+ * 后端同一字段可能用英文键或中文键（历史返回）；按此表逐个取值。
+ * 未出现的字段保持 undefined，UI 会显示「未填写」，而不是补造内容。
+ */
+const PLAN_FIELD_ALIASES: Partial<Record<keyof ChapterPlan, readonly string[]>> = {
+  id: ['id', 'plan_id', '规划ID'],
+  project_id: ['project_id', '项目ID'],
+  node_id: ['node_id', '章节ID'],
+  package_id: ['package_id', '规则包ID'],
+  version: ['version', '版本'],
+  status: ['status', '状态'],
+  objective: ['objective', '目标', '章节目标', '写作目标'],
+  score_points: ['score_points', '评分点', '得分点'],
+  requirements: ['requirements', '要求', '需求'],
+  conditions: ['conditions', '条件'],
+  challenges: ['challenges', '挑战', '难点'],
+  strategy: ['strategy', '策略', '写作策略', '章节策略'],
+  measures: ['measures', '措施', '应对措施'],
+  knowledge_refs: ['knowledge_refs', '知识引用', '知识点', '知识参考'],
+  fact_refs: ['fact_refs', '事实引用', '台账引用'],
+  planned_tables: ['planned_tables', '计划表格', '表格'],
+  planned_diagrams: ['planned_diagrams', '计划图表', '图表'],
+  forbidden_assumptions: ['forbidden_assumptions', '禁止假设', '不得假设'],
+  quality_criteria: ['quality_criteria', '质量标准', '质量要求'],
+  user_adjustments: ['user_adjustments', '用户调整', '人工调整'],
+  validation_errors: ['validation_errors', '校验错误', '验证错误'],
+  raw_response: ['raw_response', '原始响应'],
+  user_instruction: ['user_instruction', '补充指令'],
+  used_at: ['used_at', '使用时间'],
+  model_id: ['model_id', '模型ID'],
+  prompt_version: ['prompt_version', '提示词版本'],
+  created_by: ['created_by', '创建人'],
+  updated_by: ['updated_by', '更新人'],
+  confirmed_by: ['confirmed_by', '确认人'],
+  created_at: ['created_at', '创建时间'],
+  updated_at: ['updated_at', '更新时间'],
+  confirmed_at: ['confirmed_at', '确认时间'],
+}
+
+const TEXT_FIELDS: ReadonlyArray<keyof ChapterPlan> = [
+  'id',
+  'project_id',
+  'node_id',
+  'package_id',
+  'status',
+  'objective',
+  'raw_response',
+  'user_instruction',
+  'used_at',
+  'model_id',
+  'prompt_version',
+  'created_by',
+  'updated_by',
+  'confirmed_by',
+  'created_at',
+  'updated_at',
+  'confirmed_at',
+]
+
+const ARRAY_FIELDS: ReadonlyArray<keyof ChapterPlan> = [
+  'score_points',
+  'requirements',
+  'conditions',
+  'challenges',
+  'strategy',
+  'measures',
+  'knowledge_refs',
+  'fact_refs',
+  'planned_tables',
+  'planned_diagrams',
+  'forbidden_assumptions',
+  'quality_criteria',
+  'user_adjustments',
+  'validation_errors',
+]
+
+function pickPlanField(raw: Record<string, unknown>, field: keyof ChapterPlan): unknown {
+  const keys = PLAN_FIELD_ALIASES[field] ?? [field]
+  for (const key of keys) {
+    if (raw[key] !== undefined) return raw[key]
+  }
+  return undefined
+}
+
+function optionalText(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined
+  if (value === null) return null
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return undefined
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim() && /^\d+$/.test(value.trim())) {
+    return Number(value.trim())
+  }
+  return undefined
+}
+
+/** 把 `{plan: ...}` / `{规划: ...}` / 裸 plan 统一成 ChapterPlan。 */
+export function normalizeChapterPlan(value: unknown): ChapterPlan | null {
+  const outer = asRecord(value)
+  const raw =
+    outer.plan !== undefined
+      ? asRecord(outer.plan)
+      : outer['规划'] !== undefined
+        ? asRecord(outer['规划'])
+        : outer
+  if (Object.keys(raw).length === 0) return null
+  const plan: Record<string, unknown> = {}
+  for (const field of TEXT_FIELDS) {
+    const text = optionalText(pickPlanField(raw, field))
+    if (text !== undefined) plan[field] = text
+  }
+  const version = optionalNumber(pickPlanField(raw, 'version'))
+  if (version !== undefined) plan.version = version
+  for (const field of ARRAY_FIELDS) {
+    const list = pickPlanField(raw, field)
+    if (Array.isArray(list)) plan[field] = list
+  }
+  return Object.keys(plan).length > 0 ? (plan as ChapterPlan) : null
+}
+
+export function normalizeChapterPlanResponse(value: unknown): ChapterPlanResponse {
+  const raw = asRecord(value)
+  return {
+    plan: normalizeChapterPlan(value),
+    mode: raw.mode === 'review' ? 'review' : 'auto',
+  }
+}
+
+export function normalizeChapterPlanHistory(value: unknown): ChapterPlan[] {
+  const raw = asRecord(value)
+  const list = Array.isArray(raw.plans)
+    ? raw.plans
+    : Array.isArray(raw['历史'])
+      ? raw['历史']
+      : []
+  return list
+    .map((item) => normalizeChapterPlan(item))
+    .filter((plan): plan is ChapterPlan => plan !== null)
+}
+
+function planFromMutation(value: unknown): ChapterPlan {
+  const plan = normalizeChapterPlan(value)
+  if (!plan) throw new ApiError(0, null, '章节规划响应缺少有效数据')
+  return plan
+}
+
+function trimOptional(value: string | undefined): string | undefined {
+  const text = (value || '').trim()
+  return text || undefined
+}
+
+function planUpdatePayload(input: ChapterPlanUpdateInput) {
+  const payload = planMutationPayload(input)
+  // 契约以 updates 字典提交；当前后端 schema 同时接受顶层扁平字段。两者一起发，
+  // 老/新后端都能读到人工调整，且不会凭空补造未修改的字段。
+  for (const [key, value] of Object.entries(input.updates)) {
+    if (!(key in payload)) payload[key] = value
+  }
+  return payload
+}
+
+function planMutationPayload(input: ChapterPlanGenerateInput | ChapterPlanUpdateInput) {
+  const payload: Record<string, unknown> = {}
+  if ('user_instruction' in input) {
+    const instruction = trimOptional(input.user_instruction)
+    if (instruction) payload.user_instruction = instruction
+  }
+  if ('updates' in input) payload.updates = input.updates
+  const packageId = trimOptional(input.package_id)
+  if (packageId) payload.package_id = packageId
+  return payload
+}
+
+function planPath(ref: string, nodeId: string, suffix = ''): string {
+  return `/projects/${encodeURIComponent(ref)}/chapters/${encodeURIComponent(nodeId)}/plan${suffix}`
+}
+
+export function getChapterPlan(ref: string, nodeId: string): Promise<ChapterPlanResponse> {
+  return request<unknown>(planPath(ref, nodeId)).then(normalizeChapterPlanResponse)
+}
+
+export function generateChapterPlan(
+  ref: string,
+  nodeId: string,
+  input: ChapterPlanGenerateInput = {},
+): Promise<ChapterPlan> {
+  const body = jsonBody(planMutationPayload(input))
+  return request<unknown>(planPath(ref, nodeId, '/generate'), body)
+    .then(planFromMutation)
+    .catch((error: unknown) => {
+      // 契约路径是 /plan/generate；个别后端版本把「首次生成」放在 POST /plan。
+      if (error instanceof ApiError && (error.status === 404 || error.status === 405)) {
+        return request<unknown>(planPath(ref, nodeId), body).then(planFromMutation)
+      }
+      throw error
+    })
+}
+
+export function regenerateChapterPlan(
+  ref: string,
+  nodeId: string,
+  input: ChapterPlanGenerateInput = {},
+): Promise<ChapterPlan> {
+  return request<unknown>(
+    planPath(ref, nodeId, '/regenerate'),
+    jsonBody(planMutationPayload(input)),
+  ).then(planFromMutation)
+}
+
+export function updateChapterPlan(
+  ref: string,
+  nodeId: string,
+  input: ChapterPlanUpdateInput,
+): Promise<ChapterPlan> {
+  return request<unknown>(planPath(ref, nodeId), {
+    method: 'PUT',
+    body: JSON.stringify(planUpdatePayload(input)),
+  }).then(planFromMutation)
+}
+
+export function confirmChapterPlan(
+  ref: string,
+  nodeId: string,
+  input: ChapterPlanConfirmInput = {},
+): Promise<ChapterPlan> {
+  const payload: Record<string, unknown> = {}
+  const note = trimOptional(input.note)
+  if (note) payload.note = note
+  return request<unknown>(planPath(ref, nodeId, '/confirm'), jsonBody(payload)).then(
+    planFromMutation,
+  )
+}
+
+export function listChapterPlanHistory(ref: string, nodeId: string): Promise<ChapterPlan[]> {
+  return request<ChapterPlanListResponse>(planPath(ref, nodeId, '/history')).then((data) =>
+    normalizeChapterPlanHistory(data),
+  )
 }
 
 /** 本章正文的台账来源追溯（读侧，viewer 也可读）。 */

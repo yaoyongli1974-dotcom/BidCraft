@@ -416,6 +416,100 @@ class Section(Base):
     locked_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
 
 
+class ChapterPlan(Base):
+    """章节规划版本：绑定真实大纲节点，可校验、可确认、可复用。
+
+    每次生成/更新都追加新版本，不覆盖旧版本；所有引用（评分项、事实、知识、
+    章节）必须是本项目中真实存在的行，校验时不符合的引用会被剔除并记入
+    ``validation_errors``，绝不把编造的 ID 带入正文生成。
+    """
+
+    __tablename__ = "chapter_plans"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id", "node_id", "version", name="uq_chapter_plan_project_node_version"
+        ),
+        Index("ix_chapter_plans_project_node_status", "project_id", "node_id", "status"),
+        Index("ix_chapter_plans_project_package", "project_id", "package_id"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=new_id, comment="规划记录 ID"
+    )
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id"), index=True, comment="所属项目 ID"
+    )
+    node_id: Mapped[str] = mapped_column(
+        ForeignKey("outline_nodes.id"), index=True, comment="绑定的大纲节点 ID"
+    )
+    package_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, comment="标段/包件 ID（空表示项目级通用）"
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1, comment="同章节内的规划版本号")
+    status: Mapped[str] = mapped_column(
+        String(24), default="DRAFT", index=True, comment="规划状态（状态机见 generation/chapter_plan.py）"
+    )
+    objective: Mapped[str] = mapped_column(Text, default="", comment="本章写作目标")
+    raw_response: Mapped[str] = mapped_column(
+        Text, default="", comment="模型原始返回或确定性回退说明"
+    )
+    model_id: Mapped[str] = mapped_column(
+        String(120), default="", comment="生成该规划的模型名或回退标识"
+    )
+    prompt_version: Mapped[str] = mapped_column(
+        String(40), default="", comment="生成该规划所用的提示词版本"
+    )
+    user_instruction: Mapped[str] = mapped_column(
+        Text, default="", comment="用户针对本章的补充写作指令"
+    )
+    created_by: Mapped[str] = mapped_column(
+        String(80), default="", comment="规划创建人"
+    )
+    confirmed_by: Mapped[str | None] = mapped_column(
+        String(80), nullable=True, comment="规划确认人"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, comment="创建时间（naive UTC）"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, comment="最近更新时间（naive UTC）"
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, comment="确认时间（naive UTC）"
+    )
+    used_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, comment="最近一次用于正文生成的时间（naive UTC）"
+    )
+    score_points: Mapped[list] = mapped_column(
+        JSON, default=list, comment="本章覆盖的评分项（含真实评分项 ID）"
+    )
+    requirements: Mapped[list] = mapped_column(
+        JSON, default=list, comment="本章响应的招标要求（含真实需求 ID）"
+    )
+    conditions: Mapped[list] = mapped_column(JSON, default=list, comment="本章必须满足的前提条件")
+    challenges: Mapped[list] = mapped_column(JSON, default=list, comment="本章的写作难点与风险")
+    strategy: Mapped[list] = mapped_column(JSON, default=list, comment="写作策略（注入正文提示词）")
+    measures: Mapped[list] = mapped_column(JSON, default=list, comment="具体落实措施")
+    knowledge_refs: Mapped[list] = mapped_column(
+        JSON, default=list, comment="引用的知识条目（含真实知识 ID）"
+    )
+    fact_refs: Mapped[list] = mapped_column(
+        JSON, default=list, comment="引用的事实台账条目（含真实事实 ID）"
+    )
+    planned_tables: Mapped[list] = mapped_column(JSON, default=list, comment="计划使用的表格")
+    planned_diagrams: Mapped[list] = mapped_column(JSON, default=list, comment="计划使用的图示")
+    forbidden_assumptions: Mapped[list] = mapped_column(
+        JSON, default=list, comment="本章禁止作出的假设"
+    )
+    quality_criteria: Mapped[list] = mapped_column(JSON, default=list, comment="本章质量验收口径")
+    user_adjustments: Mapped[list] = mapped_column(
+        JSON, default=list, comment="用户手工调整记录"
+    )
+    validation_errors: Mapped[list] = mapped_column(
+        JSON, default=list, comment="校验发现并已修复的问题（中文）"
+    )
+
+
 class Issue(Base):
     __tablename__ = "issues"
 

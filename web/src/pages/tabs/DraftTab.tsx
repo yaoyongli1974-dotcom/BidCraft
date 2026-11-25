@@ -28,6 +28,8 @@ import { generateChapter, getChapter, getChapterCitations, getOutline, getProjec
 import { applyImagePlan, createImage, deleteImage, getImagePlan, getImagePolicy, listImages, regenerateImage, updateImagePolicy, uploadImage } from '../../api/images'
 import { ApiError, chapterConflict, messageOf } from '../../lib/http'
 import { watchJob } from '../../hooks/watchJob'
+import { useChapterPlans } from '../../hooks/useChapterPlans'
+import { chapterPlanGate, isConfirmedPlan } from '../../lib/chapterPlan'
 import { canReviewChapter } from '../../lib/permissions'
 import type {
   ChapterConflict,
@@ -347,6 +349,22 @@ export function DraftTab() {
 
   const outline = useMemo(() => outlineQuery.data || [], [outlineQuery.data])
   const selectedChapter = outline.find((chapter) => chapter.id === selectedId) || null
+  const planChapterIds = useMemo(
+    () =>
+      outline
+        .map((chapter) => chapter.id)
+        .filter((id): id is string => Boolean(id)),
+    [outline],
+  )
+  const chapterPlans = useChapterPlans(ref, planChapterIds)
+  const selectedPlan = selectedId ? chapterPlans.plans.get(selectedId) ?? null : null
+  const planGate = chapterPlanGate(chapterPlans.mode, selectedPlan, selectedChapter?.heading)
+  const unconfirmedPlanCount =
+    chapterPlans.mode === 'review' || chapterPlans.mode === 'review_strict'
+      ? planChapterIds.filter((id) => !isConfirmedPlan(chapterPlans.plans.get(id))).length
+      : 0
+  const fullPlanBlocked = unconfirmedPlanCount > 0
+  const fullPlanReason = `还有 ${unconfirmedPlanCount} 章的章节规划未确认。请在「目录大纲」的章节规划面板逐章确认后再生成全书正文。`
   const dirty = Boolean(selectedId) && loadedId === selectedId && body !== savedBody
   const stats = projectStats(project)
   const missingRequired = stats.missing_required || (project.missing_required?.length || 0)
@@ -772,6 +790,10 @@ export function DraftTab() {
 
   const runChapter = async () => {
     if (!canWrite || !selectedId || !selectedChapter || generatingChapter) return
+    if (planGate.blocked) {
+      toast.warning('章节规划尚未确认', planGate.reason)
+      return
+    }
     if (dirty) {
       const accepted = await confirm({
         title: '生成会覆盖当前修改',
@@ -1354,6 +1376,10 @@ export function DraftTab() {
 
   const startFullGeneration = async () => {
     if (!canWrite || startingJob || jobActive || !outline.length) return
+    if (fullPlanBlocked) {
+      toast.warning('章节规划尚未确认', fullPlanReason)
+      return
+    }
     const anyBody = outline.some((chapter) => chapter.has_body || (chapter.words || 0) > 0)
     if (anyBody || dirty) {
       const accepted = await confirm({
@@ -1612,16 +1638,20 @@ export function DraftTab() {
               size="sm"
               icon={<Sparkles size={14} />}
               loading={startingJob}
-              disabled={!canWrite || !outline.length || jobActive || missingRequired > 0}
+              disabled={
+                !canWrite || !outline.length || jobActive || missingRequired > 0 || fullPlanBlocked
+              }
               onClick={() => void startFullGeneration()}
               title={
                 !canWrite
                   ? '只读成员不能生成正文'
-                  : missingRequired > 0
-                    ? '先补齐必填事实'
-                    : !outline.length
-                      ? '先生成目录大纲'
-                      : '生成全书正文'
+                  : fullPlanBlocked
+                    ? fullPlanReason
+                    : missingRequired > 0
+                      ? '先补齐必填事实'
+                      : !outline.length
+                        ? '先生成目录大纲'
+                        : '生成全书正文'
               }
             >
               生成全书正文
@@ -1629,6 +1659,18 @@ export function DraftTab() {
           </>
         }
       />
+
+      {(fullPlanBlocked || planGate.blocked || planGate.warning) && (
+        <div
+          className={className(
+            'chapter-plan-note',
+            Boolean(fullPlanBlocked || planGate.blocked) && 'is-blocked',
+          )}
+          role="note"
+        >
+          {fullPlanBlocked ? fullPlanReason : planGate.reason || planGate.warning}
+        </div>
+      )}
 
       {creditGate && (
         <div className="credit-gate" role="alert">
@@ -1947,13 +1989,17 @@ export function DraftTab() {
                       size="sm"
                       icon={<Wand2 size={14} />}
                       loading={generatingChapter}
-                      disabled={!canWrite || jobActive || !loadedId || reviewFrozen}
+                      disabled={
+                        !canWrite || jobActive || !loadedId || reviewFrozen || planGate.blocked
+                      }
                       title={
                         reviewFrozen
                           ? '本章已确认，需先撤回为草稿才能重新生成'
                           : !canWrite
                             ? '只读成员不能生成正文'
-                            : undefined
+                            : planGate.blocked
+                              ? planGate.reason
+                              : undefined
                       }
                       onClick={() => void runChapter()}
                     >

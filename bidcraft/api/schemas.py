@@ -646,3 +646,42 @@ class QualityFindingUpdate(BaseModel):
     # 请求体解析阶段直接 422，不进入 Service 层。
     status: Literal["handled", "ignored", "open"] = "handled"
     note: str = ""
+
+
+# --- v0.32 Phase 1：章节规划 ---
+class ChapterPlanGenerateRequest(BaseModel):
+    #: 用户对本章的补充写作指令（会进入规划 prompt，不会凭空生成引用 ID）。
+    user_instruction: str = ""
+    #: 标段/包件隔离；不传时沿用项目上下文。
+    package_id: str = ""
+    #: 为 True 时把当前有效规划标记为被取代并追加新版本。
+    regenerate: bool = False
+    note: str = ""
+
+
+class ChapterPlanUpdate(BaseModel):
+    """人工调整：只覆盖显式给出的字段，其余沿用当前版本。"""
+
+    note: str = ""
+    package_id: str = ""
+    #: 与扁平字段等价的包装形式，便于统一前端契约；两者同时给出时以扁平字段为准。
+    updates: dict[str, Any] | None = None
+    objective: str | None = None
+    user_instruction: str | None = None
+    score_points: list[Any] | None = None
+    requirements: list[Any] | None = None
+    conditions: list[Any] | None = None
+    challenges: list[Any] | None = None
+    strategy: list[Any] | None = None
+    measures: list[Any] | None = None
+    knowledge_refs: list[Any] | None = None
+    fact_refs: list[Any] | None = None
+    planned_tables: list[Any] | None = None
+    planned_diagrams: list[Any] | None = None
+    forbidden_assumptions: list[Any] | None = None
+    quality_criteria: list[Any] | None = None
+    user_adjustments: list[Any] | None = None
+
+
+class ChapterPlanConfirm(BaseModel):
+    note: str = ""
