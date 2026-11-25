@@ -3,7 +3,9 @@
 本模块把阶段 5 的 :mod:`bidcraft.evaluation.tender_dataset` 契约转成可审计的
 质量指标。**没有真实样本时一律返回 ``status='未测量'``**，绝不用合成夹具的
 结果冒充真实件指标；即便数据集就绪，未在标注中提供“应答文本”的条款也不参与
-判定一致性计算，该项单列为 ``未测量``。
+判定一致性计算，该项单列为 ``未测量``。输出同时带 ``coverage``（分子/分母/
+宏平均）、``samples``（可抽查的具体命中样本）与 ``mismatches``（判定不一致、
+未抽取条款、未解析值）明细；样本截断不影响任何比率。
 
 指标口径（每个文件单独计算后取宏平均）：
 
@@ -65,7 +67,9 @@ def evaluate_tender_file(path: Path, annotations: dict[str, Any]) -> dict[str, A
     responses = annotations.get("responses") or {}
 
     hit_clauses = [c for c in clauses if _contains(requirement_text, str(c))]
+    missed_clauses = [c for c in clauses if c not in hit_clauses]
     hit_values: list[str] = []
+    missed_values: list[str] = []
     for item in values:
         if not isinstance(item, dict):
             continue
@@ -73,10 +77,13 @@ def evaluate_tender_file(path: Path, annotations: dict[str, Any]) -> dict[str, A
         expected = str(item.get("value") or "")
         if _contains(field_text, expected):
             hit_values.append(label or expected)
+        else:
+            missed_values.append(label or expected)
 
     notes: list[str] = []
     agreement: float | None = None
-    mismatches: list[str] = []
+    mismatches: list[dict[str, Any]] = []
+    verdict_rows: list[dict[str, Any]] = []
     if expected_verdicts:
         compared = 0
         agreed = 0
@@ -92,18 +99,45 @@ def evaluate_tender_file(path: Path, annotations: dict[str, Any]) -> dict[str, A
             ).lower()
             want = str(expected).strip().lower()
             compared += 1
-            if state == want:
+            ok = state == want
+            if ok:
                 agreed += 1
             else:
-                mismatches.append(f"{_text(clause)[:40]}：期望 {want}，实测 {state}")
+                mismatches.append(
+                    {
+                        "kind": "verdict",
+                        "clause": _text(clause)[:120],
+                        "expected": want,
+                        "actual": state,
+                    }
+                )
+            verdict_rows.append(
+                {
+                    "clause": _text(clause)[:120],
+                    "expected": want,
+                    "actual": state,
+                    "agree": ok,
+                }
+            )
         if compared:
             agreement = agreed / compared
             if mismatches:
                 notes.append(
-                    f"判定不一致 {len(mismatches)}/{compared} 条：" + "；".join(mismatches[:3])
+                    f"判定不一致 {len(mismatches)}/{compared} 条："
+                    + "；".join(
+                        f"{m['clause'][:40]}：期望 {m['expected']}，实测 {m['actual']}"
+                        for m in mismatches[:3]
+                    )
                 )
         else:
             notes.append("缺少应答文本标注，无法复算判定一致性，记为未测量")
+
+    for clause in missed_clauses[:5]:
+        mismatches.append(
+            {"kind": "clause_not_extracted", "clause": _text(clause)[:120]}
+        )
+    for value in missed_values[:5]:
+        mismatches.append({"kind": "value_not_parsed", "value": value})
 
     return {
         "path": str(path),
@@ -112,6 +146,30 @@ def evaluate_tender_file(path: Path, annotations: dict[str, Any]) -> dict[str, A
         "verdict_agreement": agreement,
         "matched_clauses": hit_clauses,
         "matched_values": hit_values,
+        "coverage": {
+            "clauses": {
+                "hit": len(hit_clauses),
+                "total": len(clauses),
+                "ratio": (len(hit_clauses) / len(clauses)) if clauses else None,
+            },
+            "values": {
+                "hit": len(hit_values),
+                "total": len(values),
+                "ratio": (len(hit_values) / len(values)) if values else None,
+            },
+            "verdict": {
+                "compared": compared if expected_verdicts else 0,
+                "agreed": agreed if expected_verdicts else 0,
+                "annotated": len(expected_verdicts),
+                "ratio": agreement,
+            },
+        },
+        "samples": {
+            "matched_clauses": [str(c)[:120] for c in hit_clauses[:5]],
+            "matched_values": hit_values[:5],
+            "verdict_checks": verdict_rows[:5],
+        },
+        "mismatches": mismatches,
         "notes": notes,
         "normalized": {"clauses": len(clauses), "values": len(values)},
     }
@@ -128,6 +186,9 @@ def collect_tender_quality(root: Path | str = DEFAULT_ROOT) -> dict[str, Any]:
             "clause_recall": None,
             "value_parse_rate": None,
             "verdict_agreement": None,
+            "coverage": {},
+            "samples": {},
+            "mismatches": [],
             "notes": [status.get("reason") or "真实招标文件数据集未就绪"],
         }
 
@@ -158,5 +219,37 @@ def collect_tender_quality(root: Path | str = DEFAULT_ROOT) -> dict[str, Any]:
         "clause_recall": _macro("clause_recall"),
         "value_parse_rate": _macro("value_parse_rate"),
         "verdict_agreement": _macro("verdict_agreement"),
+        "coverage": {
+            "clauses": {
+                "macro_ratio": _macro("clause_recall"),
+                "covered": sum(
+                    int(f["coverage"]["clauses"]["hit"]) for f in files
+                ),
+                "total": sum(int(f["coverage"]["clauses"]["total"]) for f in files),
+                "files": files_count,
+            },
+            "values": {
+                "macro_ratio": _macro("value_parse_rate"),
+                "covered": sum(int(f["coverage"]["values"]["hit"]) for f in files),
+                "total": sum(int(f["coverage"]["values"]["total"]) for f in files),
+                "files": files_count,
+            },
+            "verdict": {
+                "macro_ratio": _macro("verdict_agreement"),
+                "compared": sum(int(f["coverage"]["verdict"]["compared"]) for f in files),
+                "agreed": sum(int(f["coverage"]["verdict"]["agreed"]) for f in files),
+                "annotated": sum(
+                    int(f["coverage"]["verdict"]["annotated"]) for f in files
+                ),
+            },
+        },
+        "samples": {
+            "files": [f["samples"] for f in files[:5]],
+        },
+        "mismatches": [
+            {"file": f["path"], **mismatch}
+            for f in files
+            for mismatch in f["mismatches"]
+        ],
         "notes": notes + errors,
     }

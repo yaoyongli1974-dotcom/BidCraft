@@ -15,7 +15,15 @@ from bidcraft.models import (
     Section,
 )
 
-METRIC_KEYS = {"manual_edit_rate", "issue_density", "boq_match_rate", "notes"}
+METRIC_KEYS = {
+    "manual_edit_rate",
+    "issue_density",
+    "boq_match_rate",
+    "coverage",
+    "samples",
+    "mismatches",
+    "notes",
+}
 
 
 def _project(db, name: str) -> Project:

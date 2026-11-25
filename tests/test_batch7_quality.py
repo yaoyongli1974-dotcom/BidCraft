@@ -162,7 +162,8 @@ def test_evaluation_job_retry_reuses_report(db, monkeypatch):
         job = Job(
             project_id=project_id,
             kind="evaluation",
-            status="queued",
+            # 真实 worker 只处理 running；首轮必须处于已认领状态才会生成报告。
+            status="running",
             payload={"owner_id": "u-admin", "note": "", "created_by": "admin"},
         )
         sess.add(job)

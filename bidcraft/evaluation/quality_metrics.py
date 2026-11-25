@@ -16,6 +16,10 @@ BOQ 没有落库的匹配标记：``boq.align()`` 每次依据快照 items 与�
 ``{matched, qty_diff, unit_diff, spec_diff}``（与 ``boq._summarize`` 的
 ``match_rate`` 同口径：找到台账材料，即使数量/单位/规格有差异）视为已匹配。
 若快照/台账数据异常无法对齐，则记入 ``notes`` 并返回 0.0，绝不臆造标记。
+
+每项同时输出 ``coverage``（分子/分母/样本数）、``samples``（最多 20 条具体
+样本）与 ``mismatches``（未处置 finding / 未匹配清单行）明细，便于人工抽查
+与回归比对；样本只用于展示，比率始终由全量计数计算。
 """
 
 from __future__ import annotations
@@ -54,6 +58,8 @@ _UNRESOLVED_STATUSES = frozenset(
 _SEVERE_LEVELS = frozenset({"blocking", "major", "阻断", "废标", "主要"})
 #: boq.align() 中"已找到台账材料"的行状态（与 boq._summarize.match_rate 一致）。
 _MATCHED_BOQ_STATUSES = frozenset({"matched", "qty_diff", "unit_diff", "spec_diff"})
+#: 明细最多保留多少条样本；覆盖率计数始终基于全量，不受样本截断影响。
+MAX_SAMPLES = 20
 
 
 def _rate(numerator: int, denominator: int) -> float:
@@ -79,37 +85,84 @@ def _word_count(text: str) -> int:
 
 def _section_metrics(db: Session, project_id: str, metrics: dict[str, Any]) -> None:
     rows = db.execute(
-        select(Section.body, Section.revision)
+        select(
+            Section.id,
+            OutlineNode.heading,
+            Section.body,
+            Section.revision,
+        )
         .join(OutlineNode, Section.node_id == OutlineNode.id)
         .where(OutlineNode.project_id == project_id)
     ).all()
-    bodies = [str(body or "") for body, _revision in rows]
-    written = [body for body in bodies if body.strip()]
-    edited = sum(
-        1
-        for body, revision in rows
-        if str(body or "").strip() and int(revision or 0) > 1
-    )
+    written_rows = [
+        (section_id, heading, str(body or ""), int(revision or 0))
+        for section_id, heading, body, revision in rows
+        if str(body or "").strip()
+    ]
+    written = [body for _sid, _heading, body, _rev in written_rows]
+    edited = sum(1 for _sid, _heading, _body, revision in written_rows if revision > 1)
     metrics["manual_edit_rate"] = _rate(edited, len(written))
+    metrics["coverage"]["manual_edit_rate"] = {
+        "numerator": edited,
+        "denominator": len(written),
+        "sample_count": min(len(written_rows), MAX_SAMPLES),
+        "ratio": metrics["manual_edit_rate"],
+    }
+    metrics["samples"]["manual_edit_rate"] = [
+        {
+            "section_id": section_id,
+            "heading": heading,
+            "revision": revision,
+            "edited": revision > 1,
+        }
+        for section_id, heading, _body, revision in written_rows[:MAX_SAMPLES]
+    ]
     metrics["notes"].append(f"manual_edit_rate 分母: {len(written)} 个有正文的章节")
 
     findings = db.execute(
-        select(QualityFinding.level, QualityFinding.status)
+        select(
+            QualityFinding.id,
+            QualityFinding.level,
+            QualityFinding.status,
+            QualityFinding.title,
+        )
         .join(QualityReport, QualityFinding.report_id == QualityReport.id)
         .where(QualityReport.project_id == project_id)
     ).all()
-    severe_open = sum(
-        1
-        for level, status in findings
+    severe_rows = [
+        (finding_id, level, status, title)
+        for finding_id, level, status, title in findings
         if _normalized(level) in _SEVERE_LEVELS
         and _normalized(status) in _UNRESOLVED_STATUSES
-    )
+    ]
     words = sum(_word_count(body) for body in written)
     metrics["issue_density"] = (
-        round(severe_open / words * 1000, 4) if words else 0.0
+        round(len(severe_rows) / words * 1000, 4) if words else 0.0
+    )
+    metrics["coverage"]["issue_density"] = {
+        "numerator": len(severe_rows),
+        "denominator": words,
+        "unit": "findings_per_1000_words",
+        "sample_count": min(len(severe_rows), MAX_SAMPLES),
+        "ratio_per_1000": metrics["issue_density"],
+    }
+    metrics["samples"]["issue_density"] = [
+        {"finding_id": finding_id, "level": level, "status": status, "title": title}
+        for finding_id, level, status, title in severe_rows[:MAX_SAMPLES]
+    ]
+    metrics["mismatches"].extend(
+        {
+            "metric": "issue_density",
+            "kind": "unresolved_finding",
+            "finding_id": finding_id,
+            "level": level,
+            "status": status,
+            "title": title,
+        }
+        for finding_id, level, status, title in severe_rows[:MAX_SAMPLES]
     )
     metrics["notes"].append(
-        f"issue_density 分母: {words} 词（未处置 blocking/major finding: {severe_open}）"
+        f"issue_density 分母: {words} 词（未处置 blocking/major finding: {len(severe_rows)}）"
     )
     metrics["notes"].append("issue_density 为每千词问题数，不按 0..1 截断")
     metrics["notes"].append("issue_density 计数范围: 项目全部报告的 finding（含当前报告）")
@@ -132,17 +185,40 @@ def _boq_metrics(db: Session, project_id: str, metrics: dict[str, Any]) -> None:
     )
     total = 0
     matched = 0
+    samples: list[dict[str, Any]] = []
+    mismatches: list[dict[str, Any]] = []
     for snapshot in active.values():
         items = list(snapshot.items or [])
         total += len(items)
         rows = boq.align(items, materials, list(snapshot.ignored or []), snapshot.sheet or "")
-        matched += sum(
-            1
-            for row in rows
-            if row.get("boq_row") is not None
-            and row.get("status") in _MATCHED_BOQ_STATUSES
-        )
+        for row in rows:
+            if row.get("boq_row") is None:
+                continue
+            is_match = row.get("status") in _MATCHED_BOQ_STATUSES
+            if is_match:
+                matched += 1
+            detail = {
+                "snapshot_id": snapshot.id,
+                "sheet": snapshot.sheet,
+                "row": row.get("boq_row"),
+                "name": row.get("name"),
+                "status": row.get("status"),
+                "matched": is_match,
+            }
+            if len(samples) < MAX_SAMPLES:
+                samples.append(detail)
+            if not is_match and len(mismatches) < MAX_SAMPLES:
+                mismatches.append({"metric": "boq_match_rate", "kind": "boq_row", **detail})
     metrics["boq_match_rate"] = _rate(matched, total)
+    metrics["coverage"]["boq_match_rate"] = {
+        "numerator": matched,
+        "denominator": total,
+        "snapshot_count": len(active),
+        "sample_count": len(samples),
+        "ratio": metrics["boq_match_rate"],
+    }
+    metrics["samples"]["boq_match_rate"] = samples
+    metrics["mismatches"].extend(mismatches)
     metrics["notes"].append(
         f"boq_match_rate 分母: {total} 条清单行（{len(active)} 份在用快照）"
     )
@@ -157,12 +233,19 @@ def _boq_metrics(db: Session, project_id: str, metrics: dict[str, Any]) -> None:
 def collect_quality_metrics(db: Session | None, project_id: str) -> dict[str, Any]:
     """收集项目级质量指标；任何缺失数据都不抛异常，返回全键零值 + 说明。
 
-    Returns exactly ``{manual_edit_rate, issue_density, boq_match_rate, notes}``.
+    Returns exactly ``{manual_edit_rate, issue_density, boq_match_rate,
+    coverage, samples, mismatches, notes}``. ``coverage`` records per-metric
+    numerator/denominator, ``samples`` keeps up to :data:`MAX_SAMPLES` concrete
+    sample rows, and ``mismatches`` lists unresolved findings / unmatched BOQ
+    rows. Ratios are computed from full counts, never from truncated samples.
     """
     metrics: dict[str, Any] = {
         "manual_edit_rate": 0.0,
         "issue_density": 0.0,
         "boq_match_rate": 0.0,
+        "coverage": {},
+        "samples": {},
+        "mismatches": [],
         "notes": [],
     }
     notes: list[str] = metrics["notes"]
