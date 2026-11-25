@@ -32,6 +32,21 @@ from ..services.job_support import _fail_job
 logger = logging.getLogger("bidcraft.workers")
 
 
+def _discard_partial_zip(zip_path: Path | None) -> None:
+    """Remove a batch archive that was written before the final fence failed.
+
+    The database transaction cannot roll back a filesystem write.  The archive
+    name is derived from the unique job id, so deleting it on an aborted or
+    failed run is safe and lets the reaper retry produce a fresh file.
+    """
+    if zip_path is None:
+        return
+    try:
+        zip_path.unlink(missing_ok=True)
+    except OSError:  # pragma: no cover - best-effort cleanup only
+        logger.exception("清理未交付的批量导出归档失败: %s", zip_path)
+
+
 def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None:
     """Background worker: export each project, then bundle the files into a zip.
 
@@ -47,6 +62,7 @@ def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None
     failed_items: list[dict[str, Any]] = []
     entries: list[tuple[Path, str]] = []
     blocked = 0
+    zip_path: Path | None = None
     try:
         raise_if_aborted()
         assert_claim_current(job_id)
@@ -178,8 +194,13 @@ def _run_batch_export_job(job_id: str, project_ids: list[str], fmt: str) -> None
     except JobAborted:
         # 中止不是业务失败：保持 running，由 reaper 重新排队。
         logger.info("批量导出任务 %s 已中止，等待重新排队", job_id)
+        _discard_partial_zip(zip_path)
     except Exception:  # noqa: BLE001 - surfaced to the UI as a stable message
         log_job_failure(logger)
+        # DB 事务回滚不会删除已落盘的 zip：丢弃本次未交付的归档，
+        # 下次重跑会按同一个 job_id 重新生成。已完成终态时 zip_path
+        # 只会在 finalize 成功后才保留，因此这里清理是安全的。
+        _discard_partial_zip(zip_path)
         failed_message = "批量导出失败：服务内部错误，详情见服务日志"
         with session_scope() as db:
             job = fenced_job(db, job_id)
