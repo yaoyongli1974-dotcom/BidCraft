@@ -2,6 +2,16 @@
 
 按版本倒序。对外口径以 `docs/release-notes/` 下对应文件为准；本文件是仓库内的简明索引。
 
+## v0.31.2 (2026-11-25)
+
+并发可靠性验证与残余风险专项收官，对外说明见 [docs/release-notes/v0.31.2.md](docs/release-notes/v0.31.2.md)，逐阶段证据与最终验收矩阵见 `docs/development/BIDCRAFT_V0312_*.md`。
+
+- `commit_fenced_result` 禁止 NULL / 过期租约提交终态；Reaper 与章节写入升级为真实多线程 / 独立 Session / 条件 UPDATE 证据（100 轮 × 多场景）。
+- GenerationLease + Job claim 双重 fencing 在单一短事务内提交章节，重复写入幂等；8 类 Worker 补状态守卫，取消任务不再被复活。
+- 账务 6 场景 × 50 轮真实并发验证金额守恒；并发失败唯一终态、退款领取失败可重试。
+- 质量指标新增 coverage / samples / mismatches 明细，旧比率口径不变；真实件样本仍保持「未测量」。
+- 后端全量 2125 passed / 18 skipped，前端 39 files / 320 tests；历史迁移零改动，无测试删除。
+
 ## v0.31.1 (2026-11-24)
 
 并发可靠性热修复，对外说明见 [docs/release-notes/v0.31.1.md](docs/release-notes/v0.31.1.md)，逐阶段证据见 `docs/development/BIDCRAFT_V0311_*.md`。
