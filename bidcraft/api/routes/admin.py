@@ -20,9 +20,11 @@ from ..shared import (  # noqa: F401
     HTTPException,
     InvoiceReject,
     Job,
+    KbAssetReview,
     KbChunk,
     KbCreate,
     KbDocMeta,
+    KbDuplicateGroupResolve,
     KbUpdate,
     KnowledgeBase,
     ModelConfig,
@@ -78,6 +80,7 @@ from ..shared import (  # noqa: F401
     jobqueue,
     jobs,
     knowledge,
+    knowledge_assets,
     list_packages,
     logger,
     material_policy,
@@ -531,6 +534,130 @@ def kb_docs_delete(kb_id: str, request: Request, source: str) -> dict[str, Any]:
         row.options = options
         audit(db, None, "kb.doc_meta", {"kb_id": kb_id, "source": source, "deleted": True})
         return {"deleted": True, "source": source}
+
+
+# --- v0.32 Phase 2：知识资产引擎 -------------------------------------------
+# 查重（静态）路由必须先于 /assets/{document_id} 动态路由注册，避免
+# "duplicates" 被当成 document_id 捕获。
+@router.get("/admin/kbs/{kb_id}/assets")
+def kb_assets_list(kb_id: str, request: Request) -> dict[str, Any]:
+    """文档资产清单（结构化字段 + 审核状态），逐文档给出真实来源。"""
+
+    require_super(request)
+    with session_scope() as db:
+        kb = db.get(KnowledgeBase, kb_id)
+        if kb is None:
+            raise HTTPException(status_code=404, detail="知识库不存在")
+        items = [
+            knowledge_assets.asset_payload(doc, db)
+            for doc in knowledge.list_documents(db, kb)
+        ]
+        return {"items": items}
+
+
+@router.get("/admin/kbs/{kb_id}/assets/duplicates")
+def kb_asset_duplicates(kb_id: str, request: Request) -> dict[str, Any]:
+    """同库内查重候选组：按文件哈希/规范化题录聚合，供人工裁决。"""
+
+    require_super(request)
+    with session_scope() as db:
+        kb = db.get(KnowledgeBase, kb_id)
+        if kb is None:
+            raise HTTPException(status_code=404, detail="知识库不存在")
+        try:
+            items = knowledge_assets.find_duplicate_candidates(db, kb.id)
+        except (ValueError, knowledge.KnowledgeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"items": items}
+
+
+@router.post("/admin/kbs/{kb_id}/assets/duplicates/{group_id}/resolve")
+def kb_asset_duplicate_resolve(
+    kb_id: str, group_id: str, payload: KbDuplicateGroupResolve, request: Request
+) -> dict[str, Any]:
+    require_super(request)
+    with session_scope() as db:
+        kb = db.get(KnowledgeBase, kb_id)
+        if kb is None:
+            raise HTTPException(status_code=404, detail="知识库不存在")
+        actor = (current_user() or {}).get("username", "")
+        try:
+            result = knowledge_assets.resolve_duplicate_group(
+                db, kb.id, group_id, payload.decision, payload.note, actor
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (ValueError, knowledge.KnowledgeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        audit(
+            db,
+            None,
+            "kb.duplicate_resolve",
+            {
+                "kb_id": kb.id,
+                "group_id": group_id,
+                "decision": payload.decision,
+                "actor": actor,
+            },
+        )
+        return result
+
+
+@router.post("/admin/kbs/{kb_id}/assets/{document_id}/extract")
+def kb_asset_extract(kb_id: str, document_id: str, request: Request) -> dict[str, Any]:
+    """确定性抽取：只从文档真实来源生成草稿资产，不编造引用。"""
+
+    require_super(request)
+    with session_scope() as db:
+        kb = db.get(KnowledgeBase, kb_id)
+        if kb is None:
+            raise HTTPException(status_code=404, detail="知识库不存在")
+        actor = (current_user() or {}).get("username", "")
+        try:
+            payload = knowledge_assets.propose_document_assets(db, kb.id, document_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (ValueError, knowledge.KnowledgeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        audit(
+            db,
+            None,
+            "kb.document_extract",
+            {"kb_id": kb.id, "document_id": document_id, "actor": actor},
+        )
+        return payload
+
+
+@router.post("/admin/kbs/{kb_id}/assets/{document_id}/review")
+def kb_asset_review(
+    kb_id: str, document_id: str, payload: KbAssetReview, request: Request
+) -> dict[str, Any]:
+    require_super(request)
+    with session_scope() as db:
+        kb = db.get(KnowledgeBase, kb_id)
+        if kb is None:
+            raise HTTPException(status_code=404, detail="知识库不存在")
+        actor = (current_user() or {}).get("username", "")
+        try:
+            result = knowledge_assets.review_asset(
+                db, kb, document_id, payload.decision, payload.note, actor
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (ValueError, knowledge.KnowledgeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        audit(
+            db,
+            None,
+            "kb.document_review",
+            {
+                "kb_id": kb.id,
+                "document_id": document_id,
+                "decision": payload.decision,
+                "actor": actor,
+            },
+        )
+        return result
 
 
 @router.get("/admin/plugins/catalog")

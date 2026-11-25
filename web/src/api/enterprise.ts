@@ -8,8 +8,20 @@ import type {
   EnterpriseMemberInput,
   EnterprisePackage,
   EnterprisePackageItem,
+  KnowledgeAsset,
+  KnowledgeAssetDuplicateGroup,
 } from '../lib/types'
-import { asNumber, asText, isoOrNull } from './shared'
+import {
+  knowledgeAssetDuplicateItems,
+  knowledgeAssetDuplicateResolvePayload,
+  knowledgeAssetItems,
+  knowledgeAssetReviewPayload,
+  normalizeKnowledgeAsset,
+  normalizeKnowledgeAssetDuplicateGroup,
+  type KnowledgeAssetDuplicateResolveInput,
+  type KnowledgeAssetReviewInput,
+} from './knowledge'
+import { asLooseBool, asNumber, asText, isoOrNull } from './shared'
 
 // ---------------------------------------------------------------- enterprise domain
 
@@ -34,6 +46,8 @@ export function normalizeEnterprise(raw: unknown): Enterprise {
     name: asText(source.name),
     owner_id: source.owner_id ? asText(source.owner_id) : undefined,
     role: source.role ? asText(source.role) : undefined,
+    is_owner:
+      source.is_owner !== undefined ? asLooseBool(source.is_owner, false) : undefined,
     member_count: source.member_count !== undefined ? asNumber(source.member_count) : undefined,
     document_count:
       source.document_count !== undefined ? asNumber(source.document_count) : undefined,
@@ -197,4 +211,60 @@ export async function getEnterprisePackage(ref: string): Promise<EnterprisePacka
     `/projects/${encodeURIComponent(ref)}/enterprise/package`,
   )
   return normalizeEnterprisePackage(data)
+}
+
+// ---------------------------------------------------------------- 企业知识资产
+
+/** 与 admin 侧共用归一化器，但所有请求都留在 /enterprise 命名空间下。 */
+export async function listEnterpriseKnowledgeAssets(
+  enterpriseId: string,
+): Promise<KnowledgeAsset[]> {
+  const data = await request<unknown>(
+    `/enterprise/${encodeURIComponent(enterpriseId)}/assets`,
+  )
+  return knowledgeAssetItems(data)
+}
+
+export async function extractEnterpriseKnowledgeAsset(
+  enterpriseId: string,
+  documentId: string,
+): Promise<KnowledgeAsset> {
+  const data = await request<unknown>(
+    `/enterprise/${encodeURIComponent(enterpriseId)}/assets/${encodeURIComponent(documentId)}/extract`,
+    { method: 'POST' },
+  )
+  return normalizeKnowledgeAsset(data)
+}
+
+export async function reviewEnterpriseKnowledgeAsset(
+  enterpriseId: string,
+  documentId: string,
+  input: KnowledgeAssetReviewInput,
+): Promise<KnowledgeAsset> {
+  const data = await request<unknown>(
+    `/enterprise/${encodeURIComponent(enterpriseId)}/assets/${encodeURIComponent(documentId)}/review`,
+    jsonBody(knowledgeAssetReviewPayload(input)),
+  )
+  return normalizeKnowledgeAsset(data)
+}
+
+export async function listEnterpriseKnowledgeAssetDuplicates(
+  enterpriseId: string,
+): Promise<KnowledgeAssetDuplicateGroup[]> {
+  const data = await request<unknown>(
+    `/enterprise/${encodeURIComponent(enterpriseId)}/assets/duplicates`,
+  )
+  return knowledgeAssetDuplicateItems(data)
+}
+
+export async function resolveEnterpriseKnowledgeAssetDuplicate(
+  enterpriseId: string,
+  groupId: string,
+  input: KnowledgeAssetDuplicateResolveInput,
+): Promise<KnowledgeAssetDuplicateGroup> {
+  const data = await request<unknown>(
+    `/enterprise/${encodeURIComponent(enterpriseId)}/assets/duplicates/${encodeURIComponent(groupId)}/resolve`,
+    jsonBody(knowledgeAssetDuplicateResolvePayload(input)),
+  )
+  return normalizeKnowledgeAssetDuplicateGroup(data)
 }

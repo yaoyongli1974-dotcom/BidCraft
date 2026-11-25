@@ -685,3 +685,18 @@ class ChapterPlanUpdate(BaseModel):
 
 class ChapterPlanConfirm(BaseModel):
     note: str = ""
+
+
+# --- v0.32 Phase 2：知识资产引擎 -------------------------------------------
+class KbAssetReview(BaseModel):
+    """文档资产审核流转：draft → review → approved → published / rejected / archived。"""
+
+    decision: Literal["review", "approve", "publish", "reject", "archive"]
+    note: str = ""
+
+
+class KbDuplicateGroupResolve(BaseModel):
+    """查重候选组人工裁决：resolve（合并/采纳）或 dismiss（忽略）。"""
+
+    decision: Literal["resolve", "dismiss"]
+    note: str = ""

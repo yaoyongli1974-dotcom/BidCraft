@@ -1,6 +1,6 @@
 import { ApiError, asArray, jsonBody, request } from '../lib/http'
-import type { KbDocMetaInput, KbDocMetaItem, KbDocMetaResponse, KbDocPolicy, KbDocSource, KbDocumentItem, KbSearchPassage, KbVectorResult, KnowledgeBase, KnowledgeBaseInput, TermInput, TermItem, TestResult } from '../lib/types'
-import { TERM_KINDS, TERM_NOTE_MAX, TERM_SOURCE_MAX, TERM_TARGET_MAX, asBool, asLooseBool, asNumber, asText, kbDocsPath, normalizeKbDocFields, normalizeKbDocPolicyEntry, normalizeKbDocSource, normalizeKbVector, normalizeTermKind, termItems, termPayload } from './shared'
+import type { KbDocMetaInput, KbDocMetaItem, KbDocMetaResponse, KbDocPolicy, KbDocSource, KbDocumentItem, KbSearchPassage, KbVectorResult, KnowledgeAsset, KnowledgeAssetChunk, KnowledgeAssetDecision, KnowledgeAssetDuplicateDecision, KnowledgeAssetDuplicateGroup, KnowledgeAssetDuplicateMember, KnowledgeBase, KnowledgeBaseInput, TermInput, TermItem, TestResult } from '../lib/types'
+import { TERM_KINDS, TERM_NOTE_MAX, TERM_SOURCE_MAX, TERM_TARGET_MAX, asBool, asLooseBool, asNumber, asText, isoOrNull, kbDocsPath, normalizeKbDocFields, normalizeKbDocPolicyEntry, normalizeKbDocSource, normalizeKbVector, normalizeTermKind, termItems, termPayload } from './shared'
 
 // ---------------------------------------------------------------- knowledge domain
 export async function getKnowledgeBases(): Promise<KnowledgeBase[]> {
@@ -438,3 +438,222 @@ export const deleteTerm = (id: string) =>
     `/admin/terms/${encodeURIComponent(id)}`,
     { method: 'DELETE' },
   )
+
+// ---------------------------------------------------------------- 知识资产（admin）
+
+/** 可空数值：缺失/非有限值一律为 null，不把 0 当成真实页码或相似度。 */
+function nullableFinite(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim() && Number.isFinite(Number(value))) {
+    return Number(value)
+  }
+  return null
+}
+
+/** 可空布尔：值为 undefined/null 时保持 undefined，不伪造 ok=true。 */
+function optionalBool(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') return value
+  if (value === 'true') return true
+  if (value === 'false') return false
+  return undefined
+}
+
+function nullableText(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value : null
+}
+
+const ASSET_UNREADABLE = '服务端返回的知识资产无法识别，请刷新后重试。'
+const DUPLICATE_UNREADABLE = '服务端返回的重复资产组无法识别，请刷新后重试。'
+
+/**
+ * 归一化一条资产。id 缺失时沿用服务端真实返回的 document_id 作为行标识
+ * （旧后端只发 document_id）；两者都缺失才算无法识别并抛 ApiError。
+ * 未知字段原样保留，便于溯源核对；缺失的 review_status 保持 null，
+ * 绝不回写「草稿」冒充已知状态。
+ */
+export function normalizeKnowledgeAsset(value: unknown): KnowledgeAsset {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ApiError(500, null, ASSET_UNREADABLE)
+  }
+  const raw = value as Record<string, unknown>
+  const id = asText(raw.id).trim() || asText(raw.document_id).trim()
+  if (!id) throw new ApiError(500, null, ASSET_UNREADABLE)
+  const fields =
+    raw.fields && typeof raw.fields === 'object' && !Array.isArray(raw.fields)
+      ? { ...(raw.fields as Record<string, unknown>) }
+      : {}
+  const chunks = Array.isArray(raw.chunks)
+    ? raw.chunks
+        .map(normalizeKnowledgeAssetChunk)
+        .filter((chunk): chunk is KnowledgeAssetChunk => chunk !== null)
+    : []
+  const status =
+    raw.review_status === null || raw.review_status === undefined
+      ? null
+      : asText(raw.review_status).trim().toLowerCase() || null
+  return {
+    ...raw,
+    id,
+    document_id: nullableText(raw.document_id),
+    kb_id: nullableText(raw.kb_id),
+    source: asText(raw.source),
+    sha256: nullableText(raw.sha256),
+    review_status: status,
+    fields,
+    chunks,
+    source_file_id: nullableText(raw.source_file_id),
+    reviewed_by: nullableText(raw.reviewed_by),
+    reviewed_at: isoOrNull(raw.reviewed_at),
+    published_at: isoOrNull(raw.published_at),
+    rejected_reason: nullableText(raw.rejected_reason),
+    ok: optionalBool(raw.ok),
+    reason: asText(raw.reason),
+  }
+}
+
+function normalizeKnowledgeAssetChunk(value: unknown): KnowledgeAssetChunk | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  const id = asText(raw.id).trim()
+  const heading = asText(raw.heading)
+  if (!id && !heading) return null
+  return {
+    ...raw,
+    id: id || undefined,
+    page: nullableFinite(raw.page),
+    heading,
+  }
+}
+
+/** 归一化一组重复资产组；无 id 的条目直接丢弃，未知字段原样保留。 */
+export function normalizeKnowledgeAssetDuplicateGroup(value: unknown): KnowledgeAssetDuplicateGroup {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ApiError(500, null, DUPLICATE_UNREADABLE)
+  }
+  const raw = value as Record<string, unknown>
+  const id = asText(raw.id).trim()
+  if (!id) throw new ApiError(500, null, DUPLICATE_UNREADABLE)
+  const members = Array.isArray(raw.members)
+    ? raw.members
+        .map(normalizeDuplicateMember)
+        .filter((member): member is KnowledgeAssetDuplicateMember => member !== null)
+    : []
+  return {
+    ...raw,
+    id,
+    kb_id: nullableText(raw.kb_id),
+    fingerprint: nullableText(raw.fingerprint),
+    similarity: nullableFinite(raw.similarity),
+    status: nullableText(raw.status),
+    reason: asText(raw.reason),
+    members,
+  }
+}
+
+function normalizeDuplicateMember(value: unknown): KnowledgeAssetDuplicateMember | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  const id = asText(raw.id).trim()
+  const documentId = asText(raw.document_id).trim()
+  if (!id && !documentId) return null
+  return {
+    ...raw,
+    id: id || undefined,
+    document_id: documentId || null,
+    score: nullableFinite(raw.score),
+    role: asText(raw.role),
+    source: asText(raw.source),
+  }
+}
+
+/** 列表响应必须是 `{items: [...]}`；无法识别时报错，不返回空数组冒充成功。 */
+export function knowledgeAssetItems(value: unknown, label = ASSET_UNREADABLE): KnowledgeAsset[] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ApiError(500, null, label)
+  }
+  const items = (value as Record<string, unknown>).items
+  if (!Array.isArray(items)) throw new ApiError(500, null, label)
+  return items.map(normalizeKnowledgeAsset)
+}
+
+export function knowledgeAssetDuplicateItems(
+  value: unknown,
+  label = DUPLICATE_UNREADABLE,
+): KnowledgeAssetDuplicateGroup[] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ApiError(500, null, label)
+  }
+  const items = (value as Record<string, unknown>).items
+  if (!Array.isArray(items)) throw new ApiError(500, null, label)
+  return items.map(normalizeKnowledgeAssetDuplicateGroup)
+}
+
+export interface KnowledgeAssetReviewInput {
+  decision: KnowledgeAssetDecision
+  note?: string
+}
+
+export interface KnowledgeAssetDuplicateResolveInput {
+  decision: KnowledgeAssetDuplicateDecision
+  note?: string
+}
+
+/** 出站请求体只含后端接受的 decision / note，note 统一收敛为字符串。 */
+export const knowledgeAssetReviewPayload = (input: KnowledgeAssetReviewInput) => ({
+  decision: input.decision,
+  note: asText(input.note).trim(),
+})
+
+export const knowledgeAssetDuplicateResolvePayload = (
+  input: KnowledgeAssetDuplicateResolveInput,
+) => ({
+  decision: input.decision,
+  note: asText(input.note).trim(),
+})
+
+export async function listKnowledgeAssets(kbId: string): Promise<KnowledgeAsset[]> {
+  const data = await request<unknown>(`/admin/kbs/${encodeURIComponent(kbId)}/assets`)
+  return knowledgeAssetItems(data)
+}
+
+export async function extractKnowledgeAsset(
+  kbId: string,
+  documentId: string,
+): Promise<KnowledgeAsset> {
+  const data = await request<unknown>(
+    `/admin/kbs/${encodeURIComponent(kbId)}/assets/${encodeURIComponent(documentId)}/extract`,
+    { method: 'POST' },
+  )
+  return normalizeKnowledgeAsset(data)
+}
+
+export async function reviewKnowledgeAsset(
+  kbId: string,
+  documentId: string,
+  input: KnowledgeAssetReviewInput,
+): Promise<KnowledgeAsset> {
+  const data = await request<unknown>(
+    `/admin/kbs/${encodeURIComponent(kbId)}/assets/${encodeURIComponent(documentId)}/review`,
+    jsonBody(knowledgeAssetReviewPayload(input)),
+  )
+  return normalizeKnowledgeAsset(data)
+}
+
+export async function listKnowledgeAssetDuplicates(
+  kbId: string,
+): Promise<KnowledgeAssetDuplicateGroup[]> {
+  const data = await request<unknown>(`/admin/kbs/${encodeURIComponent(kbId)}/assets/duplicates`)
+  return knowledgeAssetDuplicateItems(data)
+}
+
+export async function resolveKnowledgeAssetDuplicate(
+  kbId: string,
+  groupId: string,
+  input: KnowledgeAssetDuplicateResolveInput,
+): Promise<KnowledgeAssetDuplicateGroup> {
+  const data = await request<unknown>(
+    `/admin/kbs/${encodeURIComponent(kbId)}/assets/duplicates/${encodeURIComponent(groupId)}/resolve`,
+    jsonBody(knowledgeAssetDuplicateResolvePayload(input)),
+  )
+  return normalizeKnowledgeAssetDuplicateGroup(data)
+}

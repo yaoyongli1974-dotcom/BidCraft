@@ -36,6 +36,7 @@ import { EmptyState, ErrorState, Skeleton, Spinner } from '../../components/Feed
 import { Modal } from '../../components/Modal'
 import { TabHeading } from '../../components/Workbench'
 import { EnterpriseAssetList } from '../../components/EnterpriseAssetList'
+import { KnowledgeAssetPanel } from '../../components/KnowledgeAssetPanel'
 import { useConfirm } from '../../context/useConfirm'
 import { useToast } from '../../context/useToast'
 
@@ -57,6 +58,8 @@ export function EnterpriseTab() {
   const selected: Enterprise | undefined = enterprises.find(
     (enterprise) => enterprise.id === selectedId,
   )
+  /** 企业资产写操作同时要求项目可写与当前用户是该企业 owner。 */
+  const canManageAssets = Boolean(canWrite && selected?.is_owner)
 
   const membersQuery = useQuery(
     `enterprise-members:${selectedId || 'none'}`,
@@ -525,6 +528,12 @@ export function EnterpriseTab() {
                   </div>
                 </form>
               </section>
+
+              <KnowledgeAssetPanel
+                enterpriseId={selected.id}
+                canManage={canManageAssets}
+                canReview={canManageAssets}
+              />
             </>
           ) : (
             <section className="panel ent-panel">

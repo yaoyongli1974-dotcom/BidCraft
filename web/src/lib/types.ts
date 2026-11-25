@@ -1724,6 +1724,76 @@ export interface KbDocMetaInput {
   fields: Record<string, string>
 }
 
+// ---------------------------------------------------------------- 知识资产（v0.32 Phase 2）
+
+/** 审核状态；null（旧数据未审核）在界面按「未审核」展示，不冒充草稿。 */
+export type KnowledgeAssetReviewStatus =
+  | 'draft'
+  | 'review'
+  | 'approved'
+  | 'published'
+  | 'rejected'
+  | 'archived'
+
+/** 资产溯源片段。page 可空，heading 可空串；未知字段按原样保留。 */
+export interface KnowledgeAssetChunk {
+  id?: string
+  page?: number | null
+  heading?: string
+  [key: string]: unknown
+}
+
+/**
+ * `/admin/kbs/{id}/assets` 与 `/enterprise/{id}/assets` 共用的资产视图。
+ * 服务端可随版本增减字段，因此除 id 外全部可选，未知字段由归一化器保留。
+ */
+export interface KnowledgeAsset {
+  id: string
+  document_id?: string | null
+  kb_id?: string | null
+  source?: string
+  sha256?: string | null
+  review_status?: KnowledgeAssetReviewStatus | string | null
+  fields?: Record<string, unknown>
+  chunks?: KnowledgeAssetChunk[]
+  source_file_id?: string | null
+  reviewed_by?: string | null
+  reviewed_at?: string | null
+  published_at?: string | null
+  rejected_reason?: string | null
+  ok?: boolean
+  reason?: string
+  [key: string]: unknown
+}
+
+/** 重复组中的一条成员；score / role / source 由服务端给出，缺失时留空。 */
+export interface KnowledgeAssetDuplicateMember {
+  id?: string
+  document_id?: string | null
+  score?: number | null
+  role?: string
+  source?: string
+  [key: string]: unknown
+}
+
+/** `GET .../assets/duplicates` 的一组重复资产。 */
+export interface KnowledgeAssetDuplicateGroup {
+  id: string
+  kb_id?: string | null
+  fingerprint?: string | null
+  similarity?: number | null
+  status?: string | null
+  reason?: string
+  members?: KnowledgeAssetDuplicateMember[]
+  [key: string]: unknown
+}
+
+/** 审核动作，与后端 Literal 一致。 */
+export type KnowledgeAssetDecision = 'review' | 'approve' | 'publish' | 'reject' | 'archive'
+
+/** 重复组裁决动作，与后端 Literal 一致。 */
+export type KnowledgeAssetDuplicateDecision = 'resolve' | 'dismiss'
+
 // ---------------------------------------------------------------- 协作与审计
 
 /** `owner` is synthesised by the server from `project.owner_id` and always listed first. */
@@ -1941,6 +2011,8 @@ export interface Enterprise {
   owner_id?: string
   /** 当前用户在企业中的角色（后端可省略）。 */
   role?: string
+  /** 当前用户是否为企业 owner；企业写操作的闸门（后端可省略）。 */
+  is_owner?: boolean
   member_count?: number
   document_count?: number
   created_at?: string | null

@@ -1079,8 +1079,97 @@ class KbDocument(Base):
     tags: Mapped[list] = mapped_column(JSON, default=list)
     valid_to: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     error: Mapped[str] = mapped_column(Text, default="")
+    # v0.32 Phase 2：结构化知识资产挂在既有文档上，不另建第二套知识库。
+    # review_status 为 NULL 表示历史文档，保持既有检索行为；抽取后才进入状态机。
+    structured: Mapped[dict | None] = mapped_column(
+        JSON, nullable=True, comment="结构化资产字段（确定性抽取，含真实来源）"
+    )
+    review_status: Mapped[str | None] = mapped_column(
+        String(16), nullable=True, comment="资产审核状态；NULL 为历史文档，仍按原规则检索"
+    )
+    reviewed_by: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="最近一次审核人"
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, comment="最近一次审核时间（naive UTC）"
+    )
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, comment="发布时间（naive UTC）"
+    )
+    rejected_reason: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="驳回原因"
+    )
+    source_file_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, comment="来源文件 ID（真实文件溯源，不编造）"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class KbAssetDuplicateGroup(Base):
+    """知识资产查重候选组：同库内按文件哈希或规范化题录聚合，人工裁决。"""
+
+    __tablename__ = "kb_asset_duplicate_groups"
+    __table_args__ = (
+        UniqueConstraint("kb_id", "fingerprint", name="uq_kb_asset_duplicate_group"),
+        Index("ix_kb_asset_duplicate_groups_kb_status", "kb_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=new_id, comment="候选组 ID"
+    )
+    kb_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_bases.id"), index=True, comment="所属知识库 ID"
+    )
+    fingerprint: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="组内指纹（哈希摘要，同库唯一）"
+    )
+    similarity: Mapped[float] = mapped_column(
+        Float, default=0.0, comment="组内相似度（精确哈希 1.0，题录规范化为固定值）"
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), default="pending", comment="裁决状态：pending|resolved|dismissed"
+    )
+    reason: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="成组原因或裁决说明"
+    )
+    created_by: Mapped[str] = mapped_column(
+        String(64), default="", comment="候选组创建人（自动生成为 system）"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, comment="创建时间（naive UTC）"
+    )
+    reviewed_by: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="裁决人"
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, comment="裁决时间（naive UTC）"
+    )
+
+
+class KbAssetDuplicateMember(Base):
+    """查重候选组成员：只引用真实 KbDocument，重复计算不新增重复行。"""
+
+    __tablename__ = "kb_asset_duplicate_members"
+    __table_args__ = (
+        UniqueConstraint("group_id", "document_id", name="uq_kb_asset_duplicate_member"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=new_id, comment="组成员 ID"
+    )
+    group_id: Mapped[str] = mapped_column(
+        ForeignKey("kb_asset_duplicate_groups.id"), index=True, comment="所属候选组 ID"
+    )
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("kb_documents.id"), index=True, comment="真实文档 ID"
+    )
+    score: Mapped[float] = mapped_column(
+        Float, default=0.0, comment="该成员与组基准的相似度"
+    )
+    role: Mapped[str] = mapped_column(
+        String(16), default="candidate", comment="成员角色：primary|candidate"
+    )
 
 
 class SimilarityReport(Base):

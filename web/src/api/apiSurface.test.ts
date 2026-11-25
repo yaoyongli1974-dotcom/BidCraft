@@ -27,8 +27,18 @@ const API_LITERALS = [
   '/admin/health',
   '/admin/invoices',
   '/admin/models',
+  '/admin/kbs/kb-1/assets',
+  '/admin/kbs/kb-1/assets/doc-1/extract',
+  '/admin/kbs/kb-1/assets/doc-1/review',
+  '/admin/kbs/kb-1/assets/duplicates',
+  '/admin/kbs/kb-1/assets/duplicates/group-1/resolve',
   '/agents',
   '/enterprise',
+  '/enterprise/e-1/assets',
+  '/enterprise/e-1/assets/doc-1/extract',
+  '/enterprise/e-1/assets/doc-1/review',
+  '/enterprise/e-1/assets/duplicates',
+  '/enterprise/e-1/assets/duplicates/group-1/resolve',
 ] as const
 
 // React Router pages that are not API namespaces.

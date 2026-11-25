@@ -14,7 +14,7 @@ from bidcraft.config import settings
 from bidcraft.db import get_engine, init_db, reset_engine_for_tests
 
 #: 当前 alembic head（新增 revision 时同步这里）。
-HEAD = "0013_chapter_planning"
+HEAD = "0014_kb_asset_metadata"
 
 
 def _version() -> list[str]:
@@ -426,4 +426,101 @@ def test_0013_chapter_planning_table_is_reversible(db):
     init_db()
     command.upgrade(cfg, "head")
     assert expected_columns <= columns()
+    assert _version() == [HEAD]
+
+
+def test_0014_kb_asset_metadata_is_reversible_and_idempotent(db):
+    """0014 的文档列/查重表必须可降级再升级，且历史行 review_status 保持 NULL。"""
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+
+    from bidcraft.db import session_scope
+    from bidcraft.migrations import __file__ as migrations_init
+    from bidcraft.models import KbDocument, KnowledgeBase
+
+    engine = get_engine()
+    asset_columns = {
+        "structured", "review_status", "reviewed_by", "reviewed_at",
+        "published_at", "rejected_reason", "source_file_id",
+    }
+    group_columns = {
+        "id", "kb_id", "fingerprint", "similarity", "status", "reason",
+        "created_by", "created_at", "reviewed_by", "reviewed_at",
+    }
+    member_columns = {"id", "group_id", "document_id", "score", "role"}
+
+    def columns(table: str) -> set[str]:
+        with engine.connect() as connection:
+            return {c["name"] for c in inspect(connection).get_columns(table)}
+
+    def indexes(table: str) -> set[str]:
+        with engine.connect() as connection:
+            return {
+                item["name"]
+                for item in inspect(connection).get_indexes(table)
+                if item.get("name")
+            }
+
+    def uniques(table: str) -> set[str]:
+        with engine.connect() as connection:
+            return {
+                item["name"]
+                for item in inspect(connection).get_unique_constraints(table)
+                if item.get("name")
+            }
+
+    tables = set(inspect(engine).get_table_names())
+    assert asset_columns <= columns("kb_documents")
+    assert {"kb_asset_duplicate_groups", "kb_asset_duplicate_members"} <= tables
+    assert group_columns <= columns("kb_asset_duplicate_groups")
+    assert member_columns <= columns("kb_asset_duplicate_members")
+    assert {"ix_kb_asset_duplicate_groups_kb_id", "ix_kb_asset_duplicate_groups_kb_status"} <= indexes(
+        "kb_asset_duplicate_groups"
+    )
+    assert {"ix_kb_asset_duplicate_members_group_id", "ix_kb_asset_duplicate_members_document_id"} <= indexes(
+        "kb_asset_duplicate_members"
+    )
+    assert "uq_kb_asset_duplicate_group" in uniques("kb_asset_duplicate_groups")
+    assert "uq_kb_asset_duplicate_member" in uniques("kb_asset_duplicate_members")
+
+    # 历史行（未经资产抽取）的 review_status 必须是 NULL，而不是 server_default。
+    with session_scope() as session:
+        kb = KnowledgeBase(name="migration-asset-kb")
+        session.add(kb)
+        session.flush()
+        session.add(KbDocument(kb_id=kb.id, source="legacy.pdf", status="ready"))
+    with engine.connect() as connection:
+        row = connection.execute(
+            text("SELECT review_status FROM kb_documents WHERE source = 'legacy.pdf'")
+        ).fetchone()
+    assert row == (None,)
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(Path(migrations_init).parent))
+    cfg.set_main_option(
+        "sqlalchemy.url",
+        engine.url.render_as_string(hide_password=False).replace("%", "%%"),
+    )
+    command.downgrade(cfg, "0013_chapter_planning")
+    tables = set(inspect(engine).get_table_names())
+    assert "kb_asset_duplicate_groups" not in tables
+    assert "kb_asset_duplicate_members" not in tables
+    assert not (asset_columns & columns("kb_documents"))
+
+    command.upgrade(cfg, "head")
+    tables = set(inspect(engine).get_table_names())
+    assert {"kb_asset_duplicate_groups", "kb_asset_duplicate_members"} <= tables
+    assert asset_columns <= columns("kb_documents")
+    assert group_columns <= columns("kb_asset_duplicate_groups")
+    assert member_columns <= columns("kb_asset_duplicate_members")
+
+    # 幂等：create_all 已建列/表后，重复 init_db + upgrade 不得报错。
+    init_db()
+    command.upgrade(cfg, "head")
+    assert asset_columns <= columns("kb_documents")
+    assert {"kb_asset_duplicate_groups", "kb_asset_duplicate_members"} <= set(
+        inspect(engine).get_table_names()
+    )
     assert _version() == [HEAD]

@@ -674,15 +674,22 @@ def _query_vector(db, query: str) -> tuple[str, list[float] | None]:
 
 
 def _ready_chunk_filter():
-    """文档生命周期门禁：未就绪/已过期的文档不参与检索（旧块兼容放行）。"""
+    """文档生命周期门禁：未就绪/已过期/未发布的资产不参与检索（旧块兼容放行）。"""
 
     today = clock.today()
     start = datetime(today.year, today.month, today.day)
+    # 结构化资产的审核门禁：只有历史行（review_status IS NULL）与 published
+    # 可检索；draft/review/approved/rejected/archived 一律显式拦截。
+    review_gate = or_(
+        KbDocument.review_status.is_(None),  # 旧文档未经资产抽取，保持既有行为
+        KbDocument.review_status == "published",
+    )
     return or_(
         KbDocument.id.is_(None),  # 迁移前的无溯源块仍可检索
         and_(
             KbDocument.status == "ready",
             or_(KbDocument.valid_to.is_(None), KbDocument.valid_to >= start),
+            review_gate,
         ),
     )
 

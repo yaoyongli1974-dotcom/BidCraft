@@ -10,9 +10,17 @@ import {
   getEnterpriseMembers,
   getEnterprisePackage,
   getEnterprises,
+  listEnterpriseKnowledgeAssetDuplicates,
+  listEnterpriseKnowledgeAssets,
   matchEnterpriseAssets,
 } from '../../api/enterprise'
-import type { Enterprise, EnterpriseDocument, EnterpriseMatch } from '../../lib/types'
+import type {
+  Enterprise,
+  EnterpriseDocument,
+  EnterpriseMatch,
+  KnowledgeAsset,
+  KnowledgeAssetDuplicateGroup,
+} from '../../lib/types'
 import { clearQueryCache } from '../../lib/queryCache'
 
 const workspace = vi.hoisted(() => ({
@@ -59,14 +67,38 @@ vi.mock('../../api/enterprise', () => ({
   addEnterpriseDocument: vi.fn(),
   matchEnterpriseAssets: vi.fn(),
   getEnterprisePackage: vi.fn(),
+  listEnterpriseKnowledgeAssets: vi.fn(),
+  listEnterpriseKnowledgeAssetDuplicates: vi.fn(),
+  extractEnterpriseKnowledgeAsset: vi.fn(),
+  reviewEnterpriseKnowledgeAsset: vi.fn(),
+  resolveEnterpriseKnowledgeAssetDuplicate: vi.fn(),
 }))
 
 const ENTERPRISE: Enterprise = {
   id: 'e1',
   name: '示例建设集团',
   role: 'owner',
+  is_owner: true,
   member_count: 2,
   document_count: 3,
+}
+
+const ASSET: KnowledgeAsset = {
+  id: 'a1',
+  document_id: 'd1',
+  kb_id: 'e1',
+  source: '资质证书.pdf',
+  review_status: 'draft',
+  fields: { cert_no: 'C-1' },
+  chunks: [{ id: 'c1', page: 1, heading: '资质证书' }],
+}
+
+const DUPLICATE_GROUP: KnowledgeAssetDuplicateGroup = {
+  id: 'g1',
+  fingerprint: 'fp-1',
+  similarity: 0.91,
+  status: 'pending',
+  members: [{ id: 'm1', document_id: 'd1', score: 0.91, source: '资质证书.pdf' }],
 }
 
 const DOCUMENT: EnterpriseDocument = {
@@ -124,6 +156,8 @@ beforeEach(() => {
     source: '类似业绩',
   })
   vi.mocked(matchEnterpriseAssets).mockResolvedValue([MATCH])
+  vi.mocked(listEnterpriseKnowledgeAssets).mockResolvedValue([])
+  vi.mocked(listEnterpriseKnowledgeAssetDuplicates).mockResolvedValue([])
   vi.mocked(getEnterprisePackage).mockResolvedValue({
     name: '项目材料包',
     items: [{ label: '安全生产许可证', count: 1 }],
@@ -215,5 +249,32 @@ describe('EnterpriseTab', () => {
     expect(screen.getByLabelText('成员用户名')).toBeDisabled()
     expect(screen.getByLabelText('资料名称')).toBeDisabled()
     expect(screen.getByRole('button', { name: '资料入库' })).toBeDisabled()
+  })
+
+  it('disables knowledge asset mutations when the enterprise is not owned', async () => {
+    vi.mocked(getEnterprises).mockResolvedValue([{ ...ENTERPRISE, is_owner: false }])
+    vi.mocked(listEnterpriseKnowledgeAssets).mockResolvedValue([ASSET])
+    vi.mocked(listEnterpriseKnowledgeAssetDuplicates).mockResolvedValue([DUPLICATE_GROUP])
+    renderTab()
+
+    expect(await screen.findByText('示例建设集团')).toBeInTheDocument()
+    expect(await screen.findAllByText('资质证书.pdf')).not.toHaveLength(0)
+    expect(listEnterpriseKnowledgeAssets).toHaveBeenCalledWith('e1')
+    expect(screen.getByRole('button', { name: '提炼' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '提交复核' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '解决' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '忽略' })).toBeDisabled()
+    expect(screen.getByLabelText('审核意见')).toBeDisabled()
+  })
+
+  it('enables knowledge asset mutations for an owning editor', async () => {
+    vi.mocked(listEnterpriseKnowledgeAssets).mockResolvedValue([ASSET])
+    vi.mocked(listEnterpriseKnowledgeAssetDuplicates).mockResolvedValue([DUPLICATE_GROUP])
+    renderTab()
+
+    expect(await screen.findAllByText('资质证书.pdf')).not.toHaveLength(0)
+    expect(screen.getByRole('button', { name: '提炼' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: '提交复核' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: '解决' })).toBeEnabled()
   })
 })

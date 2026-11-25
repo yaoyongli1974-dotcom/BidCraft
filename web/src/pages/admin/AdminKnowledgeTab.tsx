@@ -44,6 +44,7 @@ import {
   type KnowledgeModalState,
 } from './AdminKnowledgeModal'
 import { AdminKbDocsModal } from './AdminKbDocsModal'
+import { KnowledgeAssetPanel } from '../../components/KnowledgeAssetPanel'
 
 interface KnowledgeTabProps {
   kbs: KnowledgeBase[]
@@ -205,6 +206,8 @@ export function AdminKnowledgeTab({
   }, [kbs])
 
   const defaultKb = kbs.find((kb) => kb.is_default && kb.enabled)
+  /** 资产面板按单个知识库工作：优先默认库，其次第一个本地库。 */
+  const assetKb = defaultKb || kbs.find((kb) => kb.kind === 'local') || kbs[0]
   const visibleGroups = KB_GROUPS.filter(
     (group) => kindFilter === 'all' || group.id === kindFilter,
   )
@@ -702,6 +705,14 @@ export function AdminKnowledgeTab({
       <div className="admin-footnote">
         本地索引只保存文本片段与来源；语义向量只用于检索排序，构建失败时会自动退回关键词匹配。第三方接口密钥加密保存。检索结果始终作为参考，事实台账优先。
       </div>
+
+      {assetKb && (
+        <KnowledgeAssetPanel
+          kbId={assetKb.id}
+          canManage
+          canReview
+        />
+      )}
 
       {modal && (
         <AdminKnowledgeModal

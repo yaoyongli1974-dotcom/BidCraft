@@ -43,8 +43,9 @@ def test_domain_routers_are_importable_and_populated():
         enterprise, evaluation, health, jobs, legal, my, packages, projects, similarity,
         orchestration, collaboration,
     ]
-    # v0.32 Phase 1 新增 6 条章节规划路由（见 projects.py）。
-    assert sum(len(mod.router.routes) for mod in modules) == 259
+    # v0.32 Phase 1 新增 6 条章节规划路由（projects.py），Phase 2 新增 10 条
+    # 知识资产路由（admin.py 5 条 + enterprise.py 5 条）。
+    assert sum(len(mod.router.routes) for mod in modules) == 269
 
 
 def test_route_modules_do_not_import_api_module_through_package():
@@ -115,8 +116,8 @@ def test_request_models_live_in_schemas_not_app():
             isinstance(b, ast.Name) and b.id == "BaseModel" for b in node.bases
         )
     ]
-    # v0.32 Phase 1 新增 3 个章节规划请求模型。
-    assert len(schema_models) == 91, f"schemas.py 应含 91 个请求模型，实际 {len(schema_models)}"
+    # v0.32 Phase 1 新增 3 个章节规划请求模型，Phase 2 新增 2 个知识资产请求模型。
+    assert len(schema_models) == 93, f"schemas.py 应含 93 个请求模型，实际 {len(schema_models)}"
 
 
 def test_monkeypatch_reaches_route_call_site(monkeypatch):

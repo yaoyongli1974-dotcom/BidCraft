@@ -24,7 +24,9 @@ from ..schemas import (  # noqa: E402
     EnterpriseCreate,
     EnterpriseMatchRequest,
     EnterpriseMemberAdd,
+    KbAssetReview,
     KbDocumentIngest,
+    KbDuplicateGroupResolve,
 )
 from ..shared import (  # noqa: E402
     Any,
@@ -32,6 +34,7 @@ from ..shared import (  # noqa: E402
     _project,
     audit,
     billing_user,
+    knowledge_assets,
     select,
     session_scope,
 )
@@ -179,6 +182,146 @@ def enterprise_document_delete(
             {"enterprise_id": enterprise.id, "document_id": row.id, "source": row.source},
         )
         return {"deleted": True, "id": row.id}
+
+
+# --- v0.32 Phase 2：知识资产引擎 -------------------------------------------
+# 查重（静态）路由必须先于 /assets/{document_id} 动态路由注册，避免
+# "duplicates" 被当成 document_id 捕获。KB 一律由企业容器解析，绝不信任调用方
+# 传入的 kb_id。
+@router.get("/enterprise/{enterprise_id}/assets")
+def enterprise_asset_list(enterprise_id: str) -> dict[str, Any]:
+    with session_scope() as db:
+        user = billing_user(db)
+        enterprise = assets.get_enterprise(db, user, enterprise_id)
+        kb = assets.enterprise_kb(db, enterprise, create=False)
+        if kb is None:
+            return {"items": []}
+        return {
+            "items": [
+                knowledge_assets.asset_payload(doc, db)
+                for doc in list_documents(db, kb)
+            ]
+        }
+
+
+@router.get("/enterprise/{enterprise_id}/assets/duplicates")
+def enterprise_asset_duplicates(enterprise_id: str) -> dict[str, Any]:
+    with session_scope() as db:
+        user = billing_user(db)
+        enterprise = assets.get_enterprise(db, user, enterprise_id)
+        kb = assets.enterprise_kb(db, enterprise, create=False)
+        if kb is None:
+            return {"items": []}
+        try:
+            items = knowledge_assets.find_duplicate_candidates(db, kb.id)
+        except (ValueError, KnowledgeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"items": items}
+
+
+@router.post("/enterprise/{enterprise_id}/assets/duplicates/{group_id}/resolve")
+def enterprise_asset_duplicate_resolve(
+    enterprise_id: str, group_id: str, payload: KbDuplicateGroupResolve
+) -> dict[str, Any]:
+    with session_scope() as db:
+        user = billing_user(db)
+        try:
+            enterprise = assets.get_owned_enterprise(db, user, enterprise_id)
+        except assets.EnterprisePermissionError as exc:
+            raise _forbidden(exc) from exc
+        kb = assets.enterprise_kb(db, enterprise, create=False)
+        if kb is None:
+            raise HTTPException(status_code=404, detail="文档不存在")
+        try:
+            result = knowledge_assets.resolve_duplicate_group(
+                db, kb.id, group_id, payload.decision, payload.note, user.username
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (ValueError, KnowledgeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        audit(
+            db,
+            None,
+            "enterprise.duplicate_resolve",
+            {
+                "enterprise_id": enterprise.id,
+                "kb_id": kb.id,
+                "group_id": group_id,
+                "decision": payload.decision,
+                "actor": user.username,
+            },
+        )
+        return result
+
+
+@router.post("/enterprise/{enterprise_id}/assets/{document_id}/extract")
+def enterprise_asset_extract(
+    enterprise_id: str, document_id: str
+) -> dict[str, Any]:
+    with session_scope() as db:
+        user = billing_user(db)
+        try:
+            enterprise = assets.get_owned_enterprise(db, user, enterprise_id)
+        except assets.EnterprisePermissionError as exc:
+            raise _forbidden(exc) from exc
+        kb = assets.enterprise_kb(db, enterprise, create=False)
+        if kb is None:
+            raise HTTPException(status_code=404, detail="文档不存在")
+        try:
+            payload = knowledge_assets.propose_document_assets(db, kb.id, document_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (ValueError, KnowledgeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        audit(
+            db,
+            None,
+            "enterprise.document_extract",
+            {
+                "enterprise_id": enterprise.id,
+                "kb_id": kb.id,
+                "document_id": document_id,
+                "actor": user.username,
+            },
+        )
+        return payload
+
+
+@router.post("/enterprise/{enterprise_id}/assets/{document_id}/review")
+def enterprise_asset_review(
+    enterprise_id: str, document_id: str, payload: KbAssetReview
+) -> dict[str, Any]:
+    with session_scope() as db:
+        user = billing_user(db)
+        try:
+            enterprise = assets.get_owned_enterprise(db, user, enterprise_id)
+        except assets.EnterprisePermissionError as exc:
+            raise _forbidden(exc) from exc
+        kb = assets.enterprise_kb(db, enterprise, create=False)
+        if kb is None:
+            raise HTTPException(status_code=404, detail="文档不存在")
+        try:
+            result = knowledge_assets.review_asset(
+                db, kb, document_id, payload.decision, payload.note, user.username
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (ValueError, KnowledgeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        audit(
+            db,
+            None,
+            "enterprise.document_review",
+            {
+                "enterprise_id": enterprise.id,
+                "kb_id": kb.id,
+                "document_id": document_id,
+                "decision": payload.decision,
+                "actor": user.username,
+            },
+        )
+        return result
 
 
 @router.post("/projects/{ref}/enterprise/match")

@@ -202,9 +202,22 @@ def _legacy_meta(kb, source: str, location: str) -> dict[str, Any]:
 
 
 def _document_meta(row, legacy: dict[str, Any] | None = None) -> dict[str, Any]:
-    """KbDocument 的生命周期字段为权威值，覆盖 legacy 元数据。"""
+    """KbDocument 的生命周期字段为权威值，覆盖 legacy 元数据。
+
+    v0.32 Phase 2：已抽取的结构化资产字段也并入素材元数据，供 ``assess``
+    按必填项判定；未抽取（``structured`` 为 NULL）的历史文档行为不变。
+    """
 
     meta = dict(legacy or {})
+    structured = getattr(row, "structured", None)
+    if isinstance(structured, dict):
+        for key in (
+            "title", "cert_no", "contract_no", "amount", "valid_to",
+            "owner", "source_url", "note",
+        ):
+            value = structured.get(key)
+            if value not in (None, ""):
+                meta[key] = value
     meta["kind"] = str(row.kind or "other")
     meta["title"] = meta.get("title") or str(row.source or "")
     meta["source"] = str(row.source or "")
