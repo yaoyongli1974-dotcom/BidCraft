@@ -14,11 +14,13 @@ from sqlalchemy import inspect, text
 
 PG_URL = os.getenv("BIDCRAFT_TEST_PG_URL", "").strip()
 
-pytestmark = pytest.mark.skipif(not PG_URL, reason="需要 BIDCRAFT_TEST_PG_URL（专用测试库）")
-
 
 @pytest.fixture(scope="module")
 def pg_engine():
+    if not PG_URL:
+        # conftest 里的模块级 pytestmark 对测试模块无效；必须在 fixture 中显式 skip，
+        # 否则默认 pytest job 会进入 fixture 并以空 URL 触发 67 个 ERROR。
+        pytest.skip("需要 BIDCRAFT_TEST_PG_URL（专用测试库）")
     from bidcraft.config import settings
     from bidcraft.db import get_engine, init_db, reset_engine_for_tests
     from bidcraft.models import Base
