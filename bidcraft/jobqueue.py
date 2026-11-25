@@ -584,6 +584,32 @@ def claim_next() -> Job | None:
         return claimed
 
 
+def _renew_lease_once(job_id: str, token: str) -> bool:
+    """One real conditional UPDATE renewing a still-owned lease.
+
+    Extracted from the heartbeat loop so concurrency tests can execute exactly
+    the production SQL in an independent thread/session without timing games.
+    """
+
+    now = utc_now()
+    lease_until = now + timedelta(seconds=_lease_seconds())
+    with session_scope() as db:
+        result = db.execute(
+            update(Job)
+            .where(
+                Job.id == job_id,
+                Job.status == "running",
+                Job.worker_id == _worker_id,
+                Job.claim_token == token,
+                # Never revive a lease the reaper has already declared expired.
+                Job.lease_expires_at.is_not(None),
+                Job.lease_expires_at >= now,
+            )
+            .values(heartbeat_at=now, lease_expires_at=lease_until)
+        )
+        return bool(result.rowcount)
+
+
 def _heartbeat(
     job_id: str,
     stop: threading.Event,
@@ -600,32 +626,13 @@ def _heartbeat(
 
     interval = _heartbeat_seconds()
     while not stop.wait(interval):
-        now = utc_now()
-        lease_until = now + timedelta(seconds=_lease_seconds())
         try:
-            with session_scope() as db:
-                result = db.execute(
-                    update(Job)
-                    .where(
-                        Job.id == job_id,
-                        Job.status == "running",
-                        Job.worker_id == _worker_id,
-                        Job.claim_token == token,
-                        # Never revive a lease the reaper has already declared
-                        # expired.  A NULL lease is treated as expired too.
-                        Job.lease_expires_at.is_not(None),
-                        Job.lease_expires_at >= now,
-                    )
-                    .values(heartbeat_at=now, lease_expires_at=lease_until)
-                )
-                if result.rowcount:
-                    db.commit()
-                else:
-                    # Lease no longer ours — stop renewing and tell the runner to
-                    # abort at its next checkpoint (the new owner took over).
-                    if abort is not None:
-                        abort.set()
-                    return
+            if not _renew_lease_once(job_id, token):
+                # Lease no longer ours — stop renewing and tell the runner to
+                # abort at its next checkpoint (the new owner took over).
+                if abort is not None:
+                    abort.set()
+                return
         except Exception:  # noqa: BLE001 - heartbeat must never kill the worker
             logger.debug("心跳更新失败 job=%s", job_id, exc_info=True)
             # A failure to renew is indistinguishable from a lost worker from
