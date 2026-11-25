@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import {
+  exportEvaluationReport,
+  getEvaluationReportDetail,
+  getEvaluationSummary,
+  updateQualityFinding,
+} from './evaluation'
 import { generateChapterPlan, updateChapterPlan } from './generation'
 import { updateFact } from './ledger'
 import { getProjectLessons, lessonQuery } from './learning'
@@ -24,6 +30,9 @@ import {
  * - CommercialReview: bidcraft/api/schemas.py:600-604
  * - ChapterPlanGenerateRequest / ChapterPlanUpdate: schemas.py:652-684
  * - KbAssetReview / KbDuplicateGroupResolve: schemas.py:691-702
+ * - 质量报告详情/导出/概览: GET /projects/{ref}/evaluation/reports/{id}
+ *   GET .../export、GET /projects/{ref}/evaluation/summary（?refs= 可选）
+ * - Finding PATCH status='ignored' 要求非空 note（400 otherwise）
  */
 const BACKEND_ENUMS = {
   similarityScope: ['project', 'history'] as const,
@@ -65,6 +74,7 @@ const BACKEND_KEYS = {
   kbAssetReview: ['decision', 'note'],
   duplicateResolve: ['decision', 'note'],
   retrievalPreviewQuery: ['q', 'limit'],
+  evaluationSummaryQuery: ['refs'],
   agentTool: ['name', 'description', 'input_schema', 'side_effect', 'readonly'],
   // 只读投影：轨迹字段严格来自后端，前端不得合成 ok / verified。
   toolCallTrace: ['name', 'args', 'result', 'verification', 'audit_id', 'ts', 'is_error', 'ms'],
@@ -465,5 +475,83 @@ describe('出站契约：UI payload 对齐后端枚举与字段', () => {
     expect(result.items[0].text).toBe('建议补充盖章页')
     expect('verified' in result.items[0]).toBe(false)
     expect('is_law' in result.items[0]).toBe(false)
+  })
+})
+
+describe('出站契约：质量评估新增端点', () => {
+  it('报告详情按 report_id 读取，不引入新的 API namespace', async () => {
+    const fetchMock = mockFetch({
+      id: 'r1', project_id: 'p1', report_version: 4, overall_score: 90,
+      grade: 'A', verdict: 'pass', dimensions: [], summary: {},
+      risk_summary: {}, created_by: 'owner', created_at: null, findings: [],
+    })
+    const report = await getEvaluationReportDetail('p 1', 'r/1')
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('/projects/p%201/evaluation/reports/r%2F1')
+    expect(url.startsWith('/projects/')).toBe(true)
+    expect(init?.method).toBeUndefined()
+    expect(init?.body).toBeUndefined()
+    expect(report.id).toBe('r1')
+  })
+
+  it('报告导出是无 body 的 GET 附件，文件名来自 Content-Disposition', async () => {
+    const fetchMock = vi.fn(
+      async (_input: string, _init?: RequestInit) =>
+        new Response('markdown bytes', {
+          status: 200,
+          headers: { 'Content-Disposition': 'attachment; filename="quality-v4.md"' },
+        }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const exported = await exportEvaluationReport('p1', 'r/4')
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('/projects/p1/evaluation/reports/r%2F4/export')
+    expect(url.startsWith('/projects/')).toBe(true)
+    expect(init?.method).toBeUndefined()
+    expect(init?.body).toBeUndefined()
+    expect((init?.headers as Record<string, string>).Accept).toBe('*/*')
+    expect(exported.filename).toBe('quality-v4.md')
+    expect(await exported.blob.text()).toBe('markdown bytes')
+  })
+
+  it('评估概览只带 refs 查询参数，空报告一律 measured=false', async () => {
+    const fetchMock = mockFetch({
+      items: [
+        { ref: 'p1', project_id: 'p1', name: '项目一', measured: true, report_id: 'r4',
+          report_version: 4, overall_score: 90.25, grade: 'A', verdict: 'pass' },
+        { ref: 'p2', project_id: 'p2', name: '项目二', measured: false,
+          overall_score: 100, grade: 'A', verdict: 'pass' },
+      ],
+    })
+    const result = await getEvaluationSummary('p1', ['p 1', 'p2'])
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url.startsWith('/projects/p1/evaluation/summary?')).toBe(true)
+    expect(init?.method).toBeUndefined()
+    const params = new URL(url, 'http://localhost').searchParams
+    expect(Array.from(params.keys()).every((key) =>
+      BACKEND_KEYS.evaluationSummaryQuery.includes(key as (typeof BACKEND_KEYS.evaluationSummaryQuery)[number]),
+    )).toBe(true)
+    expect(params.get('refs')).toBe('p 1,p2')
+    expect(result.items[0].measured).toBe(true)
+    expect(result.items[0].verdict).toBe('pass')
+    expect(result.items[1].measured).toBe(false)
+    expect(result.items[1].overall_score).toBeNull()
+    expect(result.items[1].grade).toBeNull()
+    expect(result.items[1].verdict).toBeNull()
+  })
+
+  it('忽略状态必须提交非空 note，字段仍限定为 status/note', async () => {
+    const fetchMock = mockFetch({ id: 'f1', status: 'ignored' })
+    await updateQualityFinding('p1', 'f1', { status: 'ignored', note: '已确认无需处置' })
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('/projects/p1/evaluation/findings/f1')
+    expect(init?.method).toBe('PATCH')
+    const body = assertBody(
+      JSON.parse(String(init?.body)),
+      BACKEND_KEYS.qualityFindingUpdate,
+      'quality finding ignored',
+    )
+    expect(body.status).toBe('ignored')
+    expect(String(body.note).trim().length).toBeGreaterThan(0)
   })
 })

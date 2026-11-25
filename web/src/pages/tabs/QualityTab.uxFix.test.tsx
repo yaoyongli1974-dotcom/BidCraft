@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { QualityTab } from './QualityTab'
 import {
   getEvaluationFindings,
+  getEvaluationReportDetail,
   getLatestEvaluation,
   listEvaluationReports,
   runEvaluation,
@@ -36,6 +37,9 @@ vi.mock('../../context/useToast', () => ({ useToast: () => toast }))
 vi.mock('../../hooks/watchJob', () => ({ watchJob: vi.fn() }))
 vi.mock('../../api/evaluation', () => ({
   getEvaluationFindings: vi.fn(),
+  getEvaluationReportDetail: vi.fn(),
+  exportEvaluationReport: vi.fn(),
+  getEvaluationSummary: vi.fn(),
   getLatestEvaluation: vi.fn(),
   listEvaluationReports: vi.fn(),
   runEvaluation: vi.fn(),
@@ -73,6 +77,7 @@ describe('QualityTab 交互修复', () => {
     vi.mocked(getLatestEvaluation).mockResolvedValue(report())
     vi.mocked(listEvaluationReports).mockResolvedValue([report()])
     vi.mocked(getEvaluationFindings).mockResolvedValue([])
+    vi.mocked(getEvaluationReportDetail).mockResolvedValue(report())
     vi.mocked(runEvaluation).mockResolvedValue(report({ report_version: 2 }))
     vi.mocked(runEvaluationAsync).mockResolvedValue({ job_id: 'job-1' })
     vi.mocked(watchJob).mockReturnValue(vi.fn())
@@ -85,10 +90,10 @@ describe('QualityTab 交互修复', () => {
     return render(<MemoryRouter><QualityTab /></MemoryRouter>)
   }
 
-  it('后台评估展示进度，完成后刷新最新报告', async () => {
-    vi.mocked(getLatestEvaluation)
-      .mockResolvedValueOnce(report())
-      .mockResolvedValueOnce(report({ id: 'r3', report_version: 3 }))
+  it('后台评估展示进度，完成后按 job.result.report_id 取本次报告', async () => {
+    // 最新报告仍是 v1；本次任务的报告是 v3，只有详情接口知道正确结果。
+    vi.mocked(getLatestEvaluation).mockResolvedValue(report())
+    vi.mocked(getEvaluationReportDetail).mockResolvedValue(report({ id: 'r3', report_version: 3 }))
     renderTab()
     fireEvent.click(screen.getByRole('button', { name: /后台评估/ }))
 
@@ -100,8 +105,12 @@ describe('QualityTab 交互修复', () => {
     expect(screen.getByRole('status').textContent).toContain('42%')
 
     await act(async () => {
-      await lastWatchOptions().onDone?.({ id: 'job-1' } as Job)
+      await lastWatchOptions().onDone?.({
+        id: 'job-1',
+        result: { report_id: 'r3' },
+      } as unknown as Job)
     })
+    await waitFor(() => expect(getEvaluationReportDetail).toHaveBeenCalledWith('p1', 'r3'))
     await waitFor(() => expect(screen.getByText('v3')).toBeTruthy())
     expect(screen.queryByRole('status')).toBeNull()
     expect(toast.success).toHaveBeenCalledWith('已生成质量报告 v3')

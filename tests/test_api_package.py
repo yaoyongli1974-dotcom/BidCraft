@@ -47,8 +47,9 @@ def test_domain_routers_are_importable_and_populated():
     # 知识资产路由（admin.py 5 条 + enterprise.py 5 条），Phase 3 新增 1 条
     # 只读检索预览路由（projects.py），Phase 4 新增 1 条只读工具目录路由
     # （orchestration.py：GET /agents/{agent_type}/tools），Phase 5 新增 1 条
-    # 只读经验摘要路由（projects.py：GET /projects/{ref}/lessons）。
-    assert sum(len(mod.router.routes) for mod in modules) == 272
+    # 只读经验摘要路由（projects.py：GET /projects/{ref}/lessons），Phase 6 新增 2 条
+    # 质量只读路由（evaluation.py：报告 Markdown 导出、单/跨项目质量摘要）。
+    assert sum(len(mod.router.routes) for mod in modules) == 274
 
 
 def test_route_modules_do_not_import_api_module_through_package():

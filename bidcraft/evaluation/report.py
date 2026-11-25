@@ -19,8 +19,10 @@ from .commercial import collect_commercial_completeness
 from .coverage import (
     calculate_chapter_coverage,
     calculate_evidence_coverage,
+    calculate_plan_coverage,
     calculate_requirement_coverage,
     calculate_scoring_coverage,
+    collect_coverage_findings,
 )
 from .quality_metrics import collect_quality_metrics
 from .risk import (
@@ -93,6 +95,10 @@ def _prior_dispositions(
             value = evidence.get(field)
             if value not in (None, ""):
                 carried[field] = value
+        # 历史处置若没有 resolved_at 盖章，沿用其所在报告的真实 created_at，
+        # 而不是在结转时新造一个「刚刚处置」的时间。
+        if "resolved_at" not in carried and _report.created_at is not None:
+            carried["resolved_at"] = clock.iso_beijing(_report.created_at)
         for key in _finding_keys(finding.node_id, finding.category, finding.title, evidence):
             prior.setdefault(key, carried)
     return prior
@@ -143,6 +149,7 @@ def build_quality_report(
         "scoring": calculate_scoring_coverage(db, project_id),
         "evidence": calculate_evidence_coverage(db, project_id),
         "chapter": calculate_chapter_coverage(db, project_id),
+        "plan": calculate_plan_coverage(db, project_id),
     }
     risks = collect_project_risks(db, project_id)
     risk_summary = calculate_risk_summary(risks)
@@ -155,14 +162,15 @@ def build_quality_report(
         risk_summary["by_level"] = by_level
         risk_summary["commercial_incomplete"] = not commercial_info.get("ok")
     quality = evaluate_project_quality(
-        {"requirement": coverage["requirement"], "scoring": coverage["scoring"],
-         "evidence": coverage["evidence"], "chapter": coverage["chapter"]},
+        coverage,
         {**risks, "risk_summary": risk_summary},
         weights=weights,
         commercial_info=commercial_info,
     )
 
     findings = classify_quality_risks(risks)
+    # 规划/知识引用/事实确认类 finding 全部来自真实 ChapterPlan / Fact 行。
+    findings.extend(collect_coverage_findings(db, project_id))
     # 覆盖类维度也生成 finding（非硬性，level=info/major）
     if coverage["requirement"]["star_unconfirmed"]:
         pass  # 已在 classify_quality_risks 生成（★ 硬风险）
@@ -333,8 +341,8 @@ def finding_payload(row: QualityFinding) -> dict[str, Any]:
     }
 
 
-#: finding 人工处置的合法状态（API schema 在此设了 Literal 校验，这里再兜一层）。
-FINDING_STATUSES = ("open", "handled", "ignored")
+#: finding 人工处置的合法状态（API schema 仅开放前三种；服务层兼容历史 resolved）。
+FINDING_STATUSES = ("open", "handled", "ignored", "resolved")
 
 
 def finding_for_project(
@@ -384,9 +392,16 @@ def update_finding(
     row, report = found
     row.status = status or "handled"
     evidence = dict(row.evidence or {})
-    if note:
-        evidence["resolution_note"] = note
-    evidence["resolved_by"] = actor
+    if row.status == "open":
+        # 重开：处置结论必须整体清空，避免旧意见/盖章「复活」。
+        for field in ("resolution_note", "resolved_by", "resolved_at", "disposition_from_finding_id"):
+            evidence.pop(field, None)
+    else:
+        # 处置：盖章时间只取服务端当前时间，不接受调用方传入。
+        if note:
+            evidence["resolution_note"] = note
+        evidence["resolved_by"] = actor
+        evidence["resolved_at"] = clock.iso_beijing(clock.utc_now())
     row.evidence = evidence
     db.flush()
     record_audit(
@@ -398,6 +413,8 @@ def update_finding(
             "report_id": report.id,
             "status": row.status,
             "note": note,
+            "resolved_at": evidence.get("resolved_at"),
+            "reopened": row.status == "open",
         },
         actor={"username": actor},
     )

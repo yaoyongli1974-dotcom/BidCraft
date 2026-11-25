@@ -4,22 +4,26 @@ import {
   AlertTriangle,
   CheckCircle2,
   ClipboardCheck,
+  Download,
   FileBarChart,
   RefreshCw,
 } from 'lucide-react'
 import { useWorkspace } from '../useWorkspace'
 import {
+  exportEvaluationReport,
   getEvaluationFindings,
+  getEvaluationReportDetail,
   getLatestEvaluation,
   listEvaluationReports,
   runEvaluation,
   runEvaluationAsync,
   updateQualityFinding,
 } from '../../api/evaluation'
+import { downloadBlob } from '../../api/generation'
 import { getProjectLessons } from '../../api/learning'
 import { watchJob } from '../../hooks/watchJob'
 import { messageOf } from '../../lib/http'
-import type { QualityDimension, QualityFinding, QualityReport } from '../../lib/types'
+import type { Job, QualityDimension, QualityFinding, QualityReport } from '../../lib/types'
 import { className, formatDate, formatRelative } from '../../lib/format'
 import { useQuery } from '../../lib/hooks'
 import { Badge } from '../../components/Badge'
@@ -42,6 +46,9 @@ const LEVEL_TONE: Record<string, 'danger' | 'warn' | 'info' | 'neutral'> = {
   info: 'neutral',
 }
 
+type QualityMetrics = NonNullable<QualityReport['summary']['metrics']>
+type TenderQuality = NonNullable<QualityReport['summary']['tender_quality']>
+
 function metricText(
   value: number | string | null | undefined,
   kind: 'rate' | 'density',
@@ -51,6 +58,12 @@ function metricText(
   if (!Number.isFinite(numeric)) return String(value)
   if (kind === 'rate') return `${(numeric * 100).toFixed(1)}%`
   return `${numeric.toFixed(1)} /千词`
+}
+
+function detailText(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '—'
+  if (typeof value === 'object') return JSON.stringify(value)
+  return String(value)
 }
 
 function dimensionClass(score: number): string {
@@ -63,6 +76,127 @@ function dimensionTone(score: number): 'success' | 'warn' | 'danger' {
   if (score >= 90) return 'success'
   if (score >= 60) return 'warn'
   return 'danger'
+}
+
+/** 问题来源行：后端有值就展示真值，缺失一律「—」，不拿旧报告或推测值填充。 */
+function findingSourceParts(finding: QualityFinding): Array<{ label: string; value: string }> {
+  const evidence = finding.evidence || {}
+  return [
+    { label: '核对码', value: detailText(evidence.code) },
+    { label: '页码', value: detailText(evidence.page) },
+    { label: '位置', value: detailText(evidence.location) },
+    { label: '条款', value: detailText(evidence.clause_no) },
+    { label: '章节', value: detailText(finding.node_id) },
+    { label: '要求', value: detailText(finding.requirement_id) },
+    { label: '评分点', value: detailText(finding.scoring_item_id) },
+    {
+      label: '稳定键',
+      value: detailText(finding.stable_key ?? evidence.stable_key ?? evidence.fingerprint),
+    },
+    {
+      label: '源行',
+      value: detailText(
+        finding.source_row_id ??
+          evidence.source_row_id ??
+          evidence.source_row ??
+          evidence.row_id ??
+          evidence.issue_id ??
+          evidence.audit_id ??
+          evidence.run_id ??
+          evidence.task_id,
+      ),
+    },
+  ]
+}
+
+/** 后台任务的 result 只作为报告索引；真正的报告内容一律走详情接口。 */
+function reportIdFromJob(job: Job): string {
+  const result: unknown = job.result
+  if (!result || typeof result !== 'object') return ''
+  const id = (result as Record<string, unknown>).report_id
+  return typeof id === 'string' && id.trim() ? id : ''
+}
+
+function MetricDetails({ metrics, tender }: { metrics?: QualityMetrics; tender?: TenderQuality }) {
+  const rows = [
+    {
+      label: '人工修改率',
+      value: metrics?.manual_edit_rate,
+      coverage: metrics?.coverage?.manual_edit_rate,
+      samples: metrics?.samples?.manual_edit_rate,
+    },
+    {
+      label: '问题密度',
+      value: metrics?.issue_density,
+      coverage: metrics?.coverage?.issue_density,
+      samples: metrics?.samples?.issue_density,
+    },
+    {
+      label: '清单匹配率',
+      value: metrics?.boq_match_rate,
+      coverage: metrics?.coverage?.boq_match_rate,
+      samples: metrics?.samples?.boq_match_rate,
+    },
+    {
+      label: '条款召回率',
+      value: tender?.clause_recall,
+      coverage: tender?.coverage?.clauses,
+      samples: tender?.samples?.matched_clauses,
+    },
+    {
+      label: '关键值解析率',
+      value: tender?.value_parse_rate,
+      coverage: tender?.coverage?.values,
+      samples: tender?.samples?.matched_values,
+    },
+    {
+      label: '判定一致率',
+      value: tender?.verdict_agreement,
+      coverage: tender?.coverage?.verdict,
+      samples: tender?.samples?.verdict_checks,
+    },
+  ]
+  const mismatches = [
+    ...(metrics?.mismatches || []),
+    ...(tender?.mismatches || []),
+  ]
+  return (
+    <details className="quality-metric-details">
+      <summary>查看指标计算明细（分子 / 分母 / 样本）</summary>
+      <ul>
+        {rows.map((row) => {
+          const measured = row.value !== null && row.value !== undefined && row.value !== ''
+          const sampleRows = row.samples || []
+          return (
+            <li key={row.label}>
+              <strong>{row.label}</strong>：
+              {measured
+                ? `分子 ${detailText(row.coverage?.numerator)} / 分母 ${detailText(
+                    row.coverage?.denominator,
+                  )} / 样本 ${detailText(row.coverage?.sample_count)}`
+                : '未测量'}
+              {sampleRows.length > 0 && (
+                <div className="quality-metric-samples">
+                  <span>可抽查样本 {sampleRows.length} 条</span>
+                  {sampleRows.slice(0, 3).map((sample, index) => (
+                    <code key={index}>{JSON.stringify(sample)}</code>
+                  ))}
+                </div>
+              )}
+            </li>
+          )
+        })}
+      </ul>
+      {mismatches.length > 0 && (
+        <div className="quality-metric-samples">
+          <span>不匹配明细 {mismatches.length} 条</span>
+          {mismatches.slice(0, 3).map((item, index) => (
+            <code key={index}>{JSON.stringify(item)}</code>
+          ))}
+        </div>
+      )}
+    </details>
+  )
 }
 
 function QualityDimensions({ dimensions }: { dimensions: QualityDimension[] }) {
@@ -95,9 +229,17 @@ function FindingCard({
   onUpdate: (finding: QualityFinding, status: string, note?: string) => void
 }) {
   const [note, setNote] = useState('')
+  const [noteError, setNoteError] = useState('')
   const isOpen = finding.status === 'open'
   const commit = (status: string) => {
-    onUpdate(finding, status, note.trim() || undefined)
+    const trimmed = note.trim()
+    // 后端对 status='ignored' 要求非空 note；提交前在本地拦下并明确提示。
+    if (status === 'ignored' && !trimmed) {
+      setNoteError('忽略时必须填写处置意见')
+      return
+    }
+    setNoteError('')
+    onUpdate(finding, status, trimmed || undefined)
     setNote('')
   }
   return (
@@ -111,25 +253,35 @@ function FindingCard({
         </Badge>
       </div>
       {finding.description && <p className="quality-finding-desc">{finding.description}</p>}
+      <p className="quality-finding-source">
+        {findingSourceParts(finding).map((part) => (
+          <span key={part.label}>
+            {part.label}：{part.value}
+          </span>
+        ))}
+      </p>
       {finding.recommendation && (
         <p className="quality-finding-rec"><CheckCircle2 size={13} /> {finding.recommendation}</p>
       )}
-      {!isOpen &&
-        (finding.resolution_note || finding.resolved_by || finding.resolved_at) && (
-          <p className="quality-finding-resolution">
-            处置人：{finding.resolved_by || '—'}
-            {finding.resolved_at && ` · 处置时间：${formatDate(finding.resolved_at)}`}
-            {finding.resolution_note ? ` · 意见：${finding.resolution_note}` : ''}
-          </p>
-        )}
+      {(finding.resolution_note || finding.resolved_by || finding.resolved_at) && (
+        <p className="quality-finding-resolution">
+          处置人：{finding.resolved_by || '—'}
+          {finding.resolved_at && ` · 处置时间：${formatDate(finding.resolved_at)}`}
+          {finding.resolution_note ? ` · 意见：${finding.resolution_note}` : ''}
+        </p>
+      )}
       {canWrite && (
         <div className="quality-finding-actions">
           <input
             className="input input--sm"
             aria-label={`处置意见：${finding.title}`}
-            placeholder="填写处置意见（可选）"
+            placeholder="填写处置意见（忽略时必填）"
             value={note}
-            onChange={(event) => setNote(event.target.value)}
+            aria-invalid={Boolean(noteError)}
+            onChange={(event) => {
+              setNote(event.target.value)
+              if (noteError) setNoteError('')
+            }}
           />
           {isOpen ? (
             <>
@@ -146,6 +298,9 @@ function FindingCard({
             </Button>
           )}
         </div>
+      )}
+      {noteError && (
+        <p className="inline-error" role="alert">{noteError}</p>
       )}
     </article>
   )
@@ -275,6 +430,7 @@ export function QualityTab() {
   const [note, setNote] = useState('')
   const [historyLoadingId, setHistoryLoadingId] = useState<string | null>(null)
   const [historyError, setHistoryError] = useState<string | null>(null)
+  const [downloadingId, setDownloadingId] = useState<string | null>(null)
 
   useEffect(() => () => watchRef.current?.(), [])
 
@@ -317,16 +473,20 @@ export function QualityTab() {
       watchRef.current?.()
       watchRef.current = watchJob(jobId, {
         onUpdate: (data) => setJobProgress(data.progress ?? 0),
-        onDone: async () => {
+        onDone: async (job) => {
           watchRef.current = null
           setRunning(false)
           setJobProgress(null)
+          // result 里的 report_id 只是索引：必须按它取详情，不能拿异步窗口的最新报告冒充本次结果。
+          const reportId = reportIdFromJob(job)
           try {
-            const latest = await getLatestEvaluation(ref)
-            if (latest) setReport(latest)
-            toast.success(
-              latest ? `已生成质量报告 v${latest.report_version}` : '后台质量评估已完成',
-            )
+            if (reportId) {
+              const exact = await getEvaluationReportDetail(ref, reportId)
+              setReport(exact)
+              toast.success(`已生成质量报告 v${exact.report_version}`)
+            } else {
+              toast.success('后台质量评估已完成')
+            }
             await Promise.all([latestQuery.refresh(), reportsQuery.refresh()])
           } catch (error) {
             toast.error(messageOf(error))
@@ -385,8 +545,23 @@ export function QualityTab() {
     }
   }
 
+  const handleDownload = async (item: QualityReport) => {
+    setDownloadingId(item.id)
+    try {
+      const { blob, filename } = await exportEvaluationReport(ref, item.id)
+      downloadBlob(blob, filename)
+      toast.success(`已下载 ${filename}`)
+    } catch (error) {
+      toast.error(messageOf(error))
+    } finally {
+      setDownloadingId(null)
+    }
+  }
+
   const hardRisk = Boolean(report?.risk_summary?.has_hard_risk)
-  const verdictMeta = VERDICT_META[report?.verdict || 'warn'] || VERDICT_META.warn
+  const verdictMeta = report?.verdict
+    ? VERDICT_META[report.verdict] || { label: report.verdict, tone: 'neutral' as const }
+    : { label: '—', tone: 'neutral' as const }
 
   return (
     <div className="quality-tab">
@@ -457,7 +632,7 @@ export function QualityTab() {
         <>
           <div className="quality-overview">
             <StatTile label="综合分" value={report.overall_score.toFixed(1)} tone={dimensionTone(report.overall_score)} />
-            <StatTile label="等级" value={report.grade} />
+            <StatTile label="等级" value={report.grade || '—'} />
             <StatTile label="结论" value={<Badge tone={verdictMeta.tone}>{verdictMeta.label}</Badge>} />
             <StatTile label="版本" value={`v${report.report_version}`} />
             <StatTile label="生成时间" value={report.created_at ? formatRelative(report.created_at) : '—'} />
@@ -498,6 +673,10 @@ export function QualityTab() {
                   (report.summary?.tender_quality?.notes || []).join('；')}
               </p>
             )}
+            <MetricDetails
+              metrics={report.summary?.metrics}
+              tender={report.summary?.tender_quality}
+            />
           </section>
 
           {(report.summary?.recommendations || []).length > 0 && (
@@ -544,18 +723,37 @@ export function QualityTab() {
           <div className="eyebrow">历史报告</div>
           <div className="quality-history">
             {(reportsQuery.data || []).map((r) => (
-              <button
+              <div
                 key={r.id}
-                type="button"
                 className={className('quality-history-item', r.id === report?.id && 'is-active')}
-                disabled={historyLoadingId !== null}
-                onClick={() => void selectReport(r)}
               >
-                <strong>v{r.report_version}</strong>
-                <span>{r.overall_score.toFixed(1)} 分</span>
-                <Badge tone={VERDICT_META[r.verdict]?.tone || 'warn'} subtle>{r.grade}</Badge>
-                {historyLoadingId === r.id && <span className="subtle">加载中…</span>}
-              </button>
+                <button
+                  type="button"
+                  className="quality-history-select"
+                  disabled={historyLoadingId !== null}
+                  onClick={() => void selectReport(r)}
+                >
+                  <strong>v{r.report_version}</strong>
+                  <span>{r.overall_score.toFixed(1)} 分</span>
+                  <Badge
+                    tone={r.verdict ? (VERDICT_META[r.verdict]?.tone || 'neutral') : 'neutral'}
+                    subtle
+                  >
+                    {r.grade || '—'}
+                  </Badge>
+                  {historyLoadingId === r.id && <span className="subtle">加载中…</span>}
+                </button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  icon={<Download size={14} />}
+                  aria-label={`下载报告 ${r.id}`}
+                  disabled={downloadingId !== null}
+                  onClick={() => void handleDownload(r)}
+                >
+                  下载
+                </Button>
+              </div>
             ))}
           </div>
           {historyError && (

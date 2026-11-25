@@ -2527,6 +2527,9 @@ export interface QualityFinding {
   evidence: Record<string, unknown>
   recommendation: string
   status: string
+  /** 稳定键与源行 ID 用于跨报告追踪同一条问题；缺失时保持 null，不臆造。 */
+  stable_key?: string | null
+  source_row_id?: string | null
   /** 人工处置意见、处置人与时间（后端写入 evidence，这里展开便于展示）。 */
   resolution_note?: string
   resolved_by?: string
@@ -2562,8 +2565,9 @@ export interface QualityReport {
   project_id: string
   report_version: number
   overall_score: number
-  grade: string
-  verdict: 'pass' | 'warn' | 'blocked' | string
+  /** 后端未给等级/结论时保持 null；界面显示「—」，绝不回退成 C / warn。 */
+  grade: string | null
+  verdict: 'pass' | 'warn' | 'blocked' | string | null
   dimensions: QualityDimension[]
   summary: {
     coverage?: Record<string, unknown>
@@ -2584,6 +2588,12 @@ export interface QualityReport {
       issue_density?: number | string | null
       boq_match_rate?: number | string | null
       notes?: string[]
+      /** 每项指标的分子/分母/样本数；后端没给时为空对象。 */
+      coverage?: Record<string, Record<string, unknown>>
+      /** 每项最多 20 条可抽查样本；后端没给时为空对象。 */
+      samples?: Record<string, Array<Record<string, unknown>>>
+      /** 未处置 finding / 未匹配清单行等不匹配明细。 */
+      mismatches?: Array<Record<string, unknown>>
     }
     /** v0.31 阶段 6：真实件指标；数据集未就绪时全部为 null。 */
     tender_quality?: {
@@ -2598,7 +2608,13 @@ export interface QualityReport {
         clause_recall?: number | string | null
         value_parse_rate?: number | string | null
         notes?: string[]
+        coverage?: Record<string, Record<string, unknown>>
+        samples?: Record<string, Array<Record<string, unknown>>>
+        mismatches?: Array<Record<string, unknown>>
       }>
+      coverage?: Record<string, Record<string, unknown>>
+      samples?: Record<string, Array<Record<string, unknown>>>
+      mismatches?: Array<Record<string, unknown>>
     }
   }
   risk_summary: Record<string, unknown>
@@ -2609,4 +2625,22 @@ export interface QualityReport {
 
 export interface QualityRunInput {
   note?: string
+}
+
+/** 跨项目评估概览的单行：measured=false 表示该项目没有报告，分数/结论一律 null。 */
+export interface EvaluationSummaryItem {
+  project_id: string
+  ref: string
+  name: string
+  measured: boolean
+  report_id: string | null
+  report_version: number | null
+  overall_score: number | null
+  grade: string | null
+  verdict: 'pass' | 'warn' | 'blocked' | string | null
+  created_at: string | null
+}
+
+export interface EvaluationSummary {
+  items: EvaluationSummaryItem[]
 }

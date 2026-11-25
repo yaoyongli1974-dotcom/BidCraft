@@ -9,8 +9,10 @@ from .commercial import collect_commercial_completeness
 from .coverage import (
     calculate_chapter_coverage,
     calculate_evidence_coverage,
+    calculate_plan_coverage,
     calculate_requirement_coverage,
     calculate_scoring_coverage,
+    collect_coverage_findings,
 )
 from .learning import (
     LESSON_LABEL,
@@ -36,6 +38,7 @@ from .risk import (
     calculate_risk_summary,
     classify_quality_risks,
     collect_project_risks,
+    collect_tool_audit_failures,
 )
 from .scorer import (
     DIMENSION_WEIGHTS,
@@ -58,14 +61,17 @@ __all__ = [
     "calculate_dimension_scores",
     "calculate_evidence_coverage",
     "calculate_overall_quality",
+    "calculate_plan_coverage",
     "calculate_requirement_coverage",
     "calculate_risk_summary",
     "calculate_scoring_coverage",
     "classify_quality_risks",
     "collect_commercial_completeness",
+    "collect_coverage_findings",
     "collect_project_risks",
     "collect_quality_metrics",
     "collect_tender_quality",
+    "collect_tool_audit_failures",
     "dataset_status",
     "evaluate_project_quality",
     "find_report_for_job",

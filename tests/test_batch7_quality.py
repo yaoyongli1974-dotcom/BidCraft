@@ -286,3 +286,45 @@ def test_cross_project_workflow_approval_workbench(db, monkeypatch):
         == 200
     )
     assert outsider.get("/approvals/workflows/pending").json() == []
+
+
+def test_update_finding_stamps_resolved_at_and_clears_on_reopen(db, monkeypatch):
+    client = _client(monkeypatch)
+    project_id = _project(client, "b7-resolved-at")
+    finding_id, report_id = _finding_in(client, project_id)
+
+    with session_scope() as sess:
+        row = update_finding(
+            sess, finding_id, "handled", "已复核", "owner", project_id=project_id
+        )
+        assert row is not None
+        assert row.status == "handled"
+        assert row.evidence["resolved_by"] == "owner"
+        assert row.evidence["resolved_at"].endswith("+08:00")
+
+    with session_scope() as sess:
+        row = update_finding(
+            sess, finding_id, "resolved", "结案", "owner", project_id=project_id
+        )
+        assert row is not None and row.status == "resolved"
+        assert row.evidence["resolution_note"] == "结案"
+
+    with session_scope() as sess:
+        row = update_finding(
+            sess, finding_id, "open", "", "owner", project_id=project_id
+        )
+        assert row is not None and row.status == "open"
+        for field in ("resolution_note", "resolved_by", "resolved_at", "disposition_from_finding_id"):
+            assert field not in row.evidence
+        audits = [
+            row
+            for row in sess.scalars(
+                select(AuditLog).where(
+                    AuditLog.action == "quality.finding_update",
+                    AuditLog.project_id == project_id,
+                )
+            )
+            if (row.detail or {}).get("report_id") == report_id
+        ]
+        assert len(audits) == 3
+        assert audits[-1].detail["reopened"] is True

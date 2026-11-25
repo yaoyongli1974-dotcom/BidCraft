@@ -84,17 +84,20 @@ export function CheckTab() {
       return 'warn'
     }
     if (persistedIssues.length > 0) return 'pass'
-    return localRecord?.verdict || null
-  }, [result?.verdict, persistedIssues, localRecord?.verdict])
+    // 本机 localStorage 记录不是后端已保存的结论：绝不据此展示通过/绿灯。
+    return null
+  }, [result?.verdict, persistedIssues])
   const verdict = derivedVerdict ? verdictMeta(derivedVerdict) : null
-  const checkedAt = result ? new Date().toISOString() : localRecord?.at
+  const checkedAt = result
+    ? new Date().toISOString()
+    : persistedIssues.length > 0
+      ? localRecord?.at
+      : undefined
   const verdictSource = result
     ? '本次核对'
     : persistedIssues.length > 0
       ? '已保存的核对问题'
-      : localRecord
-        ? '本机核对记录'
-        : null
+      : null
 
   const levelCounts = useMemo(() => {
     const counts: Record<string, number> = { all: failedIssues.length }
@@ -197,7 +200,7 @@ export function CheckTab() {
     : persistedIssues.length > 0
       ? '以下为已保存的核对问题。重新核对可基于最新正文与台账更新结论。'
       : localRecord
-        ? '这是本机记录的最近一次核对结论；问题明细可能已被后端更新或清理。'
+        ? '本机只保存了上次核对的时间记录；后端没有已保存的结论，按「尚未核对」展示。请重新核对后再依据结论交付。'
         : '运行核对会检查实质性响应、数量一致、参数覆盖与废标风险。核对只提示，不会改写正文。'
 
   return (

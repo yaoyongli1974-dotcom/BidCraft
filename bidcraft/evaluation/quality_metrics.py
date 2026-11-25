@@ -10,6 +10,8 @@
   章节正文总词数 × 1000（分母：章节正文词数，按
   ``generation.writer.count_words`` 口径：中日韩字符逐字 + 拉丁字母/数字词块；
   分母为 0 → 0.0；该指标表示每千词问题数，**不**做 0..1 截断）。
+  同一问题跨报告版本只计一次：按 ``evidence.stable_key``（或 ``fingerprint``）
+  去重并取最新版本的状态；没有稳定键的历史 finding 按行 id 各自计数。
 * ``boq_match_rate`` = 已匹配清单行 / 项目清单总行数
   （分母：项目所有在用 BOQ 快照的 ``items`` 行数；分母为 0 → 0.0）。
 
@@ -158,16 +160,34 @@ def _section_metrics(db: Session, project_id: str, metrics: dict[str, Any]) -> N
             QualityFinding.level,
             QualityFinding.status,
             QualityFinding.title,
+            QualityFinding.evidence,
+            QualityReport.report_version,
         )
         .join(QualityReport, QualityFinding.report_id == QualityReport.id)
         .where(QualityReport.project_id == project_id)
     ).all()
-    severe_rows = [
-        (finding_id, level, status, title)
-        for finding_id, level, status, title in findings
-        if _normalized(level) in _SEVERE_LEVELS
-        and _normalized(status) in _UNRESOLVED_STATUSES
-    ]
+    # 同一 finding 每重新评估一次都会落新行：按稳定键只取最新版本的状态，
+    # 避免「已处置的旧版本 + 新版本」被算成两个未处置问题。没有稳定键的历史
+    # 行无法可靠归并，按行 id 单独计，保持历史口径。
+    latest: dict[str, tuple[int, str, tuple[str, str, str, str]]] = {}
+    for finding_id, level, status, title, evidence, version in findings:
+        payload = evidence if isinstance(evidence, dict) else {}
+        stable = _normalized(payload.get("stable_key") or payload.get("fingerprint"))
+        key = f"stable:{stable}" if stable else f"id:{finding_id}"
+        row = (str(finding_id), str(level or ""), str(status or ""), str(title or ""))
+        candidate = (int(version or 0), str(finding_id), row)
+        previous = latest.get(key)
+        if previous is None or candidate[:2] > previous[:2]:
+            latest[key] = candidate
+    severe_rows = sorted(
+        (
+            row
+            for _version, _finding_id, row in latest.values()
+            if _normalized(row[1]) in _SEVERE_LEVELS
+            and _normalized(row[2]) in _UNRESOLVED_STATUSES
+        ),
+        key=lambda item: item[0],
+    )
     words = sum(_word_count(body) for body in written)
     metrics["issue_density"] = (
         round(len(severe_rows) / words * 1000, 4) if words else 0.0
@@ -198,7 +218,10 @@ def _section_metrics(db: Session, project_id: str, metrics: dict[str, Any]) -> N
         f"issue_density 分母: {words} 词（未处置 blocking/major finding: {len(severe_rows)}）"
     )
     metrics["notes"].append("issue_density 为每千词问题数，不按 0..1 截断")
-    metrics["notes"].append("issue_density 计数范围: 项目全部报告的 finding（含当前报告）")
+    metrics["notes"].append(
+        "issue_density 去重: 按 evidence.stable_key/fingerprint 取最新版本状态；"
+        "无稳定键的历史 finding 按行 id 单独计"
+    )
 
 
 def _boq_metrics(db: Session, project_id: str, metrics: dict[str, Any]) -> None:

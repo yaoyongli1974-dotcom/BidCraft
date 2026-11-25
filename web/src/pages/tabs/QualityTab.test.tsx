@@ -36,6 +36,9 @@ vi.mock('../../api/evaluation', () => ({
   getLatestEvaluation: vi.fn(),
   listEvaluationReports: vi.fn(),
   getEvaluationFindings: vi.fn(),
+  getEvaluationReportDetail: vi.fn(),
+  exportEvaluationReport: vi.fn(),
+  getEvaluationSummary: vi.fn(),
   runEvaluation: vi.fn(),
   updateQualityFinding: vi.fn(),
 }))

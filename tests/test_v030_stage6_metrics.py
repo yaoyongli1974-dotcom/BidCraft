@@ -254,6 +254,37 @@ def test_old_report_without_metrics_still_renders(db):
         assert payload["risk_summary"] == {"issues_open": 0}
 
 
+def test_issue_density_dedupes_stable_key_latest_status(db):
+    """同一问题跨报告版本只计一次，且以最新版本的状态为准。"""
+    with session_scope() as sess:
+        project = _project(sess, "metrics-density-dedupe")
+        _section(sess, project.id, " ".join(["word"] * 100), 1)
+        first = _report(sess, project.id)
+        second = QualityReport(project_id=project.id, report_version=2, summary={})
+        sess.add(second)
+        sess.flush()
+
+        def finding(report_id, level, status, stable_key):
+            row = _finding(sess, report_id, level, status)
+            row.evidence = {"stable_key": stable_key} if stable_key else {}
+            sess.flush()
+            return row
+
+        finding(first.id, "blocking", "open", "issue:1")
+        finding(second.id, "major", "handled", "issue:1")  # 最新已处置 → 不计
+        finding(first.id, "major", "open", "issue:2")
+        finding(second.id, "blocking", "open", "issue:2")  # 同一问题 → 只计一次
+        finding(first.id, "major", "handled", "issue:3")
+        finding(second.id, "major", "open", "issue:3")  # 重开 → 计一次
+        finding(second.id, "major", "open", None)  # 无稳定键的历史行独立计
+
+        metrics = collect_quality_metrics(sess, project.id)
+        assert metrics["coverage"]["issue_density"]["numerator"] == 3
+        assert metrics["coverage"]["issue_density"]["denominator"] == 100
+        assert metrics["issue_density"] == 30.0
+        assert any("stable_key" in note for note in metrics["notes"])
+
+
 def test_collect_quality_metrics_never_raises_on_missing_data(db):
     assert collect_quality_metrics(None, "missing-db")["manual_edit_rate"] == 0.0
 
