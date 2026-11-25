@@ -2,6 +2,15 @@
 
 按版本倒序。对外口径以 `docs/release-notes/` 下对应文件为准；本文件是仓库内的简明索引。
 
+## v0.31.3 (2026-11-25)
+
+生产上线前最后验收与风险收口，对外说明见 [docs/release-notes/v0.31.3.md](docs/release-notes/v0.31.3.md)，逐阶段证据与四类结论见 `docs/development/BIDCRAFT_V0313_*.md`。
+
+- 真实 PostgreSQL 16.2 复现并修复 `refund_claimed == 0` 在 BOOLEAN 列上的退款失败；100 轮 Reaper/心跳与终态竞争、50 轮退款/对账竞争全部通过。
+- 8 类 Worker 真实 PG 运行时矩阵、导出归档失败清理、图片/知识副作用边界与迁移/权限/IDOR 验证完成。
+- CI 纳入全部 `tests/postgres/**`（tests≥900、skipped=0），安全门禁改为强制，容器健康检查与 compose 环境变量透传补齐。
+- 本地 SQLite 2125 passed / 18 skipped；真实 PG 901 passed / 1 skipped；历史迁移零改动，无测试删除。
+
 ## v0.31.2 (2026-11-25)
 
 并发可靠性验证与残余风险专项收官，对外说明见 [docs/release-notes/v0.31.2.md](docs/release-notes/v0.31.2.md)，逐阶段证据与最终验收矩阵见 `docs/development/BIDCRAFT_V0312_*.md`。
