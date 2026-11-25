@@ -47,6 +47,64 @@ from ..services.job_support import (
 logger = logging.getLogger("bidcraft.workers")
 
 
+def commit_generation_chapter(
+    job_id: str,
+    project_id: str,
+    lease_token: str,
+    info: dict[str, Any],
+    body: str,
+    source: str,
+) -> None:
+    """Atomically persist one chapter under BOTH Job and GenerationLease fences.
+
+    Section, OutlineNode, the idempotency ledger and the success event are
+    written in one short transaction opened by ``fenced_chapter_write``.  A
+    lost Job claim or project lease aborts the whole unit before any write.
+    """
+    from .. import jobs
+
+    node_id = str(info.get("node_id") or "")
+    section_id = str(info.get("section_id") or "")
+    words = int(info.get("words") or 0)
+    status = "fallback" if source == "fallback" else "drafted"
+    with fenced_chapter_write(
+        job_id,
+        node_id,
+        project_id=project_id,
+        lease_token=lease_token,
+    ) as (chapter_db, _row):
+        step_key = f"chapter:{node_id}"
+        # Idempotency is checked INSIDE the fenced transaction: a duplicate
+        # delivery must not overwrite an already committed chapter body or
+        # emit a second success event.
+        if step_status(chapter_db, job_id, step_key) is True:
+            return
+        section = (
+            chapter_db.scalar(select(Section).where(Section.id == section_id))
+            if section_id
+            else None
+        )
+        if section is not None:
+            section.body = body
+            section.words = words
+            section.status = status
+        outline_node = chapter_db.get(OutlineNode, node_id)
+        if outline_node is not None:
+            outline_node.status = status
+        mark_step_done(
+            chapter_db,
+            job_id,
+            f"chapter:{node_id}",
+            current_claim_token(),
+        )
+        jobs.publish_event(
+            job_id,
+            "chapter_committed",
+            {"node_id": node_id, "words": words, "status": status},
+            db=chapter_db,
+        )
+
+
 def _release_lease(project_id: str, token: str) -> None:
     if not token:
         return
@@ -212,33 +270,8 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
                 )
 
             def commit_chapter(info: dict[str, Any], body: str, source: str) -> None:
-                """Write one chapter and its done_steps mark under a fresh fence."""
-                node_id = str(info.get("node_id") or "")
-                section_id = str(info.get("section_id") or "")
-                words = int(info.get("words") or 0)
-                status = "fallback" if source == "fallback" else "drafted"
-                with fenced_chapter_write(
-                    job_id,
-                    node_id,
-                    project_id=project_id,
-                    lease_token=lease_token,
-                ) as (chapter_db, _row):
-                    section = chapter_db.scalar(
-                        select(Section).where(Section.id == section_id)
-                    ) if section_id else None
-                    if section is not None:
-                        section.body = body
-                        section.words = words
-                        section.status = status
-                    outline_node = chapter_db.get(OutlineNode, node_id)
-                    if outline_node is not None:
-                        outline_node.status = status
-                    mark_step_done(
-                        chapter_db,
-                        job_id,
-                        f"chapter:{node_id}",
-                        current_claim_token(),
-                    )
+                """Production chapter write path; tested directly by stage 3 suite."""
+                commit_generation_chapter(job_id, project_id, lease_token, info, body, source)
 
             report = generate_document(
                 work_db,
