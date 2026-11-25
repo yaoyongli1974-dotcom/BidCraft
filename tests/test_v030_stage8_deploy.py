@@ -78,7 +78,9 @@ def test_ci_has_docker_image_job_with_image_assertions():
     jobs = _ci_jobs()
     assert "docker-image" in jobs, "CI 缺少生产镜像构建 job"
     scripts = _step_scripts(jobs["docker-image"])
-    assert "docker build -t bidcraft:v030-check ." in scripts
+    # v0.31.3 将临时镜像标签改为 v0313-check；断言当前标签且不允许旧标签回退。
+    assert "docker build -t bidcraft:v0313-check ." in scripts
+    assert "bidcraft:v030-check" not in scripts
     assert "docker inspect" in scripts and "Config.User" in scripts
     assert "pg_dump --version" in scripts
     # 当前 CLI 提供 version 子命令而非 --version 选项，两者都视为可执行的 CLI 门禁。
