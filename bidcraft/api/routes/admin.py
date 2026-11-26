@@ -285,6 +285,7 @@ def update_kb(kb_id: str, payload: KbUpdate, request: Request) -> dict[str, Any]
             validate_kb(data.get("kind", row.kind), data.get("provider", row.provider))
         if data.get("kind") == "api" and row.kind == "local":
             # FK 未开级联，SQLite 也不强制外键：显式清理文档实体与其块。
+            knowledge.cleanup_duplicate_references(db, row.id)
             db.execute(delete(KbDocument).where(KbDocument.kb_id == row.id))
             db.execute(delete(KbChunk).where(KbChunk.kb_id == row.id))
             row.chunk_count = 0
@@ -294,6 +295,7 @@ def update_kb(kb_id: str, payload: KbUpdate, request: Request) -> dict[str, Any]
             and data["location"] != row.location
             and row.kind == "local"
         ):
+            knowledge.cleanup_duplicate_references(db, row.id)
             db.execute(delete(KbDocument).where(KbDocument.kb_id == row.id))
             db.execute(delete(KbChunk).where(KbChunk.kb_id == row.id))
             row.chunk_count = 0
@@ -322,6 +324,7 @@ def delete_kb(kb_id: str, request: Request) -> dict[str, Any]:
         row = db.get(KnowledgeBase, kb_id)
         if row is None:
             raise HTTPException(status_code=404, detail="知识库不存在")
+        knowledge.cleanup_duplicate_references(db, row.id)
         db.execute(delete(KbDocument).where(KbDocument.kb_id == kb_id))
         db.execute(delete(KbChunk).where(KbChunk.kb_id == kb_id))
         db.delete(row)

@@ -19,7 +19,7 @@ from datetime import UTC, date, datetime
 from sqlalchemy import or_, select
 
 from .. import clock
-from ..knowledge import tokens_for
+from ..knowledge import releasable_review_filter, tokens_for
 from ..models import KbChunk, KbDocument, Personnel, Qualification
 from ..qualifications import KIND_LABELS, status_of
 from . import assets, evidence
@@ -189,7 +189,9 @@ def _document_rows(
         kb = assets.enterprise_kb(db, enterprise, create=False)
         if kb is None:
             continue
-        statement = select(KbDocument).where(KbDocument.kb_id == kb.id)
+        statement = select(KbDocument).where(
+            KbDocument.kb_id == kb.id, releasable_review_filter()
+        )
         if kinds:
             statement = statement.where(KbDocument.kind.in_(kinds))
         for row in db.scalars(statement.order_by(KbDocument.created_at)):
@@ -198,10 +200,13 @@ def _document_rows(
 
 
 def _document_text(db, document: KbDocument, limit: int = 1200) -> str:
+    # 块级再按同一生命周期谓词收窄：即便调用方传入未发布文档，也不会把
+    # 草稿/驳回正文当成企业证据（无溯源旧块沿用既有放行语义）。
     chunks = list(
         db.scalars(
             select(KbChunk)
-            .where(KbChunk.document_id == document.id)
+            .join(KbDocument, KbChunk.document_id == KbDocument.id, isouter=True)
+            .where(KbChunk.document_id == document.id, releasable_review_filter())
             .order_by(KbChunk.ordinal)
         )
     )

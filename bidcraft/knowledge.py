@@ -27,7 +27,14 @@ from sqlalchemy import and_, delete, func, or_, select
 from . import clock
 from .config import settings
 from .model_config import api_base, resolve_embedding_endpoint
-from .models import KbChunk, KbDocument, KnowledgeBase, utcnow
+from .models import (
+    KbAssetDuplicateGroup,
+    KbAssetDuplicateMember,
+    KbChunk,
+    KbDocument,
+    KnowledgeBase,
+    utcnow,
+)
 from .security import decrypt_secret
 
 logger = logging.getLogger("bidcraft.knowledge")
@@ -444,6 +451,15 @@ def ingest_document(
         db.add(row)
         db.flush()
     else:
+        # 内容摘要变化意味着旧审核结论针对的是另一份文本：撤销发布痕迹，
+        # 新块回到草稿，重新走审核后才能进入检索/向量化/企业证据链路。
+        # 历史文档（review_status IS NULL）保持 legacy 语义，不被写入 draft。
+        if (row.sha256 or "") != digest and row.review_status is not None:
+            row.review_status = "draft"  # knowledge_assets.DRAFT
+            row.reviewed_by = None
+            row.reviewed_at = None
+            row.published_at = None
+            row.rejected_reason = None
         row.version = int(row.version or 1) + 1
         row.sha256 = digest
         row.size = size
@@ -493,11 +509,44 @@ def ingest_document(
     return row
 
 
+def cleanup_duplicate_references(
+    db, kb_id: str, *, document_id: str | None = None
+) -> None:
+    """删除查重孤儿行：先清成员，再清本库中已空的候选组。
+
+    ``document_id`` 给定时只清理该文档的成员（用于单文档删除）；否则清理
+    整个知识库的成员（用于 KB 删除）。不改变任何已裁决组的非空成员。
+    """
+
+    if document_id is not None:
+        db.execute(
+            delete(KbAssetDuplicateMember).where(
+                KbAssetDuplicateMember.document_id == document_id
+            )
+        )
+    else:
+        owned = select(KbAssetDuplicateGroup.id).where(
+            KbAssetDuplicateGroup.kb_id == kb_id
+        )
+        db.execute(
+            delete(KbAssetDuplicateMember).where(KbAssetDuplicateMember.group_id.in_(owned))
+        )
+    populated = select(KbAssetDuplicateMember.group_id)
+    db.execute(
+        delete(KbAssetDuplicateGroup).where(
+            KbAssetDuplicateGroup.kb_id == kb_id,
+            ~KbAssetDuplicateGroup.id.in_(populated),
+        )
+    )
+    db.flush()
+
+
 def delete_document(db, kb: KnowledgeBase, document_id: str) -> KbDocument:
     row = db.get(KbDocument, str(document_id or ""))
     if row is None or row.kb_id != kb.id:
         raise LookupError("文档不存在")
     db.execute(delete(KbChunk).where(KbChunk.document_id == row.id))
+    cleanup_duplicate_references(db, kb.id, document_id=row.id)
     db.delete(row)
     db.flush()
     _refresh_chunk_count(db, kb)
@@ -734,6 +783,17 @@ def embed_texts(endpoint, texts: list[str]) -> list[list[float]]:
     return vectors
 
 
+def releasable_review_filter(column=None):
+    """资产审核门禁：历史（NULL/空串）与 published 放行，其余状态一律拦截。
+
+    检索、企业匹配与向量化共用同一谓词，避免同一份块在一条链路可发布、
+    在另一条链路仍被当成有效证据。
+    """
+
+    target = KbDocument.review_status if column is None else column
+    return or_(target.is_(None), target == "", target == "published")
+
+
 def build_vectors(db, kb: KnowledgeBase) -> dict:
     """Embed chunks whose vectors are missing or stale; never raises on model failure."""
     total = int(kb.chunk_count or 0)
@@ -745,22 +805,19 @@ def build_vectors(db, kb: KnowledgeBase) -> dict:
         return {**result, "error": "未配置可用的向量模型"}
     key = _embed_key(endpoint)
     result["model"] = endpoint.model_name
+    stale = or_(KbChunk.embed_key.is_(None), KbChunk.embed_key != key)
     statement = (
         select(KbChunk)
-        .where(
-            KbChunk.kb_id == kb.id,
-            or_(KbChunk.embed_key.is_(None), KbChunk.embed_key != key),
-        )
+        .join(KbDocument, KbChunk.document_id == KbDocument.id, isouter=True)
+        .where(KbChunk.kb_id == kb.id, stale, releasable_review_filter())
         .order_by(KbChunk.source, KbChunk.ordinal, KbChunk.id)
     )
     pending = int(
         db.scalar(
             select(func.count())
             .select_from(KbChunk)
-            .where(
-                KbChunk.kb_id == kb.id,
-                or_(KbChunk.embed_key.is_(None), KbChunk.embed_key != key),
-            )
+            .join(KbDocument, KbChunk.document_id == KbDocument.id, isouter=True)
+            .where(KbChunk.kb_id == kb.id, stale, releasable_review_filter())
         )
         or 0
     )
@@ -834,18 +891,14 @@ def _ready_chunk_filter():
 
     today = clock.today()
     start = datetime(today.year, today.month, today.day)
-    # 结构化资产的审核门禁：只有历史行（review_status IS NULL）与 published
+    # 结构化资产的审核门禁与向量化/企业匹配共用，历史 NULL/空串与 published
     # 可检索；draft/review/approved/rejected/archived 一律显式拦截。
-    review_gate = or_(
-        KbDocument.review_status.is_(None),  # 旧文档未经资产抽取，保持既有行为
-        KbDocument.review_status == "published",
-    )
     return or_(
         KbDocument.id.is_(None),  # 迁移前的无溯源块仍可检索
         and_(
             KbDocument.status == "ready",
             or_(KbDocument.valid_to.is_(None), KbDocument.valid_to >= start),
-            review_gate,
+            releasable_review_filter(),
         ),
     )
 
