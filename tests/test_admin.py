@@ -156,7 +156,23 @@ def test_local_knowledge_base_index_and_search(db, tmp_path):
     assert hits
     assert "Cat6A" in hits[0].text
 
+    updated = client.patch(f"/admin/kbs/{kb_id}", json={"name": "公司技术资料（更新）"})
+    assert updated.status_code == 200, updated.text
     assert client.delete(f"/admin/kbs/{kb_id}").json()["deleted"] is True
+
+    from sqlalchemy import select
+
+    from bidcraft.models import AuditLog
+
+    with session_scope() as session:
+        actions = set(
+            session.scalars(
+                select(AuditLog.action).where(
+                    AuditLog.action.in_({"kb.create", "kb.update", "kb.delete"})
+                )
+            )
+        )
+    assert {"kb.create", "kb.update", "kb.delete"} <= actions
 
 
 def test_user_management_guards(db):

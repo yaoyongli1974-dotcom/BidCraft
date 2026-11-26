@@ -268,6 +268,7 @@ def create_kb(payload: KbCreate, request: Request) -> dict[str, Any]:
         )
         db.add(row)
         db.flush()
+        audit(db, None, "kb.create", {"kb_id": row.id, "name": row.name, "kind": row.kind})
         return knowledge.kb_payload(row, db)
 
 
@@ -314,6 +315,7 @@ def update_kb(kb_id: str, payload: KbUpdate, request: Request) -> dict[str, Any]
             unset_default_kb(db)
             row.is_default = True
         db.flush()
+        audit(db, None, "kb.update", {"kb_id": row.id, "fields": sorted(data)})
         return knowledge.kb_payload(row, db)
 
 
@@ -328,6 +330,7 @@ def delete_kb(kb_id: str, request: Request) -> dict[str, Any]:
         db.execute(delete(KbDocument).where(KbDocument.kb_id == kb_id))
         db.execute(delete(KbChunk).where(KbChunk.kb_id == kb_id))
         db.delete(row)
+        audit(db, None, "kb.delete", {"kb_id": kb_id, "name": row.name})
         return {"deleted": True, "id": kb_id}
 
 
@@ -401,6 +404,12 @@ def embed_kb(kb_id: str, request: Request) -> dict[str, Any]:
                 detail="未配置可用的向量模型；请在模型配置中添加 embedding 模型",
             )
         result = knowledge.build_vectors(db, row)
+        audit(
+            db,
+            None,
+            "kb.embed",
+            {"kb_id": row.id, "embedded": result.get("embedded", 0), "total": result.get("total", 0)},
+        )
         return {**result, "kb": knowledge.kb_payload(row, db)}
 
 

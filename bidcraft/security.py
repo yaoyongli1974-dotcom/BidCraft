@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import os
 import re
 import secrets
@@ -210,5 +211,14 @@ def redact_mapping(value: Any, *, depth: int = 0) -> Any:
     if isinstance(value, (list, tuple)):
         return [redact_mapping(item, depth=depth + 1) for item in value]
     if isinstance(value, str):
+        stripped = value.strip()
+        if stripped[:1] in ("{", "["):
+            try:
+                embedded = json.loads(stripped)
+            except (TypeError, ValueError):
+                pass
+            else:
+                if isinstance(embedded, (dict, list)):
+                    return json.dumps(redact_mapping(embedded, depth=depth + 1), ensure_ascii=False)
         return redact_text(value)
     return value

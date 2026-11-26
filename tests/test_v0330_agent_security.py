@@ -80,6 +80,17 @@ def test_trace_args_and_result_are_redacted() -> None:
     assert trace["args"]["api_key"] == "***REDACTED***"
 
 
+def test_nested_json_result_is_redacted() -> None:
+    secret = "nested-" "secret123456"
+    result = _loop(
+        _Client([_Call(), "完成"]),
+        lambda _name, _args: {"id": "p1", "payload": json.dumps({"password": secret})},
+    )
+    trace = result.tool_calls[0]
+    assert secret not in json.dumps(trace, ensure_ascii=False)
+    assert "***REDACTED***" in trace["result"]
+
+
 def test_fail_on_tool_error_rejects_final_text() -> None:
     with pytest.raises(ToolVerificationError, match="工具调用失败"):
         _loop(

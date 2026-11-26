@@ -1281,6 +1281,17 @@ def search(
             if kb.id not in known:
                 bases.append(kb)
                 known.add(kb.id)
+    # 企业知识库必须显式授权（由调用方先做企业成员校验）。只声明
+    # options.enterprise_id 而未进入 extra_ids 的库不得被全局检索命中。
+    authorised_enterprise = []
+    for kb in bases:
+        options = kb.options if isinstance(kb.options, dict) else {}
+        enterprise_id = options.get("enterprise_id")
+        if enterprise_id and kb.id not in extra_ids:
+            diagnostics["skipped"].append(f"企业知识库 {kb.id} 未显式授权")
+            continue
+        authorised_enterprise.append(kb)
+    bases = authorised_enterprise
     if not include_personal:
         bases = [
             kb

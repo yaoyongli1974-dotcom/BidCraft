@@ -617,6 +617,7 @@ def update_project(ref: str, payload: ProjectUpdate) -> dict[str, Any]:
         project, my_role = _project(db, ref)
         _require_write(my_role)
         keys: list[str] = []
+        lesson_audit: dict[str, Any] = {}
         meta = dict(project.meta or {})
         if "name" in updates:
             name = str(updates["name"] or "").strip()
@@ -738,18 +739,38 @@ def update_project(ref: str, payload: ProjectUpdate) -> dict[str, Any]:
             _require_owner(my_role)
             # 部分字段 PATCH：未给出的键沿用旧策略（尤其是 revoked_ids），
             # 白名单校验与裁剪统一交给 learning.normalize_lesson_policy。
-            merged = dict(load_lesson_policy(project))
+            old_policy = dict(load_lesson_policy(project))
+            merged = dict(old_policy)
             for key, value in (updates["lesson_policy"] or {}).items():
                 if value is not None:
                     merged[key] = value
-            meta[LESSON_POLICY_KEY] = normalize_lesson_policy(merged)
+            new_policy = normalize_lesson_policy(merged)
+            meta[LESSON_POLICY_KEY] = new_policy
+            lesson_audit = {
+                "revoked_added": sorted(
+                    set(new_policy["revoked_ids"]) - set(old_policy["revoked_ids"])
+                ),
+                "revoked_removed": sorted(
+                    set(old_policy["revoked_ids"]) - set(new_policy["revoked_ids"])
+                ),
+                "changed": {
+                    key: {"from": old_policy.get(key), "to": new_policy.get(key)}
+                    for key in ("grades", "trust_levels", "min_trust", "ttl_days")
+                    if old_policy.get(key) != new_policy.get(key)
+                },
+            }
             project.meta = meta
             keys.append("lesson_policy")
         if "is_template" in updates:
             _require_owner(my_role)
             project.is_template = bool(updates["is_template"])
             keys.append("is_template")
-        audit(db, project.id, "project.update", {"keys": keys})
+        audit(
+            db,
+            project.id,
+            "project.update",
+            {"keys": keys, **({"lesson_policy": lesson_audit} if lesson_audit else {})},
+        )
         return _project_payload(project, _project_stats(db, project.id), my_role)
 
 

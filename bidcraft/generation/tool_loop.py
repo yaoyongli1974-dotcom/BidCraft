@@ -299,6 +299,23 @@ def _assistant_message(content: str, calls: list[Any]) -> dict[str, Any]:
     return message
 
 
+def _redact_result_text(value: str) -> str:
+    """Redact JSON-encoded tool results before they enter an audited trace.
+
+    ``_payload_text`` serialises object results to JSON. ``redact_text`` only
+    recognises unquoted ``key=value`` forms, so a JSON string such as
+    ``{"password":"..."}`` would otherwise leak into workflow output.
+    """
+
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return redact_text(value)
+    if isinstance(parsed, (dict, list)):
+        return json.dumps(redact_mapping(parsed), ensure_ascii=False)
+    return redact_text(value)
+
+
 def _trace(
     *,
     name: str,
@@ -312,7 +329,7 @@ def _trace(
     trace = {
         "name": name,
         "args": redact_mapping(args),
-        "result": redact_text(result),
+        "result": _redact_result_text(result),
         "verification": verification,
         "audit_id": audit_id,
         "ts": datetime.now(UTC).isoformat(),

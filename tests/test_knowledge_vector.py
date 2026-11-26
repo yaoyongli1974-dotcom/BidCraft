@@ -581,6 +581,15 @@ def test_embed_route_partial_failure_is_200(db, tmp_path, monkeypatch):
     assert payload["error"]
     assert payload["kb"]["vector_stale"] is True
 
+    from bidcraft.models import AuditLog
+
+    with session_scope() as session:
+        embed_audits = list(
+            session.scalars(select(AuditLog).where(AuditLog.action == "kb.embed"))
+        )
+    assert embed_audits
+    assert any(str(kb_id) in str(item.detail) for item in embed_audits)
+
 
 def test_kb_payload_vector_fields_for_api_kb(db, monkeypatch):
     from bidcraft import knowledge

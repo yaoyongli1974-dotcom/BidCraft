@@ -253,7 +253,7 @@ def scoped_knowledge_provider(
     )
     if accepts_scope:
         return factory(db, user_id, project_id=project_id, package_id=package_id)
-    return factory(db, user_id)
+    raise ValueError("知识检索工厂不支持项目/标段作用域，拒绝无作用域检索")
 
 
 def chapter_plan_payload(row: ChapterPlan) -> dict[str, Any]:
@@ -354,24 +354,31 @@ def _allowed_kb_ids(
     """
 
     rows = list(db.scalars(select(KnowledgeBase).where(KnowledgeBase.enabled.is_(True))))
+    uid = str(user_id or "")
+    enterprise_ids: set[str] = set()
+    if uid:
+        try:
+            from ..enterprise.assets import enterprise_kb_ids
+
+            enterprise_ids = {str(item) for item in enterprise_kb_ids(db, uid)}
+        except Exception:  # noqa: BLE001 - 企业库不可用时只保留共享与个人库
+            import logging
+
+            logging.getLogger(__name__).debug("解析授权企业知识库失败", exc_info=True)
+
+    def _enterprise_allowed(options: dict) -> bool:
+        enterprise_id = str(options.get("enterprise_id") or "")
+        return not enterprise_id or enterprise_id in enterprise_ids
+
     allowed = {
         kb.id
         for kb in rows
         if not (kb.options or {}).get("personal")
         and _kb_scope_allowed(kb, project_id, package_id)
+        and _enterprise_allowed(kb.options or {})
     }
-    uid = str(user_id or "")
     if not uid:
         return allowed
-    enterprise_ids: set[str] = set()
-    try:
-        from ..enterprise.assets import enterprise_kb_ids
-
-        enterprise_ids = {str(item) for item in enterprise_kb_ids(db, uid)}
-    except Exception:  # noqa: BLE001 - 企业库不可用时只保留共享与个人库
-        import logging
-
-        logging.getLogger(__name__).debug("解析授权企业知识库失败", exc_info=True)
     for kb in rows:
         options = kb.options or {}
         if not options.get("personal") or not _kb_scope_allowed(kb, project_id, package_id):

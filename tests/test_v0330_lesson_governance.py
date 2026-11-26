@@ -179,6 +179,18 @@ def test_lesson_policy_patch_roundtrip_and_owner_only(db):
     assert stored["ttl_days"] == 30
     assert stored["revoked_ids"] == ["l1"]
 
+    from sqlalchemy import select
+
+    with session_scope() as session:
+        updates = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == project_id, AuditLog.action == "project.update"
+                )
+            )
+        )
+    assert any("l1" in str(row.detail) for row in updates)
+
 
 def test_lesson_policy_partial_patch_preserves_revoked_ids(db):
     client = _client()
