@@ -11,7 +11,9 @@ from sqlalchemy import case, or_
 
 _core = sys.modules['bidcraft.api.app']  # 运行期查找，保持 monkeypatch 生效
 
+from ...evaluation.learning import lessons_block  # noqa: E402
 from ...generation.chapter_plan import (  # noqa: E402
+    invalidate_stale_plan,
     normalize_retrieval,
     retrieval_ref_payload,
     scoped_knowledge_provider,
@@ -268,6 +270,13 @@ def _chapter_plan_gate(
     mode = _planning_mode(project)
 
     plan = load_active_plan(db, project.id, node.id)
+    if plan is not None:
+        stale = invalidate_stale_plan(db, plan)
+        if stale:
+            # HTTP 异常会让 session_scope 回滚；先把判废状态提交，避免旧 CONFIRMED
+            # 规划在后续请求里又被 load_active_plan 取回。
+            db.commit()
+            raise _http_error(409, "章节规划依赖已变化，请重新生成并确认：" + "；".join(stale[:3]))
     if plan is not None and plan.status in CONFIRMED_STATUSES:
         return plan
     history = db.scalar(
@@ -1500,8 +1509,20 @@ def _generate_chapter_plan(
             )
         except Exception:  # noqa: BLE001 - 知识检索失败不阻断规划
             provider = None
+        package_id = str(payload.package_id or "").strip() or package_id
+        try:
+            lessons_text = lessons_block(db, project, node.id)
+        except Exception:  # noqa: BLE001 - 未审核经验是可选 advisory
+            lessons_text = ""
         context = build_plan_context(
-            db, project.id, node, payload.user_instruction, provider
+            db,
+            project.id,
+            node,
+            payload.user_instruction,
+            provider,
+            user_id=str(user.get("id") or ""),
+            package_id=package_id,
+            lessons_text=lessons_text,
         )
         client = _generation_client(db)
         project_id = project.id
@@ -1563,7 +1584,7 @@ def create_chapter_plan(
 ) -> dict[str, Any]:
     """生成章节规划新版本；模型不可用时使用真实项目数据的确定性回退。"""
 
-    return _generate_chapter_plan(ref, node_id, payload, regenerate=False)
+    return _generate_chapter_plan(ref, node_id, payload, regenerate=bool(payload.regenerate))
 
 
 @router.post("/projects/{ref}/chapters/{node_id}/plan/generate")
@@ -1572,7 +1593,7 @@ def create_chapter_plan_alias(
 ) -> dict[str, Any]:
     """统一契约别名：与 POST /plan 等价，便于前端只使用文档化路径。"""
 
-    return _generate_chapter_plan(ref, node_id, payload, regenerate=False)
+    return _generate_chapter_plan(ref, node_id, payload, regenerate=bool(payload.regenerate))
 
 
 @router.post("/projects/{ref}/chapters/{node_id}/plan/regenerate")
@@ -1641,9 +1662,9 @@ def approve_chapter_plan(
         project, role = _project(db, ref)
         _require_write(role)
         node = authorize_node(db, project.id, node_id)
-        plan = load_active_plan(
-            db, project.id, node.id, (project.meta or {}).get("package_id")
-        )
+        # 不带项目 meta 的包件过滤：规划自身记录了生成时的 package_id，确认时
+        # 以它为准，避免项目切换到其他标段后把本标段的合法引用静默剔除。
+        plan = load_active_plan(db, project.id, node.id)
         if plan is None:
             raise _http_error(409, "该章节没有可确认的规划")
         username = str((current_user() or {}).get("username") or "")
@@ -1971,6 +1992,9 @@ def generate_chapter(ref: str, node_id: str) -> dict[str, Any]:
         heading = node.heading
         planning_warnings: list[str] = []
         active_plan = _chapter_plan_gate(db, project, node, planning_warnings)
+        # 门禁通过的规划必须冻结：后续生成会话里若有人改动/删除该行，也不能让
+        # writer 悄悄换用另一版本（尤其不能回退到 DRAFT/UPDATED）。
+        frozen_plan = active_plan
         plan_meta = _plan_metadata(active_plan)
         existing = db.scalar(select(Section).where(Section.node_id == node.id))
         if existing is not None and (existing.review_status or "draft") in {
@@ -2040,7 +2064,9 @@ def generate_chapter(ref: str, node_id: str) -> dict[str, Any]:
                 knowledge_provider=scoped_knowledge_provider(
                     _knowledge_provider, gen_db, user.id, project_id, package_id
                 ),
-                plan_provider=lambda nid: load_active_plan(gen_db, project_id, nid),
+                plan_provider=lambda nid: (
+                    frozen_plan if nid == node_id_value and frozen_plan is not None else None
+                ),
             )
         # 心跳线程发现租约失效后只置事件；生成会话可能已写出部分章节，按已写
         # 章节数结算而不是全额退款，避免把已完成的工作白送。
@@ -2111,6 +2137,7 @@ def write(ref: str) -> dict[str, Any]:
             db.flush()
         planning_warnings: list[str] = []
         plan_meta_list: list[dict[str, Any]] = []
+        frozen_plans: dict[str, ChapterPlan] = {}
         for outline_row in load_outline(db, project.id):
             if not is_pending(outline_row):
                 continue
@@ -2119,6 +2146,7 @@ def write(ref: str) -> dict[str, Any]:
                 continue
             active = _chapter_plan_gate(db, project, node_row, planning_warnings)
             if active is not None:
+                frozen_plans[node_row.id] = active
                 plan_meta_list.append(_plan_metadata(active))
         plan_meta = plan_meta_list[0] if plan_meta_list else _plan_metadata(None)
         plan_ids = [
@@ -2171,7 +2199,7 @@ def write(ref: str) -> dict[str, Any]:
                 knowledge_provider=scoped_knowledge_provider(
                     _knowledge_provider, gen_db, user.id, project_id, package_id
                 ),
-                plan_provider=lambda nid: load_active_plan(gen_db, project_id, nid),
+                plan_provider=lambda nid: frozen_plans.get(nid),
             )
         if heartbeat_abort.is_set():
             raise RuntimeError("项目生成租约已失效，生成中止")

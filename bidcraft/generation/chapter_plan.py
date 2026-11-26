@@ -304,11 +304,17 @@ def load_active_plan(
     """
 
     for row in db.scalars(_plan_query(db, project_id, node_id)):
-        if row.status not in ACTIVE_STATUSES:
+        # GENERATING/REGENERATING 是中间态，等下一次写入再判断；其余状态一旦出现
+        # 就以该 newest meaningful 版本为准。REJECTED 必须阻断，不能回退到更旧的
+        # CONFIRMED 版本——否则一次依赖失效会让旧规划继续被正文消费。
+        if row.status in {GENERATING, REGENERATING}:
             continue
         if package_id and row.package_id and row.package_id != package_id:
             continue
-        return row
+        if row.status == REJECTED:
+            return None
+        if row.status in ACTIVE_STATUSES:
+            return row
     return None
 
 
@@ -803,6 +809,120 @@ def _add_error(plan: ChapterPlan, message: str) -> None:
         plan.validation_errors = current
 
 
+def plan_dependency_staleness(db: Session, plan: ChapterPlan) -> list[str]:
+    """比较规划引用的真实行与当前值，返回中文依赖变化列表。
+
+    已确认规划只在依赖稳定时可复用。这里不新增字段/迁移，直接逐条读取规划
+    保存时写入 JSON 的真实 ID 与取值，和当前 ``ScoringItem`` / ``Requirement`` /
+    ``Fact`` / ``KbDocument`` / ``KbChunk`` / ``OutlineNode`` 对比。外部 API 知识库
+    引用（无本地 document/chunk 行）无法比对正文，不做臆测性判废。
+    """
+
+    reasons: list[str] = []
+
+    def add(message: str) -> None:
+        if message not in reasons and len(reasons) < 20:
+            reasons.append(message)
+
+    node = db.get(OutlineNode, plan.node_id) if plan.node_id else None
+    if node is None or node.project_id != plan.project_id:
+        add("大纲节点已删除或不再属于本项目，规划失效")
+    else:
+        match = re.search(r"围绕「(.+?)」", _text(plan.objective))
+        heading = _text(node.heading)
+        if match and heading and match.group(1) != heading:
+            add(f"大纲标题已从「{match.group(1)}」变更为「{heading}」，规划失效")
+
+    for row in _list(plan.score_points):
+        if not isinstance(row, dict):
+            continue
+        ident = _text(row.get("id"))
+        if not ident:
+            continue
+        item = db.get(ScoringItem, ident)
+        if item is None or item.project_id != plan.project_id:
+            add(f"评分项 {ident} 已删除，规划失效")
+            continue
+        if "name" in row and _text(row["name"]) != _text(item.name):
+            add(f"评分项「{_text(item.name)}」名称已变化，规划失效")
+        if "score" in row:
+            try:
+                old_score = float(row["score"] or 0)
+            except (TypeError, ValueError):
+                old_score = -1.0
+            if old_score != float(item.score or 0):
+                add(f"评分项「{_text(item.name)}」分值已变化，规划失效")
+        if "criteria" in row and _text(row["criteria"]) != _text(item.criteria):
+            add(f"评分项「{_text(item.name)}」评分标准已变化，规划失效")
+
+    for row in _list(plan.requirements):
+        if not isinstance(row, dict):
+            continue
+        ident = _text(row.get("id"))
+        if not ident:
+            continue
+        item = db.get(Requirement, ident)
+        if item is None or item.project_id != plan.project_id:
+            add(f"招标要求 {ident} 已删除，规划失效")
+            continue
+        if "text" in row and _text(row["text"]) != _text(item.text):
+            add("招标要求正文已变化，规划失效")
+        if "mandatory" in row and bool(row["mandatory"]) != bool(item.mandatory):
+            add("招标要求强制属性已变化，规划失效")
+        if "marker" in row and _text(row["marker"]) != _text(item.marker):
+            add("招标要求标记已变化，规划失效")
+
+    for row in _list(plan.fact_refs):
+        if not isinstance(row, dict):
+            continue
+        ident = _text(row.get("id"))
+        if not ident:
+            continue
+        item = db.get(Fact, ident)
+        if item is None or item.project_id != plan.project_id:
+            add(f"事实台账 {ident} 已删除，规划失效")
+            continue
+        for key, attr in (("key", "key"), ("label", "label"), ("value", "value"), ("unit", "unit")):
+            if key in row and _text(row[key]) != _text(getattr(item, attr, "")):
+                add(f"事实「{_text(item.key) or ident}」的{key}已变化，规划失效")
+
+    for row in _list(plan.knowledge_refs):
+        if not isinstance(row, dict):
+            continue
+        chunk_id = _text(row.get("chunk_id") or row.get("id"))
+        doc_id = _text(row.get("document_id"))
+        chunk = db.get(KbChunk, chunk_id) if chunk_id else None
+        document = db.get(KbDocument, doc_id) if doc_id else None
+        if chunk is None and document is None:
+            # 外部 API 知识库引用没有本地行，交由检索层按信任等级降级。
+            continue
+        if chunk_id and chunk is None:
+            add("知识检索引用指向的正文块已删除，规划失效")
+        if chunk is not None and (chunk_id != chunk.id or (doc_id and doc_id != chunk.document_id)):
+            add("知识检索引用指向的正文块已变化，规划失效")
+        if document is not None:
+            status = _text(getattr(document, "review_status", ""))
+            if status and status not in {"published", "ready"}:
+                add("知识文档已退回未发布状态，规划失效")
+    return reasons
+
+
+def invalidate_stale_plan(db: Session, plan: ChapterPlan | None) -> list[str]:
+    """把依赖已变化的规划明确判废；返回本次新增的中文原因。"""
+
+    if plan is None:
+        return []
+    reasons = plan_dependency_staleness(db, plan)
+    if not reasons:
+        return []
+    for message in reasons:
+        _add_error(plan, message)
+    if REJECTED in VALID_TRANSITIONS.get(plan.status or DRAFT, frozenset()):
+        plan.status = REJECTED
+    db.flush()
+    return reasons
+
+
 def validate_chapter_plan(
     db: Session,
     plan: ChapterPlan,
@@ -1086,7 +1206,11 @@ def confirm_chapter_plan(
     """校验通过后确认规划；不可修复的错误（如节点越权）直接拒绝。"""
 
     project = db.get(Project, plan.project_id)
-    package_id = str((project.meta or {}).get("package_id") or "") or None if project else None
+    # 以规划自身的标段为准：项目 meta 可能已切换到另一标段，确认时不能按新标段
+    # 把原规划里的合法知识引用静默剔除。
+    package_id = str(plan.package_id or "") or (
+        str((project.meta or {}).get("package_id") or "") or None if project else None
+    )
     validate_chapter_plan(db, plan, user_id=user_id, package_id=package_id)
     if plan.status == REJECTED:
         raise ValueError("规划绑定章节无效，不能确认")

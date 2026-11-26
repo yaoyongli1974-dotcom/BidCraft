@@ -16,6 +16,7 @@ from ..db import session_scope
 from ..generation.chapter_plan import (
     CONFIRMED_STATUSES,
     chapter_plan_payload,
+    invalidate_stale_plan,
     load_active_plan,
     mark_plan_used,
     scoped_knowledge_provider,
@@ -102,6 +103,10 @@ def _resolve_worker_plan(
     if plan is None:
         # 老 Job 没有 plans 映射时退回当前有效规划，仍执行同样的状态门禁。
         plan = load_active_plan(db, project_id, node_id, package_id)
+    if plan is not None:
+        stale = invalidate_stale_plan(db, plan)
+        if stale:
+            raise ValueError(f"章节 {node_id} 的规划依赖已变化，worker 拒绝生成正文：{'；'.join(stale[:3])}")
     if plan is not None and plan.status not in CONFIRMED_STATUSES and mode != "auto":
         raise ValueError(f"章节 {node_id} 的规划尚未确认，worker 拒绝生成正文")
     return plan

@@ -253,7 +253,13 @@ def chapter_plan_messages(context: dict) -> list[dict[str, str]]:
         f"真实知识条目（只能引用这里的 id，含文档/页码/溯源/可信度）：\n"
         f"{chr(10).join(json.dumps(row, ensure_ascii=False)[:600] for row in (context.get('knowledge') or [])[:4])}\n\n"
         f"检索文本（仅供参考，不能据此造出 ID）：\n{str(context.get('knowledge_text') or '')[:1200]}\n\n"
-        "请输出 JSON 规划。"
+        + (
+            "历史人工调整 / 未审核建议经验（仅供参考，非核实事实，不得写入正文作为事实）：\n"
+            f"{str(context.get('lessons_text') or '')[:1200]}\n\n"
+            if context.get("lessons_text")
+            else ""
+        )
+        + "请输出 JSON 规划。"
     )
     return [
         {"role": "system", "content": SYSTEM_CHAPTER_PLANNER},
