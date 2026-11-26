@@ -58,7 +58,7 @@
 
 ## 6. 验证状态与占位
 
-- **SQLite 可逆性已验证**：`tests/test_alembic.py` 覆盖 0013/0014/0015 的 upgrade/downgrade 往返、legacy NULL 语义与 no-default PRAGMA 检查；全量 SQLite 回归 `2257 passed, 886 skipped, 1 warning in 1779.18s`，零失败。
-- **真实 PostgreSQL 往返测试**：`tests/postgres/test_v032_migrations.py` 由独立 agent 创建，已显式加入 CI postgres job 的 pytest 命令；本地无 PG 常驻服务，结果占位：【待回填：真实 PG 迁移往返测试结果（含 upgrade/downgrade 往返、NULL 语义、幂等与权限）】。
-- **CI PG 门禁**：远端 job 强制 `tests>=900`、`skipped=0`、`failures=0`；【待回填：远端 CI postgres job 结果】。
+- **SQLite 可逆性已验证**：`tests/test_alembic.py` 覆盖 0013/0014/0015 的 upgrade/downgrade 往返、legacy NULL 语义与 no-default PRAGMA 检查；最终全量 SQLite 回归 `2257 passed, 888 skipped, 1 warning in 971.16s`，零失败。
+- **真实 PostgreSQL 往返测试**：`tests/postgres/test_v032_migrations.py` 已显式加入 CI postgres job 的 pytest 命令。本地使用 pgserver PostgreSQL 16.2 专用库 `v032_migrations` 执行 `BIDCRAFT_TEST_PG_URL='postgresql+psycopg://postgres:@/v032_migrations?host=/home/yao/.cache/bidcraft-v032-pgdata' .venv/bin/python -m pytest -o addopts="" -q tests/postgres/test_v032_migrations.py` → **2 passed in 5.47s**（head→0014→0013→0012 逐步降级、artifacts 消失、legacy 数据保留、再升级回 head `0015_fact_confirmation`，finally 恢复 head）。另在密钥扫描误报修复后，用专用库 `v032_secret_fix` 重跑 → **2 passed in 3.62s**。
+- **CI PG 门禁**：远端 job 强制 `tests>=900`、`skipped=0`、`failures=0`；最终 run `45732364770`（SHA `0716edfbdd9cc3c804a1c8e3c41bde8ef2673635`）的 `postgres (real integration)` job 成功，日志显示 `PG integration OK: 904 tests, 0 skipped`。
 - 未验证边界：真实生产库体量下的迁移耗时/锁竞争、跨版本跳级升级（仅验证从 `0012_generation_lease` 起逐级 upgrade），不作通过声明。

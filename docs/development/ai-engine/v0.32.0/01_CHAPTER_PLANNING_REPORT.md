@@ -60,7 +60,7 @@
 - 全量回归暴露两处契约型测试未同步：
   1. `tests/test_batch8_contract.py` 把 `/plan/{generate,regenerate,confirm,history}` 当作根命名空间；已把 4 个路径后缀加入 `FRONTEND_NON_API` 明确白名单（不是放宽断言）。
   2. `tests/test_v030_stage8_observability.py` 仍断言 252 条路由；7 条章节规划路由使总数变为 259，已更新期望值并同步 docstring。
-  修正后 19 passed；完整重跑待回填。
+  修正后 19 passed；该阶段完整重跑为 **2145 passed**（见 `10_TEST_REPORT.md` 阶段增量表）。
 
 ## 7. 残留风险
 

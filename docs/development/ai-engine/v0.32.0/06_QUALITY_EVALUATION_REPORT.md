@@ -46,7 +46,7 @@
 - Agent 分层验证：engine 98 passed；API 22 passed（含回归 38 passed）
 - Web：typecheck ✓、lint ✓、`npm test -- --run` → **57 files / 431 tests passed**、build ✓（1720 modules）
 - 路由运行时计数：274；schema 93；Alembic 单 head 0015
-- 全量后端 pytest：`.venv/bin/python -m pytest -o addopts="" -q` → **2257 passed, 886 skipped, 1 warning in 1779.18s**，零失败（仅 Starlette/httpx deprecation）。
+- 全量后端 pytest（Phase 7 收口后最终重跑）：`.venv/bin/python -m pytest -o addopts="" -q` → **2257 passed, 888 skipped, 1 warning in 971.16s**，零失败（仅 Starlette/httpx deprecation）。
 
 ## 6. 残留风险
 
