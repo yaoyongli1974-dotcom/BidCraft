@@ -4,6 +4,7 @@ import {
   exportEvaluationReport,
   getEvaluationReportDetail,
   getEvaluationSummary,
+  normalizeEvaluationSummaryItem,
   updateQualityFinding,
 } from './evaluation'
 import { generateChapterPlan, updateChapterPlan } from './generation'
@@ -518,7 +519,8 @@ describe('出站契约：质量评估新增端点', () => {
     const fetchMock = mockFetch({
       items: [
         { ref: 'p1', project_id: 'p1', name: '项目一', measured: true, report_id: 'r4',
-          report_version: 4, overall_score: 90.25, grade: 'A', verdict: 'pass' },
+          report_version: 4, overall_score: 90.25, grade: 'A', verdict: 'pass',
+          created_at: '2026-11-25T10:00:00Z' },
         { ref: 'p2', project_id: 'p2', name: '项目二', measured: false,
           overall_score: 100, grade: 'A', verdict: 'pass' },
       ],
@@ -534,10 +536,23 @@ describe('出站契约：质量评估新增端点', () => {
     expect(params.get('refs')).toBe('p 1,p2')
     expect(result.items[0].measured).toBe(true)
     expect(result.items[0].verdict).toBe('pass')
+    expect(result.items[0].report_version).toBe(4)
+    expect(result.items[0].created_at).toBe('2026-11-25T10:00:00Z')
     expect(result.items[1].measured).toBe(false)
     expect(result.items[1].overall_score).toBeNull()
     expect(result.items[1].grade).toBeNull()
     expect(result.items[1].verdict).toBeNull()
+  })
+
+  it('摘要条目未显式 measured=true 时一律未测量，不沿用旧分数', () => {
+    const item = normalizeEvaluationSummaryItem({
+      ref: 'p2', project_id: 'p2', name: '项目二', report_id: null,
+      overall_score: 100, grade: 'A', verdict: 'pass',
+    })!
+    expect(item.measured).toBe(false)
+    expect(item.overall_score).toBeNull()
+    expect(item.report_version).toBeNull()
+    expect(item.verdict).toBeNull()
   })
 
   it('忽略状态必须提交非空 note，字段仍限定为 status/note', async () => {

@@ -67,6 +67,23 @@ function detailText(value: unknown): string {
   return String(value)
 }
 
+/** 判定核对样本是 {clause, expected, actual, agree} 结构，渲染成可读句子。 */
+/** 后端 measured=false 时即使残留 0.0 也按未测量渲染（归一化器之外再加一道防线）。 */
+function measuredValue<T>(value: T, flag: boolean | undefined): T | null {
+  return flag === false ? null : value
+}
+
+function tenderValue<T>(value: T, tender?: TenderQuality): T | null {
+  return tender?.status === '未测量' ? null : value
+}
+
+function sampleText(sample: Record<string, unknown>): string {
+  if ('expected' in sample || 'actual' in sample || 'agree' in sample) {
+    return `判定：期望 ${detailText(sample.expected)} / 实测 ${detailText(sample.actual)} / ${sample.agree === true ? '一致' : '不一致'}`
+  }
+  return JSON.stringify(sample)
+}
+
 function dimensionClass(score: number): string {
   if (score >= 90) return 'is-ok'
   if (score >= 60) return 'is-warn'
@@ -119,40 +136,47 @@ function reportIdFromJob(job: Job): string {
 }
 
 function MetricDetails({ metrics, tender }: { metrics?: QualityMetrics; tender?: TenderQuality }) {
+  const tenderUnmeasured = tender?.status === '未测量' ? false : undefined
   const rows = [
     {
       label: '人工修改率',
       value: metrics?.manual_edit_rate,
+      measuredFlag: metrics?.measured?.manual_edit_rate,
       coverage: metrics?.coverage?.manual_edit_rate,
       samples: metrics?.samples?.manual_edit_rate,
     },
     {
       label: '问题密度',
       value: metrics?.issue_density,
+      measuredFlag: metrics?.measured?.issue_density,
       coverage: metrics?.coverage?.issue_density,
       samples: metrics?.samples?.issue_density,
     },
     {
       label: '清单匹配率',
       value: metrics?.boq_match_rate,
+      measuredFlag: metrics?.measured?.boq_match_rate,
       coverage: metrics?.coverage?.boq_match_rate,
       samples: metrics?.samples?.boq_match_rate,
     },
     {
       label: '条款召回率',
       value: tender?.clause_recall,
+      measuredFlag: tenderUnmeasured,
       coverage: tender?.coverage?.clauses,
       samples: tender?.samples?.matched_clauses,
     },
     {
       label: '关键值解析率',
       value: tender?.value_parse_rate,
+      measuredFlag: tenderUnmeasured,
       coverage: tender?.coverage?.values,
       samples: tender?.samples?.matched_values,
     },
     {
       label: '判定一致率',
       value: tender?.verdict_agreement,
+      measuredFlag: tenderUnmeasured,
       coverage: tender?.coverage?.verdict,
       samples: tender?.samples?.verdict_checks,
     },
@@ -166,7 +190,11 @@ function MetricDetails({ metrics, tender }: { metrics?: QualityMetrics; tender?:
       <summary>查看指标计算明细（分子 / 分母 / 样本）</summary>
       <ul>
         {rows.map((row) => {
-          const measured = row.value !== null && row.value !== undefined && row.value !== ''
+          // 后端显式 measured=false 时即使保留了 0.0 也按未测量展示。
+          const measured =
+            row.measuredFlag === false
+              ? false
+              : row.value !== null && row.value !== undefined && row.value !== ''
           const sampleRows = row.samples || []
           return (
             <li key={row.label}>
@@ -180,7 +208,7 @@ function MetricDetails({ metrics, tender }: { metrics?: QualityMetrics; tender?:
                 <div className="quality-metric-samples">
                   <span>可抽查样本 {sampleRows.length} 条</span>
                   {sampleRows.slice(0, 3).map((sample, index) => (
-                    <code key={index}>{JSON.stringify(sample)}</code>
+                    <code key={index}>{sampleText(sample)}</code>
                   ))}
                 </div>
               )}
@@ -783,12 +811,57 @@ export function QualityTab() {
               </Badge>
             </div>
             <div className="quality-overview">
-              <StatTile label="人工修改率" value={metricText(report.summary?.metrics?.manual_edit_rate, 'rate')} />
-              <StatTile label="问题密度" value={metricText(report.summary?.metrics?.issue_density, 'density')} />
-              <StatTile label="清单匹配率" value={metricText(report.summary?.metrics?.boq_match_rate, 'rate')} />
-              <StatTile label="条款召回率" value={metricText(report.summary?.tender_quality?.clause_recall, 'rate')} />
-              <StatTile label="关键值解析率" value={metricText(report.summary?.tender_quality?.value_parse_rate, 'rate')} />
-              <StatTile label="判定一致率" value={metricText(report.summary?.tender_quality?.verdict_agreement, 'rate')} />
+              <StatTile
+                label="人工修改率"
+                value={metricText(
+                  measuredValue(
+                    report.summary?.metrics?.manual_edit_rate,
+                    report.summary?.metrics?.measured?.manual_edit_rate,
+                  ),
+                  'rate',
+                )}
+              />
+              <StatTile
+                label="问题密度"
+                value={metricText(
+                  measuredValue(
+                    report.summary?.metrics?.issue_density,
+                    report.summary?.metrics?.measured?.issue_density,
+                  ),
+                  'density',
+                )}
+              />
+              <StatTile
+                label="清单匹配率"
+                value={metricText(
+                  measuredValue(
+                    report.summary?.metrics?.boq_match_rate,
+                    report.summary?.metrics?.measured?.boq_match_rate,
+                  ),
+                  'rate',
+                )}
+              />
+              <StatTile
+                label="条款召回率"
+                value={metricText(
+                  tenderValue(report.summary?.tender_quality?.clause_recall, report.summary?.tender_quality),
+                  'rate',
+                )}
+              />
+              <StatTile
+                label="关键值解析率"
+                value={metricText(
+                  tenderValue(report.summary?.tender_quality?.value_parse_rate, report.summary?.tender_quality),
+                  'rate',
+                )}
+              />
+              <StatTile
+                label="判定一致率"
+                value={metricText(
+                  tenderValue(report.summary?.tender_quality?.verdict_agreement, report.summary?.tender_quality),
+                  'rate',
+                )}
+              />
             </div>
             {(report.summary?.tender_quality?.reason ||
               (report.summary?.tender_quality?.notes || []).length > 0) && (

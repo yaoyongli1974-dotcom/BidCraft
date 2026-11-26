@@ -39,6 +39,22 @@ function asNotes(value: unknown): string[] {
   return Array.isArray(value) ? value.map(String) : []
 }
 
+const QUALITY_METRIC_KEYS = ['manual_edit_rate', 'issue_density', 'boq_match_rate'] as const
+
+/**
+ * 后端零分母/采集失败时保留 0.0 兼容旧调用方，但 measured[key]=false；
+ * 这里把未测量比率归一为 null，界面统一显示「未测量」而不是 0.0%。
+ * 旧报告没有 measured 字段时按已测量处理，保持历史快照可读。
+ */
+function asMetricMeasured(value: unknown): Record<string, boolean> {
+  const raw = asRecord(value)
+  const result: Record<string, boolean> = {}
+  for (const key of QUALITY_METRIC_KEYS) {
+    result[key] = typeof raw[key] === 'boolean' ? raw[key] : true
+  }
+  return result
+}
+
 /** 明细容器一律归一化成空对象/空数组，脏值不得让详情面板抛错。 */
 function asDetailRows(value: unknown): Array<Record<string, unknown>> {
   return Array.isArray(value)
@@ -92,11 +108,15 @@ export function normalizeQualityReport(value: unknown): QualityReport | null {
       }
     : undefined
   const metricsRaw = asRecord(summary.metrics)
+  const measured = asMetricMeasured(metricsRaw.measured)
+  const metricValue = (key: (typeof QUALITY_METRIC_KEYS)[number]) =>
+    measured[key] ? asMetric(metricsRaw[key]) : null
   const metrics = summary.metrics
     ? {
-        manual_edit_rate: asMetric(metricsRaw.manual_edit_rate),
-        issue_density: asMetric(metricsRaw.issue_density),
-        boq_match_rate: asMetric(metricsRaw.boq_match_rate),
+        manual_edit_rate: metricValue('manual_edit_rate'),
+        issue_density: metricValue('issue_density'),
+        boq_match_rate: metricValue('boq_match_rate'),
+        measured,
         notes: asNotes(metricsRaw.notes),
         coverage: asDetailCoverage(metricsRaw.coverage),
         samples: asDetailSamples(metricsRaw.samples),
@@ -208,8 +228,8 @@ export function normalizeEvaluationSummaryItem(value: unknown): EvaluationSummar
   if (!ref) return null
   const reportId = asNullableText(raw.report_id)
   // 没有落库报告时一律 measured=false，分数/等级/结论不得沿用旧值。
-  const measured =
-    (raw.measured === undefined ? true : raw.measured === true) && reportId !== null
+  // 只有后端显式 measured=true 且有报告 ID 才算已测量；缺省一律未测量。
+  const measured = raw.measured === true && reportId !== null
   return {
     project_id: asNullableText(raw.project_id) || ref,
     ref,

@@ -22,18 +22,26 @@ def _write_dataset(root: Path, *, files: list[dict], **extra: object) -> None:
     (root / "dataset.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
-def _entry(root: Path, name: str = "tender.md", *, synthetic: bool = False) -> dict:
-    body = (
-        "<!-- SYNTHETIC: framework self-check -->\n★投标人须具备独立法人资格\n"
-        if synthetic
-        else "★投标人须具备独立法人资格\n预算金额：壹仟万元\n"
-    )
+def _entry(
+    root: Path,
+    name: str = "tender.md",
+    *,
+    synthetic: bool = False,
+    marker_offset: int = 0,
+    source: str = "user-provided",
+) -> dict:
+    body = "★投标人须具备独立法人资格\n预算金额：壹仟万元\n"
+    if marker_offset:
+        body += "\n" * marker_offset + "<!-- SYNTHETIC: framework self-check -->\n"
+    elif synthetic:
+        body = "<!-- SYNTHETIC: framework self-check -->\n" + body
     path = root / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
     return {
         "path": name,
         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "source": source,
         "annotations": {
             "required_clauses": ["★投标人须具备独立法人资格"],
             "required_values": [{"key": "预算金额", "value": "壹仟万元"}],
@@ -81,6 +89,26 @@ def test_synthetic_marker_is_rejected_as_real_sample(tmp_path: Path) -> None:
     _write_dataset(tmp_path, files=[entry])
     with pytest.raises(ValueError, match="合成/示例标记"):
         load_dataset(tmp_path)
+
+
+def test_synthetic_marker_beyond_first_chunk_is_rejected(tmp_path: Path) -> None:
+    """合成标记出现在 4096 字节之后也必须被整文件扫描发现。"""
+    entry = _entry(tmp_path, marker_offset=6000)
+    assert (tmp_path / "tender.md").stat().st_size > 4096
+    _write_dataset(tmp_path, files=[entry])
+    with pytest.raises(ValueError, match="合成/示例标记"):
+        load_dataset(tmp_path)
+    assert dataset_status(tmp_path)["ready"] is False
+
+
+def test_non_user_provided_source_is_rejected(tmp_path: Path) -> None:
+    """只有用户提供的真实/脱敏文件才能进入回归集；synthetic 来源一律拒绝。"""
+    for index, source in enumerate(("synthetic", "synthetic-fixture", "", "user_generated")):
+        root = tmp_path / f"case-{index}"
+        entry = _entry(root, source=source)
+        _write_dataset(root, files=[entry])
+        with pytest.raises(ValueError, match="user-provided"):
+            load_dataset(root)
 
 
 def test_missing_annotation_is_rejected(tmp_path: Path) -> None:

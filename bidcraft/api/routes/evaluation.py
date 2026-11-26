@@ -34,6 +34,7 @@ from ..shared import (  # noqa: F401
     _project,
     audit,
     billing,
+    clock,
     current_user,
     jobqueue,
     jobs,
@@ -146,9 +147,13 @@ def _render_quality_markdown(payload: dict[str, Any]) -> str:
         lines.append("（无覆盖率数据）")
 
     lines += ["", "### 指标", ""]
+    # 零分母/采集失败时比率是 0.0，但 measured[key]=false：导出必须显示未测量，
+    # 旧报告没有 measured 字段时沿用原始比率，保持历史快照可读。
+    measured = metrics.get("measured") or {}
     for key in ("manual_edit_rate", "issue_density", "boq_match_rate"):
         if key in metrics:
-            lines.append(f"- {key}：{_md_text(metrics[key])}")
+            value = "未测量" if measured.get(key) is False else _md_text(metrics[key])
+            lines.append(f"- {key}：{value}")
     for note in metrics.get("notes") or []:
         lines.append(f"  - {_md_text(note)}")
     tender = summary.get("tender_quality") or {}
@@ -307,7 +312,9 @@ def evaluation_report_export(ref: str, report_id: str) -> Response:
 def evaluation_summary(ref: str, refs: str | None = None) -> dict[str, Any]:
     """单项目最新报告摘要；``?refs=a,b`` 聚合当前用户可访问的项目。
 
-    没有真实报告的项目直接跳过，不返回带默认分数的条目（绝不编造评分）。
+    请求过的每个可访问项目都占一行：有真实报告才带分数/等级/结论，
+    没有报告的返回 ``measured=false`` 占位条目且分数一律为 null（绝不编造评分）。
+    不可访问或不存在的 ref 由授权层过滤，不出现在结果里。
     """
     with session_scope() as db:
         if refs:
@@ -318,17 +325,21 @@ def evaluation_summary(ref: str, refs: str | None = None) -> dict[str, Any]:
         items: list[dict[str, Any]] = []
         for project in projects:
             reports = list_reports(db, project.id, limit=1)
-            if not reports:
-                continue
-            report = reports[0]
+            report = reports[0] if reports else None
             items.append(
                 {
-                    "project_id": report.project_id,
-                    "report_id": report.id,
-                    "overall_score": report.overall_score,
-                    "grade": report.grade,
-                    "verdict": report.verdict,
-                    "measured": True,
+                    "project_id": project.id,
+                    "ref": project.id,
+                    "name": project.name,
+                    "report_id": report.id if report else None,
+                    "report_version": report.report_version if report else None,
+                    "overall_score": report.overall_score if report else None,
+                    "grade": report.grade if report else None,
+                    "verdict": report.verdict if report else None,
+                    "created_at": (
+                        clock.iso_beijing(report.created_at) if report and report.created_at else None
+                    ),
+                    "measured": report is not None,
                 }
             )
     return {"items": items}

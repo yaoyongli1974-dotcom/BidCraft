@@ -41,7 +41,9 @@
 | `GET /projects/{ref}/evaluation` | 最新报告（含 findings） | 页面初始真相源 |
 | `GET /projects/{ref}/evaluation/reports?limit=20` | 历史报告列表 | 快照不可变；为控制体积，列表不含 findings |
 | `GET /projects/{ref}/evaluation/reports/{report_id}` | 单份报告（含 findings） | 按需读取详情 |
+| `GET /projects/{ref}/evaluation/reports/{report_id}/export` | 报告快照 Markdown 附件 | viewer 可导出；跨项目 report_id 一律 404，无 force 旁路 |
 | `GET /projects/{ref}/evaluation/reports/{report_id}/findings` | 问题清单 | 前端选中历史报告时调用，避免空问题列表 |
+| `GET /projects/{ref}/evaluation/summary?refs=a,b` | 单/跨项目质量摘要 | 每项含 `ref`/`name`/`report_version`/`created_at`；无报告返回 `measured=false` 占位，分数一律 null |
 | `PATCH /projects/{ref}/evaluation/findings/{finding_id}` | 更新后的问题 | 请求体 `{status, note?}`；`note` 与操作人写入 `evidence.resolution_note` / `evidence.resolved_by`，不改写报告快照 |
 
 处置状态支持 `handled` / `ignored`，也支持 `open`（重新打开）；每次处置都写审计并
@@ -57,9 +59,36 @@
 直接切换会显示空问题列表）。问题卡片可填写处置意见，标记已处置/忽略后展示处置人与
 意见，并可「重新打开」。
 
-## 尚未提供：报告导出与批量看板
+## 过程指标与「未测量」口径（v0.33.0 RC-11）
 
-质量报告目前**仅支持在线查看与处置**：没有报告导出端点（DOCX/PDF/XLSX），也没有跨项目
-批量质量看板 UI，属于未实现/暂缓能力（见 `docs/BIDCRAFT_RECON_INVENTORY.md` 模块 8）。
-报告快照含逐条 finding 与证据，导出格式与脱敏口径尚未定稿；现有
+`summary.metrics` 的三项过程指标沿用既有比率键
+（`manual_edit_rate` / `issue_density` / `boq_match_rate`）与 `coverage`/`samples`/
+`mismatches`/`notes` 明细；新增逐指标 `measured` 标记：
+
+- 分母 ≤ 0（无有正文章节 / 无正文词数 / 无 BOQ 清单行）时，比率仍返回 `0.0`
+  兼容旧调用方，但 `measured[key]=false`，Markdown 导出与前端统一显示「未测量」，
+  不显示 `0.0%`；
+- 采集器异常时只把该采集器负责的指标置为 `measured=false`，比率保持 0.0，
+  绝不拿半成品冒充实测值；
+- 旧报告快照没有 `measured` 字段时按已测量处理，历史导出内容不变；
+- 前端归一化器遇到 `measured=false` 会把比率归一为 `null`，界面显示「未测量」；
+  概览条目只有后端显式 `measured=true` 时才显示分数，缺省一律未测量。
+
+真实/脱敏招标文件指标（`summary.tender_quality`）数据集未就绪时状态为「未测量」，
+三条比率均为 `null`；缺少应答文本标注的条款不参与 `verdict_agreement`。
+
+## 真实/脱敏投标 E2E（v0.33.0 RC-10）
+
+`tests/test_v0330_dataset_gate.py` 只在 `dataset_status()` 返回 `ready=True` 时对
+`dataset.json` 里逐个人工标注文件跑 parse→outline→generate→check→export，并回检
+`required_clauses` / `required_values` / `expected_verdicts`。数据集位置由
+`BIDCRAFT_REAL_TENDER_ROOT` 注入；未就绪时用例以 `DATA BLOCKED` 明确跳过，
+绝不用合成夹具替代。CI 的 python-tests 只打印 `DATA BLOCKED (skip)` 或
+`READY (run)`，不把跳过当成门禁条件。
+
+## 报告导出与看板现状
+
+质量报告已支持只读 Markdown 附件导出（见上表）与跨项目摘要接口；前端质量评估页
+在「跨版本评估概览」展示有报告项目的真实分数，无报告项目显示「未测量」。
+DOCX/PDF/XLSX 报告导出与独立批量看板页暂未提供，报告快照含逐条 finding 与证据；
 `POST /projects/{ref}/export` 针对投标文件正文，不复用为质量报告导出。

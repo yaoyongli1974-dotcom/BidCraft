@@ -2,7 +2,8 @@
 
 本模块只做**数据集契约校验**：确认真实文件存在、指纹匹配、人工标注字段
 完整，并给出可机器读取的就绪状态。它不执行判定，也不把合成夹具冒充真实
-样本；没有用户提供的数据集时 ``load_dataset`` 会返回明确的未就绪原因。
+样本：每个条目必须显式标注 ``source='user-provided'``，且整文件分块扫描不得
+出现合成标记；没有用户提供的数据集时 ``load_dataset`` 会返回明确的未就绪原因。
 
 真实标书可能包含商业信息，因此 ``tests/fixtures/tender_real/`` 下的实际
 文件被 `.gitignore` 排除；仓库只保留 README 与 ``dataset.example.json``。
@@ -27,6 +28,19 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _has_synthetic_marker(path: Path) -> bool:
+    """分块扫描**整个文件**的合成标记；块间保留重叠，避免标记跨边界漏检。"""
+    overlap = 64  # 大于最长标记 UTF-8 字节数，足以覆盖跨块的多字节字符。
+    tail = b""
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(64 * 1024), b""):
+            text = (tail + chunk).decode("utf-8", errors="ignore")
+            if any(marker in text for marker in SYNTHETIC_MARKERS):
+                return True
+            tail = (tail + chunk)[-overlap:]
+    return False
 
 
 def dataset_path(root: Path | str = DEFAULT_ROOT) -> Path:
@@ -60,6 +74,12 @@ def load_dataset(root: Path | str = DEFAULT_ROOT) -> dict[str, Any]:
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
             raise TypeError(f"files[{index}] 必须是对象")
+        # 只有明确标注为用户提供的文件才允许作为真实件；合成/生成来源一律拒绝。
+        source = str(entry.get("source") or "").strip()
+        if source != "user-provided":
+            raise ValueError(
+                f"files[{index}].source 必须为 user-provided，实际为 {source or '空'}"
+            )
         name = str(entry.get("path") or "").strip()
         if not name or Path(name).is_absolute() or ".." in Path(name).parts:
             raise ValueError(f"files[{index}].path 必须是安全的相对路径")
@@ -79,8 +99,7 @@ def load_dataset(root: Path | str = DEFAULT_ROOT) -> dict[str, Any]:
         missing = [key for key in REQUIRED_ANNOTATIONS if not annotations.get(key)]
         if missing:
             raise ValueError(f"{name} 缺少人工标注：{', '.join(missing)}")
-        head = file_path.read_bytes()[:4096].decode("utf-8", errors="ignore")
-        if any(marker in head for marker in SYNTHETIC_MARKERS):
+        if _has_synthetic_marker(file_path):
             raise ValueError(f"{name} 含合成/示例标记，不能作为真实样本")
         # 可选标注：条款 → 应答正文。缺它时判定一致性只能记为未测量。
         responses = annotations.get("responses") or {}
@@ -99,7 +118,7 @@ def load_dataset(root: Path | str = DEFAULT_ROOT) -> dict[str, Any]:
                 }
                 | ({"responses": responses} if responses else {}),
                 "language": str(entry.get("language") or "zh"),
-                "source": str(entry.get("source") or "user-provided"),
+                "source": source,
             }
         )
     return {

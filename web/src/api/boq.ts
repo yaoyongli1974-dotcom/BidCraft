@@ -1,6 +1,7 @@
 import { ApiError, asArray, jsonBody, notifyUnauthorized, readError, request, uploadForm } from '../lib/http'
 import type { BoqAction, BoqPayload, BoqQuoteVersion, BoqSummary, BoqVersionDeleteResult, BoqVersionDiff, PricePolicy, QuotaFillResult, QuotaInput, QuotaItem, QuotaMatch, QuotaProposal } from '../lib/types'
 import { filenameFromDisposition } from './generation'
+import { normalizeApprovalExplain } from './project'
 import { EXCHANGE_RATE_MAX, EXCHANGE_RATE_MIN, asBool, asLooseBool, asNumber, asText, boqNumber, boqPackageQuery, clampExchangeRate, clampNumber, isoOrNull, normalizeBoqPayload, normalizeBoqVersionDiffChanged, normalizeBoqVersionDiffEntry, normalizeCurrency, normalizeQuotaItem, normalizeQuotaProposal, normalizeQuoteApprovals, normalizeQuoteVersionStatus, nullableNumber, postQuoteVersionAction, quotaItems } from './shared'
 
 // ---------------------------------------------------------------- boq domain
@@ -122,6 +123,8 @@ export function normalizeBoqQuoteVersion(value: unknown): BoqQuoteVersion | null
     reviewed_by: asText(source.reviewed_by).slice(0, 80),
     reviewed_at: isoOrNull(source.reviewed_at),
     approvals: normalizeQuoteApprovals(source.approvals),
+    // RC-09 后端逐阶段解释必须原样透传；BoqVersions 优先用它，仅在缺省时本地镜像兜底。
+    approval_explain: normalizeApprovalExplain(source.approval_explain),
     approval_stage: Math.max(0, Math.round(asNumber(source.approval_stage, 0))),
     // R21 生效级总数：旧后端不返回时缺省 1，界面用本地 applicableStages 回退。
     approval_stage_count: Math.max(1, Math.round(asNumber(source.approval_stage_count, 1))),
@@ -218,6 +221,7 @@ export async function createBoqVersion(
       reviewed_by: '',
       reviewed_at: null,
       approvals: [],
+      approval_explain: [],
       approval_stage: 0,
       approval_stage_count: 1,
     }

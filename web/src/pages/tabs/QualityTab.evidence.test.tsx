@@ -145,6 +145,55 @@ describe('QualityTab 证据与明细', () => {
     expect(screen.getAllByText('未测量').length).toBeGreaterThan(0)
   })
 
+  it('后端 measured=false 的指标显示未测量，绝不显示 0.0%', async () => {
+    vi.mocked(getLatestEvaluation).mockResolvedValue(report({
+      summary: {
+        metrics: {
+          manual_edit_rate: 0,
+          issue_density: 0,
+          boq_match_rate: 0,
+          measured: {
+            manual_edit_rate: false,
+            issue_density: false,
+            boq_match_rate: false,
+          },
+        },
+      },
+    }))
+    renderTab()
+    expect((await screen.findAllByText('未测量')).length).toBeGreaterThanOrEqual(6)
+    expect(screen.queryByText('0.0%')).toBeNull()
+    expect(screen.queryByText('0.0 /千词')).toBeNull()
+    fireEvent.click(await screen.findByText(/查看指标计算明细/))
+    const details = screen.getByText(/查看指标计算明细/).closest('details')!
+    expect(details.textContent).toContain('未测量')
+    expect(details.textContent).not.toContain('分子 0 / 分母 0')
+  })
+
+  it('判定明细以期望/实测/一致的可读形式展示', async () => {
+    vi.mocked(getLatestEvaluation).mockResolvedValue(report({
+      summary: {
+        tender_quality: {
+          status: '已测量',
+          clause_recall: 1,
+          value_parse_rate: 1,
+          verdict_agreement: 1,
+          coverage: {}, samples: {
+            verdict_checks: [
+              { clause: '★资质', expected: 'satisfied', actual: 'satisfied', agree: true },
+              { clause: '★业绩', expected: 'satisfied', actual: 'review', agree: false },
+            ],
+          },
+          mismatches: [],
+        },
+      },
+    }))
+    renderTab()
+    fireEvent.click(await screen.findByText(/查看指标计算明细/))
+    expect(screen.getByText(/判定：期望 satisfied \/ 实测 satisfied \/ 一致/)).toBeTruthy()
+    expect(screen.getByText(/判定：期望 satisfied \/ 实测 review \/ 不一致/)).toBeTruthy()
+  })
+
   it('忽略必须填写处置意见，校验通过后才提交 PATCH', async () => {
     vi.mocked(getLatestEvaluation).mockResolvedValue(report({ findings: [finding()] }))
     vi.mocked(updateQualityFinding).mockResolvedValue(

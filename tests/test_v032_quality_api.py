@@ -46,13 +46,21 @@ def qa(db):
     other = outsider.post(
         "/projects", json={"name": "外部质量项目", "package": "weakcurrent-cabling"}
     ).json()["id"]
+    from bidcraft.db import session_scope
+    from bidcraft.models import Project
+
+    with session_scope() as sess:
+        project_name = sess.get(Project, project).name
+        other_name = sess.get(Project, other).name
     return {
         "admin": admin,
         "owner": owner,
         "viewer": viewer,
         "outsider": outsider,
         "project": project,
+        "project_name": project_name,
         "other": other,
+        "other_name": other_name,
     }
 
 
@@ -129,6 +137,10 @@ def test_report_export_is_viewer_safe_markdown_with_real_anchors(qa):
     assert "覆盖 / 指标 / 经验摘要" in body
     assert "覆盖" in body and "指标" in body and "经验" in body
     assert "manual_edit_rate" in body
+    # 零分母指标保留比率键但明确呈现为未测量，不冒充 0.0%。
+    assert "manual_edit_rate：未测量" in body
+    assert "issue_density：未测量" in body
+    assert "boq_match_rate：未测量" in body
     # viewer 只能读，不能生成报告。
     assert qa["viewer"].post(f"/projects/{project}/evaluation/run", json={}).status_code == 403
 
@@ -200,10 +212,14 @@ def test_summary_is_scoped_and_never_fabricates_scores(qa):
         "items": [
             {
                 "project_id": project,
+                "ref": project,
+                "name": qa["project_name"],
                 "report_id": report["id"],
+                "report_version": report["report_version"],
                 "overall_score": report["overall_score"],
                 "grade": report["grade"],
                 "verdict": report["verdict"],
+                "created_at": report["created_at"],
                 "measured": True,
             }
         ]
@@ -214,7 +230,23 @@ def test_summary_is_scoped_and_never_fabricates_scores(qa):
         f"?refs={project},{empty_project},{qa['other']},missing"
     )
     assert scoped.status_code == 200, scoped.text
-    assert [row["project_id"] for row in scoped.json()["items"]] == [project]
+    scoped_items = scoped.json()["items"]
+    # 请求过的可访问项目都在，未出报告的以未测量占位条目呈现；
+    # 无权访问的 other 与不存在的 missing 仍由授权层过滤。
+    assert [row["project_id"] for row in scoped_items] == [project, empty_project]
+    assert [row["measured"] for row in scoped_items] == [True, False]
+    assert scoped_items[1] == {
+        "project_id": empty_project,
+        "ref": empty_project,
+        "name": "无报告项目",
+        "report_id": None,
+        "report_version": None,
+        "overall_score": None,
+        "grade": None,
+        "verdict": None,
+        "created_at": None,
+        "measured": False,
+    }
 
     outsider = qa["outsider"].get(
         f"/projects/{qa['other']}/evaluation/summary?refs={project},{qa['other']}"
@@ -222,7 +254,11 @@ def test_summary_is_scoped_and_never_fabricates_scores(qa):
     assert outsider.status_code == 200, outsider.text
     items = outsider.json()["items"]
     assert [row["project_id"] for row in items] == [qa["other"]]
+    assert items[0]["ref"] == qa["other"]
+    assert items[0]["name"] == qa["other_name"]
     assert items[0]["report_id"] == other_report["id"]
+    assert items[0]["report_version"] == other_report["report_version"]
+    assert items[0]["created_at"] == other_report["created_at"]
     assert items[0]["measured"] is True
 
     viewer = qa["viewer"].get(
@@ -231,6 +267,22 @@ def test_summary_is_scoped_and_never_fabricates_scores(qa):
     assert viewer.status_code == 200, viewer.text
     assert [row["project_id"] for row in viewer.json()["items"]] == [project]
 
-    # 没有真实报告的项目不返回带分数的条目。
+    # 没有真实报告的项目只返回无分数的未测量占位条目，绝不带默认分数。
     no_report = qa["owner"].get(f"/projects/{empty_project}/evaluation/summary")
-    assert no_report.status_code == 200 and no_report.json() == {"items": []}
+    assert no_report.status_code == 200
+    assert no_report.json() == {
+        "items": [
+            {
+                "project_id": empty_project,
+                "ref": empty_project,
+                "name": "无报告项目",
+                "report_id": None,
+                "report_version": None,
+                "overall_score": None,
+                "grade": None,
+                "verdict": None,
+                "created_at": None,
+                "measured": False,
+            }
+        ]
+    }

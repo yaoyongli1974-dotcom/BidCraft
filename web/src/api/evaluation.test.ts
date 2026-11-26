@@ -4,6 +4,7 @@ import {
   getEvaluationReportDetail,
   getEvaluationSummary,
   normalizeEvaluationSummary,
+  normalizeEvaluationSummaryItem,
   normalizeQualityFinding,
   normalizeQualityReport,
 } from './evaluation'
@@ -72,6 +73,38 @@ describe('normalizeQualityReport', () => {
     expect(report!.summary.tender_quality?.reason).toContain('数据集尚未就绪')
   })
 
+  it('marks zero-denominator metrics unmeasured instead of showing 0.0%', () => {
+    const report = normalizeQualityReport({
+      ...base,
+      summary: {
+        metrics: {
+          manual_edit_rate: 0,
+          issue_density: 0,
+          boq_match_rate: 0,
+          measured: {
+            manual_edit_rate: false,
+            issue_density: false,
+            boq_match_rate: false,
+          },
+        },
+      },
+    })
+    expect(report!.summary.metrics?.manual_edit_rate).toBeNull()
+    expect(report!.summary.metrics?.issue_density).toBeNull()
+    expect(report!.summary.metrics?.boq_match_rate).toBeNull()
+    expect(report!.summary.metrics?.measured).toEqual({
+      manual_edit_rate: false,
+      issue_density: false,
+      boq_match_rate: false,
+    })
+
+    const measured = normalizeQualityReport({
+      ...base,
+      summary: { metrics: { manual_edit_rate: 0.75, measured: { manual_edit_rate: true } } },
+    })
+    expect(measured!.summary.metrics?.manual_edit_rate).toBe(0.75)
+  })
+
   it('normalizes coverage/samples/mismatches details null-safe', () => {
     const report = normalizeQualityReport({
       ...base,
@@ -125,6 +158,37 @@ describe('normalizeQualityReport', () => {
 
   it('rejects invalid response', () => {
     expect(normalizeQualityReport({})).toBeNull()
+  })
+})
+
+describe('normalizeEvaluationSummaryItem', () => {
+  it('defaults to unmeasured unless the backend explicitly says measured=true', () => {
+    const item = normalizeEvaluationSummaryItem({
+      ref: 'p1', project_id: 'p1', name: '项目一', overall_score: 99, grade: 'A', verdict: 'pass',
+      report_id: 'r1', report_version: 3, created_at: '2026-11-25T10:00:00Z',
+    })
+    expect(item).toMatchObject({
+      measured: false, report_id: 'r1', overall_score: null, grade: null,
+      verdict: null, report_version: null,
+    })
+
+    const missingFlag = normalizeEvaluationSummaryItem({
+      ref: 'p1', measured: undefined, report_id: null, overall_score: 88,
+    })
+    expect(missingFlag!.measured).toBe(false)
+    expect(missingFlag!.overall_score).toBeNull()
+  })
+
+  it('keeps identity fields from the backend summary', () => {
+    const item = normalizeEvaluationSummaryItem({
+      project_id: 'p1', ref: ' p1 ', name: '项目一', measured: true, report_id: 'r9',
+      report_version: 3, overall_score: 88.5, grade: 'B', verdict: 'pass',
+      created_at: '2026-11-25T10:00:00Z',
+    })
+    expect(item).toMatchObject({
+      ref: 'p1', name: '项目一', report_version: 3,
+      created_at: '2026-11-25T10:00:00Z', measured: true,
+    })
   })
 })
 

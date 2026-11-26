@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 
 from bidcraft.config import settings
@@ -27,9 +30,20 @@ def db(tmp_path, monkeypatch):
 
 @pytest.fixture()
 def tender_path():
-    from pathlib import Path
-
     return Path(__file__).parent / "fixtures" / "tender_cabling.txt"
+
+
+@pytest.fixture()
+def real_tender_root() -> Path:
+    """真实/脱敏招标文件数据集根目录。
+
+    只由 ``BIDCRAFT_REAL_TENDER_ROOT`` 注入，未注入时用数据集模块的默认路径；
+    测试代码不硬编码真实数据位置，也不用合成夹具替代用户提供的数据集。
+    """
+    from bidcraft.evaluation.tender_dataset import DEFAULT_ROOT
+
+    configured = os.environ.get("BIDCRAFT_REAL_TENDER_ROOT", "").strip()
+    return Path(configured) if configured else DEFAULT_ROOT
 
 
 def make_docx_tender(path):

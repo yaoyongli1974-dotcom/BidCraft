@@ -2658,11 +2658,14 @@ export interface QualityReport {
       doc_status: string
       source: string
     }
-    /** v0.31 阶段 6：既有质量口径；无样本时后端写 0 并给 notes。 */
+    /** v0.31 阶段 6：既有质量口径。分母为 0/采集失败时后端保留 0.0 兼容旧调用方，
+     *  但 measured[key]=false；前端据此显示「未测量」，绝不显示 0.0%。 */
     metrics?: {
       manual_edit_rate?: number | string | null
       issue_density?: number | string | null
       boq_match_rate?: number | string | null
+      /** 逐指标可信标记；旧报告缺字段时按已测量处理，保持历史快照可读。 */
+      measured?: Record<string, boolean>
       notes?: string[]
       /** 每项指标的分子/分母/样本数；后端没给时为空对象。 */
       coverage?: Record<string, Record<string, unknown>>
@@ -2703,7 +2706,7 @@ export interface QualityRunInput {
   note?: string
 }
 
-/** 跨项目评估概览的单行：measured=false 表示该项目没有报告，分数/结论一律 null。 */
+/** 跨项目评估概览的单行：measured=false 表示未出报告（或后端未显式测量），分数/结论一律 null。 */
 export interface EvaluationSummaryItem {
   project_id: string
   ref: string

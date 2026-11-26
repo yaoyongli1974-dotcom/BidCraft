@@ -20,11 +20,13 @@ METRIC_KEYS = {
     "manual_edit_rate",
     "issue_density",
     "boq_match_rate",
+    "measured",
     "coverage",
     "samples",
     "mismatches",
     "notes",
 }
+MEASURED_KEYS = {"manual_edit_rate", "issue_density", "boq_match_rate"}
 
 
 def _project(db, name: str) -> Project:
@@ -151,11 +153,15 @@ def test_manual_edit_rate_exact_ratio_and_zero_denominator(db):
         metrics = collect_quality_metrics(sess, project.id)
         assert set(metrics) == METRIC_KEYS
         assert metrics["manual_edit_rate"] == round(2 / 4, 4)  # 0.5
+        assert set(metrics["measured"]) == MEASURED_KEYS
+        assert metrics["measured"]["manual_edit_rate"] is True
+        assert metrics["measured"]["issue_density"] is True
         assert any("4 个有正文的章节" in note for note in metrics["notes"])
 
         empty = _project(sess, "metrics-edit-empty")
         zero = collect_quality_metrics(sess, empty.id)
         assert zero["manual_edit_rate"] == 0.0
+        assert zero["measured"]["manual_edit_rate"] is False
         assert any("0 个有正文的章节" in note for note in zero["notes"])
 
 
@@ -188,13 +194,16 @@ def test_issue_density_counts_severe_unresolved_per_1000_words(db):
         metrics = collect_quality_metrics(sess, project.id)
         # 200 个 word + 三个短标题（正文A/B/C 各 3 词）= 209 词。
         assert metrics["issue_density"] == round(5 / 209 * 1000, 4)
+        assert metrics["measured"]["issue_density"] is True
         assert any("209 词" in note for note in metrics["notes"])
 
         no_words = _project(sess, "metrics-density-empty")
         report = _report(sess, no_words.id)
         _finding(sess, report.id, "blocking", "open")
         _section(sess, no_words.id, "", 1)
-        assert collect_quality_metrics(sess, no_words.id)["issue_density"] == 0.0
+        empty_metrics = collect_quality_metrics(sess, no_words.id)
+        assert empty_metrics["issue_density"] == 0.0
+        assert empty_metrics["measured"]["issue_density"] is False
 
 
 def test_boq_match_rate_uses_canonical_align_marker_and_zero_denominator(db):
@@ -203,11 +212,13 @@ def test_boq_match_rate_uses_canonical_align_marker_and_zero_denominator(db):
         _seed_boq(sess, project.id)
         metrics = collect_quality_metrics(sess, project.id)
         assert metrics["boq_match_rate"] == 0.75  # 2 matched + 1 spec_diff / 4
+        assert metrics["measured"]["boq_match_rate"] is True
         assert any("boq.align()" in note for note in metrics["notes"])
 
         empty = _project(sess, "metrics-boq-empty")
         zero = collect_quality_metrics(sess, empty.id)
         assert zero["boq_match_rate"] == 0.0
+        assert zero["measured"]["boq_match_rate"] is False
         assert any("没有 BOQ 清单行" in note for note in zero["notes"])
 
 
@@ -222,6 +233,11 @@ def test_build_quality_report_stores_metrics_and_preserves_summary(db):
         assert metrics["manual_edit_rate"] == 0.5
         assert metrics["issue_density"] == round(5 / 209 * 1000, 4)
         assert metrics["boq_match_rate"] == 0.75
+        assert metrics["measured"] == {
+            "manual_edit_rate": True,
+            "issue_density": True,
+            "boq_match_rate": True,
+        }
         # 既有摘要键一个不少。
         assert {"coverage", "recommendations", "note"} <= set(report.summary)
         assert report.summary["note"] == "例行"
@@ -286,7 +302,13 @@ def test_issue_density_dedupes_stable_key_latest_status(db):
 
 
 def test_collect_quality_metrics_never_raises_on_missing_data(db):
-    assert collect_quality_metrics(None, "missing-db")["manual_edit_rate"] == 0.0
+    no_db = collect_quality_metrics(None, "missing-db")
+    assert no_db["manual_edit_rate"] == 0.0
+    assert no_db["measured"] == {
+        "manual_edit_rate": False,
+        "issue_density": False,
+        "boq_match_rate": False,
+    }
 
     class BrokenDB:
         def execute(self, *_args, **_kwargs):
@@ -300,4 +322,26 @@ def test_collect_quality_metrics_never_raises_on_missing_data(db):
     assert metrics["manual_edit_rate"] == 0.0
     assert metrics["issue_density"] == 0.0
     assert metrics["boq_match_rate"] == 0.0
+    assert all(flag is False for flag in metrics["measured"].values())
     assert len(metrics["notes"]) == 2
+
+
+def test_measured_flag_false_only_for_failed_collector(db, monkeypatch):
+    """单个采集器失败时，仅该采集器负责的指标记为未测量。"""
+    from bidcraft.evaluation import quality_metrics
+
+    def broken_boq(_db, _project_id, _metrics):
+        raise RuntimeError("boq collector down")
+
+    monkeypatch.setattr(quality_metrics, "_boq_metrics", broken_boq)
+    with session_scope() as sess:
+        project = _project(sess, "metrics-partial-failure")
+        _section(sess, project.id, "正文", 1)
+        metrics = collect_quality_metrics(sess, project.id)
+        assert metrics["manual_edit_rate"] == 0.0
+        assert metrics["issue_density"] == 0.0
+        assert metrics["boq_match_rate"] == 0.0
+        assert metrics["measured"]["manual_edit_rate"] is True
+        assert metrics["measured"]["issue_density"] is True
+        assert metrics["measured"]["boq_match_rate"] is False
+        assert any("清单指标" in note and "未测量" in note for note in metrics["notes"])

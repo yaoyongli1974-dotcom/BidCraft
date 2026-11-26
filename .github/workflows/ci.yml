@@ -233,6 +233,26 @@ jobs:
       - name: Test (pytest)
         run: uv run --frozen pytest -q --junitxml=/tmp/pytest-results.xml
 
+      # RC-10：真实/脱敏数据集是可选外部输入，这里只报告状态、不设门禁，
+      # 也不把 skip 数量当作失败条件（DATA BLOCKED 时真实件 E2E 明确跳过）。
+      - name: Real tender dataset status (non-gating)
+        env:
+          BIDCRAFT_REAL_TENDER_ROOT: ${{ vars.BIDCRAFT_REAL_TENDER_ROOT || '' }}
+        run: |
+          uv run --frozen python - <<'PY'
+          import os
+          from pathlib import Path
+
+          from bidcraft.evaluation.tender_dataset import DEFAULT_ROOT, dataset_status
+
+          root = Path(os.environ.get("BIDCRAFT_REAL_TENDER_ROOT") or DEFAULT_ROOT)
+          status = dataset_status(root)
+          if status["ready"]:
+              print(f"READY (run): {status['files']} annotated real/redacted tender file(s)")
+          else:
+              print(f"DATA BLOCKED (skip): {status['reason']}")
+          PY
+
       - name: Calibration regression (synthetic + industry fixtures, baseline gate)
         run: uv run --frozen bidcraft calibrate tests/fixtures/regression --compare-baseline tests/fixtures/regression/baseline.json
 

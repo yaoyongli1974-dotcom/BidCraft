@@ -4,16 +4,19 @@
 
 * ``manual_edit_rate`` = 有正文的章节中留下人工修订（且仅有
   ``SectionRevision.change_type='edit'`` 算人工修改，``restore``/``generate``
-  不算）的比例（分母：``body`` 去除空白后非空的章节数；分母为 0 → 0.0）。
+  不算）的比例（分母：``body`` 去除空白后非空的章节数；分母为 0 → 0.0 且
+  ``measured['manual_edit_rate']=false``）。
   有修订快照时只认真实 ``edit`` 行；没有快照的历史章节才回退到 ``revision > 1``。
 * ``issue_density`` = 未处置且级别为 blocking/major 的质量 finding 数 /
   章节正文总词数 × 1000（分母：章节正文词数，按
   ``generation.writer.count_words`` 口径：中日韩字符逐字 + 拉丁字母/数字词块；
-  分母为 0 → 0.0；该指标表示每千词问题数，**不**做 0..1 截断）。
+  分母为 0 → 0.0 且 ``measured['issue_density']=false``；该指标表示每千词问题数，
+   **不**做 0..1 截断）。
   同一问题跨报告版本只计一次：按 ``evidence.stable_key``（或 ``fingerprint``）
   去重并取最新版本的状态；没有稳定键的历史 finding 按行 id 各自计数。
 * ``boq_match_rate`` = 已匹配清单行 / 项目清单总行数
-  （分母：项目所有在用 BOQ 快照的 ``items`` 行数；分母为 0 → 0.0）。
+  （分母：项目所有在用 BOQ 快照的 ``items`` 行数；分母为 0 → 0.0 且
+   ``measured['boq_match_rate']=false``）。
 
 BOQ 没有落库的匹配标记：``boq.align()`` 每次依据快照 items 与实时材料台账
 重新计算每行的 ``status``。这里复用该规范结果，把 status ∈
@@ -24,6 +27,10 @@ BOQ 没有落库的匹配标记：``boq.align()`` 每次依据快照 items 与�
 每项同时输出 ``coverage``（分子/分母/样本数）、``samples``（最多 20 条具体
 样本）与 ``mismatches``（未处置 finding / 未匹配清单行）明细，便于人工抽查
 与回归比对；样本只用于展示，比率始终由全量计数计算。
+
+``measured`` 是逐指标的可信标记：分母 ≤ 0 或采集器失败时对应的比率为 0.0
+（兼容旧调用方），但 ``measured[key]`` 必须为 ``False``，调用方据此展示
+「未测量」而不是 0.0%。
 """
 
 from __future__ import annotations
@@ -72,6 +79,12 @@ _SEVERE_LEVELS = frozenset({"blocking", "major", "阻断", "废标", "主要"})
 _MATCHED_BOQ_STATUSES = frozenset({"matched", "qty_diff", "unit_diff", "spec_diff"})
 #: 明细最多保留多少条样本；覆盖率计数始终基于全量，不受样本截断影响。
 MAX_SAMPLES = 20
+#: 三项比率键及每个采集器负责的指标；采集失败时只把对应指标记为未测量。
+RATIO_KEYS = ("manual_edit_rate", "issue_density", "boq_match_rate")
+_COLLECTOR_METRICS = {
+    "章节指标": ("manual_edit_rate", "issue_density"),
+    "清单指标": ("boq_match_rate",),
+}
 
 
 def _rate(numerator: int, denominator: int) -> float:
@@ -133,6 +146,7 @@ def _section_metrics(db: Session, project_id: str, metrics: dict[str, Any]) -> N
         if is_edited(node_id, revision)
     )
     metrics["manual_edit_rate"] = _rate(edited, len(written))
+    metrics["measured"]["manual_edit_rate"] = len(written) > 0
     metrics["coverage"]["manual_edit_rate"] = {
         "numerator": edited,
         "denominator": len(written),
@@ -192,6 +206,7 @@ def _section_metrics(db: Session, project_id: str, metrics: dict[str, Any]) -> N
     metrics["issue_density"] = (
         round(len(severe_rows) / words * 1000, 4) if words else 0.0
     )
+    metrics["measured"]["issue_density"] = words > 0
     metrics["coverage"]["issue_density"] = {
         "numerator": len(severe_rows),
         "denominator": words,
@@ -266,6 +281,7 @@ def _boq_metrics(db: Session, project_id: str, metrics: dict[str, Any]) -> None:
             if not is_match and len(mismatches) < MAX_SAMPLES:
                 mismatches.append({"metric": "boq_match_rate", "kind": "boq_row", **detail})
     metrics["boq_match_rate"] = _rate(matched, total)
+    metrics["measured"]["boq_match_rate"] = total > 0
     metrics["coverage"]["boq_match_rate"] = {
         "numerator": matched,
         "denominator": total,
@@ -290,15 +306,19 @@ def collect_quality_metrics(db: Session | None, project_id: str) -> dict[str, An
     """收集项目级质量指标；任何缺失数据都不抛异常，返回全键零值 + 说明。
 
     Returns exactly ``{manual_edit_rate, issue_density, boq_match_rate,
-    coverage, samples, mismatches, notes}``. ``coverage`` records per-metric
-    numerator/denominator, ``samples`` keeps up to :data:`MAX_SAMPLES` concrete
-    sample rows, and ``mismatches`` lists unresolved findings / unmatched BOQ
-    rows. Ratios are computed from full counts, never from truncated samples.
+    measured, coverage, samples, mismatches, notes}``. ``measured`` maps each
+    ratio to a bool: ``False`` means denominator ≤ 0 or collector failure, and
+    the corresponding 0.0 must be shown as 未测量 by callers. ``coverage``
+    records per-metric numerator/denominator, ``samples`` keeps up to
+    :data:`MAX_SAMPLES` concrete sample rows, and ``mismatches`` lists unresolved
+    findings / unmatched BOQ rows. Ratios are computed from full counts, never
+    from truncated samples.
     """
     metrics: dict[str, Any] = {
         "manual_edit_rate": 0.0,
         "issue_density": 0.0,
         "boq_match_rate": 0.0,
+        "measured": {key: False for key in RATIO_KEYS},
         "coverage": {},
         "samples": {},
         "mismatches": [],
@@ -306,14 +326,19 @@ def collect_quality_metrics(db: Session | None, project_id: str) -> dict[str, An
     }
     notes: list[str] = metrics["notes"]
     if db is None:
-        notes.append("数据库会话不可用，三项指标均为 0.0")
+        notes.append("数据库会话不可用，三项指标均为 0.0（未测量）")
         return metrics
     for name, collector in (("章节指标", _section_metrics), ("清单指标", _boq_metrics)):
         try:
             collector(db, project_id, metrics)
         except Exception as exc:  # noqa: BLE001 - 指标是旁路观测，不能拖垮评估主流程
             logger.warning("collect %s failed for project %s: %s", name, project_id, exc)
-            notes.append(f"{name}不可用，相关指标保持 0.0: {type(exc).__name__}")
+            # 采集失败可能发生在设置 measured 之后：整组回退为未测量，不保留半成品。
+            for key in _COLLECTOR_METRICS[name]:
+                metrics["measured"][key] = False
+            notes.append(
+                f"{name}不可用，相关指标未测量（0.0 仅为兼容占位）: {type(exc).__name__}"
+            )
     return metrics
 
 
