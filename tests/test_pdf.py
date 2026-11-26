@@ -1,15 +1,29 @@
 from __future__ import annotations
 
+import importlib
+import os
 import shutil
 import subprocess
 
 import pytest
 
+import bidcraft.export.pdf as pdf_module
 from bidcraft.export.docx import export_docx
 from bidcraft.export.pdf import PdfExportError, export_pdf
 from bidcraft.schemas import FactItem, FactLedger
 
 SOFFICE = shutil.which("soffice") or shutil.which("libreoffice")
+
+
+def test_pdf_timeout_env_override(monkeypatch):
+    monkeypatch.setenv("BIDCRAFT_PDF_TIMEOUT", "600")
+    try:
+        module = importlib.reload(pdf_module)
+        assert module.PDF_EXPORT_TIMEOUT == 600
+    finally:
+        if "BIDCRAFT_PDF_TIMEOUT" in os.environ:
+            monkeypatch.delenv("BIDCRAFT_PDF_TIMEOUT", raising=False)
+        importlib.reload(pdf_module)
 
 
 @pytest.mark.skipif(SOFFICE is None, reason="LibreOffice 未安装")

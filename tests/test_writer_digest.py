@@ -26,3 +26,13 @@ def test_digest_capped_and_collapses_whitespace():
 def test_digest_skips_empty_bodies():
     text = continuity_digest([("空章", "")])
     assert "空章" in text and "近期章节" not in text
+
+
+def test_long_document_digest_keeps_every_heading_within_cap():
+    chapters = [(f"第{i}章", f"长正文 {i} " * 200) for i in range(1, 51)]
+    text = continuity_digest(chapters, cap=1200)
+    assert len(text) <= 1200
+    for index in range(1, 51):
+        assert f"第{index}章" in text
+    assert "全书已写章节索引" in text
+    assert not text.endswith("长正文")

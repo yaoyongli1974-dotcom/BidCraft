@@ -81,6 +81,39 @@ def test_validator_accepts_clean_document(tmp_path):
     assert not [issue for issue in result["issues"] if issue["code"] == "heading_skip"]
 
 
+def test_large_synthetic_document_validates_without_structural_errors(tmp_path):
+    sections = []
+    for index in range(1, 61):
+        sections.append(
+            DocumentSection(
+                heading=f"第{index}章 合成章节",
+                paragraphs=[DocumentParagraph(f"这是第{index}章的合成正文，用于长文档工程校验。")],
+                tables=[
+                    DocumentTable(
+                        rows=[["名称", "数量"], [f"材料{index}", "1"]],
+                        caption=f"第{index}章材料表",
+                    )
+                ]
+                if index % 10 == 0
+                else [],
+            )
+        )
+    ir = DocumentIR(
+        sections=sections,
+        core_properties={"title": "合成长文档校验", "author": "工程测试"},
+    )
+    output = _render(ir, tmp_path / "large-synthetic.docx")
+
+    result = validate_docx_package(output)
+    report = build_document_report(ir, result)
+
+    assert result["valid"] is True
+    assert [issue for issue in result["issues"] if issue["severity"] == "error"] == []
+    assert report["sections"] == 60
+    assert report["paragraph_count"] == 60
+    assert report["table_count"] == 6
+
+
 def test_validator_flags_missing_table_header_and_core_properties(tmp_path):
     ir = DocumentIR(
         sections=[

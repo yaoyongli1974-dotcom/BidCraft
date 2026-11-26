@@ -359,13 +359,25 @@ class GenerationReport:
     unused_plan_refs: dict[str, dict[str, list[str]]] = field(default_factory=dict)
 
 
+def _clip_lines(text: str, limit: int) -> str:
+    """Clip text at line boundaries so a prompt never ends in a half line."""
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+    cut = text.rfind("\n", 0, limit + 1)
+    return text[:cut] if cut > 0 else text[:limit]
+
+
 def continuity_digest(chapters: list[tuple[str, str]], *, recent: int = 3, cap: int = 4000) -> str:
     """Build a compact cross-chapter digest for long documents.
 
-    Long-range section keeps every heading with a one-line gist so the model
-    knows the whole structure; the recent tail keeps fuller excerpts so the next
-    chapter can pick up terminology, numbers and commitments without repeating
-    them. The result is capped so it cannot crowd out the outline.
+    Long-range section keeps every heading so the model knows the whole
+    structure; when a very long document cannot fit one-line gists, the gists
+    are dropped before headings. The recent tail keeps fuller excerpts so the
+    next chapter can pick up terminology, numbers and commitments without
+    repeating them. Both sections are clipped at line boundaries and the
+    result is capped so it cannot crowd out the outline.
     """
     if not chapters:
         return ""
@@ -373,18 +385,25 @@ def continuity_digest(chapters: list[tuple[str, str]], *, recent: int = 3, cap: 
     for heading, body in chapters:
         gist = " ".join(str(body or "").split())[:60]
         long_range.append(f"- {heading}：{gist}" if gist else f"- {heading}")
+    if sum(len(line) + 1 for line in long_range) > max(1, cap // 2):
+        long_range = [f"- {heading}" for heading, _body in chapters]
     detail = []
     for heading, body in chapters[-recent:]:
         text = " ".join(str(body or "").split())[:300]
         if text:
             detail.append(f"【{heading}】{text}")
     parts = []
-    if detail:
-        parts.append("近期章节（承接术语、数字与承诺，勿重复）：\n" + "\n".join(detail))
+    heading_budget = min(cap, max(cap // 2, 120))
     if long_range:
-        parts.append("全书已写章节索引：\n" + "\n".join(long_range))
-    text = "\n\n".join(parts)
-    return text[:cap]
+        heading_block = "全书已写章节索引：\n" + "\n".join(long_range)
+        parts.append(_clip_lines(heading_block, heading_budget))
+    if detail:
+        remaining = cap - sum(len(part) + 2 for part in parts)
+        detail_block = "近期章节（承接术语、数字与承诺，勿重复）：\n" + "\n".join(detail)
+        clipped = _clip_lines(detail_block, remaining)
+        if clipped:
+            parts.append(clipped)
+    return "\n\n".join(parts)[:cap]
 
 
 def write_chapter(
