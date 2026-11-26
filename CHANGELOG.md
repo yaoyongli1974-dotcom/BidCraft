@@ -2,6 +2,17 @@
 
 按版本倒序。对外口径以 `docs/release-notes/` 下对应文件为准；本文件是仓库内的简明索引。
 
+## v0.33.0 (2026-11-26)
+
+AI 可靠性与实战效果专项改造 RC-01～RC-13 收口，对外说明见 [docs/release-notes/v0.33.0.md](docs/release-notes/v0.33.0.md)。
+
+- 工具结果严格验证、Agent 工具脱敏/预算/审计关联；章节规划依赖失效判废、知识资产生命周期收紧。
+- 生成退款单一归属、失败 fencing、心跳三振与 PG SKIP LOCKED；真实 PostgreSQL 迁移往返与并发 119 passed。
+- 检索基准、专家校准、经验治理、审批规则解释、真实件 E2E 数据门禁与过程指标“未测量”口径。
+- 新增 1 条经验撤销路由与 1 个请求模型；路由 275、Pydantic 模型 94；历史迁移与 Alembic head 不变。
+- 本地全量回归 2364 passed / 1008 skipped / 1 warning；Web 58 files / 451 tests；ruff/diff-check/版本一致性通过。
+- 真实招标件、qrels/专家评分、真实模型与生产 PG/部署仍未验证，按 PARTIAL / NOT VERIFIED 处理。
+
 ## v0.32.2 (2026-11-26)
 
 首个 v0.32.x 正式版本，合并 v0.32.0 AI 技术标引擎三段工作与 v0.32.1 审批规则、v0.32.2 质量概览前端。对外说明见 [docs/release-notes/v0.32.2.md](docs/release-notes/v0.32.2.md)。
