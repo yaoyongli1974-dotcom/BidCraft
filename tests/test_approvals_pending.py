@@ -32,6 +32,7 @@ PENDING_KEYS = {
     "submitted_by",
     "submitted_at",
     "total_amount",
+    "approval_explain",
 }
 
 
@@ -471,6 +472,42 @@ def test_payload_shape_sorting_and_none_last(db, tmp_path):
         assert item["mode"] == ""
         assert item["submitted_by"] == "项目负责人"
         assert item["total_amount"] == 25.0
+        explain = item["approval_explain"]
+        assert explain["index"] == 1
+        assert explain["applicable"] is True
+        assert explain["conditions"] == []
+        assert explain["missing_data"] == []
+        assert explain["owner_only"] is True
+        assert "owner" in explain["note"]
+
+
+def test_legacy_condition_chain_pending_explains_min_amount(db, tmp_path):
+    """v0.33.1 P1：普通条件链（无 rules）待办也必须带回当前级解释。"""
+    admin = _client()
+    owner, owner_id = _member(admin, None, "pend-owner", "项目负责人", "editor")
+    project_id, package_id = _seed(owner, tmp_path)
+    stage = _stage([owner_id])
+    stage["min_amount"] = 10
+    _patch_chain(owner, project_id, [stage])
+    version = _save(owner, project_id, "金额门槛版", package_id)
+    _submit(owner, project_id, version["id"])
+
+    items = _pending(owner)
+    assert _ids(items) == [version["id"]]
+    explain = items[0]["approval_explain"]
+    assert explain["index"] == 0  # 原链索引，与审批记录 stage 同源
+    assert explain["applicable"] is True
+    assert explain["missing_data"] == []
+    assert explain["conditions"] == [
+        {
+            "field": "min_amount",
+            "op": "gte",
+            "value": 10,
+            "actual": 25.0,
+            "hit": True,
+            "missing": False,
+        }
+    ]
 
 
 def test_cross_project_aggregation(db, tmp_path):

@@ -32,6 +32,27 @@ describe('normalizePendingApproval', () => {
     expect(item?.doc_id).toBeUndefined()
     expect(item?.doc_name).toBeUndefined()
   })
+
+  it('保留后端当前审批级解释与空链负责人说明', () => {
+    const item = normalizePendingApproval({
+      project_id: 'p1',
+      version_id: 'v1',
+      stage: 1,
+      stage_count: 1,
+      approval_explain: {
+        index: 1,
+        applicable: true,
+        conditions: [],
+        missing_data: [],
+        owner_only: true,
+        note: '未配置审批链，由项目 owner 审批',
+      },
+    })
+
+    expect(item?.approval_explain?.owner_only).toBe(true)
+    expect(item?.approval_explain?.note).toContain('owner')
+    expect(item?.approval_explain?.index).toBe(1)
+  })
 })
 
 describe('normalizePendingWorkflowApproval', () => {

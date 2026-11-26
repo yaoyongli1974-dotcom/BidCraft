@@ -7,7 +7,9 @@ import {
   percent,
   projectTypeLabel,
   projectTypeMeta,
+  kbVectorMeta,
 } from './format'
+import type { KnowledgeBase } from './types'
 
 describe('project type helpers', () => {
   it('falls back to the "other" package for unknown or empty values', () => {
@@ -60,5 +62,33 @@ describe('formatWords and percent', () => {
     expect(percent(1, 4)).toBe(25)
     expect(percent(9, 4)).toBe(100)
     expect(percent(2, 0)).toBe(0)
+  })
+})
+
+describe('kbVectorMeta', () => {
+  const kb = {
+    id: 'kb-1',
+    name: '知识库',
+    kind: 'local',
+    provider: 'local',
+    location: '',
+    enabled: true,
+    is_default: false,
+    has_api_key: false,
+    chunk_count: 4,
+    vector_enabled: true,
+    vector_model: 'emb-test',
+    vector_embedded: 2,
+    vector_total: 2,
+    vector_excluded: 2,
+    vector_ready: true,
+    vector_stale: false,
+  } as KnowledgeBase
+
+  it('使用可发布块口径，并标注被排除的草稿/驳回块', () => {
+    expect(kbVectorMeta(kb)).toEqual({
+      label: '语义就绪（未发布 2 不计入）',
+      tone: 'success',
+    })
   })
 })

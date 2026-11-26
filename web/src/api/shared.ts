@@ -1,6 +1,6 @@
 import { normalizeProjectType, projectTypeLabel } from '../lib/format'
 import { ApiError, asArray, request } from '../lib/http'
-import type { AdminRulePackage, AuditEntry, AuditPage, BatchItemResult, BidPackage, BoqLedgerSummary, BoqPayload, BoqPrice, BoqQuoteVersion, BoqRow, BoqSnapshot, BoqVersionDiffChanged, BoqVersionDiffEntry, ImagePlan, ImagePlanDocument, ImagePolicy, KbDocPolicyEntry, KbDocSource, KbVectorResult, KnowledgeBase, PackageInfo, PendingApproval, PendingWorkflowApproval, Personnel, PluginCatalogEntry, PreflightItem, PreflightStatus, PriceCurrency, ProjectTemplate, Qualification, QualificationEvidence, QualificationKind, QualificationStatus, QuotaItem, QuotaProposal, QuoteApprovalRecord, QuoteVersionStatus, RequirementResponse, RequirementResponseStatus, RequirementVerdict, RiskCategorySummary, RiskTierLevel, RiskTierSummary, RulePackageSummary, RulePackageValidation, TermInput, TextQaSettings, UserDoc, WechatConfig } from '../lib/types'
+import type { AdminRulePackage, ApprovalExplainCondition, AuditEntry, AuditPage, BatchItemResult, BidPackage, BoqLedgerSummary, BoqPayload, BoqPrice, BoqQuoteVersion, BoqRow, BoqSnapshot, BoqVersionDiffChanged, BoqVersionDiffEntry, ImagePlan, ImagePlanDocument, ImagePolicy, KbDocPolicyEntry, KbDocSource, KbVectorResult, KnowledgeBase, PackageInfo, PendingApproval, PendingWorkflowApproval, Personnel, PluginCatalogEntry, PreflightItem, PreflightStatus, PriceCurrency, ProjectTemplate, Qualification, QualificationEvidence, QualificationKind, QualificationStatus, QuotaItem, QuotaProposal, QuoteApprovalRecord, QuoteVersionStatus, RequirementResponse, RequirementResponseStatus, RequirementVerdict, RiskCategorySummary, RiskTierLevel, RiskTierSummary, RulePackageSummary, RulePackageValidation, StageApprovalExplain, TermInput, TextQaSettings, UserDoc, WechatConfig } from '../lib/types'
 import type { DeletionState } from './account'
 import type { InvoiceRequest } from './auth'
 import { normalizeBoqQuoteVersion, normalizeBoqSummary } from './boq'
@@ -494,6 +494,43 @@ export function auditQuery(params: { limit?: number; before?: number | null; pro
   return `?${search.toString()}`
 }
 
+/** 待办项的单级审批解释；兼容数组形态（版本详情）与对象形态（pending）。 */
+function normalizePendingApprovalExplain(value: unknown): StageApprovalExplain | null {
+  const raw = (Array.isArray(value) ? value[0] : value) as Record<string, unknown> | null
+  if (!raw || typeof raw !== 'object') return null
+  const conditions: ApprovalExplainCondition[] = []
+  if (Array.isArray(raw.conditions)) {
+    for (const item of raw.conditions) {
+      if (!item || typeof item !== 'object') continue
+      const condition = item as Record<string, unknown>
+      const conditionValue = condition.value
+      const actual = condition.actual
+      conditions.push({
+        field: asText(condition.field),
+        op: asText(condition.op),
+        value: Array.isArray(conditionValue)
+          ? conditionValue.filter((entry): entry is string => typeof entry === 'string')
+          : typeof conditionValue === 'number' || typeof conditionValue === 'string'
+            ? conditionValue
+            : null,
+        actual: typeof actual === 'number' || typeof actual === 'string' ? actual : null,
+        hit: condition.hit === true,
+        missing: condition.missing === true,
+      })
+    }
+  }
+  return {
+    index: Math.max(0, Math.round(asNumber(raw.index, 0))),
+    applicable: raw.applicable === true,
+    conditions,
+    missing_data: Array.isArray(raw.missing_data)
+      ? raw.missing_data.filter((entry): entry is string => typeof entry === 'string')
+      : [],
+    owner_only: raw.owner_only === true,
+    note: asText(raw.note) || undefined,
+  }
+}
+
 export function normalizePendingApproval(value: unknown): PendingApproval | null {
   if (!value || typeof value !== 'object') return null
   const raw = value as Record<string, unknown>
@@ -522,6 +559,7 @@ export function normalizePendingApproval(value: unknown): PendingApproval | null
     total_amount: Number.isFinite(amount) ? amount : null,
     doc_id: asText(raw.doc_id).trim() || undefined,
     doc_name: asText(raw.doc_name).slice(0, 120) || undefined,
+    approval_explain: normalizePendingApprovalExplain(raw.approval_explain) ?? undefined,
   }
 }
 

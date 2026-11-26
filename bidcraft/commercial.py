@@ -1566,6 +1566,7 @@ def pending_for_user(db: Session, user: dict | None) -> list[dict[str, Any]]:
                 if not is_super and project.owner_id != user_id:
                     continue
                 pending_stage, stage_count, mode = 1, 1, ""
+                explain = boq.empty_chain_explain()
             else:
                 applicable = boq.applicable_stages(
                     chain, total_amount, package_id, currency, summary=quote
@@ -1577,18 +1578,18 @@ def pending_for_user(db: Session, user: dict | None) -> list[dict[str, Any]]:
                     continue
                 stage, current = applicable[done]
                 pending_stage, stage_count, mode = done + 1, len(applicable), current["mode"]
-                if any(item.get("rules") for item in chain):
-                    explain = {
-                        "index": stage,
-                        **boq._stage_explain(
-                            current,
-                            total_amount,
-                            package_id,
-                            currency,
-                            amount_known=total_amount is not None,
-                            summary=quote,
-                        ),
-                    }
+                # v0.33.1 P1：普通条件链也必须解释当前可审级。
+                explain = {
+                    "index": stage,
+                    **boq._stage_explain(
+                        current,
+                        total_amount,
+                        package_id,
+                        currency,
+                        amount_known=total_amount is not None,
+                        summary=quote,
+                    ),
+                }
                 if not is_super:
                     approver_ids = {
                         str(person.get("id") or "") for person in current["approvers"]

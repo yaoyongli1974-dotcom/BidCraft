@@ -1001,6 +1001,24 @@ def _stage_explain(
     }
 
 
+def empty_chain_explain() -> dict[str, Any]:
+    """Explain the implicit owner-only approval used when no chain exists.
+
+    No approver identity is invented: the chain is empty, so the only authoritative
+    rule is the project owner. Kept as a shared helper so BOQ and commercial
+    pending inboxes present exactly the same explanation.
+    """
+
+    return {
+        "index": 1,
+        "applicable": True,
+        "conditions": [],
+        "missing_data": [],
+        "owner_only": True,
+        "note": "未配置审批链，由项目 owner 审批",
+    }
+
+
 def _stage_applies(
     stage: dict[str, Any],
     total_amount: Any,
@@ -1562,6 +1580,7 @@ def pending_for_user(db: Session, user: dict) -> list[dict[str, Any]]:
                 if not is_super and project.owner_id != user_id:
                     continue
                 pending_stage, stage_count, mode = 1, 1, ""
+                explain = empty_chain_explain()
             else:
                 # R21: only stages applicable to the version amount take part;
                 # the inbox level is the applicable ordinal, records keep the
@@ -1583,20 +1602,19 @@ def pending_for_user(db: Session, user: dict) -> list[dict[str, Any]]:
                     and not isinstance(total_amount, bool)
                     and math.isfinite(total_amount)
                 )
-                # 仅在链路含 rules 时附带解释：既有 PENDING_KEYS 契约对
-                # min_amount / packages / currencies-only 链保持不变。
-                if any(item.get("rules") for item in chain):
-                    explain = {
-                        "index": stage,
-                        **_stage_explain(
-                            current,
-                            total_amount,
-                            version.package_id,
-                            currency,
-                            amount_known=known,
-                            summary=summary,
-                        ),
-                    }
+                # v0.33.1 P1：待办解释覆盖所有非空审批链，普通条件链
+                # （min_amount / packages / currencies）也必须可追溯。
+                explain = {
+                    "index": stage,
+                    **_stage_explain(
+                        current,
+                        total_amount,
+                        version.package_id,
+                        currency,
+                        amount_known=known,
+                        summary=summary,
+                    ),
+                }
                 if not is_super:
                     approver_ids = {str(p.get("id") or "") for p in current["approvers"]}
                     if user_id not in approver_ids:

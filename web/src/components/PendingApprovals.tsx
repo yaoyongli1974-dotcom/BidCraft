@@ -197,6 +197,14 @@ export function PendingApprovals() {
                             <span className="pending-item-stage">
                               第 {item.stage}/{item.stage_count} 级{modeLabel(item.mode)}
                             </span>
+                            {item.approval_explain && (
+                              <span className="pending-item-explain">
+                                {item.approval_explain.note ||
+                                  (item.approval_explain.conditions.length > 0
+                                    ? `当前级命中 ${item.approval_explain.conditions.filter((condition) => condition.hit).length}/${item.approval_explain.conditions.length} 项条件`
+                                    : '当前级无附加条件')}
+                              </span>
+                            )}
                             <span className="pending-item-meta">
                               <span className="pending-item-submitter">
                                 {item.submitted_by || '—'}

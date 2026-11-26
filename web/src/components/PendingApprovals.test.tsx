@@ -124,6 +124,36 @@ describe('PendingApprovals', () => {
     expect(screen.getByText(/复核报价/)).toBeInTheDocument()
   })
 
+  it('渲染后端当前审批级解释，不编造审批人', async () => {
+    vi.mocked(getPendingApprovals).mockResolvedValue([
+      {
+        ...QUOTE,
+        approval_explain: {
+          index: 0,
+          applicable: true,
+          conditions: [
+            {
+              field: 'min_amount',
+              op: 'gte',
+              value: 10,
+              actual: 100,
+              hit: true,
+              missing: false,
+            },
+          ],
+          missing_data: [],
+        },
+      },
+    ])
+
+    const view = renderPanel()
+    await settle()
+    clickTrigger(view.container)
+    await settle()
+
+    expect(screen.getByText('当前级命中 1/1 项条件')).toBeInTheDocument()
+  })
+
   it('仅在面板打开时每 60 秒轮询', async () => {
     vi.useFakeTimers()
     const view = renderPanel()

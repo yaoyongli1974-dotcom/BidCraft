@@ -130,8 +130,10 @@ export interface KnowledgeBase {
   vector_model?: string
   /** Chunks whose stored vector matches the current embedding model. */
   vector_embedded?: number
-  /** Chunks that would need a vector (mirrors `chunk_count`). */
+  /** Releasable chunks that should have a vector (excludes drafts/rejected). */
   vector_total?: number
+  /** Chunks excluded from vector readiness because their document is not releasable. */
+  vector_excluded?: number
   /** Vector width of the first embedded chunk, 0 before the first build. */
   vector_dim?: number
   /** Every chunk has a vector under the current model. */
@@ -328,6 +330,10 @@ export interface StageApprovalExplain {
   applicable: boolean
   conditions: ApprovalExplainCondition[]
   missing_data: string[]
+  /** 空链审批：仅项目 owner，不编造审批人。 */
+  owner_only?: boolean
+  /** 空链等无需逐条件展开的场景给出的人类可读说明。 */
+  note?: string
 }
 
 /**

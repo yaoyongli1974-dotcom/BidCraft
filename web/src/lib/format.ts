@@ -134,14 +134,16 @@ export function kbKindMeta(kind?: string): Meta {
 export function kbVectorMeta(kb: KnowledgeBase): Meta {
   const total = Math.max(0, kb.vector_total ?? kb.chunk_count ?? 0)
   const embedded = Math.max(0, Math.min(kb.vector_embedded ?? 0, total))
+  const excluded = Math.max(0, kb.vector_excluded ?? 0)
+  const suffix = excluded > 0 ? `（未发布 ${formatNumber(excluded)} 不计入）` : ''
   if (kb.vector_enabled === false || !kb.vector_model || total === 0) {
-    return { label: '仅关键词', tone: 'neutral' }
+    return { label: `仅关键词${suffix}`, tone: 'neutral' }
   }
   if (kb.vector_ready === true || embedded >= total) {
-    return { label: '语义就绪', tone: 'success' }
+    return { label: `语义就绪${suffix}`, tone: 'success' }
   }
   return {
-    label: `向量待更新 ${formatNumber(embedded)}/${formatNumber(total)}`,
+    label: `向量待更新 ${formatNumber(embedded)}/${formatNumber(total)}${suffix}`,
     tone: 'warn',
   }
 }

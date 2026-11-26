@@ -513,3 +513,39 @@ def test_chain_numeric_rule_uses_stored_quote_summary():
         )
     assert result["status"] == "submitted"  # 还有兜底级
     assert [record["stage"] for record in result["validation"]["approvals"]] == [0]
+
+
+def test_commercial_legacy_chain_pending_has_explain():
+    """v0.33.1 P1：商务标普通条件链待办也必须有可追溯解释。"""
+    seed = _seed()
+    owner = _actor(seed["owner_id"], "王经理")
+    chain = [
+        {
+            "approvers": [{"id": seed["owner_id"], "name": "王经理"}],
+            "mode": "all",
+            "min_amount": 10,
+        }
+    ]
+    with session_scope() as db:
+        project = db.get(Project, seed["project_id"])
+        project.meta = {"approval_chain": chain}
+        doc = commercial.save_commercial(
+            db, project, quote_version_id=seed["version_id"], actor=owner
+        )
+        commercial.submit_commercial(
+            db,
+            project,
+            doc["id"],
+            actor=owner,
+            actor_id=seed["owner_id"],
+            role="owner",
+        )
+
+    with session_scope() as db:
+        items = commercial.pending_for_user(db, {"id": seed["owner_id"], "role": "manager"})
+    item = next(row for row in items if row["doc_id"] == doc["id"])
+    explain = item["approval_explain"]
+    assert explain["index"] == 0  # 原链索引，与审批记录 stage 同源
+    assert explain["applicable"] is True
+    assert explain["conditions"][0]["field"] == "min_amount"
+    assert explain["conditions"][0]["hit"] is True

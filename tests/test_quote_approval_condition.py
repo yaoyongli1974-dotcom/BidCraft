@@ -36,6 +36,7 @@ PENDING_KEYS = {
     "submitted_by",
     "submitted_at",
     "total_amount",
+    "approval_explain",
 }
 
 

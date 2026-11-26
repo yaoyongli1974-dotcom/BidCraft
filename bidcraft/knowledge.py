@@ -119,11 +119,39 @@ def _check_response_size(response: httpx.Response, *, label: str = "知识库接
 
 
 def _vector_fields(kb: KnowledgeBase, db) -> dict:
-    total = int(kb.chunk_count or 0)
+    """Vector diagnostics over *releasable* chunks only.
+
+    ``build_vectors`` deliberately skips draft/review/rejected documents; the
+    old statistic divided embedded chunks by ``kb.chunk_count`` (all chunks),
+    so a normal unpublished draft made a fully embedded KB look stale. The
+    authoritative total is now the same releasable set used by vectorization.
+    ``kb.chunk_count`` is left untouched because it remains the raw ingest count.
+    """
+    all_total = int(kb.chunk_count or 0)
+    total = all_total
+    excluded = 0
     embedded = 0
     dim = 0
     model = ""
     if db is not None:
+        all_total = int(
+            db.scalar(
+                select(func.count())
+                .select_from(KbChunk)
+                .where(KbChunk.kb_id == kb.id)
+            )
+            or 0
+        )
+        total = int(
+            db.scalar(
+                select(func.count())
+                .select_from(KbChunk)
+                .join(KbDocument, KbChunk.document_id == KbDocument.id, isouter=True)
+                .where(KbChunk.kb_id == kb.id, releasable_review_filter())
+            )
+            or 0
+        )
+        excluded = max(0, all_total - total)
         try:
             endpoint = resolve_embedding_endpoint(db)
         except Exception:
@@ -136,7 +164,12 @@ def _vector_fields(kb: KnowledgeBase, db) -> dict:
                 db.scalar(
                     select(func.count())
                     .select_from(KbChunk)
-                    .where(KbChunk.kb_id == kb.id, KbChunk.embed_key == key)
+                    .join(KbDocument, KbChunk.document_id == KbDocument.id, isouter=True)
+                    .where(
+                        KbChunk.kb_id == kb.id,
+                        KbChunk.embed_key == key,
+                        releasable_review_filter(),
+                    )
                 )
                 or 0
             )
@@ -144,10 +177,12 @@ def _vector_fields(kb: KnowledgeBase, db) -> dict:
                 dim = int(
                     db.scalar(
                         select(KbChunk.embed_dim)
+                        .join(KbDocument, KbChunk.document_id == KbDocument.id, isouter=True)
                         .where(
                             KbChunk.kb_id == kb.id,
                             KbChunk.embed_key == key,
                             KbChunk.embed_dim > 0,
+                            releasable_review_filter(),
                         )
                         .order_by(KbChunk.ordinal)
                         .limit(1)
@@ -159,6 +194,7 @@ def _vector_fields(kb: KnowledgeBase, db) -> dict:
         "vector_model": model,
         "vector_embedded": embedded,
         "vector_total": total,
+        "vector_excluded": excluded,
         "vector_dim": dim,
         "vector_ready": total > 0 and embedded == total,
         "vector_stale": total > 0 and embedded < total,
