@@ -732,6 +732,11 @@ def _stage_min_amount(value: Any) -> int | float | None:
 
 STAGE_CONDITION_MAX_ITEMS = 20
 STAGE_CONDITION_ITEM_MAX = 40
+STAGE_RULE_MAX_ITEMS = 20
+STAGE_RULE_VALUE_MAX_ITEMS = 20
+STAGE_RULE_STRING_MAX = 40
+STAGE_RULE_FIELDS = ("total_amount", "package_id", "currency")
+STAGE_RULE_OPS = ("gte", "lte", "eq", "ne", "in", "not_in", "contains")
 
 
 def _stage_str_list(value: Any) -> list[str] | None:
@@ -764,6 +769,73 @@ def _currency_code(value: Any) -> str:
     return value.strip().upper()
 
 
+def _stage_number(value: Any) -> int | float | None:
+    """Finite number used by numeric rule operands; booleans are invalid."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
+
+
+def _stage_rule_value(field_name: str, op: str, value: Any) -> Any:
+    """Normalize one rule operand for ``field_name``/``op``; None means invalid."""
+    if op in ("in", "not_in"):
+        return _stage_str_list(value)
+    if field_name == "total_amount":
+        return _stage_number(value)
+    text = str(value or "").strip()
+    if not text or len(text) > STAGE_RULE_STRING_MAX:
+        return None
+    return _currency_code(text) if field_name == "currency" else text
+
+
+def _stage_rules(value: Any) -> list[dict[str, Any]]:
+    """Normalize optional per-stage rule conditions; invalid entries are dropped.
+
+    Rules are additional AND conditions on the already-supported approval
+    context (``total_amount``/``package_id``/``currency``). They are opt-in:
+    a stage without valid rules keeps its previous unconditional behaviour.
+    """
+    if not isinstance(value, list):
+        return []
+    rules: list[dict[str, Any]] = []
+    for entry in value[:STAGE_RULE_MAX_ITEMS]:
+        if not isinstance(entry, dict):
+            continue
+        field_name = str(entry.get("field") or "").strip()
+        op = str(entry.get("op") or "").strip()
+        if field_name not in STAGE_RULE_FIELDS or op not in STAGE_RULE_OPS:
+            continue
+        operand = _stage_rule_value(field_name, op, entry.get("value"))
+        if operand is None:
+            continue
+        rules.append({"field": field_name, "op": op, "value": operand})
+    return rules
+
+
+def _rule_value_matches(field_name: str, actual: Any, op: str, expected: Any) -> bool:
+    """Evaluate one normalized rule; unknown actual values stay conservative."""
+    if op in ("in", "not_in"):
+        if not isinstance(actual, str) or not actual.strip():
+            return True
+        left = _currency_code(actual) if field_name == "currency" else actual.strip()
+        present = left in expected
+        return present if op == "in" else not present
+    if op in ("gte", "lte"):
+        number = _stage_number(actual)
+        if number is None:
+            return True
+        return number >= expected if op == "gte" else number <= expected
+    if actual is None:
+        return True
+    left = _currency_code(actual) if field_name == "currency" else str(actual).strip()
+    right = expected if isinstance(expected, str) else str(expected)
+    if op == "contains":
+        return right.lower() in left.lower()
+    return left == right if op == "eq" else left != right
+
+
 def _attach_stage_conditions(stage: dict[str, Any], entry: dict[str, Any]) -> None:
     """Copy the valid R21/R25 condition keys of ``entry`` onto ``stage``."""
     threshold = _stage_min_amount(entry.get("min_amount"))
@@ -773,6 +845,9 @@ def _attach_stage_conditions(stage: dict[str, Any], entry: dict[str, Any]) -> No
         values = _stage_str_list(entry.get(key))
         if values is not None:
             stage[key] = values
+    rules = _stage_rules(entry.get("rules"))
+    if rules:
+        stage["rules"] = rules
 
 
 def normalize_chain(raw: Any) -> list[dict[str, Any]]:
@@ -784,8 +859,11 @@ def normalize_chain(raw: Any) -> list[dict[str, Any]]:
     ``min_amount`` (R21 amount threshold, finite number ≥0) is preserved;
     invalid values drop the key. R25 adds the same treatment for the
     ``packages`` / ``currencies`` white-lists (non-empty ``list[str]``, items
-    deduped in order and ≤40 chars). Malformed entries are ignored so legacy
-    or hand-edited meta never breaks review.
+    deduped in order and ≤40 chars). v0.32.1 adds optional ``rules``: up to 20
+    AND conditions per stage, each ``{field, op, value}`` over
+    ``total_amount`` / ``package_id`` / ``currency``. Invalid rules are dropped
+    so a stage without valid conditions stays unconditional. Malformed entries
+    are ignored so legacy or hand-edited meta never breaks review.
     """
     stages: list[dict[str, Any]] = []
     for entry in list(raw or []):
@@ -834,7 +912,9 @@ def _stage_applies(
     An unknown amount (or a stage without a threshold) satisfies the amount
     condition. A non-empty ``packages`` white-list needs a non-empty
     ``package_id`` member; a non-empty ``currencies`` white-list needs a
-    non-empty currency whose normalized code is a member. Every condition must
+    non-empty currency whose normalized code is a member. Optional ``rules``
+    are ANDed over the same context; unknown field values keep the rule
+    satisfied (over-review rather than missed approval). Every condition must
     hold for the stage to take effect.
     """
     threshold = _stage_min_amount(stage.get("min_amount"))
@@ -849,6 +929,16 @@ def _stage_applies(
     if currencies is not None:
         code = _currency_code(currency)
         if not code or code not in {_currency_code(item) for item in currencies}:
+            return False
+    context = {
+        "total_amount": total_amount,
+        "package_id": package_id,
+        "currency": currency,
+    }
+    for rule in _stage_rules(stage.get("rules")):
+        if not _rule_value_matches(
+            rule["field"], context[rule["field"]], rule["op"], rule["value"]
+        ):
             return False
     return True
 
@@ -867,7 +957,8 @@ def applicable_stages(
     condition satisfied — conservative, better over-review than miss one.
     ``packages`` / ``currencies`` white-lists need ``package_id`` / the
     normalized ``currency`` to be a member; an unknown context skips such a
-    stage. When the conditions filter out every stage the full chain is used
+    stage. Optional ``rules`` are evaluated with the same context and ANDed.
+    When the conditions filter out every stage the full chain is used
     instead, so a conditional chain never ends up with zero approval levels.
     Returns ``(original chain index, stage)`` pairs in chain order.
     """
