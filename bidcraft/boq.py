@@ -735,7 +735,15 @@ STAGE_CONDITION_ITEM_MAX = 40
 STAGE_RULE_MAX_ITEMS = 20
 STAGE_RULE_VALUE_MAX_ITEMS = 20
 STAGE_RULE_STRING_MAX = 40
-STAGE_RULE_FIELDS = ("total_amount", "package_id", "currency")
+STAGE_RULE_NUMERIC_FIELDS = (
+    "total_amount",
+    "boq_rows",
+    "priced",
+    "unpriced",
+    "match_rate",
+)
+STAGE_RULE_STRING_FIELDS = ("package_id", "currency")
+STAGE_RULE_FIELDS = STAGE_RULE_NUMERIC_FIELDS + STAGE_RULE_STRING_FIELDS
 STAGE_RULE_OPS = ("gte", "lte", "eq", "ne", "in", "not_in", "contains")
 
 
@@ -782,7 +790,7 @@ def _stage_rule_value(field_name: str, op: str, value: Any) -> Any:
     """Normalize one rule operand for ``field_name``/``op``; None means invalid."""
     if op in ("in", "not_in"):
         return _stage_str_list(value)
-    if field_name == "total_amount":
+    if field_name in STAGE_RULE_NUMERIC_FIELDS:
         return _stage_number(value)
     text = str(value or "").strip()
     if not text or len(text) > STAGE_RULE_STRING_MAX:
@@ -794,7 +802,8 @@ def _stage_rules(value: Any) -> list[dict[str, Any]]:
     """Normalize optional per-stage rule conditions; invalid entries are dropped.
 
     Rules are additional AND conditions on the already-supported approval
-    context (``total_amount``/``package_id``/``currency``). They are opt-in:
+    context (``total_amount``/``package_id``/``currency`` and, on BOQ paths,
+    quote-summary metrics). They are opt-in:
     a stage without valid rules keeps its previous unconditional behaviour.
     """
     if not isinstance(value, list):
@@ -861,7 +870,9 @@ def normalize_chain(raw: Any) -> list[dict[str, Any]]:
     ``packages`` / ``currencies`` white-lists (non-empty ``list[str]``, items
     deduped in order and ≤40 chars). v0.32.1 adds optional ``rules``: up to 20
     AND conditions per stage, each ``{field, op, value}`` over
-    ``total_amount`` / ``package_id`` / ``currency``. Invalid rules are dropped
+    ``total_amount`` / ``package_id`` / ``currency``, plus quote-summary metrics
+    ``boq_rows`` / ``priced`` / ``unpriced`` / ``match_rate`` on BOQ paths.
+    Invalid rules are dropped
     so a stage without valid conditions stays unconditional. Malformed entries
     are ignored so legacy or hand-edited meta never breaks review.
     """
@@ -906,6 +917,7 @@ def _stage_applies(
     currency: Any,
     *,
     amount_known: bool,
+    summary: dict[str, Any] | None = None,
 ) -> bool:
     """Whether one stage is applicable under all of its conditions (R21/R25).
 
@@ -913,9 +925,9 @@ def _stage_applies(
     condition. A non-empty ``packages`` white-list needs a non-empty
     ``package_id`` member; a non-empty ``currencies`` white-list needs a
     non-empty currency whose normalized code is a member. Optional ``rules``
-    are ANDed over the same context; unknown field values keep the rule
-    satisfied (over-review rather than missed approval). Every condition must
-    hold for the stage to take effect.
+    are ANDed over the same context plus the supplied quote ``summary``;
+    unknown field values keep the rule satisfied (over-review rather than
+    missed approval). Every condition must hold for the stage to take effect.
     """
     threshold = _stage_min_amount(stage.get("min_amount"))
     if amount_known and threshold is not None and total_amount < threshold:
@@ -930,14 +942,19 @@ def _stage_applies(
         code = _currency_code(currency)
         if not code or code not in {_currency_code(item) for item in currencies}:
             return False
-    context = {
+    context: dict[str, Any] = {
         "total_amount": total_amount,
         "package_id": package_id,
         "currency": currency,
     }
+    # Quote-only summary metrics are available for BOQ version review; other
+    # callers (commercial approval) keep the legacy three-field context.
+    for field_name in STAGE_RULE_NUMERIC_FIELDS:
+        if field_name != "total_amount":
+            context[field_name] = _stage_number((summary or {}).get(field_name))
     for rule in _stage_rules(stage.get("rules")):
         if not _rule_value_matches(
-            rule["field"], context[rule["field"]], rule["op"], rule["value"]
+            rule["field"], context.get(rule["field"]), rule["op"], rule["value"]
         ):
             return False
     return True
@@ -948,6 +965,7 @@ def applicable_stages(
     total_amount: Any = None,
     package_id: Any = None,
     currency: Any = None,
+    summary: dict[str, Any] | None = None,
 ) -> list[tuple[int, dict[str, Any]]]:
     """Filter the chain to the stages taking effect for a version (R21/R25).
 
@@ -957,7 +975,8 @@ def applicable_stages(
     condition satisfied — conservative, better over-review than miss one.
     ``packages`` / ``currencies`` white-lists need ``package_id`` / the
     normalized ``currency`` to be a member; an unknown context skips such a
-    stage. Optional ``rules`` are evaluated with the same context and ANDed.
+    stage. Optional ``rules`` are evaluated with the same context plus a
+    supplied quote ``summary`` (numeric BOQ metrics) and ANDed.
     When the conditions filter out every stage the full chain is used
     instead, so a conditional chain never ends up with zero approval levels.
     Returns ``(original chain index, stage)`` pairs in chain order.
@@ -970,7 +989,12 @@ def applicable_stages(
     stages: list[tuple[int, dict[str, Any]]] = []
     for index, stage in enumerate(chain):
         if _stage_applies(
-            stage, total_amount, package_id, currency, amount_known=known
+            stage,
+            total_amount,
+            package_id,
+            currency,
+            amount_known=known,
+            summary=summary,
         ):
             stages.append((index, stage))
     if chain and not stages:
@@ -984,6 +1008,7 @@ def completed_stages(
     total_amount: Any = None,
     package_id: Any = None,
     currency: Any = None,
+    summary: dict[str, Any] | None = None,
 ) -> int:
     """Count leading fully signed-off applicable stages (R19 all/any, R21/R25).
 
@@ -997,7 +1022,9 @@ def completed_stages(
     preserving the pre-R21 two-argument behavior.
     """
     completed = 0
-    for index, stage in applicable_stages(chain, total_amount, package_id, currency):
+    for index, stage in applicable_stages(
+        chain, total_amount, package_id, currency, summary
+    ):
         approvers = stage.get("approvers") or []
         count = len(
             [
@@ -1077,12 +1104,14 @@ def version_payload(
         "reviewed_at": clock.iso_utc(version.reviewed_at),
         "approvals": approvals,
         "approval_stage": (
-            completed_stages(chain, approvals, total_amount, package_id, currency)
+            completed_stages(
+                chain, approvals, total_amount, package_id, currency, summary
+            )
             if (version.status or "draft") == "submitted" and chain
             else 0
         ),
         "approval_stage_count": len(
-            applicable_stages(chain, total_amount, package_id, currency)
+            applicable_stages(chain, total_amount, package_id, currency, summary)
         ),
     }
     if include_prices:
@@ -1283,11 +1312,12 @@ def review_version(
         raise LookupError("版本不存在")
     chain = normalize_chain((project.meta or {}).get("approval_chain"))
     approvals = list(version.approvals or [])
-    total_amount = (version.summary or {}).get("total_amount")
+    summary = dict(version.summary or {})
+    total_amount = summary.get("total_amount")
     package_id = version.package_id
     currency = version_currency(version, project)
-    applicable = applicable_stages(chain, total_amount, package_id, currency)
-    done = completed_stages(chain, approvals, total_amount, package_id, currency)
+    applicable = applicable_stages(chain, total_amount, package_id, currency, summary)
+    done = completed_stages(chain, approvals, total_amount, package_id, currency, summary)
     # Authorization precedes the state check so an unauthorized caller gets 403
     # even on a draft (matching the old route-level owner gate), while an
     # authorized reviewer still sees the 409 state-machine conflict.
@@ -1329,7 +1359,9 @@ def review_version(
         version.approvals = approvals
         final_approve = (
             decision == "approve"
-            and completed_stages(chain, approvals, total_amount, package_id, currency)
+            and completed_stages(
+                chain, approvals, total_amount, package_id, currency, summary
+            )
             >= len(applicable)
         )
     else:
@@ -1433,12 +1465,13 @@ def pending_for_user(db: Session, user: dict) -> list[dict[str, Any]]:
                 # R21: only stages applicable to the version amount take part;
                 # the inbox level is the applicable ordinal, records keep the
                 # original chain index.
-                total_amount = (version.summary or {}).get("total_amount")
+                summary = dict(version.summary or {})
+                total_amount = summary.get("total_amount")
                 applicable = applicable_stages(
-                    chain, total_amount, version.package_id, currency
+                    chain, total_amount, version.package_id, currency, summary
                 )
                 done = completed_stages(
-                    chain, approvals, total_amount, version.package_id, currency
+                    chain, approvals, total_amount, version.package_id, currency, summary
                 )
                 if done >= len(applicable):
                     continue  # defensive: a fully signed version is never submitted

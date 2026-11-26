@@ -109,3 +109,39 @@ def test_legacy_chain_without_rules_is_unchanged():
     chain = _chain({"id": "u1"}, {"id": "u2"})
     assert all("rules" not in stage for stage in chain)
     assert [i for i, _ in boq.applicable_stages(chain, 1, "pkg", "CNY")] == [0, 1]
+
+
+def test_quote_summary_numeric_rules_filter_stage():
+    chain = _chain(
+        {
+            "id": "u1",
+            "rules": [
+                {"field": "boq_rows", "op": "gte", "value": 10},
+                {"field": "priced", "op": "gte", "value": 8},
+                {"field": "unpriced", "op": "lte", "value": 2},
+                {"field": "match_rate", "op": "gte", "value": 0.9},
+            ],
+        },
+        {"id": "u2"},
+    )
+    summary = {"boq_rows": 12, "priced": 10, "unpriced": 2, "match_rate": 0.92}
+    assert [i for i, _ in boq.applicable_stages(chain, 100, "pkg", "CNY", summary)] == [0, 1]
+    assert [i for i, _ in boq.applicable_stages(chain, 100, "pkg", "CNY", {**summary, "priced": 7})] == [1]
+    assert [i for i, _ in boq.applicable_stages(chain, 100, "pkg", "CNY", {**summary, "unpriced": 3})] == [1]
+    assert [i for i, _ in boq.applicable_stages(chain, 100, "pkg", "CNY", {**summary, "match_rate": 0.8})] == [1]
+
+
+def test_quote_summary_numeric_rules_fail_open_when_unknown():
+    chain = _chain(
+        {
+            "id": "u1",
+            "rules": [
+                {"field": "boq_rows", "op": "gte", "value": 10},
+                {"field": "match_rate", "op": "lte", "value": 0.5},
+            ],
+        },
+        {"id": "u2"},
+    )
+    # 报价摘要缺失时保守命中，避免漏审。
+    assert [i for i, _ in boq.applicable_stages(chain, 100)] == [0, 1]
+    assert [i for i, _ in boq.applicable_stages(chain, 100, None, None, {"boq_rows": 12})] == [0, 1]

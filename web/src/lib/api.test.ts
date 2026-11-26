@@ -1120,6 +1120,38 @@ describe('R25 conditional approval stages (packages & currencies)', () => {
     // 未知上下文保守命中，避免漏审。
     expect(applicableStages(chain, null).map((item) => item.index)).toEqual([0, 1])
   })
+
+  it('normalizes and evaluates numeric quote-summary approval rules', () => {
+    const rules = normalizeApprovalRules([
+      { field: 'boq_rows', op: 'gte', value: 10 },
+      { field: 'priced', op: 'gte', value: 8 },
+      { field: 'unpriced', op: 'lte', value: 2 },
+      { field: 'match_rate', op: 'gte', value: 0.9 },
+      { field: 'boq_rows', op: 'gte', value: 'bad' },
+      { field: 'match_rate', op: 'gte', value: Number.NaN },
+    ])
+    expect(rules).toEqual([
+      { field: 'boq_rows', op: 'gte', value: 10 },
+      { field: 'priced', op: 'gte', value: 8 },
+      { field: 'unpriced', op: 'lte', value: 2 },
+      { field: 'match_rate', op: 'gte', value: 0.9 },
+    ])
+    const chain = normalizeApprovalChain([
+      { approvers: [{ id: 'u-1', name: '甲' }], mode: 'all', rules },
+      { approvers: [{ id: 'u-2', name: '乙' }], mode: 'any' },
+    ])
+    const summary = { boq_rows: 12, priced: 10, unpriced: 2, match_rate: 0.92 }
+    expect(applicableStages(chain, 100, { summary }).map((item) => item.index)).toEqual([0, 1])
+    expect(
+      applicableStages(chain, 100, { summary: { ...summary, priced: 7 } }).map((item) => item.index),
+    ).toEqual([1])
+    expect(
+      applicableStages(chain, 100, { summary: { ...summary, match_rate: 0.8 } }).map((item) => item.index),
+    ).toEqual([1])
+    // 摘要缺失时规则未知，仍保守命中。
+    expect(applicableStages(chain, 100).map((item) => item.index)).toEqual([0, 1])
+    expect(applicableStages(chain, 100, { summary: { boq_rows: 12 } }).map((item) => item.index)).toEqual([0, 1])
+  })
 })
 
 describe('pending approvals', () => {

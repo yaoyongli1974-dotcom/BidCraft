@@ -160,7 +160,18 @@ export const updateProject = async (
   return { ...data, approval_chain: normalizeApprovalChain(data.approval_chain) }
 }
 
-const APPROVAL_RULE_FIELDS: ApprovalRuleField[] = ['total_amount', 'package_id', 'currency']
+const APPROVAL_RULE_NUMERIC_FIELDS: ApprovalRuleField[] = [
+  'total_amount',
+  'boq_rows',
+  'priced',
+  'unpriced',
+  'match_rate',
+]
+const APPROVAL_RULE_FIELDS: ApprovalRuleField[] = [
+  ...APPROVAL_RULE_NUMERIC_FIELDS,
+  'package_id',
+  'currency',
+]
 const APPROVAL_RULE_OPS: ApprovalRuleOp[] = [
   'gte', 'lte', 'eq', 'ne', 'in', 'not_in', 'contains',
 ]
@@ -176,7 +187,7 @@ function normalizeApprovalRuleValue(
   if (op === 'in' || op === 'not_in') {
     return normalizeApprovalConditionList(value).slice(0, APPROVAL_RULE_VALUE_MAX)
   }
-  if (field === 'total_amount') {
+  if (APPROVAL_RULE_NUMERIC_FIELDS.includes(field)) {
     return typeof value === 'number' && Number.isFinite(value) ? value : null
   }
   const text = asText(value).trim()
@@ -278,6 +289,7 @@ export function normalizeApprovalChain(value: unknown): ApprovalStage[] {
 export interface ApprovalStageContext {
   packageId?: string | null
   currency?: string | null
+  summary?: Record<string, unknown> | null
 }
 
 export function applicableStages(
@@ -288,6 +300,15 @@ export function applicableStages(
   const amountKnown = typeof totalAmount === 'number' && Number.isFinite(totalAmount)
   const packageId = typeof context?.packageId === 'string' ? context.packageId.trim() : ''
   const currency = normalizeCurrencyToken(context?.currency)
+  const summary = context?.summary ?? null
+  const numericValue = (field: ApprovalRuleField): number | null => {
+    if (field === 'total_amount') {
+      return typeof totalAmount === 'number' && Number.isFinite(totalAmount) ? totalAmount : null
+    }
+    const raw = summary?.[field]
+    if (typeof raw !== 'number' || !Number.isFinite(raw)) return null
+    return raw
+  }
   const result: Array<{ index: number; stage: ApprovalStage }> = []
   chain.forEach((stage, index) => {
     const threshold = stage.min_amount
@@ -308,12 +329,11 @@ export function applicableStages(
       return
     }
     for (const rule of stage.rules ?? []) {
-      const actual =
-        rule.field === 'total_amount'
-          ? totalAmount
-          : rule.field === 'package_id'
-            ? packageId || null
-            : currency || null
+      const actual = APPROVAL_RULE_NUMERIC_FIELDS.includes(rule.field)
+        ? numericValue(rule.field)
+        : rule.field === 'package_id'
+          ? packageId || null
+          : currency || null
       if (!approvalRuleMatches(rule, actual)) return
     }
     result.push({ index, stage })

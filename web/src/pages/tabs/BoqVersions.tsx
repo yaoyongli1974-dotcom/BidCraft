@@ -59,6 +59,10 @@ const COMMON_CURRENCIES = ['CNY', 'USD', 'EUR', 'JPY', 'GBP'] as const
 /** 规则条件字段 / 操作符，和后端白名单一致。 */
 const RULE_FIELDS: Array<{ value: ApprovalRuleField; label: string }> = [
   { value: 'total_amount', label: '报价合计' },
+  { value: 'boq_rows', label: '清单行数' },
+  { value: 'priced', label: '已报价行数' },
+  { value: 'unpriced', label: '未报价行数' },
+  { value: 'match_rate', label: '清单匹配率' },
   { value: 'package_id', label: '包件' },
   { value: 'currency', label: '币种' },
 ]
@@ -431,10 +435,16 @@ function ApprovalChainModal({
         toast.warning('规则值无效', '属于 / 不属于需填写至少一个有效值。')
         return
       }
-    } else if (stage.ruleField === 'total_amount') {
+    } else if (
+      stage.ruleField === 'total_amount' ||
+      stage.ruleField === 'boq_rows' ||
+      stage.ruleField === 'priced' ||
+      stage.ruleField === 'unpriced' ||
+      stage.ruleField === 'match_rate'
+    ) {
       const amount = Number(text)
       if (!Number.isFinite(amount)) {
-        toast.warning('规则值无效', '报价合计规则需填写数字。')
+        toast.warning('规则值无效', '该规则字段需填写数字。')
         return
       }
       value = amount
@@ -1073,6 +1083,7 @@ export function QuoteVersionsPanel({
     applicableStages(approvalChain, amountOf(version), {
       packageId: version.package_id,
       currency,
+      summary: version.summary ? { ...version.summary } : {},
     })
 
   /** 当前待审级在生效序列中的位置（0 起）；链被缩短等异常情况下夹取到最后一级。 */

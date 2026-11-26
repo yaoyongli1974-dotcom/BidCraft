@@ -252,7 +252,14 @@ export interface ApprovalChainEntry {
 export type ApprovalMode = 'all' | 'any'
 
 /** 审批链规则条件的字段与操作符（与后端 boq.STAGE_RULE_* 一致）。 */
-export type ApprovalRuleField = 'total_amount' | 'package_id' | 'currency'
+export type ApprovalRuleField =
+  | 'total_amount'
+  | 'boq_rows'
+  | 'priced'
+  | 'unpriced'
+  | 'match_rate'
+  | 'package_id'
+  | 'currency'
 export type ApprovalRuleOp = 'gte' | 'lte' | 'eq' | 'ne' | 'in' | 'not_in' | 'contains'
 
 /** 可选规则命中条件；同一级的 rules 按 AND 生效，未知上下文视为命中。 */
