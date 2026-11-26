@@ -27,10 +27,10 @@
 | RC-07 | 专家评分校准 | 已完成并通过验证（真实专家评分数据阻塞） | `08_AI_QUALITY_CALIBRATION_REPORT.md` | `99c0e3b` |
 | RC-08 | 经验治理（策略/过期/撤销） | 已完成并通过验证 | `09_LEARNING_GOVERNANCE_REPORT.md` | `be4f8b9` |
 | RC-09 | 审批规则可解释性 | 已完成并通过验证（普通条件链待办见报告） | `10_APPROVAL_RULE_EXPLAINABILITY_REPORT.md` | `be4f8b9` |
-| RC-10 | 真实/脱敏投标 E2E | 已完成但真实样本数据阻塞（PARTIAL） | `11_REAL_BID_E2E_ACCEPTANCE_REPORT.md` | 待提交 |
-| RC-11 | 过程指标与 summary 契约 | 已完成并通过验证 | `11_REAL_BID_E2E_ACCEPTANCE_REPORT.md`（RC-11 章节） | 待提交 |
+| RC-10 | 真实/脱敏投标 E2E | 已完成但真实样本数据阻塞（PARTIAL） | `11_REAL_BID_E2E_ACCEPTANCE_REPORT.md` | `61ed523` |
+| RC-11 | 过程指标与 summary 契约 | 已完成并通过验证 | `11_REAL_BID_E2E_ACCEPTANCE_REPORT.md`（RC-11 章节） | `61ed523` |
 | RC-12 | PostgreSQL 迁移/并发 | 已完成并通过验证（pgserver 非生产，多线程非多机） | `12_POSTGRES_MIGRATION_CONCURRENCY_REPORT.md` | `e7fab57` |
-| RC-13 | 最终验收/文档 | 待实施 | `13_FINAL_RC_ACCEPTANCE_REPORT.md`、`14_CHANGELOG.md` | 待回填 |
+| RC-13 | 最终验收/文档 | 已完成并通过验证（CONDITIONAL PASS / PARTIAL ACCEPTANCE） | `13_FINAL_RC_ACCEPTANCE_REPORT.md`、`14_CHANGELOG.md` | 随本次文档提交 |
 
 注：用户指定文件名 `02_TOOL_LOOP_RELIABILITY_REPORT.md` 对应 RC-01；主台账保留指定文件名，不做重命名。
 
