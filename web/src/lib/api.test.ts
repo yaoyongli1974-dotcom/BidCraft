@@ -8,7 +8,7 @@ import { DEFAULT_IMAGE_POLICY, normalizeImagePolicy } from '../api/images'
 import { getPendingApprovals } from '../api/jobs'
 import { createTerm, deleteKbDoc, getKbDocs, getTerms, normalizeKbDocPolicy, normalizeKbDocs, normalizeTerm, reindexKnowledgeBase, updateKbDoc } from '../api/knowledge'
 import { PLUGIN_CPU_SECONDS, PLUGIN_MEM_LIMIT, createPlugin, exportPluginPackage, importPluginPackage, normalizePlugin, updatePlugin } from '../api/plugins'
-import { applicableStages, duplicateProject, getProject, getProjectTemplates, instantiateTemplate, normalizeApprovalChain, normalizeApprovalRules, updateProject } from '../api/project'
+import { applicableStages, duplicateProject, explainApprovalStages, getProject, getProjectTemplates, instantiateTemplate, normalizeApprovalChain, normalizeApprovalExplain, normalizeApprovalRules, updateProject } from '../api/project'
 import { createPersonnel, createQualification, createUserDoc, deletePersonnel, deleteQualification, deleteUserDoc, getPersonnel, getPreflight, getQualifications, getUserDocs, normalizePreflight, normalizeQualification, updatePersonnel, updateQualification, uploadQualificationEvidence, userDocFileUrl } from '../api/tender'
 import { ApiError, UNAUTHORIZED_EVENT, apiFetch, errorDetailText, messageOf, uploadForm } from './http'
 
@@ -2805,5 +2805,73 @@ describe('risk overview & issue status', () => {
       expect((error as ApiError).status).toBe(409)
       expect((error as ApiError).message).toContain('2 项未处置的废标/阻断风险')
     }
+  })
+})
+
+describe('审批条件解释（v0.33.0 RC-09）', () => {
+  it('后端解释归一化丢弃坏条目并兜底字段', () => {
+    const result = normalizeApprovalExplain([
+      {
+        index: 1,
+        applicable: false,
+        conditions: [
+          { field: 'priced', op: 'gte', value: 8, actual: 7, hit: false, missing: false },
+          { field: 'currency', op: 'in', value: ['CNY'], actual: null, hit: true, missing: true },
+          'bad',
+        ],
+        missing_data: ['currency', 7],
+      },
+      'bad',
+    ])
+    expect(result).toHaveLength(1)
+    expect(result[0].index).toBe(1)
+    expect(result[0].applicable).toBe(false)
+    expect(result[0].conditions).toHaveLength(2)
+    expect(result[0].conditions[0].hit).toBe(false)
+    expect(result[0].conditions[1].missing).toBe(true)
+    expect(result[0].missing_data).toEqual(['currency'])
+    expect(normalizeApprovalExplain(null)).toEqual([])
+  })
+
+  it('本地解释与生效判定同源：未知数值保守命中并列出缺失字段', () => {
+    const chain = normalizeApprovalChain([
+      {
+        approvers: [{ id: 'u1' }],
+        rules: [
+          { field: 'priced', op: 'gte', value: 8 },
+          { field: 'package_id', op: 'eq', value: 'pkg-a' },
+        ],
+      },
+    ])
+    const explain = explainApprovalStages(chain, 100, {
+      packageId: 'pkg-a',
+      currency: 'CNY',
+      summary: {},
+    })
+    expect(explain).toHaveLength(1)
+    expect(explain[0].applicable).toBe(true)
+    expect(explain[0].conditions.map((item) => item.field)).toEqual(['priced', 'package_id'])
+    expect(explain[0].conditions[0].actual).toBeNull()
+    expect(explain[0].conditions[0].hit).toBe(true)
+    expect(explain[0].conditions[1].actual).toBe('pkg-a')
+    expect(explain[0].missing_data).toEqual(['priced'])
+
+    const pricedSeven = explainApprovalStages(chain, 100, {
+      packageId: 'pkg-a',
+      summary: { priced: 7 },
+    })
+    expect(pricedSeven[0].applicable).toBe(false)
+    expect(pricedSeven[0].conditions[0].hit).toBe(false)
+    expect(pricedSeven[0].conditions[0].actual).toBe(7)
+  })
+
+  it('本地解释白名单未知时跳过该级', () => {
+    const chain = normalizeApprovalChain([
+      { approvers: [{ id: 'u1' }], packages: ['pkg-a'], currencies: ['CNY'] },
+    ])
+    const explain = explainApprovalStages(chain, 100, {})
+    expect(explain[0].applicable).toBe(false)
+    expect(explain[0].conditions.map((item) => item.missing)).toEqual([true, true])
+    expect(explain[0].missing_data).toEqual(['package_id', 'currency'])
   })
 })

@@ -7894,6 +7894,12 @@ button.risk-anchor:hover {
 .quality-lesson { padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; }
 .quality-lesson-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-muted); }
 .quality-lesson-text { margin: 7px 0 0; font-size: 12.5px; line-height: 1.5; color: var(--ink-soft); }
+/* v0.33.0 RC-08：经验治理徽标与撤销控制 */
+.quality-lesson-gov { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 6px; }
+.quality-lesson-gov .badge { font-size: 10.5px; }
+.quality-lesson.is-revoked { opacity: 0.72; border-style: dashed; }
+.quality-lesson-actions { margin-top: 6px; }
+.quality-lessons-filter label.quality-lesson-checkbox { flex-direction: row; align-items: center; gap: 6px; }
 @media (max-width: 720px) {
   .quality-overview { grid-template-columns: repeat(2, 1fr); }
   .quality-dim-head { flex-wrap: wrap; }
@@ -7938,3 +7944,13 @@ button.risk-anchor:hover {
 .agents-tool-trace-meta dt { color: var(--ink-muted); }
 .agents-tool-trace-meta dd { margin: 0; min-width: 0; }
 .agents-tool-trace-meta code { font-size: 11px; }
+
+/* v0.33.0 RC-09：审批条件命中明细（与生效级判定同源） */
+.boq-approval-explain { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--line-soft); border-radius: 6px; background: var(--surface-soft, transparent); font-size: 11.5px; }
+.boq-approval-explain-title { color: var(--ink-soft); font-weight: 600; }
+.boq-approval-explain ul { margin: 6px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; }
+.boq-approval-explain li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.boq-approval-explain li.is-hit { color: var(--ok, var(--success)); }
+.boq-approval-explain li.is-miss { color: var(--danger); }
+.boq-approval-explain-missing { padding: 0 5px; border-radius: 4px; background: var(--warn-soft, transparent); color: var(--warn); font-size: 10.5px; }
+.boq-approval-explain-note { margin: 6px 0 0; color: var(--ink-muted); }

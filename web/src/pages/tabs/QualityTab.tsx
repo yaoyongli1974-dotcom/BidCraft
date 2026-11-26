@@ -21,7 +21,7 @@ import {
   updateQualityFinding,
 } from '../../api/evaluation'
 import { downloadBlob } from '../../api/generation'
-import { getProjectLessons } from '../../api/learning'
+import { getProjectLessons, revokeProjectLesson } from '../../api/learning'
 import { watchJob } from '../../hooks/watchJob'
 import { messageOf } from '../../lib/http'
 import type { Job, QualityDimension, QualityFinding, QualityReport } from '../../lib/types'
@@ -307,21 +307,55 @@ function FindingCard({
   )
 }
 
+const LESSON_GRADE_TONE: Record<string, 'success' | 'info' | 'warn' | 'neutral'> = {
+  A: 'success',
+  B: 'info',
+  C: 'warn',
+  D: 'neutral',
+}
+const LESSON_TRUST_TONE: Record<string, 'success' | 'info' | 'warn' | 'neutral'> = {
+  high: 'success',
+  medium: 'info',
+  low: 'warn',
+}
+
 /**
- * 建议经验（学习闭环）只读面板。内容来自人工修改与质量 finding 的回流，
- * 未经审核不自动生效，也不是已验证事实或法规；此处不提供写/发布操作。
+ * 建议经验（学习闭环）面板。条目来自人工修改与质量 finding 回流，未经审核
+ * 不自动生效，也不是已验证事实或法规。v0.33.0 RC-08 增加治理徽标、撤销
+ * 过滤与 owner-only 撤销控制；撤销只改项目策略，不改写任何来源行。
  */
-export function LessonsPanel({ projectRef }: { projectRef: string }) {
+export function LessonsPanel({ projectRef, role }: { projectRef: string; role?: string }) {
+  const toast = useToast()
   const [nodeFilter, setNodeFilter] = useState('')
   const [appliedNode, setAppliedNode] = useState('')
-  const lessonsQuery = useQuery(`lessons:${projectRef}:${appliedNode}`, () =>
-    getProjectLessons(projectRef, {
-      ...(appliedNode ? { node_id: appliedNode } : {}),
-      limit: 50,
-    }),
+  const [includeRevoked, setIncludeRevoked] = useState(false)
+  const [revokingId, setRevokingId] = useState<string | null>(null)
+  const lessonsQuery = useQuery(
+    `lessons:${projectRef}:${appliedNode}:${includeRevoked ? 'revoked' : 'active'}`,
+    () =>
+      getProjectLessons(projectRef, {
+        ...(appliedNode ? { node_id: appliedNode } : {}),
+        limit: 50,
+        ...(includeRevoked ? { include_revoked: true } : {}),
+      }),
   )
   const lessons = lessonsQuery.data?.items || []
   const status = lessonsQuery.data?.status || '未审核建议经验'
+  const policy = lessonsQuery.data?.policy
+  const canRevoke = role === 'owner' || role === 'admin'
+
+  const handleRevoke = async (lessonId: string) => {
+    setRevokingId(lessonId)
+    try {
+      await revokeProjectLesson(projectRef, lessonId)
+      toast.success('已撤销该建议经验（来源记录保持不变）')
+      lessonsQuery.refresh()
+    } catch (error) {
+      toast.error(`撤销失败：${messageOf(error)}`)
+    } finally {
+      setRevokingId(null)
+    }
+  }
 
   return (
     <section className="panel quality-panel" aria-label="建议经验">
@@ -344,6 +378,8 @@ export function LessonsPanel({ projectRef }: { projectRef: string }) {
       </div>
       <p className="subtle quality-lessons-note">
         由人工修改与质量 finding 回流生成；仅作建议，未审核不会写入企业规范，也不代表已验证事实或法规。
+        治理策略：最低信任 {policy?.min_trust || '不限'} · 有效期{' '}
+        {policy?.ttl_days ? `${policy.ttl_days} 天` : '不限'} · 已撤销 {policy?.revoked_ids.length ?? 0} 条。
       </p>
       <form
         className="quality-lessons-filter"
@@ -365,6 +401,15 @@ export function LessonsPanel({ projectRef }: { projectRef: string }) {
         <Button type="submit" variant="secondary" size="sm">
           筛选
         </Button>
+        <label className="quality-lesson-checkbox">
+          <input
+            type="checkbox"
+            aria-label="显示已撤销经验"
+            checked={includeRevoked}
+            onChange={(event) => setIncludeRevoked(event.target.checked)}
+          />
+          <span>显示已撤销</span>
+        </label>
         {appliedNode && (
           <Button
             variant="ghost"
@@ -397,7 +442,10 @@ export function LessonsPanel({ projectRef }: { projectRef: string }) {
       {lessons.length > 0 && (
         <div className="quality-lessons">
           {lessons.map((lesson) => (
-            <article className="quality-lesson" key={lesson.id}>
+            <article
+              className={className('quality-lesson', lesson.revoked && 'is-revoked')}
+              key={lesson.id}
+            >
               <div className="quality-lesson-meta">
                 <Badge tone="neutral" subtle>
                   ID {lesson.id}
@@ -412,7 +460,33 @@ export function LessonsPanel({ projectRef }: { projectRef: string }) {
                 <span>作者 {lesson.author || '—'}</span>
                 <span>{formatRelative(lesson.created_at)}</span>
               </div>
+              <div className="quality-lesson-gov">
+                <Badge tone={LESSON_GRADE_TONE[lesson.grade] || 'neutral'} subtle>
+                  等级 {lesson.grade || '—'}
+                </Badge>
+                <Badge tone={LESSON_TRUST_TONE[lesson.trust] || 'neutral'} subtle>
+                  信任 {lesson.trust || '—'}
+                </Badge>
+                <span>{lesson.expires_at ? `有效至 ${formatDate(lesson.expires_at)}` : '长期有效'}</span>
+                {lesson.revoked && (
+                  <Badge tone="danger" subtle>
+                    已撤销
+                  </Badge>
+                )}
+              </div>
               <p className="quality-lesson-text">{lesson.text}</p>
+              {canRevoke && !lesson.revoked && (
+                <div className="quality-lesson-actions">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={revokingId !== null}
+                    onClick={() => void handleRevoke(lesson.id)}
+                  >
+                    {revokingId === lesson.id ? '撤销中…' : '撤销'}
+                  </Button>
+                </div>
+              )}
             </article>
           ))}
         </div>
@@ -422,7 +496,7 @@ export function LessonsPanel({ projectRef }: { projectRef: string }) {
 }
 
 export function QualityTab() {
-  const { ref, canWrite } = useWorkspace()
+  const { ref, canWrite, project } = useWorkspace()
   const toast = useToast()
   const [running, setRunning] = useState(false)
   const [jobProgress, setJobProgress] = useState<number | null>(null)
@@ -766,7 +840,7 @@ export function QualityTab() {
         </>
       )}
 
-      <LessonsPanel projectRef={ref} />
+      <LessonsPanel projectRef={ref} role={project?.my_role} />
 
       {(reportsQuery.data || []).length > 1 && (
         <section className="panel quality-panel">

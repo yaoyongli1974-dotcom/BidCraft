@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -49,6 +50,21 @@ _NOTE_KEYS = ("note", "reason", "comment", "message")
 _MAX_TEXT = 600
 #: 单条经验在纯文本块中的最大长度（含标签）。
 _MAX_LINE = 700
+#: 经验治理策略在 ``project.meta`` 中的键（无 schema 变更，纯 meta 快照）。
+LESSON_POLICY_KEY = "lesson_policy"
+#: 治理字段的合法取值。级别只影响展示；信任级别同时参与 min_trust 过滤。
+LESSON_GRADES = ("A", "B", "C", "D")
+LESSON_TRUST_LEVELS = ("low", "medium", "high")
+_LESSON_TRUST_RANK = {level: rank for rank, level in enumerate(LESSON_TRUST_LEVELS)}
+#: 有效期上限（天）：0 = 不过期，过大值一律夹取到上限，避免误配置永久保留。
+_LESSON_TTL_MAX_DAYS = 3650
+#: 各来源的默认等级 / 信任（治理策略可按 id 覆盖）。
+_LESSON_SOURCE_PROFILE = {
+    "quality_finding": ("B", "medium"),
+    "section_revision": ("C", "low"),
+    "audit_log": ("B", "medium"),
+    "chapter_plan": ("C", "low"),
+}
 
 Lesson = dict[str, Any]
 """一条经验的可序列化契约（``lessons_payload`` 保证恰好这些键）：
@@ -57,8 +73,32 @@ Lesson = dict[str, Any]
 ``section_revision`` / ``audit_log`` / ``chapter_plan``）；``kind`` 中文经验类别；
 ``text`` 可展示的中文建议正文；``node_id`` 真实章节 ID 或 ``None``；
 ``created_at`` 北京时间 ISO 字符串或 ``None``；``author`` 处置人/编辑人；
-``status`` 原始状态（finding 状态 / ``edit`` / 审计动作 / 规划状态）。
+``status`` 原始状态（finding 状态 / ``edit`` / 审计动作 / 规划状态）；
+``grade`` / ``trust`` 治理等级与信任级别；``expires_at`` 有效期终点或 ``None``；
+``revoked`` 是否已被负责人撤销。
 """
+
+#: ``lesson_items`` 每条恰好这些键（12 个）。
+LESSON_ITEM_KEYS = frozenset(
+    {
+        "id",
+        "source",
+        "kind",
+        "text",
+        "node_id",
+        "created_at",
+        "author",
+        "status",
+        "grade",
+        "trust",
+        "expires_at",
+        "revoked",
+    }
+)
+#: ``normalize_lesson_policy`` 的契约键。
+LESSON_POLICY_KEYS = frozenset(
+    {"grades", "trust_levels", "min_trust", "ttl_days", "revoked_ids"}
+)
 
 
 def _text(value: Any) -> str:
@@ -93,6 +133,140 @@ def _first_note(detail: Any) -> str:
         if note:
             return note
     return ""
+
+
+def normalize_lesson_policy(raw: Any) -> dict[str, Any]:
+    """Normalize a stored ``project.meta.lesson_policy`` snapshot.
+
+    Invalid entries are dropped so a hand-edited or older meta never breaks
+    lesson reads: grades/trust levels are per-lesson overrides validated
+    against the white-lists, ``min_trust`` is an optional floor, ``ttl_days``
+    is clamped to 0–3650 and ``revoked_ids`` is deduped in order.
+    """
+
+    data = raw if isinstance(raw, dict) else {}
+
+    grades: dict[str, str] = {}
+    raw_grades = data.get("grades")
+    if isinstance(raw_grades, dict):
+        for lesson_id, value in raw_grades.items():
+            key = _text(lesson_id)
+            grade = _text(value).upper()
+            if key and grade in LESSON_GRADES:
+                grades[key] = grade
+
+    trust_levels: dict[str, str] = {}
+    raw_trust = data.get("trust_levels")
+    if isinstance(raw_trust, dict):
+        for lesson_id, value in raw_trust.items():
+            key = _text(lesson_id)
+            trust = _text(value).lower()
+            if key and trust in LESSON_TRUST_LEVELS:
+                trust_levels[key] = trust
+
+    min_trust = _text(data.get("min_trust")).lower()
+    if min_trust not in _LESSON_TRUST_RANK:
+        min_trust = None
+
+    raw_ttl = data.get("ttl_days")
+    ttl_days = (
+        max(0, min(int(raw_ttl), _LESSON_TTL_MAX_DAYS))
+        if isinstance(raw_ttl, int) and not isinstance(raw_ttl, bool)
+        else 0
+    )
+
+    revoked_ids: list[str] = []
+    raw_revoked = data.get("revoked_ids")
+    if isinstance(raw_revoked, list):
+        for value in raw_revoked:
+            if not isinstance(value, str):
+                continue
+            key = _text(value)
+            if key and key not in revoked_ids:
+                revoked_ids.append(key)
+
+    return {
+        "grades": grades,
+        "trust_levels": trust_levels,
+        "min_trust": min_trust,
+        "ttl_days": ttl_days,
+        "revoked_ids": revoked_ids,
+    }
+
+
+def load_lesson_policy(project: Any) -> dict[str, Any]:
+    """Read the normalized governance policy of ``project`` (never writes)."""
+
+    meta = getattr(project, "meta", None)
+    return normalize_lesson_policy(
+        meta.get(LESSON_POLICY_KEY) if isinstance(meta, dict) else None
+    )
+
+
+def _lesson_profile(row: dict[str, Any], policy: dict[str, Any]) -> tuple[str, str]:
+    grade, trust = _LESSON_SOURCE_PROFILE.get(row.get("source"), ("B", "medium"))
+    lesson_id = str(row.get("id") or "")
+    return policy["grades"].get(lesson_id, grade), policy["trust_levels"].get(lesson_id, trust)
+
+
+def _lesson_expiry(created_at: Any, ttl_days: int) -> str | None:
+    """ISO expiry instant derived from the lesson's real created_at."""
+
+    if not ttl_days or not created_at:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(created_at))
+    except (TypeError, ValueError):
+        return None
+    return (parsed + timedelta(days=ttl_days)).isoformat()
+
+
+def _lesson_expired(created_at: Any, ttl_days: int) -> bool:
+    if not ttl_days or not created_at:
+        return False
+    try:
+        parsed = datetime.fromisoformat(str(created_at))
+    except (TypeError, ValueError):
+        return False
+    return parsed + timedelta(days=ttl_days) < datetime.now(parsed.tzinfo)
+
+
+def lesson_source_ids(db: Session, project: Any) -> set[str]:
+    """Real lesson source ids anchored in ``project`` (no policy filtering).
+
+    Used to validate a revoke target: a genuine id belonging to another
+    project must not be revokable through this project's route.
+    """
+
+    project_id = _project_id(project)
+    if db is None or not project_id:
+        return set()
+    valid_nodes = set(
+        db.scalars(select(OutlineNode.id).where(OutlineNode.project_id == project_id))
+    )
+    return {
+        str(row["id"])
+        for row in _collect(db, project_id)
+        if not row.get("node_id") or row["node_id"] in valid_nodes
+    }
+
+
+def revoke_lesson(db: Session, project: Any, lesson_id: str) -> dict[str, Any]:
+    """Mark a lesson id revoked in ``project.meta``; never mutate source rows."""
+
+    project_id = _project_id(project)
+    if db is None or not project_id:
+        raise LookupError("项目不存在")
+    key = _text(lesson_id)
+    if not key or key not in lesson_source_ids(db, project):
+        raise LookupError("建议经验不存在")
+    meta = dict(getattr(project, "meta", None) or {})
+    policy = normalize_lesson_policy(meta.get(LESSON_POLICY_KEY))
+    if key not in policy["revoked_ids"]:
+        policy["revoked_ids"].append(key)
+    meta[LESSON_POLICY_KEY] = policy
+    project.meta = meta
+    return {"lesson_id": key, "revoked": True, "policy": policy}
 
 
 def _collect(db: Session, project_id: str) -> list[dict[str, Any]]:
@@ -223,12 +397,18 @@ def _collect(db: Session, project_id: str) -> list[dict[str, Any]]:
 
 
 def lesson_items(
-    db: Session, project: Any, node_id: str | None = None
+    db: Session,
+    project: Any,
+    node_id: str | None = None,
+    *,
+    include_revoked: bool = False,
 ) -> list[dict[str, Any]]:
     """返回项目（可选某章节）的去重、按时间倒序、上限 12 条经验字典。
 
-    返回的每个字典恰好包含 :data:`Lesson` 契约的八个键；``db`` 为 ``None``
-    或项目不存在时返回空列表。本函数只读，不产生任何审计/知识库/企业资产写入。
+    治理策略在去重 / 截断**之前**生效：撤销、过期与低于 ``min_trust`` 的条目
+    先被丢弃（``include_revoked`` 只把撤销项放回治理视图，过期项仍然丢弃）。
+    返回的每个字典恰好包含 :data:`LESSON_ITEM_KEYS` 的 12 个键；``db`` 为
+    ``None`` 或项目不存在时返回空列表。本函数只读，不写任何业务状态。
     """
 
     if db is None:
@@ -240,10 +420,21 @@ def lesson_items(
     # 只有确实是本项目真实章节的 ID 才允许作为过滤条件。
     if node_id and node_id not in valid_nodes:
         return []
+    policy = load_lesson_policy(project)
+    revoked = set(policy["revoked_ids"])
+    min_rank = _LESSON_TRUST_RANK.get(policy["min_trust"])
     candidates = _collect(db, project_id)
     seen: set[str] = set()
     result: list[dict[str, Any]] = []
     for row in sorted(candidates, key=lambda item: (item["_sort"], item["id"]), reverse=True):
+        lesson_id = str(row["id"])
+        if lesson_id in revoked and not include_revoked:
+            continue
+        if _lesson_expired(row.get("created_at"), policy["ttl_days"]):
+            continue
+        grade, trust = _lesson_profile(row, policy)
+        if min_rank is not None and _LESSON_TRUST_RANK.get(trust, 0) < min_rank:
+            continue
         node = row.get("node_id")
         # 拒绝指向其他项目/不存在章节的锚点，避免跨项目 ID 泄漏。
         if node and node not in valid_nodes:
@@ -264,6 +455,10 @@ def lesson_items(
                 "created_at": row.get("created_at"),
                 "author": row.get("author") or "",
                 "status": row.get("status") or "",
+                "grade": grade,
+                "trust": trust,
+                "expires_at": _lesson_expiry(row.get("created_at"), policy["ttl_days"]),
+                "revoked": lesson_id in revoked,
             }
         )
         if len(result) >= MAX_LESSONS:
@@ -272,19 +467,24 @@ def lesson_items(
 
 
 def lessons_payload(
-    db: Session, project: Any, node_id: str | None = None
+    db: Session,
+    project: Any,
+    node_id: str | None = None,
+    *,
+    include_revoked: bool = False,
 ) -> dict[str, Any]:
     """``GET /projects/{ref}/lessons`` 的只读响应体。
 
-    ``items`` 中每条字典恰好包含 :data:`Lesson` 契约的八个键；``status`` 恒为
-    :data:`LESSON_LABEL`，明确整批条目都是未审核建议。路由只做分页/审计，不在
-    这里写入知识库、企业资产或任何业务状态。
+    ``items`` 中每条字典恰好包含 :data:`LESSON_ITEM_KEYS` 的 12 个键；``policy``
+    回显当前治理策略。``status`` 恒为 :data:`LESSON_LABEL`，明确整批条目都是
+    未审核建议。路由只做分页/审计，不在这里写入任何业务状态。
     """
 
     return {
-        "items": lesson_items(db, project, node_id),
+        "items": lesson_items(db, project, node_id, include_revoked=include_revoked),
         "node_id": str(node_id or ""),
         "status": LESSON_LABEL,
+        "policy": load_lesson_policy(project),
     }
 
 
@@ -316,10 +516,17 @@ def lessons_block(db: Session, project: Any, node_id: str | None = None) -> str:
 
 
 __all__ = [
+    "LESSON_ITEM_KEYS",
     "LESSON_LABEL",
+    "LESSON_POLICY_KEY",
+    "LESSON_POLICY_KEYS",
     "MAX_LESSONS",
     "Lesson",
     "lesson_items",
+    "lesson_source_ids",
     "lessons_block",
     "lessons_payload",
+    "load_lesson_policy",
+    "normalize_lesson_policy",
+    "revoke_lesson",
 ]

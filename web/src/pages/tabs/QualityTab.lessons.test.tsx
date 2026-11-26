@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { QualityTab } from './QualityTab'
-import { getProjectLessons } from '../../api/learning'
+import { getProjectLessons, revokeProjectLesson } from '../../api/learning'
 import {
   getEvaluationFindings,
   getLatestEvaluation,
@@ -30,7 +30,10 @@ const toast = vi.hoisted(() => ({
 
 vi.mock('../useWorkspace', () => ({ useWorkspace: () => workspace }))
 vi.mock('../../context/useToast', () => ({ useToast: () => toast }))
-vi.mock('../../api/learning', () => ({ getProjectLessons: vi.fn() }))
+vi.mock('../../api/learning', () => ({
+  getProjectLessons: vi.fn(),
+  revokeProjectLesson: vi.fn(),
+}))
 vi.mock('../../api/evaluation', () => ({
   getLatestEvaluation: vi.fn(),
   listEvaluationReports: vi.fn(),
@@ -53,6 +56,10 @@ function lesson(overrides: Partial<Lesson> = {}): Lesson {
     created_at: '2026-11-25T10:00:00Z',
     author: 'alice',
     status: '未审核建议经验',
+    grade: 'A',
+    trust: 'high',
+    expires_at: '2026-12-25T10:00:00Z',
+    revoked: false,
     ...overrides,
   }
 }
@@ -84,7 +91,25 @@ describe('QualityTab 建议经验面板', () => {
       items: [lesson({ node_id: params?.node_id || 'n1' })],
       node_id: params?.node_id || 'n1',
       status: '未审核建议经验',
+      policy: {
+        grades: {},
+        trust_levels: {},
+        min_trust: null,
+        ttl_days: 0,
+        revoked_ids: [],
+      },
     }))
+    vi.mocked(revokeProjectLesson).mockResolvedValue({
+      lesson_id: 'l1',
+      revoked: true,
+      policy: {
+        grades: {},
+        trust_levels: {},
+        min_trust: null,
+        ttl_days: 0,
+        revoked_ids: ['l1'],
+      },
+    })
   })
 
   function renderTab() {
@@ -143,5 +168,63 @@ describe('QualityTab 建议经验面板', () => {
     const resolution = await screen.findByText(/处置人：alice/)
     expect(resolution.textContent).toContain('处置时间')
     expect(resolution.textContent).toContain('意见：已核对')
+  })
+
+  it('展示等级/信任/有效期徽标与治理策略摘要', async () => {
+    renderTab()
+    const panel = await screen.findByRole('region', { name: '建议经验' })
+    expect(panel.textContent).toContain('等级 A')
+    expect(panel.textContent).toContain('信任 high')
+    expect(panel.textContent).toContain('有效至')
+    expect(panel.textContent).toContain('治理策略：最低信任 不限')
+    expect(panel.textContent).toContain('已撤销 0 条')
+  })
+
+  it('owner 可撤销经验；viewer 看不到撤销控件', async () => {
+    renderTab()
+    await screen.findByText('建议补充盖章页并复核日期')
+    const revokeButton = screen.getByRole('button', { name: '撤销' })
+    fireEvent.click(revokeButton)
+    await waitFor(() =>
+      expect(revokeProjectLesson).toHaveBeenCalledWith('p1', 'l1'),
+    )
+    expect(toast.success).toHaveBeenCalled()
+
+    workspace.project.my_role = 'viewer'
+    try {
+      renderTab()
+      await screen.findAllByText('建议补充盖章页并复核日期')
+      expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
+    } finally {
+      workspace.project.my_role = 'owner'
+    }
+  })
+
+  it('已撤销开关切换 include_revoked 查询并展示撤销徽标', async () => {
+    vi.mocked(getProjectLessons).mockImplementation(async (_ref, params) => ({
+      items: [
+        lesson({
+          node_id: params?.node_id || 'n1',
+          revoked: params?.include_revoked === true,
+        }),
+      ],
+      node_id: params?.node_id || 'n1',
+      status: '未审核建议经验',
+      policy: {
+        grades: {},
+        trust_levels: {},
+        min_trust: null,
+        ttl_days: 0,
+        revoked_ids: params?.include_revoked ? ['l1'] : [],
+      },
+    }))
+    renderTab()
+    await screen.findByText('建议补充盖章页并复核日期')
+    expect(screen.queryByText('已撤销')).toBeNull()
+    fireEvent.click(screen.getByLabelText('显示已撤销经验'))
+    await waitFor(() =>
+      expect(getProjectLessons).toHaveBeenCalledWith('p1', { limit: 50, include_revoked: true }),
+    )
+    expect(await screen.findByText('已撤销')).toBeTruthy()
   })
 })

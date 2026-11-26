@@ -10,6 +10,7 @@ from bidcraft.db import session_scope
 from bidcraft.models import (
     AuditLog,
     BoqQuoteVersion,
+    CommercialDoc,
     Project,
     User,
     utcnow,
@@ -422,3 +423,93 @@ def test_http_permission_matrix_and_status_flow(team):
     assert team["editor"].delete(
         f"/projects/{project_id}/commercial/{doc_id}"
     ).status_code == 200
+
+
+def test_chain_numeric_rule_uses_stored_quote_summary():
+    """priced ≥ N 的规则必须读落库 validation.quote，而不是退回空摘要。"""
+
+    seed = _seed()
+    owner = _actor(seed["owner_id"], "王经理")
+    rule_approver = _actor(seed["approver_one"], "审批人甲")
+    fallback = _actor(seed["approver_two"], "审批人乙")
+    chain = [
+        {
+            "approvers": [{"id": seed["approver_one"], "name": "规则审批"}],
+            "mode": "all",
+            "rules": [{"field": "priced", "op": "gte", "value": 8}],
+        },
+        {
+            "approvers": [{"id": seed["approver_two"], "name": "兜底审批"}],
+            "mode": "any",
+        },
+    ]
+
+    def _submit_with_priced(priced: int) -> str:
+        with session_scope() as db:
+            project = db.get(Project, seed["project_id"])
+            project.meta = {"approval_chain": chain}
+            doc_payload = commercial.save_commercial(
+                db, project, quote_version_id=seed["version_id"], actor=owner
+            )
+            commercial.submit_commercial(
+                db,
+                project,
+                doc_payload["id"],
+                actor=owner,
+                actor_id=seed["owner_id"],
+                role="owner",
+            )
+            row = db.get(CommercialDoc, doc_payload["id"])
+            validation = dict(row.validation or {})
+            quote = dict(validation.get("quote") or {})
+            quote["priced"] = priced
+            validation["quote"] = quote
+            row.validation = validation
+            db.flush()
+            return doc_payload["id"]
+
+    # priced=7 → 规则级未命中，兜底审批人直接定稿。
+    low_id = _submit_with_priced(7)
+    with session_scope() as db:
+        project = db.get(Project, seed["project_id"])
+        approved = commercial.review_commercial(
+            db,
+            project,
+            low_id,
+            decision="approve",
+            actor=fallback,
+            actor_id=seed["approver_two"],
+            role="editor",
+        )
+    assert approved["status"] == "approved"
+    assert [record["stage"] for record in approved["validation"]["approvals"]] == [1]
+
+    # priced=10 → 规则级生效，兜底审批人不是当前级，被 403；规则审批人可批。
+    high_id = _submit_with_priced(10)
+    with session_scope() as db:
+        project = db.get(Project, seed["project_id"])
+        try:
+            commercial.review_commercial(
+                db,
+                project,
+                high_id,
+                decision="approve",
+                actor=fallback,
+                actor_id=seed["approver_two"],
+                role="editor",
+            )
+        except commercial.CommercialForbiddenError:
+            pass
+        else:
+            raise AssertionError("规则命中时兜底审批人不得审批")
+        result = commercial.review_commercial(
+            db,
+            project,
+            high_id,
+            decision="approve",
+            actor=rule_approver,
+            actor_id=seed["approver_one"],
+            role="editor",
+        )
+    assert result["status"] == "submitted"  # 还有兜底级
+    assert [record["stage"] for record in result["validation"]["approvals"]] == [0]

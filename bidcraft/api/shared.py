@@ -221,6 +221,7 @@ from .schemas import (  # noqa: F401,E402
     KbDocMeta,
     KbDuplicateGroupResolve,
     KbUpdate,
+    LessonPolicyUpdate,
     LoginRequest,
     MemberCreate,
     MemberUpdate,
@@ -391,7 +392,9 @@ def audit(
     return record_audit(db, project_id, action, detail)
 
 
-def lessons_payload(db, project, node_id: str | None = None) -> dict:
+def lessons_payload(
+    db, project, node_id: str | None = None, *, include_revoked: bool = False
+) -> dict:
     """只读经验摘要：运行时转交 evaluation.learning 的真实实现。
 
     延迟导入避免学习引擎的可选依赖影响 API 启动；路由层可以 monkeypatch
@@ -400,7 +403,7 @@ def lessons_payload(db, project, node_id: str | None = None) -> dict:
 
     from ..evaluation.learning import lessons_payload as _lessons_payload
 
-    return _lessons_payload(db, project, node_id=node_id)
+    return _lessons_payload(db, project, node_id=node_id, include_revoked=include_revoked)
 
 
 def _job(db, job_id: str) -> Job:
@@ -578,6 +581,9 @@ def _rule_package_admin_payload(
 def _project_payload(
     project: Project, stats: dict[str, Any] | None = None, my_role: str | None = None
 ) -> dict[str, Any]:
+    # 延迟导入：治理策略的归一化属于 evaluation.learning（可选依赖）。
+    from ..evaluation.learning import load_lesson_policy
+
     return {
         "id": project.id,
         "name": project.name,
@@ -591,6 +597,7 @@ def _project_payload(
         "tender_number": (project.meta or {}).get("tender_number", ""),
         "bid_section": (project.meta or {}).get("bid_section", "") or "",
         "approval_chain": boq.normalize_chain((project.meta or {}).get("approval_chain")),
+        "lesson_policy": load_lesson_policy(project),
         "created_at": _iso(project.created_at),
         "updated_at": _iso(project.updated_at),
         "stats": stats or {},
@@ -1459,6 +1466,7 @@ __all__ = [
     'KbDuplicateGroupResolve',
     'KbUpdate',
     'KnowledgeBase',
+    'LessonPolicyUpdate',
     'Literal',
     'LoginRequest',
     'Material',

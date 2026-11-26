@@ -315,6 +315,12 @@ def _quote_reference(
         "cny_total_with_tax": (
             _number(summary.get("cny_total_with_tax")) if approved else None
         ),
+        # v0.33.0 RC-09：报价摘要的计数/比率指标随商务标一起落库，供审批规则
+        # （priced ≥ N 等）在商务标链路复用；未审批版本不暴露任何报价指标。
+        "boq_rows": _number(summary.get("boq_rows")) if approved else None,
+        "priced": _number(summary.get("priced")) if approved else None,
+        "unpriced": _number(summary.get("unpriced")) if approved else None,
+        "match_rate": _number(summary.get("match_rate")) if approved else None,
         "reviewed_by": _text(version.reviewed_by),
         "reviewed_at": _iso(version.reviewed_at),
         "quantities": dict(basis.get("qty") or {}),
@@ -1246,8 +1252,14 @@ def _review_context(
     total_amount = _number(quote.get("total_amount"))
     package_id = doc.package_id or quote.get("package_id")
     currency = _text(quote.get("currency"))
-    applicable = boq.applicable_stages(chain, total_amount, package_id, currency)
-    done = boq.completed_stages(chain, approvals, total_amount, package_id, currency)
+    # v0.33.0 RC-09：报价摘要（priced / boq_rows / match_rate 等）来自落库
+    # validation.quote，规则条件必须用它求值，不能退回空上下文。
+    applicable = boq.applicable_stages(
+        chain, total_amount, package_id, currency, summary=quote
+    )
+    done = boq.completed_stages(
+        chain, approvals, total_amount, package_id, currency, summary=quote
+    )
     return chain, approvals, applicable, done
 
 
@@ -1310,12 +1322,14 @@ def review_commercial(
             }
         )
         validation["approvals"] = approvals
+        quote = validation.get("quote") or {}
         final_approve = decision == "approve" and boq.completed_stages(
             chain,
             approvals,
-            _number((validation.get("quote") or {}).get("total_amount")),
+            _number(quote.get("total_amount")),
             doc.package_id,
-            _text((validation.get("quote") or {}).get("currency")),
+            _text(quote.get("currency")),
+            summary=quote,
         ) >= len(applicable)
     else:
         final_approve = decision == "approve"
@@ -1547,21 +1561,34 @@ def pending_for_user(db: Session, user: dict | None) -> list[dict[str, Any]]:
             total_amount = _number(quote.get("total_amount"))
             package_id = doc.package_id or _text(quote.get("package_id")) or None
             currency = _text(quote.get("currency")) or boq.get_price_policy(project)["currency"]
+            explain: dict[str, Any] | None = None
             if not chain:
                 if not is_super and project.owner_id != user_id:
                     continue
                 pending_stage, stage_count, mode = 1, 1, ""
             else:
                 applicable = boq.applicable_stages(
-                    chain, total_amount, package_id, currency
+                    chain, total_amount, package_id, currency, summary=quote
                 )
                 done = boq.completed_stages(
-                    chain, approvals, total_amount, package_id, currency
+                    chain, approvals, total_amount, package_id, currency, summary=quote
                 )
                 if done >= len(applicable):
                     continue
                 stage, current = applicable[done]
                 pending_stage, stage_count, mode = done + 1, len(applicable), current["mode"]
+                if any(item.get("rules") for item in chain):
+                    explain = {
+                        "index": stage,
+                        **boq._stage_explain(
+                            current,
+                            total_amount,
+                            package_id,
+                            currency,
+                            amount_known=total_amount is not None,
+                            summary=quote,
+                        ),
+                    }
                 if not is_super:
                     approver_ids = {
                         str(person.get("id") or "") for person in current["approvers"]
@@ -1592,6 +1619,7 @@ def pending_for_user(db: Session, user: dict | None) -> list[dict[str, Any]]:
                     "submitted_by": doc.submitted_by or "",
                     "submitted_at": _iso(doc.submitted_at),
                     "total_amount": total_amount,
+                    **({"approval_explain": explain} if explain is not None else {}),
                 }
             )
     items.sort(key=lambda item: item["submitted_at"] or "", reverse=True)

@@ -910,6 +910,97 @@ def normalize_chain(raw: Any) -> list[dict[str, Any]]:
     return stages
 
 
+def _stage_explain(
+    stage: dict[str, Any],
+    total_amount: Any,
+    package_id: Any,
+    currency: Any,
+    *,
+    amount_known: bool,
+    summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Explain why one stage is (or is not) applicable (v0.33.0 RC-09).
+
+    Single source of truth for stage applicability: ``_stage_applies`` simply
+    returns ``applicable``. Every condition carries ``field`` / ``op`` /
+    ``value`` / ``actual`` / ``hit`` / ``missing``; ``missing_data`` lists the
+    field names whose actual value was unknown. Unknown values stay on the
+    conservative side of the existing evaluation (over-review, not missed
+    approval): amount gates and rules are satisfied while white-lists skip
+    the stage, exactly as before.
+    """
+
+    conditions: list[dict[str, Any]] = []
+    missing_data: list[str] = []
+
+    def add_condition(
+        field_name: str, op: str, value: Any, actual: Any, hit: bool, missing: bool
+    ) -> None:
+        conditions.append(
+            {
+                "field": field_name,
+                "op": op,
+                "value": value,
+                "actual": actual,
+                "hit": bool(hit),
+                "missing": bool(missing),
+            }
+        )
+        if missing:
+            missing_data.append(field_name)
+
+    threshold = _stage_min_amount(stage.get("min_amount"))
+    if threshold is not None:
+        hit = not (amount_known and total_amount < threshold)
+        add_condition(
+            "min_amount",
+            "gte",
+            threshold,
+            total_amount if amount_known else None,
+            hit,
+            not amount_known,
+        )
+
+    packages = _stage_str_list(stage.get("packages"))
+    if packages is not None:
+        package = str(package_id or "").strip()
+        add_condition(
+            "package_id", "in", packages, package or None, bool(package and package in packages), not package
+        )
+
+    currencies = _stage_str_list(stage.get("currencies"))
+    if currencies is not None:
+        code = _currency_code(currency)
+        codes = [_currency_code(item) for item in currencies]
+        add_condition(
+            "currency", "in", codes, code or None, bool(code and code in codes), not code
+        )
+
+    context: dict[str, Any] = {
+        "total_amount": total_amount,
+        "package_id": package_id,
+        "currency": currency,
+    }
+    # Quote-only summary metrics are available for BOQ version review and for
+    # commercial approvals that thread their stored quote as the summary.
+    for field_name in STAGE_RULE_NUMERIC_FIELDS:
+        if field_name != "total_amount":
+            context[field_name] = _stage_number((summary or {}).get(field_name))
+    for rule in _stage_rules(stage.get("rules")):
+        actual = context.get(rule["field"])
+        hit = _rule_value_matches(rule["field"], actual, rule["op"], rule["value"])
+        missing = actual is None or (
+            isinstance(actual, str) and not actual.strip()
+        )
+        add_condition(rule["field"], rule["op"], rule["value"], actual, hit, missing)
+
+    return {
+        "applicable": all(condition["hit"] for condition in conditions),
+        "conditions": conditions,
+        "missing_data": missing_data,
+    }
+
+
 def _stage_applies(
     stage: dict[str, Any],
     total_amount: Any,
@@ -921,43 +1012,48 @@ def _stage_applies(
 ) -> bool:
     """Whether one stage is applicable under all of its conditions (R21/R25).
 
-    An unknown amount (or a stage without a threshold) satisfies the amount
-    condition. A non-empty ``packages`` white-list needs a non-empty
-    ``package_id`` member; a non-empty ``currencies`` white-list needs a
-    non-empty currency whose normalized code is a member. Optional ``rules``
-    are ANDed over the same context plus the supplied quote ``summary``;
-    unknown field values keep the rule satisfied (over-review rather than
-    missed approval). Every condition must hold for the stage to take effect.
+    Delegates to :func:`_stage_explain` so filtering and explanation can never
+    diverge; see that function for the conservative unknown-value semantics.
     """
-    threshold = _stage_min_amount(stage.get("min_amount"))
-    if amount_known and threshold is not None and total_amount < threshold:
-        return False
-    packages = _stage_str_list(stage.get("packages"))
-    if packages is not None:
-        package = str(package_id or "").strip()
-        if not package or package not in packages:
-            return False
-    currencies = _stage_str_list(stage.get("currencies"))
-    if currencies is not None:
-        code = _currency_code(currency)
-        if not code or code not in {_currency_code(item) for item in currencies}:
-            return False
-    context: dict[str, Any] = {
-        "total_amount": total_amount,
-        "package_id": package_id,
-        "currency": currency,
-    }
-    # Quote-only summary metrics are available for BOQ version review; other
-    # callers (commercial approval) keep the legacy three-field context.
-    for field_name in STAGE_RULE_NUMERIC_FIELDS:
-        if field_name != "total_amount":
-            context[field_name] = _stage_number((summary or {}).get(field_name))
-    for rule in _stage_rules(stage.get("rules")):
-        if not _rule_value_matches(
-            rule["field"], context.get(rule["field"]), rule["op"], rule["value"]
-        ):
-            return False
-    return True
+
+    return _stage_explain(
+        stage,
+        total_amount,
+        package_id,
+        currency,
+        amount_known=amount_known,
+        summary=summary,
+    )["applicable"]
+
+
+def _chain_explain(
+    chain: list[dict[str, Any]],
+    total_amount: Any,
+    package_id: Any,
+    currency: Any,
+    summary: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Per-stage explanations aligned with the original chain order."""
+
+    known = (
+        isinstance(total_amount, (int, float))
+        and not isinstance(total_amount, bool)
+        and math.isfinite(total_amount)
+    )
+    return [
+        {
+            "index": index,
+            **_stage_explain(
+                stage,
+                total_amount,
+                package_id,
+                currency,
+                amount_known=known,
+                summary=summary,
+            ),
+        }
+        for index, stage in enumerate(chain)
+    ]
 
 
 def applicable_stages(
@@ -1112,6 +1208,10 @@ def version_payload(
         ),
         "approval_stage_count": len(
             applicable_stages(chain, total_amount, package_id, currency, summary)
+        ),
+        # v0.33.0 RC-09：逐条件命中 / 缺失说明，与生效级判定同源。
+        "approval_explain": _chain_explain(
+            chain, total_amount, package_id, currency, summary
         ),
     }
     if include_prices:
@@ -1457,6 +1557,7 @@ def pending_for_user(db: Session, user: dict) -> list[dict[str, Any]]:
         for version in versions:
             currency = version_currency(version, project)
             approvals = list(version.approvals or [])
+            explain: dict[str, Any] | None = None
             if not chain:
                 if not is_super and project.owner_id != user_id:
                     continue
@@ -1477,6 +1578,25 @@ def pending_for_user(db: Session, user: dict) -> list[dict[str, Any]]:
                     continue  # defensive: a fully signed version is never submitted
                 stage, current = applicable[done]
                 pending_stage, stage_count, mode = done + 1, len(applicable), current["mode"]
+                known = (
+                    isinstance(total_amount, (int, float))
+                    and not isinstance(total_amount, bool)
+                    and math.isfinite(total_amount)
+                )
+                # 仅在链路含 rules 时附带解释：既有 PENDING_KEYS 契约对
+                # min_amount / packages / currencies-only 链保持不变。
+                if any(item.get("rules") for item in chain):
+                    explain = {
+                        "index": stage,
+                        **_stage_explain(
+                            current,
+                            total_amount,
+                            version.package_id,
+                            currency,
+                            amount_known=known,
+                            summary=summary,
+                        ),
+                    }
                 if not is_super:
                     approver_ids = {str(p.get("id") or "") for p in current["approvers"]}
                     if user_id not in approver_ids:
@@ -1501,6 +1621,7 @@ def pending_for_user(db: Session, user: dict) -> list[dict[str, Any]]:
                     "submitted_by": version.submitted_by or "",
                     "submitted_at": clock.iso_utc(version.submitted_at),
                     "total_amount": (version.summary or {}).get("total_amount"),
+                    **({"approval_explain": explain} if explain is not None else {}),
                 }
             )
     items.sort(key=lambda item: item["submitted_at"] or "", reverse=True)

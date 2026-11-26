@@ -1,6 +1,6 @@
 import { ApiError, asArray, jsonBody, request, uploadForm } from '../lib/http'
-import type { ApprovalChainEntry, ApprovalRule, ApprovalRuleField, ApprovalRuleOp, ApprovalStage, ApprovalStageInput, BidPackage, BidPackageInput, ExportTemplatePreset, ExportTemplatesResponse, Member, MemberRole, ParseResult, Project, ProjectDetail, ProjectDuplicateInput, ProjectInstantiateInput, ProjectTemplate, SourceFile, UploadResult } from '../lib/types'
-import { asText, normalizeApprovalConditionList, normalizeBidPackage, normalizeCurrencyToken, normalizeProjectTemplate } from './shared'
+import type { ApprovalChainEntry, ApprovalExplainCondition, ApprovalRule, ApprovalRuleField, ApprovalRuleOp, ApprovalStage, ApprovalStageInput, BidPackage, BidPackageInput, ExportTemplatePreset, ExportTemplatesResponse, LessonPolicyInput, Member, MemberRole, ParseResult, Project, ProjectDetail, ProjectDuplicateInput, ProjectInstantiateInput, ProjectTemplate, SourceFile, StageApprovalExplain, UploadResult } from '../lib/types'
+import { asNumber, asText, normalizeApprovalConditionList, normalizeBidPackage, normalizeCurrencyToken, normalizeProjectTemplate } from './shared'
 
 // ---------------------------------------------------------------- project domain
 export async function getProjects(): Promise<Project[]> {
@@ -151,6 +151,7 @@ export const updateProject = async (
     bid_section?: string
     approval_chain?: ApprovalStageInput[]
     is_template?: boolean
+    lesson_policy?: LessonPolicyInput
   },
 ): Promise<Project> => {
   const data = await request<Project>(`/projects/${encodeURIComponent(ref)}`, {
@@ -342,6 +343,120 @@ export function applicableStages(
     return chain.map((stage, index) => ({ index, stage }))
   }
   return result
+}
+
+/** 后端 approval_explain 的防御性归一：坏条目丢弃，字段缺值补空。 */
+export function normalizeApprovalExplain(value: unknown): StageApprovalExplain[] {
+  if (!Array.isArray(value)) return []
+  const result: StageApprovalExplain[] = []
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') continue
+    const raw = entry as Record<string, unknown>
+    const conditions: ApprovalExplainCondition[] = []
+    if (Array.isArray(raw.conditions)) {
+      for (const item of raw.conditions) {
+        if (!item || typeof item !== 'object') continue
+        const condition = item as Record<string, unknown>
+        const value = condition.value
+        const actual = condition.actual
+        conditions.push({
+          field: asText(condition.field),
+          op: asText(condition.op),
+          value: Array.isArray(value)
+            ? value.filter((v): v is string => typeof v === 'string')
+            : typeof value === 'number' || typeof value === 'string'
+              ? value
+              : null,
+          actual: typeof actual === 'number' || typeof actual === 'string' ? actual : null,
+          hit: condition.hit === true,
+          missing: condition.missing === true,
+        })
+      }
+    }
+    result.push({
+      index: Math.max(0, Math.round(asNumber(raw.index, 0))),
+      applicable: raw.applicable === true,
+      conditions,
+      missing_data: Array.isArray(raw.missing_data)
+        ? raw.missing_data.filter((item): item is string => typeof item === 'string')
+        : [],
+    })
+  }
+  return result
+}
+
+/**
+ * 本地镜像后端 _stage_explain，用于旧后端未回传 approval_explain 时渲染解释。
+ * 语义与 applicableStages 同源：未知值保守命中，包件/币种白名单未知则跳过。
+ */
+export function explainApprovalStages(
+  chain: ApprovalStage[],
+  totalAmount: number | null | undefined,
+  context?: ApprovalStageContext,
+): StageApprovalExplain[] {
+  const amountKnown = typeof totalAmount === 'number' && Number.isFinite(totalAmount)
+  const packageId = typeof context?.packageId === 'string' ? context.packageId.trim() : ''
+  const currency = normalizeCurrencyToken(context?.currency)
+  const summary = context?.summary ?? null
+  const numericValue = (field: ApprovalRuleField): number | null => {
+    if (field === 'total_amount') return amountKnown ? (totalAmount as number) : null
+    const raw = summary?.[field]
+    return typeof raw === 'number' && Number.isFinite(raw) ? raw : null
+  }
+  return chain.map((stage, index) => {
+    const conditions: ApprovalExplainCondition[] = []
+    const missing: string[] = []
+    const add = (
+      field: string,
+      op: string,
+      value: ApprovalExplainCondition['value'],
+      actual: ApprovalExplainCondition['actual'],
+      hit: boolean,
+      isMissing: boolean,
+    ) => {
+      conditions.push({ field, op, value, actual, hit, missing: isMissing })
+      if (isMissing) missing.push(field)
+    }
+    const threshold = stage.min_amount
+    if (typeof threshold === 'number' && Number.isFinite(threshold) && threshold >= 0) {
+      add(
+        'min_amount',
+        'gte',
+        threshold,
+        amountKnown ? (totalAmount as number) : null,
+        !amountKnown || (totalAmount as number) >= threshold,
+        !amountKnown,
+      )
+    }
+    if (stage.packages && stage.packages.length > 0) {
+      const hit = Boolean(packageId && stage.packages.includes(packageId))
+      add('package_id', 'in', stage.packages, packageId || null, hit, !packageId)
+    }
+    if (stage.currencies && stage.currencies.length > 0) {
+      const codes = stage.currencies.map((item) => normalizeCurrencyToken(item))
+      const hit = Boolean(currency && codes.includes(currency))
+      add('currency', 'in', codes, currency || null, hit, !currency)
+    }
+    for (const rule of stage.rules ?? []) {
+      const actual = APPROVAL_RULE_NUMERIC_FIELDS.includes(rule.field)
+        ? numericValue(rule.field)
+        : rule.field === 'package_id'
+          ? packageId || null
+          : rule.field === 'currency'
+            ? currency || null
+            : null
+      const hit = approvalRuleMatches(rule, actual)
+      const isMissing =
+        actual === null || (typeof actual === 'string' && actual.trim() === '')
+      add(rule.field, rule.op, rule.value, actual, hit, isMissing)
+    }
+    return {
+      index,
+      applicable: conditions.every((condition) => condition.hit),
+      conditions,
+      missing_data: missing,
+    }
+  })
 }
 
 export async function getProject(ref: string): Promise<ProjectDetail> {

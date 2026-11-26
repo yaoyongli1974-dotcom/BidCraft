@@ -48,8 +48,10 @@ def test_domain_routers_are_importable_and_populated():
     # 只读检索预览路由（projects.py），Phase 4 新增 1 条只读工具目录路由
     # （orchestration.py：GET /agents/{agent_type}/tools），Phase 5 新增 1 条
     # 只读经验摘要路由（projects.py：GET /projects/{ref}/lessons），Phase 6 新增 2 条
-    # 质量只读路由（evaluation.py：报告 Markdown 导出、单/跨项目质量摘要）。
-    assert sum(len(mod.router.routes) for mod in modules) == 274
+    # 质量只读路由（evaluation.py：报告 Markdown 导出、单/跨项目质量摘要），
+    # v0.33.0 RC-08 新增 1 条 owner-only 撤销路由（projects.py：
+    # PATCH /projects/{ref}/lessons/{lesson_id}）。
+    assert sum(len(mod.router.routes) for mod in modules) == 275
 
 
 def test_route_modules_do_not_import_api_module_through_package():
@@ -122,7 +124,8 @@ def test_request_models_live_in_schemas_not_app():
     ]
     # v0.32 Phase 1 新增 3 个章节规划请求模型，Phase 2 新增 2 个知识资产请求模型。
     # Phase 5 只给已有 FactUpdate/ChapterSave 增字段，不新增请求模型。
-    assert len(schema_models) == 93, f"schemas.py 应含 93 个请求模型，实际 {len(schema_models)}"
+    # v0.33.0 RC-08 新增 1 个 LessonPolicyUpdate 请求模型。
+    assert len(schema_models) == 94, f"schemas.py 应含 94 个请求模型，实际 {len(schema_models)}"
 
 
 def test_monkeypatch_reaches_route_call_site(monkeypatch):

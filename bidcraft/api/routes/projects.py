@@ -11,7 +11,13 @@ from sqlalchemy import case, or_
 
 _core = sys.modules['bidcraft.api.app']  # 运行期查找，保持 monkeypatch 生效
 
-from ...evaluation.learning import lessons_block  # noqa: E402
+from ...evaluation.learning import (  # noqa: E402
+    LESSON_POLICY_KEY,
+    lessons_block,
+    load_lesson_policy,
+    normalize_lesson_policy,
+    revoke_lesson,
+)
 from ...generation.chapter_plan import (  # noqa: E402
     invalidate_stale_plan,
     normalize_retrieval,
@@ -599,7 +605,9 @@ def update_project(ref: str, payload: ProjectUpdate) -> dict[str, Any]:
     currencies 为 ≤20 项、每项非空且 ≤40 字符的字符串列表（R25 条件，
     去重保序，非法→400「条件无效」）。写入 meta 时统一存 v2 阶段快照
     （name=display_name||username，合法条件原样保留），此后用户改名不追更；
-    空列表清空审批链，回到单级负责人审批。
+    空列表清空审批链，回到单级负责人审批。v0.33.0 RC-08 新增
+    ``lesson_policy`` 部分字段 PATCH（仅 owner/admin）：写入 project.meta
+    （无 schema 迁移），回显经 learning 归一化的策略快照。
     """
 
     updates = payload.model_dump(exclude_unset=True)
@@ -726,6 +734,17 @@ def update_project(ref: str, payload: ProjectUpdate) -> dict[str, Any]:
             meta["approval_chain"] = chain
             project.meta = meta
             keys.append("approval_chain")
+        if "lesson_policy" in updates:
+            _require_owner(my_role)
+            # 部分字段 PATCH：未给出的键沿用旧策略（尤其是 revoked_ids），
+            # 白名单校验与裁剪统一交给 learning.normalize_lesson_policy。
+            merged = dict(load_lesson_policy(project))
+            for key, value in (updates["lesson_policy"] or {}).items():
+                if value is not None:
+                    merged[key] = value
+            meta[LESSON_POLICY_KEY] = normalize_lesson_policy(merged)
+            project.meta = meta
+            keys.append("lesson_policy")
         if "is_template" in updates:
             _require_owner(my_role)
             project.is_template = bool(updates["is_template"])
@@ -1337,22 +1356,55 @@ def ledger(ref: str) -> dict[str, Any]:
 
 @router.get("/projects/{ref}/lessons")
 def project_lessons(
-    ref: str, node_id: str | None = None, limit: int = 20
+    ref: str,
+    node_id: str | None = None,
+    limit: int = 20,
+    include_revoked: bool = False,
 ) -> dict[str, Any]:
-    """只读经验摘要：viewer 也能看；查询动作本身记 learning.read 审计。"""
+    """只读经验摘要：viewer 也能看；查询动作本身记 learning.read 审计。
+
+    ``include_revoked=true`` 仅把已撤销条目带回治理视图（仍过滤过期与低信任），
+    不改变“未审核建议”的展示口径。
+    """
 
     cap = _clamp_limit(limit)
     with session_scope() as db:
         project, _role = _project(db, ref)
-        data = lessons_payload(db, project, node_id=node_id or None)
+        # 默认调用保持原有签名，兼容 monkeypatch 本名字的契约测试。
+        if include_revoked:
+            data = lessons_payload(
+                db, project, node_id=node_id or None, include_revoked=True
+            )
+        else:
+            data = lessons_payload(db, project, node_id=node_id or None)
         items = list(data.get("items") or [])[:cap]
         audit(
             db,
             project.id,
             "learning.read",
-            {"node_id": node_id or "", "limit": cap, "count": len(items)},
+            {
+                "node_id": node_id or "",
+                "limit": cap,
+                "count": len(items),
+                "include_revoked": bool(include_revoked),
+            },
         )
         return {**data, "items": items, "limit": cap}
+
+
+@router.patch("/projects/{ref}/lessons/{lesson_id}")
+def revoke_project_lesson(ref: str, lesson_id: str) -> dict[str, Any]:
+    """owner-only：撤销一条建议经验；只写 project.meta，不改任何来源行。"""
+
+    with session_scope() as db:
+        project, role = _project(db, ref)
+        _require_owner(role)
+        try:
+            result = revoke_lesson(db, project, lesson_id)
+        except LookupError as exc:
+            raise _http_error(404, str(exc)) from exc
+        audit(db, project.id, "learning.revoke", {"lesson_id": lesson_id})
+        return result
 
 
 @router.patch("/projects/{ref}/facts/{key}")

@@ -311,6 +311,25 @@ export interface QuoteApprovalRecord {
   at: string | null
 }
 
+/** 一级审批的一条生效条件的解释（v0.33.0 RC-09）。 */
+export interface ApprovalExplainCondition {
+  field: string
+  op: string
+  value: number | string | string[] | null
+  actual: number | string | null
+  hit: boolean
+  missing: boolean
+}
+
+/** 一级审批为何生效 / 不生效的解释；missing_data 列出未知上下文字段。 */
+export interface StageApprovalExplain {
+  /** 原链索引（审批记录存的就是这个索引）。 */
+  index: number
+  applicable: boolean
+  conditions: ApprovalExplainCondition[]
+  missing_data: string[]
+}
+
 /**
  * 跨项目「待我审批」的一条待办（`GET /approvals/pending` 平铺数组的一项）。
  * 只读视图：点击跳转到该项目的清单对齐（BOQ）页签，在版本面板里完成审批。
@@ -335,6 +354,8 @@ export interface PendingApproval {
   /** 商务标待办标识（与 version_id 同值，便于跳转到商务标页签）。 */
   doc_id?: string
   doc_name?: string
+  /** 当前待审级的条件解释；仅含 rules 的审批链会回传。 */
+  approval_explain?: StageApprovalExplain | null
 }
 
 /**
@@ -377,6 +398,17 @@ export interface Project {
   is_template?: boolean
   /** 有序报价审批链（≤5 级，每级 1–5 人会签/或签）；空数组或缺省 = 负责人单级审批。旧后端可能省略或回显扁平格式，读取时归一为 v2。 */
   approval_chain?: ApprovalStage[]
+  /** v0.33.0 RC-08 建议经验治理策略回显；旧后端省略。 */
+  lesson_policy?: LessonPolicy
+}
+
+/** PATCH lesson_policy 的入参；只发送显式修改的键。 */
+export interface LessonPolicyInput {
+  grades?: Record<string, string>
+  trust_levels?: Record<string, string>
+  min_trust?: string | null
+  ttl_days?: number
+  revoked_ids?: string[]
 }
 
 /** R22 项目复制入参：name 缺省由后端取「源名 副本」；两个开关缺省 true。 */
@@ -1492,6 +1524,8 @@ export interface BoqQuoteVersion {
   approval_stage_count: number
   /** 仅详情接口返回：按清单行 key 保存的单价。 */
   prices?: Record<string, number> | null
+  /** v0.33.0 RC-09：逐条件命中 / 缺失说明（与原审批链对齐）。 */
+  approval_explain?: StageApprovalExplain[] | null
 }
 
 /** 删除版本的响应。 */
@@ -2572,6 +2606,25 @@ export interface Lesson {
   created_at: string | null
   author: string
   status: string
+  /** v0.33.0 RC-08 治理字段：等级 / 信任 / 有效期 / 撤销标记。 */
+  grade: string
+  trust: string
+  expires_at: string | null
+  revoked: boolean
+}
+
+/** 建议经验治理策略（存在 project.meta，无 schema 迁移）。 */
+export interface LessonPolicy {
+  /** 按经验 id 覆盖的等级（A/B/C/D）。 */
+  grades: Record<string, string>
+  /** 按经验 id 覆盖的信任级别（low/medium/high）。 */
+  trust_levels: Record<string, string>
+  /** 最低信任级别；低于它的条目不进入默认列表。 */
+  min_trust: string | null
+  /** 有效期（天）；0 = 不过期。 */
+  ttl_days: number
+  /** 已撤销的经验 id（来源行永不改写）。 */
+  revoked_ids: string[]
 }
 
 /** `GET /projects/{ref}/lessons` 的响应。status 描述整批建议的审核状态。 */
@@ -2579,6 +2632,7 @@ export interface LessonsResponse {
   items: Lesson[]
   node_id: string
   status: string
+  policy: LessonPolicy
 }
 
 /** 质量报告快照（不可变，每次运行版本号 +1）。 */

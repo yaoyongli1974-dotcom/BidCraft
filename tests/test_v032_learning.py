@@ -39,6 +39,7 @@ from bidcraft.models import (
 from bidcraft.rules.loader import load_package
 from bidcraft.schemas import FactLedger
 
+# v0.33.0 RC-08：治理字段加入契约（只新增，不删旧断言）。
 LESSON_KEYS = {
     "id",
     "source",
@@ -48,6 +49,10 @@ LESSON_KEYS = {
     "created_at",
     "author",
     "status",
+    "grade",
+    "trust",
+    "expires_at",
+    "revoked",
 }
 
 
@@ -166,7 +171,7 @@ def test_lesson_payload_contract_and_real_sources(db):
         ids = _seed_all_sources(sess, project.id, node.id)
 
         payload = lessons_payload(sess, project)
-        assert set(payload) == {"items", "node_id", "status"}
+        assert set(payload) == {"items", "node_id", "status", "policy"}
         assert payload["status"] == "未审核建议经验"
         assert payload["node_id"] == ""
         rows = lesson_items(sess, project)

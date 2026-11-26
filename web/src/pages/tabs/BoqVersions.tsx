@@ -30,9 +30,10 @@ import type {
   Member,
   QuoteApprovalRecord,
   QuoteVersionStatus,
+  StageApprovalExplain,
 } from '../../lib/types'
 import { createBoqVersion, deleteBoqVersion, getBoqVersionDiff, listBoqVersions, restoreBoqVersion, reviewBoqVersion, submitBoqVersion, unapproveBoqVersion } from '../../api/boq'
-import { applicableStages, getMembers, updateProject } from '../../api/project'
+import { applicableStages, explainApprovalStages, getMembers, normalizeApprovalExplain, updateProject } from '../../api/project'
 import { ApiError, messageOf } from '../../lib/http'
 import { className, formatDate, formatMoney, memberRoleMeta, type Tone } from '../../lib/format'
 import { useQuery } from '../../lib/hooks'
@@ -175,6 +176,48 @@ function ApprovalTimeline({
         )
       })}
     </ol>
+  )
+}
+
+function explainValue(value: StageApprovalExplain['conditions'][number]['value']): string {
+  if (Array.isArray(value)) return value.join(' / ')
+  if (value === null || value === undefined || value === '') return '未知'
+  return String(value)
+}
+
+/** v0.33.0 RC-09：审批条件命中明细，未知上下文单独提示（保守口径）。 */
+function ApprovalExplainPanel({ explain }: { explain: StageApprovalExplain | null }) {
+  if (!explain || (explain.conditions.length === 0 && explain.missing_data.length === 0)) {
+    return null
+  }
+  return (
+    <div className="boq-approval-explain" aria-label="审批条件说明">
+      <span className="boq-approval-explain-title">
+        第 {explain.index + 1} 级{explain.applicable ? '条件命中' : '条件未命中'}
+      </span>
+      <ul>
+        {explain.conditions.map((condition, index) => (
+          <li
+            key={`${condition.field}:${index}`}
+            className={condition.hit ? 'is-hit' : 'is-miss'}
+          >
+            <span className="mono">{condition.field}</span>
+            <span>{condition.op}</span>
+            <span className="mono">{explainValue(condition.value)}</span>
+            <span>实际 {explainValue(condition.actual)}</span>
+            <span>{condition.hit ? '命中' : '未命中'}</span>
+            {condition.missing && (
+              <span className="boq-approval-explain-missing">数据缺失</span>
+            )}
+          </li>
+        ))}
+      </ul>
+      {explain.missing_data.length > 0 && (
+        <p className="boq-approval-explain-note">
+          未知上下文：{explain.missing_data.join('、')}（按保守口径处理）
+        </p>
+      )}
+    </div>
   )
 }
 
@@ -1655,6 +1698,17 @@ export function QuoteVersionsPanel({
               const stageInfo = approvalChain[stage]
               const stagePendingNames = submitted ? namesOf(pendingApprovers(version)) : ''
               const finalizes = willFinalize(version)
+               // 后端解释优先；旧后端未回传时用本地同源镜像渲染。
+               const backendExplain = normalizeApprovalExplain(version.approval_explain)
+               const explains =
+                 backendExplain.length > 0
+                   ? backendExplain
+                   : explainApprovalStages(approvalChain, amountOf(version), {
+                       packageId: version.package_id,
+                       currency,
+                       summary: version.summary ? { ...version.summary } : {},
+                     })
+               const currentExplain = submitted ? (explains[stage] ?? null) : null
               return (
                 <li key={version.id} className="boq-version-item">
                   <div className="boq-version-main">
@@ -1693,6 +1747,7 @@ export function QuoteVersionsPanel({
                       approvals={version.approvals}
                       activeIndices={activeStagesOf(version).map((item) => item.index)}
                     />
+                    <ApprovalExplainPanel explain={currentExplain} />
                   </div>
                   <div
                     className={className(

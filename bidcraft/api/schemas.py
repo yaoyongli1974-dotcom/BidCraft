@@ -44,6 +44,20 @@ class ScoresUpdate(BaseModel):
     rows: list[ScoreRow] = []
 
 
+class LessonPolicyUpdate(BaseModel):
+    """v0.33.0 RC-08 建议经验治理策略（存 project.meta，无 schema 迁移）。
+
+    部分字段PATCH：只更新显式给出的键，未给出的键沿用旧策略；取值白名单与
+    裁剪在 ``evaluation.learning.normalize_lesson_policy`` 统一完成。
+    """
+
+    grades: dict[str, str] | None = None
+    trust_levels: dict[str, str] | None = None
+    min_trust: str | None = None
+    ttl_days: int | None = None
+    revoked_ids: list[str] | None = None
+
+
 class ProjectUpdate(BaseModel):
     name: str | None = None
     bid_section: str | None = None
@@ -53,6 +67,8 @@ class ProjectUpdate(BaseModel):
     # [{approvers: [用户id], mode?: "all"|"any"}]（≤5 级，仅 owner 可改）；
     # 空列表=单级负责人审批。双格式解析与校验在 handler 内完成。
     approval_chain: list[str] | list[dict[str, Any]] | None = None
+    # v0.33.0 RC-08 经验治理策略（仅 owner/admin 可改，部分字段 PATCH）。
+    lesson_policy: LessonPolicyUpdate | None = None
 
 
 class ProjectDuplicate(BaseModel):
