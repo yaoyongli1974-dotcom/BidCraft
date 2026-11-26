@@ -1031,7 +1031,24 @@ def _pending_chapters(db, project_id: str, force: bool = False) -> int:
     """
 
     nodes = load_outline(db, project_id)
-    return sum(1 for node in nodes if force or is_pending(node))
+    locked_reviews = {"confirmed", "locked"}
+    pending = 0
+    for node in nodes:
+        # ``force`` must never override human confirmation/locks: a confirmed
+        # chapter is not "pending work" even though a full regeneration was
+        # requested.
+        section_id = str(node.get("section_id") or "")
+        section = db.get(Section, section_id) if section_id else None
+        review = str(
+            (section.review_status if section is not None else None)
+            or node.get("review_status")
+            or ""
+        ).strip().lower()
+        if review in locked_reviews:
+            continue
+        if force or is_pending(node):
+            pending += 1
+    return pending
 
 
 def _profile_keys(profile_values: dict[str, Any]) -> list[str]:

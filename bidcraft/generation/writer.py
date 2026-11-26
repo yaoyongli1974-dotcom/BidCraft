@@ -483,6 +483,7 @@ def generate_document(
     before_chapter: Callable[[dict[str, Any], Session], bool] | None = None,
     after_chapter: Callable[[dict[str, Any], Session], None] | None = None,
     commit_chapter: Callable[[dict[str, Any], str, str], None] | None = None,
+    fail_chapter: Callable[[dict[str, Any]], None] | None = None,
     plan_provider: Callable[[str], Any] | None = None,
 ) -> GenerationReport:
     """Generate chapters in outline order.
@@ -491,7 +492,9 @@ def generate_document(
     worker uses them as (a) an abort checkpoint — they may raise to stop the run
     when the lease is lost/shutdown is requested — and (b) a per-unit
     idempotency ledger — returning ``False`` skips a unit already completed by
-    an earlier attempt, ``after_chapter`` records it on success.  They receive
+    an earlier attempt, ``after_chapter`` records it on success.  ``fail_chapter``
+    is the matching fenced failure hook; production uses it instead of writing
+    ``Section.status`` from this long session.  They receive
     the live session so the body write and the ledger mark commit atomically.
 
     ``commit_chapter``, when supplied, takes over the body write and ledger mark
@@ -644,9 +647,15 @@ def generate_document(
                 report.unused_plan_refs[node["heading"]] = unused
         except ModelUnavailable as exc:
             chapter_failed = True
-            section = db.scalar(select(Section).where(Section.id == node["section_id"]))
-            if section is not None:
-                section.status = "failed"
+            if fail_chapter is not None:
+                # Production supplies a fenced short-transaction hook so a lost
+                # lease or aborted run cannot be overwritten by this long
+                # generation session.  Legacy callers keep the old local write.
+                fail_chapter(info)
+            else:
+                section = db.scalar(select(Section).where(Section.id == node["section_id"]))
+                if section is not None:
+                    section.status = "failed"
             report.failed.append({"heading": node["heading"], "error": str(exc)})
         if on_progress:
             total = len(nodes)

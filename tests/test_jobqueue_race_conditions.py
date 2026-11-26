@@ -228,6 +228,17 @@ def test_heartbeat_cannot_revive_expired_lease(db, monkeypatch):
         assert row.status == "running"
 
 
+class _ThreeStrikeStop:
+    """Allow three heartbeat ticks; a persistent error must abort on the third."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def wait(self, _interval: float) -> bool:
+        self.calls += 1
+        return self.calls > 3
+
+
 def test_heartbeat_failure_sets_abort(db, monkeypatch):
     monkeypatch.setattr(jobqueue, "_heartbeat_seconds", lambda: 0.001)
 
@@ -236,7 +247,9 @@ def test_heartbeat_failure_sets_abort(db, monkeypatch):
 
     monkeypatch.setattr(jobqueue, "session_scope", broken_scope)
     abort = threading.Event()
-    jobqueue._heartbeat("missing", _OnceStop(), "tok", abort)
+    stop = _ThreeStrikeStop()
+    jobqueue._heartbeat("missing", stop, "tok", abort)
+    assert stop.calls >= 3
     assert abort.is_set()
 
 

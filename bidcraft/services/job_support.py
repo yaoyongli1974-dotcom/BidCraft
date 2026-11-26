@@ -26,7 +26,7 @@ STARTUP_INTERRUPTED_MESSAGE = "服务重启，任务已中断"
 logger = logging.getLogger("bidcraft.api")
 
 
-def _fail_job(db: Session, job: Job, message: str, error: str | None = None) -> None:
+def _fail_job(db: Session, job: Job, message: str, error: str | None = None) -> bool:
     """Mark a job failed and publish the matching SSE event.
 
     A charged ``generate`` job is refunded in this same transaction, before the
@@ -41,7 +41,8 @@ def _fail_job(db: Session, job: Job, message: str, error: str | None = None) -> 
     # 终态任务的重复回调只能补做尚未领取的退款，绝不能重复发失败事件。
     was_terminal = job.status in {"done", "failed", "cancelled"}
     if was_terminal and job.refund_claimed:
-        return
+        return False
+    lease_token = str((job.payload or {}).get("generation_lease_token") or "")
     refunded = 0
     refund_error: str | None = None
     try:
@@ -69,7 +70,9 @@ def _fail_job(db: Session, job: Job, message: str, error: str | None = None) -> 
             clear_claim=True,
         )
         if fresh is None:
-            return
+            # We lost the transition to another failure path.  The caller must
+            # treat the job as still owned/blocking, never enqueue a duplicate.
+            return False
         event_detail: dict[str, Any] = {**jobs.job_payload(fresh), "error": detail}
         if refunded:
             event_detail["refunded_credits"] = refunded
@@ -85,7 +88,12 @@ def _fail_job(db: Session, job: Job, message: str, error: str | None = None) -> 
                 },
                 db=db,
             )
+    if lease_token:
+        # A stale auto-fail must not leave the project mutex held until TTL.
+        # Release is idempotent and safe when another path already released it.
+        jobqueue.release_generation_lease(db, str(job.project_id or ""), lease_token)
     db.flush()
+    return True
 
 
 def _cancel_stale_jobs(
@@ -117,7 +125,7 @@ def _cancel_stale_jobs(
         seconds=timeout_seconds
     ):
         return running
-    _fail_job(
+    won = _fail_job(
         db,
         running,
         stale_message,
@@ -127,6 +135,10 @@ def _cancel_stale_jobs(
             else f"任务超过 {max(1, timeout_seconds // 60)} 分钟无进度，已标记为中断"
         ),
     )
+    if not won:
+        # Another failure path already took the terminal transition.  Return
+        # the fresh row so the caller does not enqueue a second job.
+        return db.get(Job, running.id)
     return None
 
 

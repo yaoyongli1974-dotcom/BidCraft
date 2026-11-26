@@ -526,22 +526,28 @@ def position(job_id: str) -> int:
         return int(ahead or 0) + 1
 
 
-def _claim_statement(now, lease_until, token: str):
+def _claim_statement(now, lease_until, token: str, *, skip_locked: bool = False):
     """构造原子认领语句；独立出来便于跨方言编译校验。
 
     外层带 ``status='queued'`` 是并发正确性的关键：PostgreSQL 下两个事务
     若选出同一行，后提交者会在 EvalPlanQual 重检时因状态已变而更新 0 行。
+    ``skip_locked`` 只在 PostgreSQL 开启：候选子查询加 ``FOR UPDATE SKIP LOCKED``
+    让并发 worker 直接跳过彼此锁定的行，SQLite 仍使用单写者事务语义。
     """
+
+    candidates = (
+        select(Job.id)
+        .where(Job.status == "queued")
+        .order_by(Job.priority.asc(), Job.created_at.asc())
+        .limit(1)
+    )
+    if skip_locked:
+        candidates = candidates.with_for_update(skip_locked=True)
 
     return (
         update(Job)
         .where(
-            Job.id
-            == select(Job.id)
-            .where(Job.status == "queued")
-            .order_by(Job.priority.asc(), Job.created_at.asc())
-            .limit(1)
-            .scalar_subquery(),
+            Job.id == candidates.scalar_subquery(),
             Job.status == "queued",
         )
         .values(
@@ -572,8 +578,9 @@ def claim_next() -> Job | None:
     # Fresh token on every claim: after a reaper reclaim the old worker's token
     # no longer matches, so all of its subsequent writes are fenced out.
     token = uuid.uuid4().hex
-    statement = _claim_statement(now, lease_until, token)
     with session_scope() as db:
+        skip_locked = db.get_bind().dialect.name == "postgresql"
+        statement = _claim_statement(now, lease_until, token, skip_locked=skip_locked)
         row = db.execute(statement).first()
         if row is None:
             return None
@@ -625,6 +632,7 @@ def _heartbeat(
     """
 
     interval = _heartbeat_seconds()
+    strikes = 0
     while not stop.wait(interval):
         try:
             if not _renew_lease_once(job_id, token):
@@ -633,13 +641,16 @@ def _heartbeat(
                 if abort is not None:
                     abort.set()
                 return
+            strikes = 0
         except Exception:  # noqa: BLE001 - heartbeat must never kill the worker
             logger.debug("心跳更新失败 job=%s", job_id, exc_info=True)
-            # A failure to renew is indistinguishable from a lost worker from
-            # the reaper's point of view.  Tell the runner to stop at its next
-            # checkpoint rather than keep computing on a lease we cannot renew.
-            if abort is not None:
+            # A single transient DB failure must not kill a healthy run.  Three
+            # consecutive failures mean we can no longer prove ownership, so
+            # stop renewing and abort at the next runner checkpoint.
+            strikes += 1
+            if strikes >= 3 and abort is not None:
                 abort.set()
+                return
 
 
 #: Explicit state machine.  Terminal states are immutable; the reaper may only
@@ -1232,6 +1243,62 @@ def _marker_written(db, marker: PendingCharge) -> int:
     )
 
 
+def _marker_job_id(marker: PendingCharge) -> str:
+    """Return the Job id recorded in an async charge marker note, if any."""
+
+    note = str(getattr(marker, "note", "") or "")
+    if not note.startswith("job:"):
+        return ""
+    return note[4:].split("|", 1)[0].strip()
+
+
+def mark_job_refund_settled(db, job_id: str, *, source: str) -> bool:
+    """Claim the JOB-level refund ledger once a marker has paid the refund.
+
+    The marker ledger and the job ledger used to be independent idempotency
+    domains: a marker settle followed by a late ``_fail_job`` could refund the
+    same charge twice.  This conditional claim joins them.  ``refund_claimed`` is
+    the single owner flag; the payload records which ledger actually paid.
+    """
+
+    if not job_id:
+        return False
+    claimed = db.execute(
+        update(Job)
+        .where(Job.id == job_id, Job.refund_claimed.is_(False))
+        .values(refund_claimed=True),
+        execution_options={"synchronize_session": False},
+    )
+    if not claimed.rowcount:
+        return False
+    row = db.get(Job, job_id)
+    if row is None:
+        return False
+    row.refund_claimed = True
+    payload = dict(row.payload or {})
+    payload["refunded"] = True
+    payload["refund_source"] = source
+    row.payload = payload
+    db.flush()
+    return True
+
+
+def clear_job_marker(db, job: Job) -> bool:
+    """Close the pending charge marker when the JOB ledger wins the refund."""
+
+    marker_id = str((job.payload or {}).get("pending_charge_id") or "")
+    if not marker_id:
+        return False
+    marker = db.get(PendingCharge, marker_id)
+    if marker is None or marker.status in {"refunded", "cleared"}:
+        return False
+    marker.status = "cleared"
+    marker.refunded_credits = 0
+    marker.updated_at = utc_now()
+    db.flush()
+    return True
+
+
 def refund_charged_job(db, job: Job, written: int | None = None) -> int:
     """Idempotently refund unearned credits of a charged ``generate`` job.
 
@@ -1306,7 +1373,11 @@ def refund_charged_job(db, job: Job, written: int | None = None) -> int:
             raise
     payload["refunded"] = True
     payload["refunded_credits"] = refund
+    payload["refund_source"] = "job"
     job.payload = payload
+    # The job ledger is now the single owner: close the pending marker so a
+    # later TTL reconcile cannot pay the same charge a second time.
+    clear_job_marker(db, job)
     db.flush()
     return refund
 
@@ -1383,6 +1454,9 @@ def settle_pending_charge(
     marker.status = "refunded" if refund > 0 else "cleared"
     marker.refunded_credits = refund
     marker.updated_at = utc_now()
+    # Close the job-level ledger too: a late worker failure or reaper callback
+    # must see refund_claimed and never issue a second refund.
+    mark_job_refund_settled(db, _marker_job_id(marker), source="marker")
     db.flush()
     return refund
 
@@ -1493,6 +1567,9 @@ def reconcile_pending_charges(
         marker.status = "cleared" if refund == 0 else "refunded"
         marker.refunded_credits = refund
         marker.updated_at = utc_now()
+        # A stale marker may outlive a job-level refund; record the same owner
+        # flag so the job ledger is skipped even though the marker paid here.
+        mark_job_refund_settled(db, _marker_job_id(marker), source="marker")
         settled += 1
     db.flush()
     return settled

@@ -381,6 +381,21 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
                 work_db.commit()
                 commit_generation_chapter(job_id, project_id, lease_token, info, body, source)
 
+            def fail_chapter(info: dict[str, Any]) -> None:
+                """Fenced failure write; the long session must not own this row."""
+
+                work_db.commit()
+                with fenced_chapter_write(
+                    job_id,
+                    str(info.get("node_id") or ""),
+                    project_id=project_id,
+                    lease_token=lease_token,
+                ) as (fail_db, _fenced_job):
+                    section = fail_db.get(Section, str(info.get("section_id") or ""))
+                    if section is not None:
+                        section.status = "failed"
+                        fail_db.flush()
+
             report = generate_document(
                 work_db,
                 project_id,
@@ -398,6 +413,7 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
                 before_chapter=before_chapter,
                 after_chapter=after_chapter,
                 commit_chapter=commit_chapter,
+                fail_chapter=fail_chapter,
                 plan_provider=lambda node_id: plans_by_node.get(str(node_id)),
             )
             flush_delta()
