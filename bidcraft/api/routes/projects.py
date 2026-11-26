@@ -710,6 +710,9 @@ def update_project(ref: str, payload: ProjectUpdate) -> dict[str, Any]:
                     stage_snapshot["min_amount"] = raw_stage["min_amount"]
                 for condition_key, condition_values in conditions.items():
                     stage_snapshot[condition_key] = condition_values
+                stage_rules = boq._stage_rules(raw_stage.get("rules"))
+                if stage_rules:
+                    stage_snapshot["rules"] = stage_rules
                 chain.append(stage_snapshot)
             meta["approval_chain"] = chain
             project.meta = meta

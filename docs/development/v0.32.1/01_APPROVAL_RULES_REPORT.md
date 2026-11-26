@@ -62,6 +62,18 @@
 
 验证：`pytest -q tests/test_boq_approval_rules_v032.py tests/test_boq.py tests/test_approvals_pending.py tests/test_batch5_commercial.py tests/test_commercial_approval.py` → **65 passed, 1 warning**；ruff、`git diff --check` 均通过。
 
+## 3.3 用户配置路径回显（第四段本地提交）
+
+新增 `tests/test_boq_approval_rules_api_v032.py`，用真实 `TestClient` 走 `PATCH /projects/{ref}` → `GET /projects/{ref}` 验证：
+
+- 审批链阶段中合法的 `boq_rows/priced/currency` 规则被 `boq._stage_rules()` 归一化后写入 `project.meta.approval_chain` 的 `stage_snapshot` 并原样回显；
+- 非法字段、非法操作符、布尔数值被裁剪，不静默保留；
+- 审批人 id 列表按接口约定以字符串数组提交，显示名仍由服务端从用户记录补全。
+
+`PATCH /projects/{ref}` 现通过 `..shared` 已有的 `boq` 重导出调用 `boq._stage_rules()`，无新增依赖或路由。
+
+验证：`pytest -q tests/test_boq_approval_rules_api_v032.py tests/test_boq_approval_rules_integration_v032.py tests/test_boq_approval_rules_v032.py tests/test_quote_approval_conditions.py tests/test_api_package.py` → **34 passed, 1 warning**；ruff、`git diff --check` 均通过。
+
 ## 4. 兼容与风险
 
 - 兼容：旧审批链、金额门槛、包件/币种白名单、审批记录 stage 原始索引语义均未改变。
