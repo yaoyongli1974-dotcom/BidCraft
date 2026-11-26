@@ -18,6 +18,9 @@ import {
 } from 'lucide-react'
 import type {
   ApprovalChainEntry,
+  ApprovalRule,
+  ApprovalRuleField,
+  ApprovalRuleOp,
   ApprovalStage,
   BidPackage,
   BoqPayload,
@@ -53,6 +56,33 @@ const CONDITION_MAX = 20
 const CONDITION_TEXT_MAX = 40
 /** 常见币种快捷选项；项目币种与自定义值会自动追加。 */
 const COMMON_CURRENCIES = ['CNY', 'USD', 'EUR', 'JPY', 'GBP'] as const
+/** 规则条件字段 / 操作符，和后端白名单一致。 */
+const RULE_FIELDS: Array<{ value: ApprovalRuleField; label: string }> = [
+  { value: 'total_amount', label: '报价合计' },
+  { value: 'package_id', label: '包件' },
+  { value: 'currency', label: '币种' },
+]
+const RULE_OPS: Array<{ value: ApprovalRuleOp; label: string }> = [
+  { value: 'gte', label: '≥' },
+  { value: 'lte', label: '≤' },
+  { value: 'eq', label: '=' },
+  { value: 'ne', label: '≠' },
+  { value: 'in', label: '属于' },
+  { value: 'not_in', label: '不属于' },
+  { value: 'contains', label: '包含' },
+]
+const RULE_MAX = 20
+const RULE_TEXT_MAX = 40
+
+function ruleValueText(value: ApprovalRule['value']): string {
+  return Array.isArray(value) ? value.join('、') : String(value)
+}
+
+function ruleLabel(rule: ApprovalRule): string {
+  const field = RULE_FIELDS.find((item) => item.value === rule.field)?.label ?? rule.field
+  const op = RULE_OPS.find((item) => item.value === rule.op)?.label ?? rule.op
+  return `${field} ${op} ${ruleValueText(rule.value)}`
+}
 
 /** 审批人名单展示：姓名快照优先，缺失时回退用户 id。 */
 function namesOf(entries: ApprovalChainEntry[]): string {
@@ -200,8 +230,14 @@ function StageApproverAdd({
   )
 }
 
-/** 弹窗草稿：在阶段之上附带门槛与自定义币种输入框的原始文本。 */
-type ChainDraftStage = ApprovalStage & { thresholdText: string; currencyText: string }
+/** 弹窗草稿：在阶段之上附带门槛、自定义币种与规则输入框的原始文本。 */
+type ChainDraftStage = ApprovalStage & {
+  thresholdText: string
+  currencyText: string
+  ruleField: ApprovalRuleField
+  ruleOp: ApprovalRuleOp
+  ruleValueText: string
+}
 
 /** 条件多选胶囊：按下即切换该条件值。 */
 function ConditionChip({
@@ -273,6 +309,9 @@ function ApprovalChainModal({
           ? String(stage.min_amount)
           : '',
       currencyText: '',
+      ruleField: 'total_amount',
+      ruleOp: 'gte',
+      ruleValueText: '',
     })),
   )
   const [saving, setSaving] = useState(false)
@@ -291,7 +330,15 @@ function ApprovalChainModal({
     if (full) return
     setDraft([
       ...draft,
-      { approvers: [], mode: 'all', thresholdText: '', currencyText: '' },
+      {
+        approvers: [],
+        mode: 'all',
+        thresholdText: '',
+        currencyText: '',
+        ruleField: 'total_amount',
+        ruleOp: 'gte',
+        ruleValueText: '',
+      },
     ])
   }
 
@@ -360,6 +407,58 @@ function ApprovalChainModal({
     updateStage(index, { currencies: [...current, text], currencyText: '' })
   }
 
+  /** 添加一条规则条件；值与后端白名单一致，非法输入直接提示且不入草稿。 */
+  const addRule = (index: number) => {
+    const stage = draft[index]
+    if (!stage) return
+    const text = stage.ruleValueText.trim()
+    if (!text) return
+    if ((stage.rules ?? []).length >= RULE_MAX) {
+      toast.warning('规则条件过多', `每级最多 ${RULE_MAX} 条规则。`)
+      return
+    }
+    let value: ApprovalRule['value']
+    if (stage.ruleOp === 'in' || stage.ruleOp === 'not_in') {
+      value = Array.from(
+        new Set(
+          text
+            .split(/[,，、\n]/)
+            .map((item) => item.trim())
+            .filter((item) => item && item.length <= RULE_TEXT_MAX),
+        ),
+      ).slice(0, RULE_MAX)
+      if (value.length === 0) {
+        toast.warning('规则值无效', '属于 / 不属于需填写至少一个有效值。')
+        return
+      }
+    } else if (stage.ruleField === 'total_amount') {
+      const amount = Number(text)
+      if (!Number.isFinite(amount)) {
+        toast.warning('规则值无效', '报价合计规则需填写数字。')
+        return
+      }
+      value = amount
+    } else {
+      if (text.length > RULE_TEXT_MAX) {
+        toast.warning('规则值无效', `规则值最多 ${RULE_TEXT_MAX} 个字符。`)
+        return
+      }
+      value = stage.ruleField === 'currency' ? text.toUpperCase() : text
+    }
+    updateStage(index, {
+      rules: [...(stage.rules ?? []), { field: stage.ruleField, op: stage.ruleOp, value }],
+      ruleValueText: '',
+    })
+  }
+
+  const removeRule = (index: number, ruleIndex: number) => {
+    const stage = draft[index]
+    if (!stage) return
+    updateStage(index, {
+      rules: (stage.rules ?? []).filter((_, i) => i !== ruleIndex),
+    })
+  }
+
   const save = async () => {
     if (saving) return
     if (draft.some((stage) => stage.approvers.length === 0)) {
@@ -407,19 +506,23 @@ function ApprovalChainModal({
             ...(minAmount === undefined ? {} : { min_amount: minAmount }),
             ...(packages.length > 0 ? { packages } : {}),
             ...(currencies.length > 0 ? { currencies } : {}),
+            ...((stage.rules ?? []).length > 0 ? { rules: stage.rules } : {}),
           }
         }),
       })
       onSaved()
       const gated = draft.some((stage) => stage.thresholdText.trim())
       const conditional = draft.some(
-        (stage) => (stage.packages?.length ?? 0) > 0 || (stage.currencies?.length ?? 0) > 0,
+        (stage) =>
+          (stage.packages?.length ?? 0) > 0 ||
+          (stage.currencies?.length ?? 0) > 0 ||
+          (stage.rules?.length ?? 0) > 0,
       )
       toast.success(
         draft.length > 0 ? '审批链已保存' : '审批链已清空',
         draft.length > 0
           ? conditional
-            ? `报价提交后将按审批链逐级审批（最多 ${draft.length} 级，带金额门槛 / 包件 / 币种条件的级按当前报价上下文生效），每级按会签/或签规则通过后才定稿。`
+            ? `报价提交后将按审批链逐级审批（最多 ${draft.length} 级，带金额门槛 / 包件 / 币种 / 规则条件的级按当前报价上下文生效），每级按会签/或签规则通过后才定稿。`
             : gated
               ? `报价提交后将按审批链逐级审批（最多 ${draft.length} 级，带金额门槛的级按报价合计生效），每级按会签/或签规则通过后才定稿。`
               : `报价提交后将按 ${draft.length} 级逐级审批，每级按会签/或签规则通过后才定稿。`
@@ -459,6 +562,8 @@ function ApprovalChainModal({
           每级可选「金额门槛」：报价合计达到该金额才需此级审批，留空恒生效；金额未知时带门槛级视为生效（宁多审不漏审）。
           还可限定「适用包件」与「适用币种」：不选表示不限；多项条件需同时满足该级才生效，
           若所有级都被条件过滤掉则自动回退为全部阶段生效。
+          每级还可添加可选「规则条件」（报价合计 / 包件 / 币种），同一级的规则需同时命中，
+          未知上下文视为命中（宁多审不漏审）。
         </p>
 
         {draft.length === 0 ? (
@@ -602,6 +707,83 @@ function ApprovalChainModal({
                   </div>
                   <small className="boq-chain-condition-empty">
                     不选 = 不限；同级多项命中任一即可
+                  </small>
+                </div>
+                <div className="boq-chain-condition">
+                  <span className="boq-chain-condition-label">规则条件</span>
+                  <div className="boq-chain-chips">
+                    {(stage.rules ?? []).map((rule, ruleIndex) => (
+                      <ConditionChip
+                        key={`${rule.field}:${rule.op}:${ruleValueText(rule.value)}:${ruleIndex}`}
+                        label={ruleLabel(rule)}
+                        active
+                        title="点击移除该规则"
+                        disabled={saving}
+                        onClick={() => removeRule(index, ruleIndex)}
+                      />
+                    ))}
+                    <span className="boq-chain-custom">
+                      <select
+                        className="boq-chain-mode input input--sm"
+                        value={stage.ruleField}
+                        disabled={saving}
+                        onChange={(event) =>
+                          updateStage(index, {
+                            ruleField: event.target.value as ApprovalRuleField,
+                          })
+                        }
+                        aria-label={`第 ${index + 1} 级规则字段`}
+                      >
+                        {RULE_FIELDS.map((field) => (
+                          <option key={field.value} value={field.value}>
+                            {field.label}
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        className="boq-chain-mode input input--sm"
+                        value={stage.ruleOp}
+                        disabled={saving}
+                        onChange={(event) =>
+                          updateStage(index, { ruleOp: event.target.value as ApprovalRuleOp })
+                        }
+                        aria-label={`第 ${index + 1} 级规则操作符`}
+                      >
+                        {RULE_OPS.map((op) => (
+                          <option key={op.value} value={op.value}>
+                            {op.label}
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        className="input input--sm"
+                        value={stage.ruleValueText}
+                        maxLength={RULE_TEXT_MAX}
+                        placeholder="规则值（多个用、分隔）"
+                        disabled={saving}
+                        onChange={(event) =>
+                          updateStage(index, { ruleValueText: event.target.value })
+                        }
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            event.preventDefault()
+                            addRule(index)
+                          }
+                        }}
+                        aria-label={`第 ${index + 1} 级规则值`}
+                      />
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={saving || !stage.ruleValueText.trim()}
+                        onClick={() => addRule(index)}
+                      >
+                        添加规则
+                      </Button>
+                    </span>
+                  </div>
+                  <small className="boq-chain-condition-empty">
+                    所有规则需同时满足；未知上下文视为命中，点击已添加规则可移除（最多 {RULE_MAX} 条）。
                   </small>
                 </div>
                 {stage.approvers.length === 0 ? (

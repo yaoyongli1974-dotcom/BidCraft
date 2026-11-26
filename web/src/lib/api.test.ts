@@ -8,7 +8,7 @@ import { DEFAULT_IMAGE_POLICY, normalizeImagePolicy } from '../api/images'
 import { getPendingApprovals } from '../api/jobs'
 import { createTerm, deleteKbDoc, getKbDocs, getTerms, normalizeKbDocPolicy, normalizeKbDocs, normalizeTerm, reindexKnowledgeBase, updateKbDoc } from '../api/knowledge'
 import { PLUGIN_CPU_SECONDS, PLUGIN_MEM_LIMIT, createPlugin, exportPluginPackage, importPluginPackage, normalizePlugin, updatePlugin } from '../api/plugins'
-import { applicableStages, duplicateProject, getProject, getProjectTemplates, instantiateTemplate, normalizeApprovalChain, updateProject } from '../api/project'
+import { applicableStages, duplicateProject, getProject, getProjectTemplates, instantiateTemplate, normalizeApprovalChain, normalizeApprovalRules, updateProject } from '../api/project'
 import { createPersonnel, createQualification, createUserDoc, deletePersonnel, deleteQualification, deleteUserDoc, getPersonnel, getPreflight, getQualifications, getUserDocs, normalizePreflight, normalizeQualification, updatePersonnel, updateQualification, uploadQualificationEvidence, userDocFileUrl } from '../api/tender'
 import { ApiError, UNAUTHORIZED_EVENT, apiFetch, errorDetailText, messageOf, uploadForm } from './http'
 
@@ -1089,6 +1089,36 @@ describe('R25 conditional approval stages (packages & currencies)', () => {
     expect(updated.approval_chain?.[0].packages).toEqual(['pkg-1', 'pkg-2'])
     expect(updated.approval_chain?.[0].currencies).toEqual(['USD'])
     expect(updated.approval_chain && 'packages' in updated.approval_chain[1]).toBe(false)
+  })
+
+  it('normalizes and evaluates optional approval rule conditions', () => {
+    const rules = normalizeApprovalRules([
+      { field: 'total_amount', op: 'gte', value: 100 },
+      { field: 'currency', op: 'eq', value: 'usd' },
+      { field: 'package_id', op: 'in', value: ['pkg-1', 'pkg-1', 42, ''] },
+      { field: 'total_amount', op: 'gte', value: 'bad' },
+      { field: 'unknown', op: 'eq', value: 'x' },
+    ])
+    expect(rules).toEqual([
+      { field: 'total_amount', op: 'gte', value: 100 },
+      { field: 'currency', op: 'eq', value: 'USD' },
+      { field: 'package_id', op: 'in', value: ['pkg-1'] },
+    ])
+    const chain = normalizeApprovalChain([
+      {
+        approvers: [{ id: 'u-1', name: '甲' }],
+        mode: 'all',
+        rules,
+      },
+      { approvers: [{ id: 'u-2', name: '乙' }], mode: 'any' },
+    ])
+    expect(chain[0]?.rules).toEqual(rules)
+    const context = { packageId: 'pkg-1', currency: 'USD' }
+    expect(applicableStages(chain, 100, context).map((item) => item.index)).toEqual([0, 1])
+    expect(applicableStages(chain, 99, context).map((item) => item.index)).toEqual([1])
+    expect(applicableStages(chain, 100, { packageId: 'pkg-2', currency: 'USD' }).map((item) => item.index)).toEqual([1])
+    // 未知上下文保守命中，避免漏审。
+    expect(applicableStages(chain, null).map((item) => item.index)).toEqual([0, 1])
   })
 })
 

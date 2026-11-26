@@ -37,10 +37,20 @@
 - `ruff check bidcraft/boq.py tests/test_boq_approval_rules_v032.py` → All checks passed。
 - `pytest -q tests/test_boq_approval_rules_v032.py tests/test_boq.py tests/test_commercial_approval.py tests/test_quote_approval.py tests/test_quote_approval_chain.py tests/test_quote_approval_condition.py tests/test_quote_approval_conditions.py tests/test_quote_approval_parallel.py tests/test_approvals_pending.py tests/test_batch7_approvals.py tests/test_api_package.py tests/test_api.py` → **122 passed, 1 warning**（仅 Starlette/httpx deprecation）。
 
+## 3.1 前端配置面板（第二段本地提交）
+
+新增本地改动，尚未推送：
+
+- `web/src/lib/types.ts`：`ApprovalRule` / `ApprovalRuleField` / `ApprovalRuleOp`，`ApprovalStage` 与 `ApprovalStageInput` 增加可选 `rules`。
+- `web/src/api/project.ts`：`normalizeApprovalRules()` 与后端白名单同口径（最多 20 条、每条 value 最多 20 项 / 40 字，非法项丢弃）；`normalizeApprovalChain()` 回显保留 rules；`applicableStages()` 在前端按同一 AND 规则计算生效级，未知上下文保守命中。
+- `web/src/pages/tabs/BoqVersions.tsx`：审批链弹窗每级新增「规则条件」区，支持字段 / 操作符 / 值输入、多条规则胶囊、点击移除、保存时随 `approval_chain` 一并 PATCH；提示文案同步。
+- `web/src/lib/api.test.ts`：新增归一化、in/去重、币种大写、金额过滤、AND 过滤与未知上下文保守命中测试。
+
+验证：`npm run typecheck`、`npm run lint`、`npm test -- --run` → 57 files / 432 tests 全通过。
+
 ## 4. 兼容与风险
 
 - 兼容：旧审批链、金额门槛、包件/币种白名单、审批记录 stage 原始索引语义均未改变。
-- 风险：规则目前在 `Project.meta` 中直接配置，尚未做专用管理端表单；可通过 API/CLI 写入 meta 使用。
 - 风险：未知上下文按「规则满足」处理，可能多要一级审批，不会漏审批；这是刻意保守口径。
 
 ## 5. 回滚

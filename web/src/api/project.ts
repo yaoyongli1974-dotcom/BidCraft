@@ -1,5 +1,5 @@
 import { ApiError, asArray, jsonBody, request, uploadForm } from '../lib/http'
-import type { ApprovalChainEntry, ApprovalStage, ApprovalStageInput, BidPackage, BidPackageInput, ExportTemplatePreset, ExportTemplatesResponse, Member, MemberRole, ParseResult, Project, ProjectDetail, ProjectDuplicateInput, ProjectInstantiateInput, ProjectTemplate, SourceFile, UploadResult } from '../lib/types'
+import type { ApprovalChainEntry, ApprovalRule, ApprovalRuleField, ApprovalRuleOp, ApprovalStage, ApprovalStageInput, BidPackage, BidPackageInput, ExportTemplatePreset, ExportTemplatesResponse, Member, MemberRole, ParseResult, Project, ProjectDetail, ProjectDuplicateInput, ProjectInstantiateInput, ProjectTemplate, SourceFile, UploadResult } from '../lib/types'
 import { asText, normalizeApprovalConditionList, normalizeBidPackage, normalizeCurrencyToken, normalizeProjectTemplate } from './shared'
 
 // ---------------------------------------------------------------- project domain
@@ -160,6 +160,71 @@ export const updateProject = async (
   return { ...data, approval_chain: normalizeApprovalChain(data.approval_chain) }
 }
 
+const APPROVAL_RULE_FIELDS: ApprovalRuleField[] = ['total_amount', 'package_id', 'currency']
+const APPROVAL_RULE_OPS: ApprovalRuleOp[] = [
+  'gte', 'lte', 'eq', 'ne', 'in', 'not_in', 'contains',
+]
+const APPROVAL_RULE_MAX = 20
+const APPROVAL_RULE_VALUE_MAX = 20
+const APPROVAL_RULE_TEXT_MAX = 40
+
+function normalizeApprovalRuleValue(
+  field: ApprovalRuleField,
+  op: ApprovalRuleOp,
+  value: unknown,
+): ApprovalRule['value'] | null {
+  if (op === 'in' || op === 'not_in') {
+    return normalizeApprovalConditionList(value).slice(0, APPROVAL_RULE_VALUE_MAX)
+  }
+  if (field === 'total_amount') {
+    return typeof value === 'number' && Number.isFinite(value) ? value : null
+  }
+  const text = asText(value).trim()
+  if (!text || text.length > APPROVAL_RULE_TEXT_MAX) return null
+  return field === 'currency' ? normalizeCurrencyToken(text) : text
+}
+
+/** 审批链规则条件回显归一化：非法项丢弃，与后端 _stage_rules 同口径。 */
+export function normalizeApprovalRules(value: unknown): ApprovalRule[] {
+  if (!Array.isArray(value)) return []
+  const rules: ApprovalRule[] = []
+  for (const entry of value.slice(0, APPROVAL_RULE_MAX)) {
+    if (!entry || typeof entry !== 'object') continue
+    const record = entry as Record<string, unknown>
+    const field = asText(record.field).trim() as ApprovalRuleField
+    const op = asText(record.op).trim() as ApprovalRuleOp
+    if (!APPROVAL_RULE_FIELDS.includes(field) || !APPROVAL_RULE_OPS.includes(op)) continue
+    const normalized = normalizeApprovalRuleValue(field, op, record.value)
+    if (normalized === null || (Array.isArray(normalized) && normalized.length === 0)) continue
+    rules.push({ field, op, value: normalized })
+  }
+  return rules
+}
+
+function approvalRuleMatches(rule: ApprovalRule, actual: unknown): boolean {
+  if (rule.op === 'in' || rule.op === 'not_in') {
+    if (typeof actual !== 'string' || !actual.trim()) return true
+    const left = rule.field === 'currency' ? normalizeCurrencyToken(actual) : actual.trim()
+    const expected = Array.isArray(rule.value) ? rule.value : []
+    const present = expected.some((item) =>
+      (rule.field === 'currency' ? normalizeCurrencyToken(item) : item.trim()) === left,
+    )
+    return rule.op === 'in' ? present : !present
+  }
+  if (rule.op === 'gte' || rule.op === 'lte') {
+    if (typeof actual !== 'number' || !Number.isFinite(actual)) return true
+    const expected = typeof rule.value === 'number' ? rule.value : Number(rule.value)
+    if (!Number.isFinite(expected)) return true
+    return rule.op === 'gte' ? actual >= expected : actual <= expected
+  }
+  if (actual === null || actual === undefined || actual === '') return true
+  const left =
+    rule.field === 'currency' ? normalizeCurrencyToken(actual) : String(actual).trim()
+  const right = String(rule.value)
+  if (rule.op === 'contains') return left.toLowerCase().includes(right.toLowerCase())
+  return rule.op === 'eq' ? left === right : left !== right
+}
+
 /**
  * 审批链回显归一化为 v2 阶段列表：
  * - R18 扁平 `{id,name}` → 单审批人 all 阶段；
@@ -192,12 +257,14 @@ export function normalizeApprovalChain(value: unknown): ApprovalStage[] {
       typeof minAmount === 'number' && Number.isFinite(minAmount) && minAmount >= 0
     const packages = normalizeApprovalConditionList(record.packages)
     const currencies = normalizeApprovalConditionList(record.currencies)
+    const rules = normalizeApprovalRules(record.rules)
     stages.push({
       approvers,
       mode: record.mode === 'any' ? 'any' : 'all',
       ...(validMinAmount ? { min_amount: minAmount } : {}),
       ...(packages.length > 0 ? { packages } : {}),
       ...(currencies.length > 0 ? { currencies } : {}),
+      ...(rules.length > 0 ? { rules } : {}),
     })
   }
   return stages
@@ -239,6 +306,15 @@ export function applicableStages(
       !(currency && stage.currencies.some((item) => normalizeCurrencyToken(item) === currency))
     ) {
       return
+    }
+    for (const rule of stage.rules ?? []) {
+      const actual =
+        rule.field === 'total_amount'
+          ? totalAmount
+          : rule.field === 'package_id'
+            ? packageId || null
+            : currency || null
+      if (!approvalRuleMatches(rule, actual)) return
     }
     result.push({ index, stage })
   })

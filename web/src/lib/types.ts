@@ -251,6 +251,17 @@ export interface ApprovalChainEntry {
 /** 一级审批的通过规则：all=会签（全部通过），any=或签（任一通过）。 */
 export type ApprovalMode = 'all' | 'any'
 
+/** 审批链规则条件的字段与操作符（与后端 boq.STAGE_RULE_* 一致）。 */
+export type ApprovalRuleField = 'total_amount' | 'package_id' | 'currency'
+export type ApprovalRuleOp = 'gte' | 'lte' | 'eq' | 'ne' | 'in' | 'not_in' | 'contains'
+
+/** 可选规则命中条件；同一级的 rules 按 AND 生效，未知上下文视为命中。 */
+export interface ApprovalRule {
+  field: ApprovalRuleField
+  op: ApprovalRuleOp
+  value: number | string | string[]
+}
+
 /** 报价审批链的一级（v2）：1–5 名审批人 + 通过模式。 */
 export interface ApprovalStage {
   approvers: ApprovalChainEntry[]
@@ -264,6 +275,8 @@ export interface ApprovalStage {
   packages?: string[]
   /** 适用币种白名单；空 / 缺省 = 不限币种。 */
   currencies?: string[]
+  /** 可选规则命中条件（AND）；缺省 / 空 = 无额外规则。 */
+  rules?: ApprovalRule[]
 }
 
 /** PATCH approval_chain 的 v2 入参：每级发用户 id 列表、模式与可选生效条件。 */
@@ -276,6 +289,8 @@ export interface ApprovalStageInput {
   packages?: string[]
   /** 适用币种白名单；省略 / 空 = 不限币种。 */
   currencies?: string[]
+  /** 可选规则命中条件（AND）；省略 / 空 = 无额外规则。 */
+  rules?: ApprovalRule[]
 }
 
 /** 报价版本逐级审批的一条记录。 */
