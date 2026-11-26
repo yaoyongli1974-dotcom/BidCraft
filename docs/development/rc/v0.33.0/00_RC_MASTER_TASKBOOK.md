@@ -23,13 +23,13 @@
 | RC-03 | 章节规划依赖一致性 | 已完成并通过验证 | `04_CHAPTER_PLAN_CONSISTENCY_REPORT.md` | `241a9bf` |
 | RC-04 | 知识资产生命周期 | 已完成并通过验证 | `05_KNOWLEDGE_ASSET_LIFECYCLE_REPORT.md` | `f5c9159` |
 | RC-05 | 生成并发/退款单一归属 | 已完成并通过验证 | `06_GENERATION_CONCURRENCY_REPORT.md` | `591891c` |
-| RC-06 | 检索基准与未测量口径 | 实施中 | `07_RETRIEVAL_BENCHMARK_REPORT.md` | 待回填 |
-| RC-07 | 专家评分校准 | 实施中 | `08_AI_QUALITY_CALIBRATION_REPORT.md` | 待回填 |
+| RC-06 | 检索基准与未测量口径 | 已完成并通过验证（真实 qrels 数据阻塞） | `07_RETRIEVAL_BENCHMARK_REPORT.md` | `99c0e3b` |
+| RC-07 | 专家评分校准 | 已完成并通过验证（真实专家评分数据阻塞） | `08_AI_QUALITY_CALIBRATION_REPORT.md` | `99c0e3b` |
 | RC-08 | 经验治理（策略/过期/撤销） | 实施中 | `09_LEARNING_GOVERNANCE_REPORT.md` | 待回填 |
 | RC-09 | 审批规则可解释性 | 实施中 | `10_APPROVAL_RULE_EXPLAINABILITY_REPORT.md` | 待回填 |
 | RC-10 | 真实/脱敏投标 E2E | 待实施 | `11_REAL_BID_E2E_ACCEPTANCE_REPORT.md` | 待回填 |
 | RC-11 | 过程指标与 summary 契约 | 待实施 | `12_POSTGRES_MIGRATION_CONCURRENCY_REPORT.md` 前的指标报告待补 | 待回填 |
-| RC-12 | PostgreSQL 迁移/并发 | 待实施 | `12_POSTGRES_MIGRATION_CONCURRENCY_REPORT.md` | 待回填 |
+| RC-12 | PostgreSQL 迁移/并发 | 已完成并通过验证（pgserver 非生产，多线程非多机） | `12_POSTGRES_MIGRATION_CONCURRENCY_REPORT.md` | 待提交 |
 | RC-13 | 最终验收/文档 | 待实施 | `13_FINAL_RC_ACCEPTANCE_REPORT.md`、`14_CHANGELOG.md` | 待回填 |
 
 注：用户指定文件名 `02_TOOL_LOOP_RELIABILITY_REPORT.md` 对应 RC-01；主台账保留指定文件名，不做重命名。
