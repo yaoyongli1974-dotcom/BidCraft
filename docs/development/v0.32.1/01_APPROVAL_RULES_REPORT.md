@@ -52,6 +52,16 @@
 
 验证：`npm run typecheck`、`npm run lint`、`npm test -- --run` → 57 files / 433 tests 全通过（新增数值规则测试；ErrorBoundary 用例打印预期 stack trace）。
 
+## 3.2 真实 DB 集成验证（第三段本地提交）
+
+新增 `tests/test_boq_approval_rules_integration_v032.py`（3 个真实 DB 测试）：在项目 `meta.approval_chain` 配置「规则级 + 兜底」两级审批后，验证
+
+- `version_payload()` 按 `version.summary` 中的 `priced` 值给出 `approval_stage_count=1`；
+- `review_version()` 在规则级被过滤后由兜底审批人通过，approve 记录仍保留原链索引 `1`，且规则未命中时非当前级审批人得到 `BoqForbiddenError`；
+- `pending_for_user()` 对命中/未命中规则的报价分别把当前审批人落到规则级或兜底级，`stage`/`stage_count` 与规则过滤结果一致。
+
+验证：`pytest -q tests/test_boq_approval_rules_v032.py tests/test_boq.py tests/test_approvals_pending.py tests/test_batch5_commercial.py tests/test_commercial_approval.py` → **65 passed, 1 warning**；ruff、`git diff --check` 均通过。
+
 ## 4. 兼容与风险
 
 - 兼容：旧审批链、金额门槛、包件/币种白名单、审批记录 stage 原始索引语义均未改变。
