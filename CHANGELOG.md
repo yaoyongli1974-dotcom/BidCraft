@@ -2,6 +2,16 @@
 
 按版本倒序。对外口径以 `docs/release-notes/` 下对应文件为准；本文件是仓库内的简明索引。
 
+## v0.32.2 (2026-11-26)
+
+首个 v0.32.x 正式版本，合并 v0.32.0 AI 技术标引擎三段工作与 v0.32.1 审批规则、v0.32.2 质量概览前端。对外说明见 [docs/release-notes/v0.32.2.md](docs/release-notes/v0.32.2.md)。
+
+- 章节规划、知识资产、RRF 混合检索、Agent 工具、经验/事实治理、质量评估全链路闭环；新增 Alembic 0013–0015，API 路由 274、Pydantic 请求模型 93。
+- 报价审批链支持字符串/数值 AND 规则、报价摘要字段、前端配置与真实 DB 集成验证；项目 PATCH 回显规则，未知上下文保守命中。
+- 质量评估中心接入跨版本评估概览，真实展示分数/等级/结论，未测量项不伪造 0 分。
+- 最终本地全量回归 2270 passed / 888 skipped / 1 warning；Web 57 files / 434 tests，typecheck/lint/build 通过；CI Run 45760674741 9/9 success。
+- 版本 0.32.2 同步后端/pyproject/uv.lock/Web/package-lock/部署清单；未推送 main、tag 或 Release 前本条目仅为待发版口径。
+
 ## v0.32.1 (2026-11-26)
 
 报价审批链补充可选规则命中条件，对外说明见 [docs/release-notes/v0.32.1.md](docs/release-notes/v0.32.1.md)，实施与验证证据见 `docs/development/v0.32.1/01_APPROVAL_RULES_REPORT.md`。
@@ -10,7 +20,7 @@
 - 规则真实参与 `version_payload`、`review_version`、`pending_for_user` 的生效级计算；审批记录仍写原链索引，商务标审批沿用旧三字段上下文。
 - 管理端审批链弹窗支持规则配置与生效级预览；前端与后端白名单/归一化口径一致。
 - 无新表、新列或历史迁移改动；API 路由与 Pydantic 模型数量不变。
-- 定点验证：后端 65 passed / 1 warning，Web 57 files / 433 tests；最终全量与 CI 结果待回填。
+- 定点验证：后端 65 passed / 1 warning，Web 57 files / 433 tests；最终全量 2270 passed / 888 skipped / 1 warning，CI Run 45745752192 9/9 success。
 
 ## v0.32.0 (2026-11-26)
 
@@ -23,7 +33,7 @@ AI 技术标编制引擎升级：章节规划、知识资产、混合检索、Ag
 - 经验只读回流（ADVISORY 建议，不自动入库）与事实确认治理（Alembic `0015_fact_confirmation`）：服务端盖章确认人/时间、来源回写、覆盖保护与失效联动。
 - 质量评估改用真实引擎证据，零分母 `measured=false`；新增报告导出与跨项目汇总；风险否决与导出门禁未削弱。
 - 版本 0.32.0 同步后端/pyproject/uv.lock/Web/package-lock/部署清单；API 路由 252→274、Pydantic 请求模型 91→93；Alembic 单 head `0015_fact_confirmation`，0001-0012 零改动。
-- 本地 SQLite 全量 2257 passed / 886 skipped / 1 warning；Web 57 files / 431 tests，typecheck/lint/build 通过；真实 PG 迁移往返与远端 CI 结果【待回填】。
+- 本地 SQLite 全量 2257 passed / 886 skipped / 1 warning；Web 57 files / 431 tests，typecheck/lint/build 通过；真实 PG 迁移往返通过，远端 CI Run 45732364770 9/9 success。
 
 ## v0.31.3 (2026-11-25)
 

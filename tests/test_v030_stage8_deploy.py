@@ -78,8 +78,9 @@ def test_ci_has_docker_image_job_with_image_assertions():
     jobs = _ci_jobs()
     assert "docker-image" in jobs, "CI 缺少生产镜像构建 job"
     scripts = _step_scripts(jobs["docker-image"])
-    # v0.32.0 将临时镜像标签改为 v0321-check；断言当前标签且不允许旧标签回退。
-    assert "docker build -t bidcraft:v0321-check ." in scripts
+    # v0.32.2 将临时镜像标签改为 v0322-check；断言当前标签且不允许旧标签回退。
+    assert "docker build -t bidcraft:v0322-check ." in scripts
+    assert "bidcraft:v0321-check" not in scripts
     assert "bidcraft:v0313-check" not in scripts
     assert "bidcraft:v030-check" not in scripts
     assert "docker inspect" in scripts and "Config.User" in scripts
