@@ -173,13 +173,16 @@ class TechnicalAgent(BaseAgent):
                 executor=executor,
                 max_rounds=int(policy.get("max_rounds", 6)),
                 max_chars=int(policy.get("max_chars", 8000)),
+                max_seconds=float(policy.get("max_seconds", 60.0)),
                 required_tools=tuple(policy.get("required") or ()),
+                fail_on_tool_error=bool(policy.get("strict", True)),
+                dedupe=bool(policy.get("dedupe", False)),
                 on_trace=traces.append,
             )
         except (ToolLoopBudgetError, ToolVerificationError, ModelUnavailable) as exc:
             return {
                 "status": "failed",
-                "result": {"error": f"工具增强失败：{exc}"},
+                "result": {"error": f"工具增强失败：{exc}", **TechnicalAgent._usage(client)},
                 "warnings": ["工具增强失败，任务不得标记为成功"],
                 "tool_calls": traces,
             }
@@ -189,9 +192,22 @@ class TechnicalAgent(BaseAgent):
                 "model_draft": loop.content,
                 "tool_rounds": loop.rounds,
                 "degraded": False,
+                **TechnicalAgent._usage(client),
             },
             "warnings": [],
             "tool_calls": loop.tool_calls,
+        }
+
+    @staticmethod
+    def _usage(client: Any) -> dict[str, Any]:
+        """把真实模型 token 用量交给 orchestrator 预算，避免预算形同虚设。"""
+
+        usage = getattr(client, "usage", None)
+        prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+        completion = int(getattr(usage, "completion_tokens", 0) or 0)
+        return {
+            "tokens": prompt + completion,
+            "usage": {"prompt_tokens": prompt, "completion_tokens": completion},
         }
 
     @staticmethod
@@ -235,11 +251,15 @@ class TechnicalAgent(BaseAgent):
         except ModelUnavailable as exc:
             return {
                 "status": "failed",
-                "result": {"degraded": False, "error": f"模型调用失败：{exc}"},
+                "result": {
+                    "degraded": False,
+                    "error": f"模型调用失败：{exc}",
+                    **TechnicalAgent._usage(client),
+                },
                 "warnings": ["模型调用失败"],
             }
         return {
             "status": "ok",
-            "result": {"model_draft": content, "degraded": False},
+            "result": {"model_draft": content, "degraded": False, **TechnicalAgent._usage(client)},
             "warnings": [],
         }

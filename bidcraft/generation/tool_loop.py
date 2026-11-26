@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from ..security import redact_mapping, redact_text
+
 #: 工具轨迹的对外契约：不多不少正好这些键。
 TRACE_KEYS = frozenset(
     {"name", "args", "result", "verification", "audit_id", "ts", "is_error", "ms"}
@@ -309,8 +311,8 @@ def _trace(
 ) -> dict[str, Any]:
     trace = {
         "name": name,
-        "args": args,
-        "result": result,
+        "args": redact_mapping(args),
+        "result": redact_text(result),
         "verification": verification,
         "audit_id": audit_id,
         "ts": datetime.now(UTC).isoformat(),
@@ -335,6 +337,9 @@ def run_tool_loop(
     tool_choice: str | dict[str, Any] = "auto",
     max_tokens: int = 4000,
     temperature: float | None = None,
+    max_seconds: float = 60.0,
+    fail_on_tool_error: bool = False,
+    dedupe: bool = False,
 ) -> ToolLoopResult:
     """执行受限的工具循环；``finish_reason`` 不参与终止判定。
 
@@ -342,8 +347,10 @@ def run_tool_loop(
     却仍带 ``tool_calls``；两者都以 ``tool_calls`` 是否为空作为继续条件。
 
     非法工具名 / 非法 JSON 参数在调用 ``executor`` 之前被拒绝，并作为错误观测
-    回灌给模型。轮次或累计文本超限抛 :class:`ToolLoopBudgetError`；必需工具
-    未成功验证抛 :class:`ToolVerificationError`。
+    回灌给模型。轮次、累计文本或墙钟预算超限抛 :class:`ToolLoopBudgetError`；
+    必需工具未成功验证、或 ``fail_on_tool_error`` 下出现失败轨迹时抛
+    :class:`ToolVerificationError`。``dedupe=True`` 只复用同一循环内同工具同
+    参数且已验证成功的结果；轨迹中的 args/result 均经过脱敏。
     """
 
     max_rounds = _int(max_rounds, 6)
@@ -354,8 +361,16 @@ def run_tool_loop(
     traces: list[dict[str, Any]] = []
     total_chars = 0
     content = ""
+    seconds = max(0.0, float(max_seconds or 0.0))
+    deadline = time.monotonic() + seconds if seconds > 0 else None
+    deduped: dict[tuple[str, str], tuple[str, str, str, bool]] = {}
+
+    def _check_deadline() -> None:
+        if deadline is not None and time.monotonic() > deadline:
+            raise ToolLoopBudgetError(f"工具循环超过 {seconds:.0f} 秒预算，已停止执行")
 
     for _round in range(max_rounds):
+        _check_deadline()
         response = client.complete_with_tools(
             history,
             tools,
@@ -366,7 +381,18 @@ def run_tool_loop(
         content = str(getattr(response, "content", "") or "")
         calls = list(getattr(response, "tool_calls", None) or [])
         if not calls:
+            _check_deadline()
             _check_required(traces, required_tools)
+            if fail_on_tool_error:
+                failed_names = [
+                    trace["name"]
+                    for trace in traces
+                    if trace["verification"] == "failed" or trace["is_error"]
+                ]
+                if failed_names:
+                    raise ToolVerificationError(
+                        f"工具调用失败，任务不得标记成功：{', '.join(dict.fromkeys(failed_names))}"
+                    )
             if content:
                 history.append({"role": "assistant", "content": content})
             return ToolLoopResult(
@@ -395,28 +421,39 @@ def run_tool_loop(
                 result_text = parse_error
                 verification = "failed"
             else:
-                try:
-                    returned = executor(name, args)
-                except Exception as exc:  # noqa: BLE001 - 执行失败必须回灌给模型
-                    is_error = True
-                    audit_id = str(getattr(exc, "audit_id", "") or "")
-                    result_text = f"工具执行失败：{exc}"
-                    verification = "failed"
+                cache_key = (
+                    name,
+                    json.dumps(args, sort_keys=True, ensure_ascii=False, default=str),
+                )
+                cached = deduped.get(cache_key) if dedupe else None
+                if cached is not None:
+                    result_text, verification, audit_id, is_error = cached
+                    result_text = f"[重复调用，复用首次结果] {result_text}"
                 else:
-                    invocation = returned if isinstance(returned, ToolInvocation) else None
-                    payload = invocation.result if invocation is not None else returned
-                    audit_id = str(
-                        (invocation.audit_id if invocation is not None else "")
-                        or (payload.get("audit_id") if isinstance(payload, dict) else "")
-                        or ""
-                    )
-                    is_error = bool(
-                        (invocation.is_error if invocation is not None else False)
-                        or (payload.get("isError") if isinstance(payload, dict) else False)
-                        or (payload.get("is_error") if isinstance(payload, dict) else False)
-                    )
-                    result_text = _payload_text(payload, max_chars=max_result_chars)
-                    verification = _verification(payload, is_error=is_error)
+                    try:
+                        returned = executor(name, args)
+                    except Exception as exc:  # noqa: BLE001 - 执行失败必须回灌给模型
+                        is_error = True
+                        audit_id = str(getattr(exc, "audit_id", "") or "")
+                        result_text = f"工具执行失败：{exc}"
+                        verification = "failed"
+                    else:
+                        invocation = returned if isinstance(returned, ToolInvocation) else None
+                        payload = invocation.result if invocation is not None else returned
+                        audit_id = str(
+                            (invocation.audit_id if invocation is not None else "")
+                            or (payload.get("audit_id") if isinstance(payload, dict) else "")
+                            or ""
+                        )
+                        is_error = bool(
+                            (invocation.is_error if invocation is not None else False)
+                            or _explicit_failure(payload)
+                        )
+                        result_text = _payload_text(payload, max_chars=max_result_chars)
+                        verification = _verification(payload, is_error=is_error)
+                        if dedupe and verification == "verified" and not is_error:
+                            deduped[cache_key] = (result_text, verification, audit_id, is_error)
+            _check_deadline()
 
             total_chars += len(result_text)
             if total_chars > max_chars:

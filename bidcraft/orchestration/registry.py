@@ -8,6 +8,7 @@ Agent 的唯一职责是：校验输入 → 构建上下文 → 调用既有业�
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -307,6 +308,19 @@ def list_tools(actor: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     return [*mcp.TOOL_SPECS, *plugin_tools]
 
 
+def _check_pending_approval(run_id: str) -> None:
+    """写工具在人工审批等待期一律禁止（内置与插件共用）。"""
+
+    if not run_id:
+        return
+    from ..db import session_scope
+    from .approval import pending_approval_exists
+
+    with session_scope() as db:
+        if pending_approval_exists(db, run_id):
+            raise AgentError("工作流正在等待人工审批，禁止执行写工具")
+
+
 def call_tool(
     name: str,
     arguments: dict[str, Any] | None = None,
@@ -317,6 +331,7 @@ def call_tool(
     package_id: str = "",
     run_id: str = "",
     task_id: str = "",
+    call_id: str = "",
 ) -> Any:
     """Invoke a built-in or plugin tool through the shared MCP implementation.
 
@@ -330,6 +345,8 @@ def call_tool(
     args = dict(arguments or {})
     resolved = _normalize_actor(actor)
     identity = _plugin_identity(resolved)
+    if not readonly:
+        _check_pending_approval(run_id)
     target = mcp._plugin_target(
         name, user_id=identity["user_id"], is_super_admin=identity["is_super_admin"]
     )
@@ -348,6 +365,7 @@ def call_tool(
             package_id=package_id,
             run_id=run_id,
             task_id=task_id,
+            call_id=call_id,
         )
     return mcp._call_tool(
         name,
@@ -358,6 +376,7 @@ def call_tool(
         package_id=package_id,
         run_id=run_id,
         task_id=task_id,
+        call_id=call_id,
     )
 
 
@@ -404,6 +423,7 @@ def call_tool_with_trace(
 
     result: Any = None
     failure: BaseException | None = None
+    call_id = uuid.uuid4().hex
     try:
         result = call_tool(
             name,
@@ -414,6 +434,7 @@ def call_tool_with_trace(
             package_id=package_id,
             run_id=run_id,
             task_id=task_id,
+            call_id=call_id,
         )
     except Exception as exc:  # noqa: BLE001 - 失败也要带真实审计 id 回灌
         failure = exc
@@ -428,13 +449,8 @@ def call_tool_with_trace(
             )
             for row in rows:
                 detail = row.detail or {}
-                if detail.get("tool") != name and detail.get("name") != name:
-                    continue
-                if run_id and detail.get("run_id") not in (None, "", run_id):
-                    continue
-                if task_id and detail.get("task_id") not in (None, "", task_id):
-                    continue
-                if project_id and row.project_id not in (None, "", project_id):
+                # 只用本次调用生成的 call_id 关联，绝不猜测/复用历史审计行。
+                if detail.get("call_id") != call_id:
                     continue
                 audit_id = row.id
                 break

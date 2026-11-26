@@ -822,6 +822,7 @@ def record_call(
     package_id: str = "",
     run_id: str = "",
     task_id: str = "",
+    call_id: str = "",
 ) -> None:
     """MCP 聚合调用后落库失败计数并写审计（独立短事务由调用方提供）。
 
@@ -845,6 +846,7 @@ def record_call(
                 "plugin": row.name,
                 "tool": tool,
                 "ok": ok,
+                "call_id": call_id,
                 "scope": row.scope,
                 "owner_id": row.owner_id or "",
                 "user_id": user_id or "",

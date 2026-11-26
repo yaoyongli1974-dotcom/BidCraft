@@ -22,6 +22,7 @@ from .generation.outline import load_outline
 from .ledger import ledger_summary, load_ledger, render_ledger
 from .models import Plugin, Project
 from .pipeline import check_project, resolve_project
+from .security import redact_mapping
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "bidcraft-mcp"
@@ -322,9 +323,10 @@ _MUTATING_TOOLS = frozenset({"run_check", "export_document"})
 
 
 def _safe_args(args: dict[str, Any]) -> dict[str, Any]:
-    """审计 detail 里的参数只留短字符串，绝不写长正文。"""
+    """审计 detail 里的参数只留短字符串，且先脱敏，绝不写 secrets/长正文。"""
+
     safe: dict[str, Any] = {}
-    for key, value in (args or {}).items():
+    for key, value in redact_mapping(args or {}).items():
         if isinstance(value, (str, int, float, bool)) or value is None:
             safe[str(key)] = str(value)[:200]
     return safe
@@ -341,12 +343,14 @@ def _audit_builtin_call(
     run_id: str,
     task_id: str,
     package_id: str,
+    call_id: str = "",
 ) -> None:
     """每次 agent 内置工具调用都落一条真实 audit_logs 行（成功/失败都记）。"""
 
     detail = {
         "tool": name,
         "name": name,
+        "call_id": call_id,
         "args": _safe_args(args),
         "isError": error is not None,
         "readonly": bool(readonly),
@@ -359,8 +363,8 @@ def _audit_builtin_call(
             audit.record_audit(
                 db, project_id or None, "agent.tool.call", detail, actor=actor
             )
-    except Exception as exc:  # noqa: BLE001 - 审计失败不能伪装成工具成功
-        plugins.warn(f"工具 {name} 审计写入失败：{exc}")
+    except Exception as exc:  # noqa: BLE001 - 审计失败必须让工具调用失败
+        raise ToolError(f"工具 {name} 审计写入失败，结果不予采信") from exc
 
 
 def _authorize_builtin_access(
@@ -417,6 +421,7 @@ def _call_tool(
     package_id: str = "",
     run_id: str = "",
     task_id: str = "",
+    call_id: str = "",
 ) -> Any:
     if name not in _TOOL_NAMES:
         raise ToolError(f"未知工具: {name}")
@@ -461,6 +466,7 @@ def _call_tool(
             run_id=run_id,
             task_id=task_id,
             package_id=package_id,
+            call_id=call_id,
         )
     if error is not None:
         raise error
@@ -561,6 +567,7 @@ def _audit_plugin_rejection(
     package_id: str = "",
     run_id: str = "",
     task_id: str = "",
+    call_id: str = "",
 ) -> None:
     """只读拒绝也留痕，但不能计入插件连续失败（避免误自动停用）。"""
 
@@ -575,6 +582,7 @@ def _audit_plugin_rejection(
                 {
                     "tool": full_name,
                     "name": full_name,
+                    "call_id": call_id,
                     "isError": True,
                     "ok": False,
                     "reason": message[:200],
@@ -600,6 +608,7 @@ def _call_plugin_tool(
     package_id: str = "",
     run_id: str = "",
     task_id: str = "",
+    call_id: str = "",
 ) -> dict[str, Any]:
     full_name = f"{plugin.name}__{tool_name}"
     if readonly:
@@ -612,12 +621,35 @@ def _call_plugin_tool(
             package_id=package_id,
             run_id=run_id,
             task_id=task_id,
+            call_id=call_id,
         )
         return _tool_error_text(message)
     if not plugin.enabled:
-        return _tool_error_text(f"插件 {plugin.name} 已禁用")
+        message = f"插件 {plugin.name} 已禁用"
+        _audit_plugin_rejection(
+            full_name,
+            actor,
+            project_id,
+            message,
+            package_id=package_id,
+            run_id=run_id,
+            task_id=task_id,
+            call_id=call_id,
+        )
+        return _tool_error_text(message)
     if not plugins.allows(plugin, tool_name):
-        return _tool_error_text(f"插件 {plugin.name} 未授权工具 {tool_name}（不在 allowlist 中）")
+        message = f"插件 {plugin.name} 未授权工具 {tool_name}（不在 allowlist 中）"
+        _audit_plugin_rejection(
+            full_name,
+            actor,
+            project_id,
+            message,
+            package_id=package_id,
+            run_id=run_id,
+            task_id=task_id,
+            call_id=call_id,
+        )
+        return _tool_error_text(message)
     ok = True
     try:
         result = plugins.call_tool(plugin, tool_name, arguments)
@@ -644,6 +676,7 @@ def _call_plugin_tool(
             package_id=package_id,
             run_id=run_id,
             task_id=task_id,
+            call_id=call_id,
         )
     return payload
 

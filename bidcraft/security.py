@@ -10,8 +10,10 @@ import base64
 import hashlib
 import hmac
 import os
+import re
 import secrets
 from pathlib import Path
+from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -158,3 +160,55 @@ def verify_state(token: str) -> dict | None:
         return payload
     except (ValueError, KeyError, json.JSONDecodeError):
         return None
+
+
+REDACTED = "***REDACTED***"
+
+_SENSITIVE_KEY_RE = re.compile(
+    r"(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|"
+    r"authorization|credential|private[_-]?key|cookie|session|otp|mfa)",
+    re.IGNORECASE,
+)
+_SENSITIVE_VALUE_PATTERNS = (
+    re.compile(r"(?i)(bearer\s+)[a-z0-9._~+/=-]{8,}"),
+    re.compile(r"(?i)(api[_-]?key\s*[:=]\s*)[^\s,;}\"']{6,}"),
+    re.compile(r"(?i)(access[_-]?token\s*[:=]\s*)[^\s,;}\"']{6,}"),
+    re.compile(r"(?i)(password\s*[:=]\s*)[^\s,;}\"']{4,}"),
+    re.compile(r"(?i)(authorization\s*[:=]\s*)[^\s,;}\"']{6,}"),
+    re.compile(r"\bsk-[a-z0-9_-]{12,}\b", re.IGNORECASE),
+)
+
+
+def redact_text(value: str) -> str:
+    """遮蔽文本中的 Bearer/API Key/密码等敏感片段；保留非敏感内容。"""
+
+    text = str(value or "")
+
+    def replace(match: re.Match[str]) -> str:
+        if match.lastindex:
+            return match.group(1) + REDACTED
+        return REDACTED
+
+    for pattern in _SENSITIVE_VALUE_PATTERNS:
+        text = pattern.sub(replace, text)
+    return text
+
+
+def redact_mapping(value: Any, *, depth: int = 0) -> Any:
+    """递归遮蔽映射中的敏感键值；执行器仍拿到原始参数，只有轨迹被脱敏。"""
+
+    if depth > 6:
+        return REDACTED
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            name = str(key)
+            redacted[name] = (
+                REDACTED if _SENSITIVE_KEY_RE.search(name) else redact_mapping(item, depth=depth + 1)
+            )
+        return redacted
+    if isinstance(value, (list, tuple)):
+        return [redact_mapping(item, depth=depth + 1) for item in value]
+    if isinstance(value, str):
+        return redact_text(value)
+    return value

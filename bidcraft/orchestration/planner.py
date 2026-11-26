@@ -55,6 +55,9 @@ class ToolPolicy:
     required: tuple[str, ...] = ()
     max_rounds: int = 6
     max_chars: int = 8000
+    max_seconds: float = 60.0
+    strict: bool = True
+    dedupe: bool = False
 
     @property
     def mutating(self) -> bool:
@@ -70,6 +73,9 @@ class ToolPolicy:
             "required": list(self.required),
             "max_rounds": self.max_rounds,
             "max_chars": self.max_chars,
+            "max_seconds": self.max_seconds,
+            "strict": self.strict,
+            "dedupe": self.dedupe or self.mutating,
             "mutating": self.mutating,
         }
 
@@ -83,6 +89,9 @@ def _policy(**values: Any) -> ToolPolicy:
         required=tuple(str(item).strip() for item in (values.get("required") or ()) if str(item).strip()),
         max_rounds=max(1, int(values.get("max_rounds", 6))),
         max_chars=max(1, int(values.get("max_chars", 8000))),
+        max_seconds=max(1.0, float(values.get("max_seconds", 60.0))),
+        strict=bool(values.get("strict", True)),
+        dedupe=bool(values.get("dedupe", False)),
     )
 
 
