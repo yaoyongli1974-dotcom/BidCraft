@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { QualityTab } from './QualityTab'
 import {
   getEvaluationFindings,
+  getEvaluationSummary,
   getLatestEvaluation,
   listEvaluationReports,
   runEvaluation,
@@ -72,6 +73,12 @@ describe('QualityTab', () => {
     vi.mocked(getLatestEvaluation).mockResolvedValue(makeReport())
     vi.mocked(listEvaluationReports).mockResolvedValue([makeReport()])
     vi.mocked(getEvaluationFindings).mockResolvedValue([])
+    vi.mocked(getEvaluationSummary).mockResolvedValue({
+      items: [{
+        project_id: 'p1', ref: 'p1', name: '测试', measured: true, report_id: 'r1',
+        report_version: 1, overall_score: 91.5, grade: 'A', verdict: 'pass', created_at: null,
+      }],
+    })
     vi.mocked(runEvaluation).mockResolvedValue(makeReport({ report_version: 2 }))
     vi.mocked(updateQualityFinding).mockImplementation(async (_ref, _id, input) => ({
       id: 'f1', report_id: 'r1', category: '核对项', level: 'major', node_id: null,
@@ -90,6 +97,27 @@ describe('QualityTab', () => {
     await waitFor(() => expect(screen.getByText('实质性响应')).toBeTruthy())
     expect(screen.getByText('82.5')).toBeTruthy()
     expect(screen.getByText('先确认 1 条 ★ 条款')).toBeTruthy()
+  })
+
+  it('renders the accessible evaluation summary without fabricating missing scores', async () => {
+    vi.mocked(getEvaluationSummary).mockResolvedValue({
+      items: [
+        {
+          project_id: 'p1', ref: 'p1', name: '测试', measured: true, report_id: 'r1',
+          report_version: 1, overall_score: 82.5, grade: 'B', verdict: 'warn', created_at: null,
+        },
+        {
+          project_id: 'p2', ref: 'p2', name: '未评估项目', measured: false, report_id: null,
+          report_version: null, overall_score: null, grade: null, verdict: null, created_at: null,
+        },
+      ],
+    })
+    renderTab()
+    const summary = await screen.findByLabelText('质量评估概览')
+    expect(summary.textContent).toContain('82.5')
+    expect(summary.textContent).toContain('需关注')
+    expect(summary.textContent).toContain('未测量')
+    expect(summary.textContent).not.toContain('0.0')
   })
 
   it('runs a new evaluation and shows updated version', async () => {

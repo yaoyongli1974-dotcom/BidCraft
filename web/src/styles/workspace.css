@@ -7848,6 +7848,7 @@ button.risk-anchor:hover {
 .quality-note input { width: min(420px, 100%); padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; font: inherit; font-size: 13px; }
 .quality-hard-risk { display: flex; align-items: flex-start; gap: 8px; padding: 10px 14px; border: 1px solid var(--danger); border-left-width: 3px; border-radius: 8px; background: var(--danger-soft); color: var(--ink-soft); font-size: 13px; line-height: 1.5; }
 .quality-overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+.quality-summary-value { display: inline-flex; align-items: center; gap: 8px; }
 .quality-panel { padding: 16px; }
 .quality-dimensions { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
 .quality-dim-head { display: flex; align-items: baseline; gap: 10px; font-size: 13px; }

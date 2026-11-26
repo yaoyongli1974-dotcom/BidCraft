@@ -13,6 +13,7 @@ import {
   exportEvaluationReport,
   getEvaluationFindings,
   getEvaluationReportDetail,
+  getEvaluationSummary,
   getLatestEvaluation,
   listEvaluationReports,
   runEvaluation,
@@ -436,6 +437,7 @@ export function QualityTab() {
 
   const latestQuery = useQuery(`quality-latest:${ref}`, () => getLatestEvaluation(ref))
   const reportsQuery = useQuery(`quality-reports:${ref}`, () => listEvaluationReports(ref))
+  const summaryQuery = useQuery(`quality-summary:${ref}`, () => getEvaluationSummary(ref))
 
   // 最新报告作为初始真相源；运行/历史切换由下方交互覆盖。
   useEffect(() => {
@@ -456,7 +458,7 @@ export function QualityTab() {
         created
       setReport(adopted)
       toast.success(`已生成质量报告 v${adopted.report_version}`)
-      await Promise.all([latestQuery.refresh(), reportsQuery.refresh()])
+      await Promise.all([latestQuery.refresh(), reportsQuery.refresh(), summaryQuery.refresh()])
     } catch (error) {
       toast.error(messageOf(error))
     } finally {
@@ -487,7 +489,7 @@ export function QualityTab() {
             } else {
               toast.success('后台质量评估已完成')
             }
-            await Promise.all([latestQuery.refresh(), reportsQuery.refresh()])
+            await Promise.all([latestQuery.refresh(), reportsQuery.refresh(), summaryQuery.refresh()])
           } catch (error) {
             toast.error(messageOf(error))
           }
@@ -608,6 +610,54 @@ export function QualityTab() {
 
       {jobProgress !== null && (
         <p className="subtle" role="status">后台评估进行中：{jobProgress}%</p>
+      )}
+
+      {summaryQuery.error && <ErrorState message={messageOf(summaryQuery.error)} />}
+      {summaryQuery.data && (
+        <section className="panel quality-panel" aria-label="质量评估概览">
+          <div className="config-head">
+            <div>
+              <div className="eyebrow">跨版本评估概览</div>
+              <h3>质量趋势</h3>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<RefreshCw size={14} />}
+              loading={summaryQuery.refreshing}
+              onClick={() => summaryQuery.refresh()}
+            >
+              刷新
+            </Button>
+          </div>
+          {summaryQuery.data.items.length === 0 ? (
+            <EmptyState
+              icon={FileBarChart}
+              title="暂无可访问的评估概览"
+              description="当前账号没有可读取的质量报告。"
+            />
+          ) : (
+            <div className="quality-overview">
+              {summaryQuery.data.items.slice(0, 6).map((item) => {
+                const verdict = item.measured && item.verdict
+                  ? VERDICT_META[item.verdict] || { label: item.verdict, tone: 'neutral' as const }
+                  : { label: '未测量', tone: 'neutral' as const }
+                return (
+                  <StatTile
+                    key={item.project_id}
+                    label={item.name || item.ref}
+                    value={
+                      <span className="quality-summary-value">
+                        {item.measured ? item.overall_score?.toFixed(1) ?? '—' : '未测量'}
+                        <Badge tone={verdict.tone} subtle>{verdict.label}</Badge>
+                      </span>
+                    }
+                  />
+                )
+              })}
+            </div>
+          )}
+        </section>
       )}
 
       {hardRisk && (

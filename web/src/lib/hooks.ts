@@ -146,7 +146,7 @@ export function useQuery<T>(
       entry.controller = controller
       entry.requestId += 1
       const requestId = entry.requestId
-      const created = fetcherRef.current(controller.signal).then((data) => {
+      const created = Promise.resolve(fetcherRef.current(controller.signal)).then((data) => {
         const current = peekQueryEntry<T>(key)
         // Ignore late responses from a replaced request (refresh or key move).
         if (current && current.requestId === requestId) storeQueryData(key, data)
