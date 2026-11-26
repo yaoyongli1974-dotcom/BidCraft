@@ -2,6 +2,19 @@
 
 按版本倒序。对外口径以 `docs/release-notes/` 下对应文件为准；本文件是仓库内的简明索引。
 
+## v0.32.0 (2026-11-26)
+
+AI 技术标编制引擎升级：章节规划、知识资产、混合检索、Agent 工具、经验/事实治理与质量评估闭环。对外说明见 [docs/release-notes/v0.32.0.md](docs/release-notes/v0.32.0.md)，逐阶段证据见 `docs/development/ai-engine/v0.32.0/`。
+
+- 新增可版本化、可确认、可追溯的章节规划（Alembic `0013_chapter_planning`）；评分点/需求/事实/知识/章节 ID 一律真实校验，规划状态进入生成门禁与 prompt；新增 7 条规划路由。
+- 知识资产结构化提炼、审核发布状态机、块级溯源与同库重复候选（Alembic `0014_kb_asset_metadata`）；管理端与企业端各 5 条资产路由，legacy NULL 保持既有检索行为。
+- RRF 混合重排与 Passage 块级溯源，可信分级/降级与未知信号保留 null；项目侧新增只读检索预览。
+- Agent 工具循环复用唯一 MCP/registry 工具系统，服务端工具策略、权限校验、真实执行与审计；`AgentOutput.tool_calls` 固定 8 键轨迹；新增工具目录路由。
+- 经验只读回流（ADVISORY 建议，不自动入库）与事实确认治理（Alembic `0015_fact_confirmation`）：服务端盖章确认人/时间、来源回写、覆盖保护与失效联动。
+- 质量评估改用真实引擎证据，零分母 `measured=false`；新增报告导出与跨项目汇总；风险否决与导出门禁未削弱。
+- 版本 0.32.0 同步后端/pyproject/uv.lock/Web/package-lock/部署清单；API 路由 252→274、Pydantic 请求模型 91→93；Alembic 单 head `0015_fact_confirmation`，0001-0012 零改动。
+- 本地 SQLite 全量 2257 passed / 886 skipped / 1 warning；Web 57 files / 431 tests，typecheck/lint/build 通过；真实 PG 迁移往返与远端 CI 结果【待回填】。
+
 ## v0.31.3 (2026-11-25)
 
 生产上线前最后验收与风险收口，对外说明见 [docs/release-notes/v0.31.3.md](docs/release-notes/v0.31.3.md)，逐阶段证据与四类结论见 `docs/development/BIDCRAFT_V0313_*.md`。
