@@ -2,6 +2,16 @@
 
 按版本倒序。对外口径以 `docs/release-notes/` 下对应文件为准；本文件是仓库内的简明索引。
 
+## v0.32.1 (2026-11-26)
+
+报价审批链补充可选规则命中条件，对外说明见 [docs/release-notes/v0.32.1.md](docs/release-notes/v0.32.1.md)，实施与验证证据见 `docs/development/v0.32.1/01_APPROVAL_RULES_REPORT.md`。
+
+- 审批阶段可附加最多 20 条 AND 规则，字段覆盖金额、包件、币种以及报价摘要的清单行数/已报价数/未报价数/匹配率；非法规则丢弃，未知上下文保守命中。
+- 规则真实参与 `version_payload`、`review_version`、`pending_for_user` 的生效级计算；审批记录仍写原链索引，商务标审批沿用旧三字段上下文。
+- 管理端审批链弹窗支持规则配置与生效级预览；前端与后端白名单/归一化口径一致。
+- 无新表、新列或历史迁移改动；API 路由与 Pydantic 模型数量不变。
+- 定点验证：后端 65 passed / 1 warning，Web 57 files / 433 tests；最终全量与 CI 结果待回填。
+
 ## v0.32.0 (2026-11-26)
 
 AI 技术标编制引擎升级：章节规划、知识资产、混合检索、Agent 工具、经验/事实治理与质量评估闭环。对外说明见 [docs/release-notes/v0.32.0.md](docs/release-notes/v0.32.0.md)，逐阶段证据见 `docs/development/ai-engine/v0.32.0/`。

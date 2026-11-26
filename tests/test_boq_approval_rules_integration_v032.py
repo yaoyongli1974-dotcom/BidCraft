@@ -66,7 +66,7 @@ def test_version_payload_uses_summary_rules_for_stage_count(db):
             name="filtered",
             summary={"total_amount": 100, "boq_rows": 12, "priced": 7, "unpriced": 5},
         )
-        payload = boq.version_payload(session, version, project=project)
+        payload = boq.version_payload(version, project=project)
     assert payload["approval_stage_count"] == 1
     assert payload["approval_stage"] == 0
 
@@ -87,8 +87,8 @@ def test_review_version_allows_current_approver_after_rule_filters_stage(db):
             decision="approve",
             note="规则级未命中，兜底审批",
         )
-    assert result["version"]["status"] == "approved"
-    approvals = result["version"]["approvals"]
+    assert result["status"] == "approved"
+    approvals = result["approvals"]
     assert [record["stage"] for record in approvals] == [1]
 
     with session_scope() as session:
@@ -102,8 +102,8 @@ def test_review_version_allows_current_approver_after_rule_filters_stage(db):
                 session,
                 wrong_project,
                 wrong_version.id,
-                actor="规则级审批人",
-                actor_id="u-rule-1",
+                actor="兜底审批人",
+                actor_id="u-rule-2",
                 decision="approve",
             )
         except boq.BoqForbiddenError:
