@@ -253,6 +253,44 @@ jobs:
               print(f"DATA BLOCKED (skip): {status['reason']}")
           PY
 
+      # v0.33.1 Phase 2：检索 qrels 与专家评分同样属于用户提供的外部数据，
+      # 只报告状态，不把 DATA BLOCKED 的 skip 当作失败，也不生成假指标。
+      - name: Real retrieval qrels status (non-gating)
+        env:
+          BIDCRAFT_REAL_RETRIEVAL_ROOT: ${{ vars.BIDCRAFT_REAL_RETRIEVAL_ROOT || '' }}
+        run: |
+          uv run --frozen python - <<'PY'
+          import os
+          from pathlib import Path
+
+          from bidcraft.evaluation.retrieval_metrics import DEFAULT_ROOT, retrieval_status
+
+          root = Path(os.environ.get("BIDCRAFT_REAL_RETRIEVAL_ROOT") or DEFAULT_ROOT)
+          status = retrieval_status(root)
+          if status["ready"]:
+              print(f"READY (run): {status['queries']} real qrels query/queries")
+          else:
+              print(f"DATA BLOCKED (skip): {status['reason']}")
+          PY
+
+      - name: Real expert ratings status (non-gating)
+        env:
+          BIDCRAFT_REAL_EXPERT_ROOT: ${{ vars.BIDCRAFT_REAL_EXPERT_ROOT || '' }}
+        run: |
+          uv run --frozen python - <<'PY'
+          import os
+          from pathlib import Path
+
+          from bidcraft.evaluation.quality_calibration import DEFAULT_ROOT, expert_status
+
+          root = Path(os.environ.get("BIDCRAFT_REAL_EXPERT_ROOT") or DEFAULT_ROOT)
+          status = expert_status(root)
+          if status["ready"]:
+              print(f"READY (run): {status['pairs']} real expert rating pair(s)")
+          else:
+              print(f"DATA BLOCKED (skip): {status['reason']}")
+          PY
+
       - name: Calibration regression (synthetic + industry fixtures, baseline gate)
         run: uv run --frozen bidcraft calibrate tests/fixtures/regression --compare-baseline tests/fixtures/regression/baseline.json
 
