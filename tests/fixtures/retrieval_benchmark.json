@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "label": "synthetic-retrieval-benchmark-self-check",
+  "synthetic": true,
+  "note": "SYNTHETIC：仅用于检索指标算法自检，禁止作为真实 qrels/真实检索基准（load_benchmark 会拒绝）",
+  "qrels": {
+    "q1": ["d1", "d2"]
+  },
+  "run": {
+    "q1": ["d1", "d2"]
+  },
+  "passages": [
+    {
+      "doc_id": "d1",
+      "document_id": "doc-1",
+      "page": 2,
+      "heading": "资格要求",
+      "chunk_id": "c-1",
+      "scope_ok": true,
+      "valid_asset": true
+    },
+    {
+      "doc_id": "d2",
+      "document_id": "doc-2",
+      "page": 3,
+      "heading": "技术要求",
+      "chunk_id": "c-2",
+      "scope_ok": true,
+      "valid_asset": true
+    }
+  ],
+  "diagnostics": {
+    "q1": {"searched": 2, "skipped": 0, "failed": 0}
+  }
+}

@@ -77,7 +77,12 @@
 
 .venv/bin/python -m pytest -o addopts="" -q tests/test_v0330_generation_concurrency.py tests/test_v0330_kb_lifecycle.py tests/test_jobqueue_race_conditions.py tests/test_jobqueue.py tests/test_v0311_stage5_billing_races.py tests/test_worker_reliability_matrix.py tests/test_v032_chapter_planning.py tests/test_v030_stage3_routes.py tests/test_api_package.py
 # 99 passed, 1 skipped, 1 warning in 36.88s
+
+.venv/bin/python -m pytest -o addopts="" -q
+# 2324 passed, 888 skipped, 1 warning in 999.36s
 ```
+
+全量后端回归零失败；888 skipped 为既定 PG/可选环境跳过，无本模块新增跳过。
 
 中间回归发现 `tests/test_jobqueue_race_conditions.py::test_heartbeat_failure_sets_abort` 仍按“首次异常即 abort”断言；已把 stop 对象改为 `_ThreeStrikeStop`（允许三次 tick）并断言 `stop.calls >= 3`，断言强度不降低，符合新的三次计数语义。
 

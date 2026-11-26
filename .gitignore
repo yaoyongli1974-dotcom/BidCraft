@@ -21,3 +21,10 @@ real-tenders/
 tests/fixtures/tender_real/*
 !tests/fixtures/tender_real/README.md
 !tests/fixtures/tender_real/dataset.example.json
+# 真实检索 qrels 与专家评分同样含商业/个人信息，绝不入库；仅提交示例与说明。
+tests/fixtures/retrieval_real/*
+!tests/fixtures/retrieval_real/README.md
+!tests/fixtures/retrieval_real/dataset.example.json
+tests/fixtures/expert_ratings_real/*
+!tests/fixtures/expert_ratings_real/README.md
+!tests/fixtures/expert_ratings_real/dataset.example.json

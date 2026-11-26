@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "label": "real-retrieval-regression",
+  "synthetic": false,
+  "qrels": {
+    "q1": ["doc-a", "doc-b"],
+    "q2": ["doc-c"]
+  },
+  "run": {
+    "q1": ["doc-a", "doc-x", "doc-b"],
+    "q2": ["doc-x", "doc-c"]
+  },
+  "passages": [
+    {
+      "doc_id": "doc-a",
+      "document_id": "doc-1",
+      "page": 12,
+      "heading": "资格要求",
+      "chunk_id": "chunk-1",
+      "scope_ok": true,
+      "valid_asset": true
+    },
+    {
+      "doc_id": "doc-x",
+      "document_id": "",
+      "page": null,
+      "heading": "",
+      "chunk_id": null,
+      "scope_ok": false,
+      "valid_asset": false
+    }
+  ],
+  "diagnostics": {
+    "q1": {"searched": 2, "skipped": 0, "failed": 0},
+    "q2": {"searched": 1, "skipped": 0, "failed": 1}
+  }
+}

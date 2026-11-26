@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "label": "synthetic-expert-ratings-self-check",
+  "synthetic": true,
+  "note": "SYNTHETIC：仅用于校准算法自检（手算值见 tests/test_v0330_quality_calibration.py），禁止作为真实专家评分",
+  "pairs": [
+    [55.0, 60.0],
+    [65.0, 70.0],
+    [70.0, 80.0],
+    [80.0, 90.0],
+    [85.0, 75.0],
+    [95.0, 100.0]
+  ]
+}

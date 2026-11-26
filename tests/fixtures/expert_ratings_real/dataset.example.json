@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "label": "real-expert-rating-calibration",
+  "synthetic": false,
+  "pairs": [
+    [72.0, 80.0],
+    [85.5, 88.0],
+    [60.0, 65.0]
+  ]
+}

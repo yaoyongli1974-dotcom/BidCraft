@@ -24,7 +24,9 @@ from .coverage import (
     calculate_scoring_coverage,
     collect_coverage_findings,
 )
+from .quality_calibration import collect_quality_calibration
 from .quality_metrics import collect_quality_metrics
+from .retrieval_metrics import collect_retrieval_metrics
 from .risk import (
     build_risk_recommendations,
     calculate_risk_summary,
@@ -274,6 +276,9 @@ def build_quality_report(
         **summary,
         "metrics": collect_quality_metrics(db, project_id),
         "tender_quality": collect_tender_quality(),
+        # RC-06/RC-07：无真实 qrels / 专家评分时两项均为「未测量」全 None。
+        "retrieval_benchmark": collect_retrieval_metrics(),
+        "calibration": collect_quality_calibration(),
     }
     db.flush()
 
