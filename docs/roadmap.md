@@ -97,7 +97,7 @@
 1. 用真实招标件跑 `bidcraft calibrate --save-baseline --label ... --manifest`，把聚合基线（不含原文）
    与指纹清单纳入版本库，积累后以 `--compare-baseline` / `bidcraft baselines --verify` 做回归门禁，
    按字段命中率与别名缺口扩充 `FIELD_ALIAS_AUGMENT`。
-2. 报价与文档进阶：审批链已支持多级流转、并行会签/或签、金额门槛与包件/币种条件分支，并已补齐可选规则命中条件（字段 total_amount/package_id/currency，支持 gte/lte/eq/ne/in/not_in/contains，AND 求值，旧链行为不变；见 `docs/development/v0.32.1/01_APPROVAL_RULES_REPORT.md`）；
+2. 报价与文档进阶：审批链已支持多级流转、并行会签/或签、金额门槛与包件/币种条件分支，并已补齐可选规则命中条件（字符串字段 package_id/currency，数值字段 total_amount/boq_rows/priced/unpriced/match_rate，支持 gte/lte/eq/ne/in/not_in/contains，AND 求值；数值摘要字段仅在 BOQ 报价链路生效，用户经 `PATCH /projects/{ref}` 配置后原样回显，旧链行为不变；见 `docs/development/v0.32.1/01_APPROVAL_RULES_REPORT.md`）；
    商务完整性已与质量评估联动——报告读取最新 `CommercialDoc` 的真实必填项完成率计入 `commercial`
    维度并生成 major finding；同步 `evaluation/run` 保留，长报表可用 `evaluation/run-async` 后台生成。
    `submit_commercial` 已提供可选完整性硬门禁（`require_complete=True`，前端为「严格校验完整性」勾选框），

@@ -1,6 +1,6 @@
 # v0.32.1 审批链规则命中条件 — 实施报告
 
-> 分支：`feature/v0.32-ai-engine`（本地 commit，等待当前 CI 绿后按循环 push）
+> 分支：`feature/v0.32-ai-engine`（分段 commit，按 CI 循环推送；当前最新 `8e5067a`）
 > 基线：v0.32 最终验收提交 `4f649ce`
 > 范围：报价审批链的可选规则命中条件，不改历史迁移、不加新表、不改 API 路由数。
 
@@ -13,7 +13,7 @@
 生产代码仅改 `bidcraft/boq.py`：
 
 - 新增常量：`STAGE_RULE_MAX_ITEMS=20`、`STAGE_RULE_VALUE_MAX_ITEMS=20`、`STAGE_RULE_STRING_MAX=40`、`STAGE_RULE_NUMERIC_FIELDS` / `STAGE_RULE_STRING_FIELDS`；操作符白名单 `gte/lte/eq/ne/in/not_in/contains`。
-- `_stage_rules()` 归一化规则：非法字段/操作符、布尔/非有限数、空列表、超长字符串、非 dict 条目一律丢弃；有效规则去重保序；无有效规则时阶段保持无条件生效。
+- `_stage_rules()` 归一化规则：非法字段/操作符、布尔/非有限数、空列表、超长字符串、非 dict 条目一律丢弃；有效规则保序，集合型 value 去重后保序；无有效规则时阶段保持无条件生效。
 - `_rule_value_matches()` 求值：数值字段只接受有限数（`in`/`not_in` 仍按字符串列表）；币种统一大写比较；包件/字符串按原值比较；未知上下文一律「满足」以保持原有 over-review 保守口径。
 - `_attach_stage_conditions()` 将有效 `rules` 写入归一化阶段；`_stage_applies()` 在原有金额/包件/币种条件之后 AND 求值规则；`applicable_stages()` / `completed_stages()` 接受可选 `summary` 并向后转发。
 - BOQ 的 `version_payload`、`review_version`、`pending_for_user` 均传入版本 `summary`；`commercial.py` 审批上下文不传，保持三字段旧语义。
@@ -39,11 +39,11 @@
 
 - `ruff check bidcraft tests scripts` → All checks passed；`git diff --check` clean。
 - `pytest -q tests/test_boq_approval_rules_v032.py tests/test_boq.py` → **30 passed**（新增数值规则两段已覆盖）。
-- 前一段（仅三字段规则）曾跑过 122 passed / 1 warning；本段数值规则改动后以 30 passed 为准，最终全量回归由后续 CI/本地全量确认。
+- 前一段（仅三字段规则）曾跑过 122 passed / 1 warning；本段数值规则改动后以 30 passed 为准，最终全量回归见文末验证汇总。
 
 ## 3.1 前端配置面板（第二段本地提交）
 
-前端配置面板已随 `37d5ac0` 推送；本段新增数值字段后重新本地验证，待当前 CI 绿后推送：
+前端配置面板已随 `37d5ac0` 推送；本段新增数值字段后重新本地验证，已随后续分段推送：
 
 - `web/src/lib/types.ts`：`ApprovalRule` / `ApprovalRuleField` / `ApprovalRuleOp`，`ApprovalStage` 与 `ApprovalStageInput` 增加可选 `rules`。
 - `web/src/api/project.ts`：`normalizeApprovalRules()` 与后端白名单同口径（最多 20 条、每条 value 最多 20 项 / 40 字，非法项丢弃）；`normalizeApprovalChain()` 回显保留 rules；`applicableStages()` 在前端按同一 AND 规则计算生效级，未知上下文保守命中。
@@ -74,6 +74,13 @@
 
 验证：`pytest -q tests/test_boq_approval_rules_api_v032.py tests/test_boq_approval_rules_integration_v032.py tests/test_boq_approval_rules_v032.py tests/test_quote_approval_conditions.py tests/test_api_package.py` → **34 passed, 1 warning**；ruff、`git diff --check` 均通过。
 
+## 3.4 最终验证汇总
+
+- 本地全量后端：`.venv/bin/python -m pytest -o addopts="" -q` → **2270 passed / 888 skipped / 1 warning in 922.71s**，0 failures（仅 Starlette/httpx TestClient 弃用告警）。
+- 前端：`npm run typecheck`、`npm run lint`、`npm test -- --run` → 57 files / 433 tests 全通过；`npm run build` 通过。
+- 静态：ruff、`git diff --check`、版本一致性（0.32.1）均通过；路由数 274、schema 数 93、Alembic 单 head `0015_fact_confirmation` 未变。
+- 远程 CI：SHA `8e5067a75c6f1fac3a70e0759f8945c6831587f9`，Run `45745752192`，**9/9 jobs success**；旧 SHA（`7e387b0`）曾因旧断言失败，已由本段修正，不作最终证据。
+
 ## 4. 兼容与风险
 
 - 兼容：旧审批链、金额门槛、包件/币种白名单、审批记录 stage 原始索引语义均未改变。
@@ -81,4 +88,4 @@
 
 ## 5. 回滚
 
-只回退 `bidcraft/boq.py` 本次规则相关 hunk，删除 `tests/test_boq_approval_rules_v032.py` 与本报告，并将 `docs/roadmap.md` 第 2 项恢复原文。无数据库状态需要回滚。
+只回退 `bidcraft/boq.py` 本次规则相关 hunk 与 `bidcraft/api/routes/projects.py` 的规则回显 hunk，删除 `tests/test_boq_approval_rules_v032.py`、`tests/test_boq_approval_rules_integration_v032.py`、`tests/test_boq_approval_rules_api_v032.py` 与本报告，并将 `docs/roadmap.md` 第 2 项恢复原文。无数据库状态需要回滚。
