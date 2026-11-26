@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -23,6 +24,46 @@ TRACE_KEYS = frozenset(
     {"name", "args", "result", "verification", "audit_id", "ts", "is_error", "ms"}
 )
 VERIFICATIONS = frozenset({"verified", "unverified", "failed"})
+
+#: 业务失败信号。工具调用成功返回并不等于业务成功；只要结果里出现这些
+#: 字段/状态，就必须记为 failed，不能让模型把失败包装成成功。
+_ERROR_KEYS = frozenset(
+    {"error", "errors", "isError", "is_error", "exception", "traceback"}
+)
+_FALSE_SUCCESS_KEYS = frozenset({"ok", "success", "succeeded", "passed"})
+_FAILED_STATUSES = frozenset(
+    {
+        "failed",
+        "failure",
+        "error",
+        "errored",
+        "blocked",
+        "denied",
+        "rejected",
+        "cancelled",
+        "canceled",
+        "forbidden",
+    }
+)
+#: 纯文本结果不能证明业务成功；但显式失败词必须被识别，避免"失败"被记为可验证。
+_TEXT_FAILURE_MARKERS = (
+    "失败",
+    "错误",
+    "异常",
+    "拒绝",
+    "无权",
+    "未授权",
+    "不存在",
+    "timeout",
+    "timed out",
+    "forbidden",
+    "unauthorized",
+    "not found",
+    "failed",
+    "error",
+)
+#: 只有结构化字段才算可验证证据；message/text/warning 等自由文本不算。
+_TEXT_ONLY_KEYS = frozenset({"text", "message", "messages", "warning", "warnings", "content"})
 
 
 class ToolLoopBudgetError(RuntimeError):
@@ -102,31 +143,78 @@ def _payload_text(payload: Any, *, max_chars: int) -> str:
     return text[:max_chars] + "…（结果已截断）"
 
 
+def _text_has_failure(text: str) -> bool:
+    """识别结果文本中的显式失败词；英文词按边界匹配避免 no errors 误报。"""
+
+    lowered = text.lower()
+    for marker in _TEXT_FAILURE_MARKERS:
+        if any("\u4e00" <= char <= "\u9fff" for char in marker):
+            if marker in lowered:
+                return True
+        elif re.search(rf"(?<![a-z]){re.escape(marker)}(?![a-z])", lowered):
+            return True
+    return False
+
+
+def _explicit_failure(payload: Any) -> bool:
+    """只检查明确的业务失败信号，不把正常内容里的普通词当失败。"""
+
+    if isinstance(payload, dict):
+        if any(payload.get(key) for key in _ERROR_KEYS):
+            return True
+        if any(key in payload and payload[key] is False for key in _FALSE_SUCCESS_KEYS):
+            return True
+        state = str(payload.get("status") or payload.get("state") or "").strip().lower()
+        if state in _FAILED_STATUSES:
+            return True
+        content = payload.get("content")
+        if isinstance(content, list):
+            return any(
+                isinstance(item, dict)
+                and isinstance(item.get("text"), str)
+                and _text_has_failure(item["text"])
+                for item in content
+            )
+        return False
+    if isinstance(payload, (list, tuple)):
+        return any(
+            _explicit_failure(item) if isinstance(item, (dict, list, tuple)) else (
+                _text_has_failure(item) if isinstance(item, str) else False
+            )
+            for item in payload
+        )
+    return isinstance(payload, str) and _text_has_failure(payload)
+
+
+def _meaningful_evidence(payload: Any) -> bool:
+    """只有结构化结果才算可验证；纯文本/提示信息不能证明业务成功。"""
+
+    if isinstance(payload, dict):
+        return any(
+            key not in _TEXT_ONLY_KEYS
+            and value not in (None, "", [], {})
+            for key, value in payload.items()
+        )
+    if isinstance(payload, (list, tuple)):
+        return bool(payload) and any(
+            isinstance(item, dict) and _meaningful_evidence(item) for item in payload
+        )
+    return False
+
+
 def _verification(payload: Any, *, is_error: bool) -> str:
-    """只依据真实工具结果判定，不因模型声称成功而放行。"""
+    """仅依据真实工具结果判定。
+
+    ``verified`` 表示工具返回了可核验的结构化证据，**不代表**业务结论通过
+    （例如 run_check 返回风险清单仍是 verified）；显式业务失败一律 failed；
+    非空但只有自由文本的结果只能算 unverified，不能满足 required_tools。
+    """
 
     if is_error:
         return "failed"
-    if isinstance(payload, dict):
-        if payload.get("isError") or payload.get("is_error") or payload.get("error"):
-            return "failed"
-        content = payload.get("content")
-        if isinstance(content, list) and any(
-            isinstance(item, dict) and item.get("text") for item in content
-        ):
-            return "verified"
-        meaningful = {
-            key: value
-            for key, value in payload.items()
-            if key not in {"isError", "is_error", "content"}
-            and value not in (None, "", [], {})
-        }
-        return "verified" if meaningful else "unverified"
-    if isinstance(payload, list):
-        return "verified" if payload else "unverified"
-    if isinstance(payload, str):
-        return "verified" if payload.strip() else "unverified"
-    return "unverified"
+    if _explicit_failure(payload):
+        return "failed"
+    return "verified" if _meaningful_evidence(payload) else "unverified"
 
 
 def _call_fields(call: Any) -> tuple[str, str, str, dict[str, Any]]:
@@ -169,12 +257,24 @@ def _parse_args(raw_text: str, fallback: dict[str, Any]) -> tuple[dict[str, Any]
 
 
 def _check_required(traces: list[dict[str, Any]], required: tuple[str, ...] | list[str]) -> None:
+    """必需工具必须执行成功；同名工具只要出现失败轨迹也不得放行。"""
+
+    failed: list[str] = []
+    unverified: list[str] = []
     for name in required or ():
-        if not any(
-            trace["name"] == name and trace["verification"] == "verified"
-            for trace in traces
-        ):
-            raise ToolVerificationError(f"必需工具 {name} 未成功执行或结果不可验证")
+        calls = [trace for trace in traces if trace["name"] == name]
+        if not calls or not any(trace["verification"] == "verified" for trace in calls):
+            unverified.append(name)
+        elif any(trace["verification"] == "failed" for trace in calls):
+            failed.append(name)
+    if failed:
+        raise ToolVerificationError(
+            f"必需工具执行失败：{', '.join(dict.fromkeys(failed))}"
+        )
+    if unverified:
+        raise ToolVerificationError(
+            f"必需工具未成功执行或结果不可验证：{', '.join(dict.fromkeys(unverified))}"
+        )
 
 
 def _assistant_message(content: str, calls: list[Any]) -> dict[str, Any]:
