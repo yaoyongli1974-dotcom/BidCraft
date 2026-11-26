@@ -148,6 +148,7 @@ def test_tender_quality_exposes_mismatch_and_coverage_details(tmp_path: Path) ->
         "files": [
             {
                 "path": "redacted.md",
+                "source": "user-provided",
                 "sha256": "",
                 "annotations": {
                     "required_clauses": [hit, missed],

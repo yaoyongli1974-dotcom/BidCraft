@@ -35,6 +35,7 @@ def test_ready_dataset_computes_recall_and_value_rate(tmp_path: Path) -> None:
         "files": [
             {
                 "path": "redacted.md",
+                "source": "user-provided",
                 "sha256": "",
                 "annotations": {
                     "required_clauses": [clause],
@@ -67,6 +68,7 @@ def test_verdict_agreement_uses_judge_on_annotated_responses(tmp_path: Path) -> 
         "files": [
             {
                 "path": "redacted.md",
+                "source": "user-provided",
                 "sha256": "",
                 "annotations": {
                     "required_clauses": [clause],
@@ -93,6 +95,7 @@ def test_invalid_responses_annotation_is_rejected(tmp_path: Path) -> None:
         "files": [
             {
                 "path": "redacted.md",
+                "source": "user-provided",
                 "sha256": "",
                 "annotations": {
                     "required_clauses": ["投标人须具备独立法人资格"],
