@@ -140,6 +140,7 @@ def test_synthetic_marker_cannot_be_promoted_to_real_sample(tmp_path: Path):
                     {
                         "path": "sample.md",
                         "sha256": "",
+                        "source": "user-provided",
                         "annotations": {
                             "required_clauses": ["必须提供营业执照"],
                             "required_values": [{"key": "预算", "value": "壹佰万元"}],
@@ -166,6 +167,7 @@ def test_annotated_dataset_measures_clauses_values_and_verdict(pg_engine, monkey
                     {
                         "path": "real.md",
                         "sha256": "",
+                        "source": "user-provided",
                         "annotations": {
                             "required_clauses": [clause],
                             "required_values": [{"key": "预算", "value": "壹佰万元"}],

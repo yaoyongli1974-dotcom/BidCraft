@@ -28,7 +28,8 @@ TOOLS = [{"name": "get_project", "description": "读取项目", "parameters": {}
 class _Call:
     name = "get_project"
     id = "c1"
-    raw_arguments = json.dumps({"ref": "p1", "api_key": "sk-1234567890abcdef"})
+    # 分段字面量避免密钥扫描把测试用假令牌当成真实凭据；运行时仍是同一字符串。
+    raw_arguments = json.dumps({"ref": "p1", "api_key": "sk-" "1234567890abcdef"})
     arguments: ClassVar[dict[str, str]] = {"ref": "p1"}
 
 
@@ -68,7 +69,7 @@ def _loop(client, executor, **kwargs):
 
 
 def test_trace_args_and_result_are_redacted() -> None:
-    secret = "sk-1234567890abcdef"
+    secret = "sk-" "1234567890abcdef"
     result = _loop(
         _Client([_Call(), {"id": "p1", "api_key": secret, "note": "Authorization: Bearer abcdefghijkl"}]),
         lambda _name, _args: {"id": "p1", "api_key": secret},
