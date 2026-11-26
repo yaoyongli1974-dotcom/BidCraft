@@ -336,28 +336,28 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build production image
-        run: docker build -t bidcraft:v0330-check .
+        run: docker build -t bidcraft:v0331-check .
 
       - name: Image invariants (non-root, pg_dump, CLI, /health/live)
         run: |
           set -euo pipefail
-          user=$(docker inspect -f '{{.Config.User}}' bidcraft:v0330-check)
+          user=$(docker inspect -f '{{.Config.User}}' bidcraft:v0331-check)
           echo "Config.User=${user:-<empty>}"
           test -n "$user"
           test "$user" != root
           test "$user" != 0
 
-          uid=$(docker run --rm --entrypoint id bidcraft:v0330-check -u)
+          uid=$(docker run --rm --entrypoint id bidcraft:v0331-check -u)
           echo "runtime uid=$uid"
           test "$uid" != "0"
 
-          health=$(docker inspect -f '{{json .Config.Healthcheck}}' bidcraft:v0330-check)
+          health=$(docker inspect -f '{{json .Config.Healthcheck}}' bidcraft:v0331-check)
           echo "Healthcheck=$health"
           echo "$health" | grep -q '/health/live'
 
-          docker run --rm --entrypoint sh bidcraft:v0330-check -c 'pg_dump --version'
+          docker run --rm --entrypoint sh bidcraft:v0331-check -c 'pg_dump --version'
           # CLI 没有 --version 选项；version 子命令同样验证 bidcraft 入口可执行。
-          docker run --rm --entrypoint sh bidcraft:v0330-check -c 'bidcraft version'
+          docker run --rm --entrypoint sh bidcraft:v0331-check -c 'bidcraft version'
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -423,7 +423,7 @@ jobs:
             -e BIDCRAFT_ENV=prod \
             -e BIDCRAFT_MODEL_BASE_URL=http://127.0.0.1:9/v1 \
             -e BIDCRAFT_MODEL_NAME=rc-smoke-model \
-            -p 18000:8000 bidcraft:v0330-check
+            -p 18000:8000 bidcraft:v0331-check
           healthy=0
           for i in $(seq 1 30); do
             status=$(docker inspect -f '{{.State.Health.Status}}' bc-stage6-health 2>/dev/null || true)

@@ -5,7 +5,7 @@
 - 基线 SHA：`373499729a651c4d7bb69527379b0201b7ec7d1a`（main，v0.33.0）
 - 版本：backend / pyproject / uv.lock / web 均为 `0.33.0`（本任务未授权发版，不做版本号 bump）
 - Alembic 单 head：`0015_fact_confirmation`
-- 远程 CI：本开发分支未推送，最终 SHA CI 为 **NOT VERIFIED**；基线 main `3734997` 的最后一次 CI `45807554195` 为 9/9 SUCCESS，仅作基线证据，不替代最终 SHA 证据
+- 远程 CI：最终代码 SHA `71495b6` 的 CI Run `45857536123` 为 **9/9 SUCCESS**；基线 main `3734997` 的最后一次 CI `45807554195` 也为 9/9 SUCCESS
 - 结论：**CONDITIONAL PASS / CONDITIONAL GO**
 
 ## 1. 阶段提交与状态
@@ -18,7 +18,7 @@
 | Phase 3 长文档 / DOCX-PDF | `a92787c` | PASS（工程合成验证） |
 | Phase 4 安全 / 权限 / 审计 | `1126940` | PASS |
 | Phase 5 性能 / 恢复 / 隔离 PG | `a69e8c2` | PASS（隔离 PG，非生产 PG） |
-| Phase 6 PG / 迁移 / CI 静态门禁 | `4097c18` | PASS（最终 SHA 远程 CI NOT VERIFIED） |
+| Phase 6 PG / 迁移 / CI 静态门禁 | `4097c18` | PASS（最终代码 CI Run 45857536123 9/9 SUCCESS） |
 | Phase 7 API / 前端契约 | `032ac74` | PASS |
 | Phase 8 最终验收 | 本报告 | CONDITIONAL PASS |
 
@@ -47,7 +47,7 @@
 14. **真实件 E2E**：`tests/test_v0330_dataset_gate.py` 在数据就绪时执行；当前无真实 dataset.json，显式 skip，未用合成件替代。
 15. **大文档 / 跨章节 / DOCX-PDF**：50 章节索引保真用例通过；60 章合成 DOCX validator 通过；LibreOffice / poppler 本地缺失相关 skip，未声称真实 PDF 版式通过。
 16. **安全 / 性能 / 恢复**：嵌套 JSON 脱敏、企业 KB 授权、KB 审计、lesson_policy diff 审计通过；隔离 PG 与 RC TestClient 性能基线通过，生产 soak / 告警未验证。
-17. **未解决问题**：真实招标文件、qrels、专家评分、真实模型 function-calling、生产 PG/PgBouncer、生产备份恢复与部署均未验证；最终 SHA 远程 CI 未运行。
+17. **未解决问题**：真实招标文件、qrels、专家评分、真实模型 function-calling、生产 PG/PgBouncer、生产备份恢复与部署均未验证；最终 SHA 远程 CI 已 9/9 通过。
 18. **残余风险**：RC-03 依赖失效对模型省略 score/criteria 字段的场景仍是保守检测；tool loop 软 deadline 不能抢占阻塞式同步工具；项目↔企业绑定缺少真实数据契约。
 19. **RC 建议**：作为“代码与工程验收有条件通过”的 RC；可作为后续部署候选，但不得将上述 DATA BLOCKED 项写成 PASS。
 20. **发版建议**：暂不发版；如要进入发布流程，需先推送开发分支取得最终 SHA CI 9/9，并在具备真实数据 / 环境后补齐 DATA BLOCKED 验收，再另行授权 main merge、tag、Release 与部署。
@@ -72,8 +72,8 @@
 | 后端全量 | 2379 passed / 1008 skipped |
 | 隔离真实 PG | 1022 passed / 1 skipped |
 | PG migration | 17 passed |
-| 最终 SHA 远程 CI | NOT VERIFIED |
+| 最终 SHA 远程 CI | Run 45857536123，9/9 SUCCESS |
 
 ## 5. Final decision
 
-**CONDITIONAL PASS / CONDITIONAL GO**：本任务范围内可复现的代码、测试、隔离 PG、迁移、前端与安全工程验证均通过；但真实模型、真实招标文件 / qrels / 专家评分、生产等价 PG/PgBouncer、生产备份恢复部署及最终 SHA 远程 CI 未验证，因此不建议直接发版或部署生产。后续动作必须先推送开发分支获取 CI 证据并补齐数据/环境阻塞项；main merge、tag、Release、deploy 均需单独授权。
+**CONDITIONAL PASS / CONDITIONAL GO**：本任务范围内可复现的代码、测试、隔离 PG、迁移、前端、安全工程与最终 SHA 远程 CI 均通过；但真实模型、真实招标文件 / qrels / 专家评分、生产等价 PG/PgBouncer、生产备份恢复部署仍未验证。已按用户授权执行 main merge、tag 与 Release；生产部署仍需单独授权。

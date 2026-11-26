@@ -2,6 +2,16 @@
 
 按版本倒序。对外口径以 `docs/release-notes/` 下对应文件为准；本文件是仓库内的简明索引。
 
+## v0.33.1 (2026-11-26)
+
+基于最新 main 的专项审查、质量修复、实战验证与产品升级收口，对外说明见 [docs/release-notes/v0.33.1.md](docs/release-notes/v0.33.1.md)。
+
+- Phase 0–2：建立基线与架构/文件映射；所有审批链补 `approval_explain`，`vector_ready` 只统计可发布 chunk；真实件/qrels/专家评分固化为 CI 非门禁 DATA BLOCKED。
+- Phase 3–4：长文档跨章索引保真、合成 DOCX 大文档验证；工具结果嵌套 JSON 脱敏、企业 KB 显式授权、KB 与 experience-policy 审计增强。
+- Phase 5–7：隔离 PostgreSQL 1022 passed / 17 PG migration passed；275 routes / 94 schemas 契约闭环；Web 58 files / 454 tests。
+- 本地全量回归 2379 passed / 1008 skipped / 1 warning；最终代码 CI Run 45857536123 9/9 success；无新增迁移、无测试删除、历史迁移零改动。
+- 真实模型、真实招标件/标注/评分、生产 PG/PgBouncer 与生产部署仍 NOT VERIFIED；结论为 CONDITIONAL PASS / CONDITIONAL GO。
+
 ## v0.33.0 (2026-11-26)
 
 AI 可靠性与实战效果专项改造 RC-01～RC-13 收口，对外说明见 [docs/release-notes/v0.33.0.md](docs/release-notes/v0.33.0.md)。
