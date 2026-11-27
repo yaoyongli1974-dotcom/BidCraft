@@ -290,3 +290,23 @@ def test_docx_url_resolver_rasterizes_svg_instead_of_grey_placeholder(db):
     data = Path(resolved).read_bytes()
     assert data.startswith(images.PNG_SIGNATURE)
     assert data != images.placeholder_png_bytes()
+
+
+def test_docx_url_resolver_rejects_unsafe_svg_before_rasterizing(db):
+    from pathlib import Path
+
+    with session_scope() as session:
+        project = Project(name="SVG 安全栅格测试", status="intake")
+        session.add(project)
+        session.flush()
+        project_id = project.id
+
+    svg_path = images.image_dir(project_id) / "unsafe.svg"
+    svg_path.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">'
+        "<script>alert(1)</script></svg>",
+        encoding="utf-8",
+    )
+    resolved = images.url_resolver(project_id)(f"/projects/{project_id}/images/unsafe.svg")
+    assert resolved is not None
+    assert Path(resolved).read_bytes() == images.placeholder_png_bytes()

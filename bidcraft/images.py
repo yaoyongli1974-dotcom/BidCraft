@@ -429,7 +429,7 @@ def placeholder_png_bytes() -> bytes:
 
 
 def placeholder_png_path(project_id: str, label: str) -> Path:
-    tag = hashlib.sha1((label or "placeholder").encode("utf-8")).hexdigest()[:8]
+    tag = hashlib.sha256((label or "placeholder").encode("utf-8")).hexdigest()[:8]
     path = image_dir(project_id) / f"placeholder-{tag}.png"
     if not path.is_file():
         path.write_bytes(placeholder_png_bytes())
@@ -493,7 +493,8 @@ def svg_to_png_bytes(svg: str) -> bytes:
     dependency-light. Unsupported elements are ignored rather than fetched.
     """
 
-    root = ET.fromstring(svg)
+    # SVG 已经过 sanitize_svg() 严格校验：无 DOCTYPE/实体/脚本/外部引用。
+    root = ET.fromstring(svg)  # nosec B314
     view_box = [float(part) for part in re.split(r"[\s,]+", root.get("viewBox", "").strip()) if part]
     width = int(float(root.get("width") or (view_box[2] if len(view_box) >= 4 else 800)))
     height = int(float(root.get("height") or (view_box[3] if len(view_box) >= 4 else 450)))
@@ -601,7 +602,8 @@ def url_resolver(project_id: str):
             # instead of substituting a grey placeholder.
             cache = candidate.with_suffix(".docx.png")
             try:
-                cache.write_bytes(svg_to_png_bytes(candidate.read_text(encoding="utf-8")))
+                raw_svg = sanitize_svg(candidate.read_text(encoding="utf-8"))
+                cache.write_bytes(svg_to_png_bytes(raw_svg))
                 return cache
             except (ImageError, OSError, ET.ParseError, ValueError):
                 return placeholder_png_path(project_id, candidate.stem)
