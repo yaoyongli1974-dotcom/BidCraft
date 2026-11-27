@@ -262,12 +262,28 @@ def _add_image(document: Document, path: Path, alt: str, figure_state: dict) -> 
         run.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
 
 
+_MARKDOWN_HEADING_RE = re.compile(r"^(#{1,6})\s+")
+
+
+def _body_heading_offset(nodes: list[dict]) -> int:
+    """章节标题是 H1；正文最小 Markdown 标题级别统一映射为 H2。"""
+
+    levels = [
+        len(match.group(1))
+        for node in nodes
+        for line in str(node.get("body") or "").splitlines()
+        if (match := _MARKDOWN_HEADING_RE.match(line.strip()))
+    ]
+    return 2 - min(levels) if levels else 0
+
+
 def _add_body(
     document: Document,
     body: str,
     heading: str,
     image_resolver: Callable[[str], Path | None] | None = None,
     figure_state: dict | None = None,
+    heading_offset: int = 0,
 ) -> None:
     if figure_state is None:
         figure_state = _figure_state(None)
@@ -292,14 +308,15 @@ def _add_body(
                 index += 1
             _add_table(document, _parse_table_block(block), kind="data")
             continue
+        # 章节标题本身是 Heading 1；正文按最小标题级别相对映射到 H2 起。
         if stripped.startswith("#### "):
-            document.add_heading(stripped[5:].strip(), level=4)
+            document.add_heading(stripped[5:].strip(), level=max(1, min(9, 4 + heading_offset)))
         elif stripped.startswith("### "):
-            document.add_heading(stripped[4:].strip(), level=3)
+            document.add_heading(stripped[4:].strip(), level=max(1, min(9, 3 + heading_offset)))
         elif stripped.startswith("## "):
-            document.add_heading(stripped[3:].strip(), level=2)
+            document.add_heading(stripped[3:].strip(), level=max(1, min(9, 2 + heading_offset)))
         elif stripped.startswith("# "):
-            document.add_heading(stripped[2:].strip(), level=2)
+            document.add_heading(stripped[2:].strip(), level=max(1, min(9, 1 + heading_offset)))
         elif re.match(r"^[-*•]\s+", stripped):
             paragraph = document.add_paragraph(style="List Bullet")
             _add_placeholder_runs(paragraph, re.sub(r"^[-*•]\s+", "", stripped))
@@ -461,6 +478,7 @@ def export_docx(
         _add_field(document.add_paragraph(), 'TOC \\o "1-3" \\h \\z \\u', "（在 Word 中右键更新目录）")
         has_front_matter = True
 
+    heading_offset = _body_heading_offset(nodes)
     for index, node in enumerate(nodes):
         # 用段前分页代替「空段落 + 手动分页符」，大文档不再积累空白段落。
         node_heading = document.add_heading(str(node.get("heading") or ""), level=1)
@@ -477,6 +495,7 @@ def export_docx(
                 str(node.get("heading") or ""),
                 image_resolver,
                 figure_state,
+                heading_offset,
             )
 
     return save_document_verified(document, output)

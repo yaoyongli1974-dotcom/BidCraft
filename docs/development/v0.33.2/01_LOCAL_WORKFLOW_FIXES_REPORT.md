@@ -141,7 +141,19 @@
 - `web/src/pages/tabs/BoqVersions.tsx`：`save()` 支持 `submitAfter`，新增“保存并提交审批”主按钮；先保存当前单价快照，再直接打开提交审批确认弹窗；不自动批准、不绕过审批链或导出门禁。
 - 新增 `web/src/pages/tabs/BoqVersions.submit.test.tsx`：验证按钮调用 `createBoqVersion` 并进入提交确认。
 
-## 11. 验证结果
+## 11. 正文配图与 DOCX 标题层级
+
+- `bidcraft/images.py`：新增自包含 SVG 清洗与生成路径，优先让配置的大模型输出 SVG 图示；拒绝脚本、外部引用、DOCTYPE、栅格嵌入和尾随内容；无可用模型/位图模型时生成真实 PNG 占位文件并标记 `provider=placeholder`，不再伪造“已生成”的图片成功。
+- SVG 在 DOCX/PDF 路径使用占位 PNG 解析，不把矢量图伪装成位图；文件下载端点允许 `.svg`，Markdown 视图明确标注占位口径。
+- 新增 `tests/test_v0332_image_svg_placeholder.py`，覆盖 SVG 安全校验、PNG 占位字节、无模型时占位资源落盘。
+
+用户随后反馈导出被完整性校验拦截：`标题层级跳级：H1 之后直接出现 H3`。
+
+- 根因：正文 Markdown 直接按原始 `###` 级别输出，章节标题为 H1 时跳级。
+- 修复：`documents/document_ir.py` 与 `export/docx.py` 按“正文最小标题级别映射到 H2”的相对偏移归一化，保留相对层级，不强制 +1，避免改变既有正确文档的级别。
+- 新增 DOCX validator / classic export 回归用例，确认 `###/####` 正文不再触发跳级。
+
+## 12. 验证结果
 
 - ruff：`ruff check bidcraft tests scripts` All checks passed。
 - 后端定向：事实治理 + Alembic + api_package + BOQ → `70 passed`；规划/审批/Worker/Phase1/Phase4 回归 → `91 passed`；来源口径留痕新增/相关用例 → `49 passed`；截图三项回归（编辑锁/稳定值刷新/确认前判废）→ `30 passed`。
@@ -149,15 +161,16 @@
 - 评分噪声回归：`tests/test_v0332_scoring_noise.py tests/test_scoring_coverage.py tests/test_extract.py tests/test_xlsx.py tests/test_batch3_generation_fixes.py` → `32 passed`；相关 11 文件回归 `94 passed`。
 - 材料/评分台账定向：`.venv/bin/python -m pytest -o addopts= -q tests/test_v0332_material_noise.py tests/test_v0332_scoring_noise.py tests/test_boq.py tests/test_extract.py tests/test_calibrate.py tests/test_calibrate_baseline.py` → `75 passed`；重复台账行补充修复后 `tests/test_v0332_material_noise.py tests/test_boq.py tests/test_api_boq.py` → `39 passed`。
 - Web：typecheck / lint / `npm test -- --run` → 66 files / 482 tests 全通过；`npm run build` 通过（Vite 8，1720 modules）。ErrorBoundary 的 “渲染炸了” 是预期测试输出。
-- 后端全量：`.venv/bin/python -m pytest -o addopts= -q` → `2404 passed, 1008 skipped, 1 warning in 997.07s`，零失败。
+- SVG/标题层级定向：`tests/test_images.py tests/test_v0332_image_svg_placeholder.py tests/test_docx_validator.py tests/test_document_ir.py tests/test_docx_renderer.py tests/test_batch4_export_engine.py` → `59 passed`。两处旧 503 断言按占位图新语义精确更新（占位图真实落盘且可下载），未删除或弱化断言。
+- 后端全量：`.venv/bin/python -m pytest -o addopts= -q` → `2413 passed, 1008 skipped, 1 warning in 951.52s`，零失败。
 
-## 11. 已知边界
+## 13. 已知边界
 
 - 价格识别仅支持明确别名（精确/前缀匹配）；`含税单价` 等复合表头仍按未识别处理，避免误判。
 - 金额反推单价按 4 位小数舍入；总价仍由数量×单价重算，不直接采用工作簿合价。
 - 用户补充说明是人工留痕，不是招标文件证据；不会进入原文引文口径。
 - 未替换用户自建的 127.0.0.1:8000 服务；浏览器端最终人工确认请在该服务更新代码/重启后进行。
 
-## 12. 回滚
+## 14. 回滚
 
 逐项 revert：React 两个组件两个测试；批量规划相关前端文件与测试；BOQ 五个文件；事实来源类型六个后端/迁移文件与四个前端文件。迁移 0016 只需 downgrade 到 0015，删除两列，不触碰历史事实值。

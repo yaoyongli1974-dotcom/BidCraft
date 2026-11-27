@@ -347,7 +347,8 @@ def from_markdown_sections(
 
     ``body`` 中：
 
-    * ``#`` / ``##`` / ``###`` / ``####`` 行 → Heading 1/2/3/4 段落
+    * ``#`` / ``##`` / ``###`` / ``####`` 行 → Heading 2/3/4/5 段落
+      （章节标题本身是 Heading 1，正文子标题必须从二级开始）
     * ``| a | b |`` 连续行 → 表格（自动跳过 ``---`` 分隔行）
     * ``-`` / ``*`` / ``•`` 开头 → List Bullet
     * ``1.`` / ``1、`` 开头 → List Number
@@ -358,6 +359,15 @@ def from_markdown_sections(
 
     core_properties_override = dict(core_properties or {})
     sections: list[DocumentSection] = []
+    # 章节标题是 H1；正文里出现的“最小”Markdown 标题级别统一映射到 H2，
+    # 保留相对层级，避免正文从 ### 开始造成 H1→H3 跳级。
+    body_heading_levels = [
+        len(match.group(1))
+        for node in nodes
+        for line in str(node.get("body") or "").splitlines()
+        if (match := _HEADING_MARKDOWN_PATTERN.match(line.strip()))
+    ]
+    heading_offset = 2 - min(body_heading_levels) if body_heading_levels else 0
     for node in nodes:
         body = str(node.get("body") or "")
         section = DocumentSection(heading=str(node.get("heading") or "").strip())
@@ -388,7 +398,7 @@ def from_markdown_sections(
 
             heading_match = _HEADING_MARKDOWN_PATTERN.match(stripped)
             if heading_match:
-                level = len(heading_match.group(1))
+                level = max(1, min(9, len(heading_match.group(1)) + heading_offset))
                 section.paragraphs.append(
                     _paragraph_with_links(
                         heading_match.group(2).strip(),

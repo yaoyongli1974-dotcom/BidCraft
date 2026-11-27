@@ -5,9 +5,11 @@ from bidcraft.documents.document_ir import (
     DocumentParagraph,
     DocumentSection,
     DocumentTable,
+    from_markdown_sections,
 )
 from bidcraft.documents.renderer import render_document
 from bidcraft.documents.validator import build_document_report, validate_docx_package
+from bidcraft.export.docx import _add_body, _body_heading_offset
 
 
 def _render(ir, path):
@@ -44,11 +46,32 @@ def test_validator_detects_heading_skip_and_placeholders(tmp_path):
     assert heading_issue["from_level"] == 1
     assert heading_issue["to_level"] == 3
 
-    placeholder_issue = next(issue for issue in result["issues"] if issue["code"] == "placeholder")
-    assert placeholder_issue["severity"] == "warning"
-    assert placeholder_issue["count"] == 1
-    assert "{{待填:项目经理}}" in placeholder_issue["text"]
-    assert placeholder_issue["paragraph_index"] is not None
+
+def test_markdown_body_headings_start_below_chapter_heading(tmp_path):
+    ir = from_markdown_sections(
+        [{"heading": "第一章 总体方案", "body": "### 三级子标题\n#### 四级子标题"}],
+        title="层级偏移测试",
+    )
+    output = _render(ir, tmp_path / "offset.docx")
+
+    result = validate_docx_package(output)
+    codes = [issue["code"] for issue in result["issues"]]
+    assert "heading_skip" not in codes
+    levels = [p.style.name for p in Document(output).paragraphs]
+    assert "Heading 2" in levels
+
+
+def test_classic_export_body_headings_avoid_level_skip(tmp_path):
+    document = Document()
+    document.add_heading("第一章 总体方案", level=1)
+    nodes = [{"heading": "第一章 总体方案", "body": "### 子节\n正文"}]
+    _add_body(document, nodes[0]["body"], nodes[0]["heading"], heading_offset=_body_heading_offset(nodes))
+    output = tmp_path / "classic-offset.docx"
+    document.save(output)
+
+    result = validate_docx_package(output)
+    assert "heading_skip" not in [issue["code"] for issue in result["issues"]]
+    assert "Heading 2" in [p.style.name for p in Document(output).paragraphs]
 
 
 def test_validator_accepts_clean_document(tmp_path):

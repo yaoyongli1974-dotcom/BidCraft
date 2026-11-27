@@ -14,8 +14,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import re
 import secrets
+import struct
+import zlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,8 +27,9 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from sqlalchemy import select
 
-from . import netguard
+from . import model_config, netguard
 from .config import settings
+from .generation.agent import ModelClient, ModelUnavailable
 from .generation.writer import count_words
 from .models import ImageAsset, ModelConfig, OutlineNode, Project, Section
 from .security import decrypt_secret
@@ -42,6 +46,13 @@ SANITIZE = re.compile(r'[\\/:*?"<>|\s]+')
 SIZE_RE = re.compile(r"^(\d{2,4})\s*[x×*]\s*(\d{2,4})$", re.IGNORECASE)
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 JPEG_SIGNATURE = b"\xff\xd8\xff"
+MAX_SVG_BYTES = 200_000
+SVG_FORBIDDEN_TAGS = re.compile(
+    r"<\s*(?:script|foreignobject|iframe|image|use|animate|set|link|style)\b", re.IGNORECASE
+)
+SVG_FORBIDDEN_ATTRS = re.compile(r"\bon[a-z]+\s*=", re.IGNORECASE)
+SVG_EXTERNAL_REF = re.compile(r"(?:href|src)\s*=\s*[\"']\s*(?:[a-z]+:)?//", re.IGNORECASE)
+SVG_FENCE = re.compile(r"^\s*```(?:svg)?\s*|\s*```\s*$", re.IGNORECASE)
 
 # Markdown export syntax: the renderer accepts safe relative URLs only.
 MARKDOWN_TEMPLATE = "![{alt}]({url})"
@@ -225,6 +236,7 @@ def asset_payload(asset: ImageAsset, *, include_url: bool = True) -> dict:
         "provider": asset.provider,
         "model": asset.model,
         "last_error": asset.last_error,
+        "kind": (asset.options or {}).get("kind", "bitmap"),
         "options": asset.options or {},
         "created_at": _iso(asset.created_at),
         "updated_at": _iso(asset.updated_at),
@@ -256,7 +268,10 @@ def resolve_image_path(project_id: str, filename: str) -> Path | None:
 
 
 def media_type_for(filename: str) -> str:
-    return "image/png" if Path(filename).suffix.lower() == ".png" else "image/jpeg"
+    suffix = Path(filename).suffix.lower()
+    if suffix == ".svg":
+        return "image/svg+xml"
+    return "image/png" if suffix == ".png" else "image/jpeg"
 
 
 def image_kind(content: bytes) -> str:
@@ -268,6 +283,64 @@ def image_kind(content: bytes) -> str:
     return ""
 
 
+def sanitize_svg(raw: str) -> str:
+    """Validate model-produced SVG and strip unsafe/out-of-scope constructs.
+
+    Only self-contained vector markup is accepted: scripts, event handlers,
+    external references and raster embeds are rejected rather than silently
+    neutralised, so a failed guard can never become a delivered figure.
+    """
+    text = SVG_FENCE.sub("", (raw or "").strip()).strip()
+    text = re.sub(r"^\s*<\?xml[^>]*\?>\s*", "", text).strip()
+    if not re.match(r"^\s*<svg\b", text, re.IGNORECASE) or not re.search(
+        r"</svg>\s*$", text, re.IGNORECASE
+    ):
+        raise ImageError("模型未返回有效的 SVG 片段")
+    if len(text.encode("utf-8")) > MAX_SVG_BYTES:
+        raise ImageError("SVG 内容超过大小上限")
+    if (
+        SVG_FORBIDDEN_TAGS.search(text)
+        or SVG_FORBIDDEN_ATTRS.search(text)
+        or SVG_EXTERNAL_REF.search(text)
+        or re.search(r"javascript\s*:", text, re.IGNORECASE)
+        or re.search(r"<!doctype|<!\[cdata", text, re.IGNORECASE)
+    ):
+        raise ImageError("SVG 含脚本、外部引用或不支持的嵌入内容")
+    if not re.search(r"\bviewBox\s*=", text, re.IGNORECASE):
+        text = re.sub(r"<svg\b", '<svg viewBox="0 0 800 450"', text, count=1, flags=re.IGNORECASE)
+    return text
+
+
+def _png_chunk(kind: bytes, payload: bytes) -> bytes:
+    return (
+        struct.pack(">I", len(payload))
+        + kind
+        + payload
+        + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+    )
+
+
+def placeholder_png_bytes() -> bytes:
+    """Deterministic grey bitmap placeholder (pure stdlib, no provider call)."""
+    width = height = 64
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    row = b"\x00" + bytes((207, 207, 207) * width)
+    return (
+        PNG_SIGNATURE
+        + _png_chunk(b"IHDR", header)
+        + _png_chunk(b"IDAT", zlib.compress(row * height, 9))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def placeholder_png_path(project_id: str, label: str) -> Path:
+    tag = hashlib.sha1((label or "placeholder").encode("utf-8")).hexdigest()[:8]
+    path = image_dir(project_id) / f"placeholder-{tag}.png"
+    if not path.is_file():
+        path.write_bytes(placeholder_png_bytes())
+    return path
+
+
 def url_resolver(project_id: str):
     """DOCX resolver for markdown image URLs created by the API/CLI."""
 
@@ -277,7 +350,12 @@ def url_resolver(project_id: str):
         match = re.search(r"/images/([^/?#]+)$", (url or "").strip())
         if not match:
             return None
-        candidate = (root / match.group(1)).resolve()
+        filename = match.group(1)
+        if Path(filename).suffix.lower() == ".svg":
+            # DOCX/PDF need a bitmap; an SVG is deliberately exported as a
+            # visible placeholder rather than pretending it was rasterised.
+            return placeholder_png_path(project_id, Path(filename).stem)
+        candidate = (root / filename).resolve()
         if not candidate.is_file() or root not in candidate.parents:
             return None
         return candidate
@@ -633,6 +711,11 @@ def delete_asset(db, project_id: str, asset_id: str) -> bool:
 
 def markdown_for(asset: ImageAsset, alt: str = "") -> str:
     label = (alt or asset.label or "配图").strip()
+    kind = (asset.options or {}).get("kind", "bitmap")
+    if kind == "svg":
+        label = f"{label}（SVG 图示，文档导出中以占位图呈现）"
+    elif kind == "placeholder":
+        label = f"{label}（占位图，未生成实际图片）"
     return MARKDOWN_TEMPLATE.format(alt=label, url=_url_for(asset))
 
 
@@ -769,6 +852,118 @@ def _request_image(
     return content, kind, revised[:2000]
 
 
+SVG_SYSTEM_PROMPT = (
+    "你是工程技术标书配图助手。只输出一个安全、自包含的 SVG 片段，不要输出 Markdown、"
+    "解释或代码块标记。viewBox 使用 0 0 800 450，使用浅色背景、清晰线条和中文标签；"
+    "禁止 script、外部图片、外部链接、事件属性、foreignObject 和 data URI。"
+)
+
+
+def _chat_svg_client(db):
+    endpoint = model_config.resolve_chat_endpoint(db)
+    if endpoint is None or not getattr(endpoint, "model_configured", False):
+        return None, None
+    client = ModelClient(endpoint)
+    if not client.available:
+        return None, None
+    return client, endpoint
+
+
+def generate_svg_figure(
+    db,
+    project: Project,
+    *,
+    label: str,
+    node_id: str = "",
+    heading: str = "",
+    package_title: str = "",
+    prompt: str = "",
+    style: str = "",
+) -> ImageAsset:
+    """Generate a self-contained SVG figure through the configured chat model."""
+    client, endpoint = _chat_svg_client(db)
+    if client is None:
+        raise ModelUnavailable("未配置可用的大模型，无法生成 SVG 图示")
+    label = (label or "").strip() or "配图"
+    package_title = (package_title or "").strip() or _project_package_title(project)
+    heading_text, context = _section_context(db, project.id, node_id, heading)
+    full_prompt = build_prompt(
+        ImagePrompt(
+            label=label,
+            heading=heading_text,
+            project_name=project.name,
+            package_title=package_title,
+            context=context,
+            style=style,
+            user_prompt=prompt,
+        )
+    )
+    raw = client.complete(
+        [
+            {"role": "system", "content": SVG_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": f"{full_prompt}\n请输出可直接渲染的 SVG 片段：",
+            },
+        ],
+        max_tokens=4000,
+        temperature=0,
+    )
+    svg = sanitize_svg(raw)
+    filename = f"{_slug(label) or 'figure'}-{secrets.token_hex(3)}.svg"
+    path = image_dir(project.id) / filename
+    try:
+        path.write_text(svg, encoding="utf-8")
+    except OSError as exc:
+        raise ImageError(f"SVG 写入失败：{exc}") from exc
+    asset = ImageAsset(
+        project_id=project.id,
+        node_id=(node_id or "").strip(),
+        label=label,
+        prompt=full_prompt,
+        status="ready",
+        provider="llm-svg",
+        model=str(getattr(endpoint, "model_name", "") or "chat-model"),
+        last_error="",
+        options={
+            "source": "llm_svg",
+            "kind": "svg",
+            "document_export": "placeholder",
+            "prompts": {"system": SVG_SYSTEM_PROMPT, "user": full_prompt},
+        },
+    )
+    db.add(asset)
+    db.flush()
+    asset.file_path = str(path)
+    asset.filename = filename
+    asset.size_bytes = len(svg.encode("utf-8"))
+    db.flush()
+    return asset
+
+
+def _placeholder_asset(db, project: Project, *, label: str, node_id: str, reason: str) -> ImageAsset:
+    filename = f"placeholder-{secrets.token_hex(4)}.png"
+    path = image_dir(project.id) / filename
+    path.write_bytes(placeholder_png_bytes())
+    asset = ImageAsset(
+        project_id=project.id,
+        node_id=(node_id or "").strip(),
+        label=label,
+        prompt="位图模型不可用，使用占位图",
+        status="ready",
+        provider="placeholder",
+        model="",
+        last_error=reason[:1000],
+        options={"source": "placeholder", "kind": "placeholder"},
+        file_path=str(path),
+        filename=filename,
+        size_bytes=path.stat().st_size,
+    )
+    db.add(asset)
+    db.flush()
+    return asset
+
+
 def generate_image(
     db,
     project: Project,
@@ -781,12 +976,31 @@ def generate_image(
     style: str = "",
     size: str = "",
 ) -> ImageAsset:
-    """Generate one image through the configured default image model.
+    """Prefer an LLM-produced SVG; fall back to the configured bitmap model."""
+    try:
+        return generate_svg_figure(
+            db,
+            project,
+            label=label,
+            node_id=node_id,
+            heading=heading,
+            package_title=package_title,
+            prompt=prompt,
+            style=style,
+        )
+    except (ModelUnavailable, ImageError, ValueError, OSError):
+        pass
 
-    Config/chapter problems raise before any row is written. Provider failures
-    are persisted as a ``failed`` asset and returned so the UI can retry.
-    """
-    config = _image_config(db)
+    try:
+        config = _image_config(db)
+    except ImageConfigError as exc:
+        return _placeholder_asset(
+            db,
+            project,
+            label=(label or "").strip() or "配图",
+            node_id=node_id,
+            reason=str(exc),
+        )
     label = (label or "").strip() or "配图"
     package_title = (package_title or "").strip() or _project_package_title(project)
     heading_text, context = _section_context(db, project.id, node_id, heading)

@@ -189,11 +189,17 @@ def test_image_asset_crud_and_file(db, monkeypatch):
     ).json()
     project_id = project["id"]
 
-    # No image model configured yet
+    # No image model configured yet: create a real bitmap placeholder, never fake a generated image.
     missing = client.post(
         f"/projects/{project_id}/images", json={"label": "拓扑图"}
     )
-    assert missing.status_code == 503
+    assert missing.status_code == 201, missing.text
+    placeholder = missing.json()
+    assert placeholder["status"] == "ready"
+    assert placeholder["provider"] == "placeholder"
+    assert placeholder["options"]["source"] == "placeholder"
+    assert placeholder["options"]["kind"] == "placeholder"
+    assert client.get(placeholder["url"]).content[:4] == b"\x89PNG"
 
     # Configure a default image model
     model = client.post(
@@ -219,7 +225,11 @@ def test_image_asset_crud_and_file(db, monkeypatch):
 
     listed = client.get(f"/projects/{project_id}/images")
     assert listed.status_code == 200
-    assert len(listed.json()) == 1
+    assert len(listed.json()) == 2
+    assert {item["source"] for item in (x["options"] for x in listed.json())} == {
+        "placeholder",
+        "generated",
+    }
 
     # File endpoint serves PNG bytes
     file_url = asset["url"]
@@ -228,10 +238,14 @@ def test_image_asset_crud_and_file(db, monkeypatch):
     assert served.headers["content-type"].startswith("image/png")
     assert served.content[:4] == b"\x89PNG"
 
-    # DELETE removes row and file
+    # DELETE removes row and file for both generated and placeholder assets
     deleted = client.delete(f"/projects/{project_id}/images/{asset['id']}")
     assert deleted.status_code == 200
     assert client.get(file_url).status_code == 404
+    placeholder_deleted = client.delete(
+        f"/projects/{project_id}/images/{placeholder['id']}"
+    )
+    assert placeholder_deleted.status_code == 200
     assert client.get(f"/projects/{project_id}/images").json() == []
 
     images.httpx.post = original_post  # not used but restored for clarity
@@ -516,7 +530,7 @@ def test_node_must_belong_to_project(db, monkeypatch):
     assert "章节不存在或不属于当前项目" in uploaded.json()["detail"]
 
 
-def test_regenerate_without_image_model_returns_503(db, monkeypatch):
+def test_regenerate_without_image_model_returns_placeholder(db, monkeypatch):
     client = _client()
     project_id = _make_project(client)
     uploaded = _upload(client, project_id, label="已有图")
@@ -524,7 +538,12 @@ def test_regenerate_without_image_model_returns_503(db, monkeypatch):
     asset_id = uploaded.json()["id"]
 
     response = client.post(f"/projects/{project_id}/images/{asset_id}/regenerate")
-    assert response.status_code == 503
+    assert response.status_code == 201, response.text
+    asset = response.json()
+    assert asset["status"] == "ready"
+    assert asset["provider"] == "placeholder"
+    assert asset["options"]["source"] == "placeholder"
+    assert client.get(asset["url"]).content[:4] == b"\x89PNG"
 
 
 def test_viewer_cannot_regenerate_or_upload(db, monkeypatch):

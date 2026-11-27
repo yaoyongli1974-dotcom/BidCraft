@@ -1229,7 +1229,7 @@ def image_detail_or_file(ref: str, image_or_file: str):
     with session_scope() as db:
         project, _role = _project(db, ref)
         suffix = Path(image_or_file).suffix.lower()
-        if suffix in {".png", ".jpg", ".jpeg"}:
+        if suffix in {".png", ".jpg", ".jpeg", ".svg"}:
             path = images.resolve_image_path(project.id, image_or_file)
             if path is None:
                 raise LookupError(f"图片不存在：{image_or_file}")
