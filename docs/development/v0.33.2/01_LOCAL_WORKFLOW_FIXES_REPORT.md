@@ -159,10 +159,12 @@
 
 修复：
 
-- `bidcraft/images.py` 新增 `_svg_safe_prompt()`：把证据类措辞改写为“示意标注”，系统/用户提示词都只声明“技术示意图，不展示任何真实性凭证材料”，不再复述触发词。
-- `generate_svg_figure()`：首次调用仍携带项目上下文；若模型返回空内容，自动用只含章节名/图名的简化提示词重试一次，避免长招标正文触发内容过滤。
+- `bidcraft/images.py` 新增 `_svg_safe_prompt()`：把“证件 / 票据 / 凭证 / 真实性 / 加盖 / 公章 / 签字 / 营业执照 / 资质证书”等全部证据类措辞改写为“示意标注”，系统/用户提示词不再复述触发词。
+- `SVG_SYSTEM_PROMPT` 与 safety tail 改为“只绘制抽象工程结构、节点和流程”，删除“真实性凭证材料”等可能被内容过滤误判的措辞。
+- `generate_svg_figure()`：首次调用仍携带项目上下文；若模型返回空内容，自动用只含章节名/图名的简化提示词重试一次。若重试仍为空或返回无效 SVG，则调用 `local_schematic_svg()` 生成真实本地 SVG 工程示意图，并标记 `provider=local-schematic`，不再退化成灰色位图占位图。
+- `local_schematic_svg()` 按“图名 + 章节 + 章节上下文”选择 4 种布局与 4 套配色，并提取真实关键词作为节点文字；同一项目内不同图会生成不同布局、配色和标签，避免所有图看起来完全相同。
 - `generate_image()`：保留 SVG 失败原因，并在最终占位图 `last_error` 中同时写明“SVG 生成失败：…”与位图模型状态，便于前端/审计定位。
-- 新增 `tests/test_v0332_image_svg_placeholder.py`：提示词改写与空返回重试用例；仍以真实 SVG 解析成功为准，不伪造图片成功。
+- 新增 `tests/test_v0332_image_svg_placeholder.py`：提示词改写、系统提示词无触发词、空返回重试与本地 SVG 兜底用例；交付物是真实可渲染 SVG，不伪造图片成功。
 
 ## 13. 验证结果
 
@@ -173,8 +175,10 @@
 - 材料/评分台账定向：`.venv/bin/python -m pytest -o addopts= -q tests/test_v0332_material_noise.py tests/test_v0332_scoring_noise.py tests/test_boq.py tests/test_extract.py tests/test_calibrate.py tests/test_calibrate_baseline.py` → `75 passed`；重复台账行补充修复后 `tests/test_v0332_material_noise.py tests/test_boq.py tests/test_api_boq.py` → `39 passed`。
 - Web：typecheck / lint / `npm test -- --run` → 66 files / 482 tests 全通过；`npm run build` 通过（Vite 8，1720 modules）。ErrorBoundary 的 “渲染炸了” 是预期测试输出。
 - SVG/标题层级定向：`tests/test_images.py tests/test_v0332_image_svg_placeholder.py tests/test_docx_validator.py tests/test_document_ir.py tests/test_docx_renderer.py tests/test_batch4_export_engine.py` → `59 passed`。两处旧 503 断言按占位图新语义精确更新（占位图真实落盘且可下载），未删除或弱化断言。
-- SVG 提示词安全化定向：`tests/test_v0332_image_svg_placeholder.py tests/test_images.py` → `31 passed, 1 warning`。
-- 后端全量：`.venv/bin/python -m pytest -o addopts= -q` → `2417 passed, 1008 skipped, 1 warning in 1235.12s`，零失败。
+- SVG 提示词安全化与本地 SVG 兜底定向：`tests/test_v0332_image_svg_placeholder.py tests/test_images.py` → `35 passed, 1 warning`。
+- 本地 SVG 多样性验证：4 个不同图名/章节/上下文生成的 SVG SHA256 与 `data-layout` 均不同（L3/L1/L3/L0），证明不再所有图共用同一张模板图。已生成的历史图片需要重新生成才能应用新布局。
+- 本机真实模型复放：使用本地隔离环境的已配置 chat 模型直接调用 `generate_svg_figure(label='系统拓扑图', heading='技术方案', prompt='加盖投标人公章及签字，显示营业执照和资质证书')` → `SVG_OK local-schematic 系统拓扑图-5a9e37.svg 1243`，`last_error='模型未返回有效内容，已使用本地工程示意图'`；交付文件是真实 SVG 而非灰色 PNG。
+- 后端全量：`.venv/bin/python -m pytest -o addopts= -q` → `2421 passed, 1008 skipped, 1 warning in 1012.25s`，零失败。
 
 ## 13. 已知边界
 

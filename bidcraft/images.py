@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
+from xml.sax.saxutils import escape
 
 import httpx
 from sqlalchemy import select
@@ -309,6 +310,97 @@ def sanitize_svg(raw: str) -> str:
     if not re.search(r"\bviewBox\s*=", text, re.IGNORECASE):
         text = re.sub(r"<svg\b", '<svg viewBox="0 0 800 450"', text, count=1, flags=re.IGNORECASE)
     return text
+
+
+def local_schematic_svg(label: str, heading: str = "", context: str = "") -> str:
+    """Build a safe, deterministic local engineering chart when a model yields nothing.
+
+    The chart is derived from the real figure title/context, so different figures
+    receive distinct layouts, palettes and node labels instead of one repeated
+    grey placeholder. No scripts, external references, event handlers or embedded
+    raster data are emitted.
+    """
+
+    def clean(value: str, limit: int = 28) -> str:
+        text = _EVIDENCE_REQUEST_RE.sub(" ", str(value or ""))
+        text = re.sub(r"[\x00-\x1f]+", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()[:limit]
+        return escape(text)
+
+    seed = hashlib.sha256(
+        f"{label or ''}|{heading or ''}|{context or ''}".encode()
+    ).hexdigest()
+    layout = int(seed[0], 16) % 4
+    palette = (
+        ("#dbeafe", "#1d4ed8", "#dcfce7", "#15803d"),
+        ("#ede9fe", "#6d28d9", "#ffedd5", "#c2410c"),
+        ("#e0f2fe", "#0369a1", "#fef9c3", "#a16207"),
+        ("#fce7f3", "#be185d", "#ccfbf1", "#0f766e"),
+    )[int(seed[1], 16) % 4]
+    title = clean(heading or "工程结构", 30) or "工程结构"
+    subject = clean(label, 34) or "工程示意"
+
+    raw = _EVIDENCE_REQUEST_RE.sub(" ", f"{label}；{context}")
+    parts = re.split(r"[（(）)；;，,、:：/|·\s]+", raw)
+    keywords: list[str] = []
+    for part in parts:
+        token = clean(part, 16)
+        if len(token) >= 2 and token not in keywords:
+            keywords.append(token)
+        if len(keywords) >= 6:
+            break
+    while len(keywords) < 6:
+        keywords.append(f"节点{len(keywords) + 1}")
+
+    header = (
+        f'<text x="36" y="48" font-family="sans-serif" font-size="24" fill="#0f172a">{title}</text>'
+        f'<text x="36" y="80" font-family="sans-serif" font-size="16" fill="#475569">{subject}</text>'
+        f'<text x="764" y="48" text-anchor="end" font-family="sans-serif" font-size="14" '
+        f'fill="#64748b">工程示意图</text>'
+    )
+    box = lambda x, y, w, h, text, fill, stroke: (
+        f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="10" fill="{fill}" '
+        f'stroke="{stroke}" stroke-width="2"/>'
+        f'<text x="{x + w // 2}" y="{y + h // 2 + 6}" text-anchor="middle" '
+        f'font-family="sans-serif" font-size="15" fill="#0f172a">{text}</text>'
+    )
+    if layout == 0:
+        body = "".join(
+            box(40 + i * 185, 170, 150, 96, keywords[i], palette[i % 2], palette[(i % 2) + 2])
+            for i in range(4)
+        )
+        body += "".join(
+            f'<line x1="{190 + i * 185}" y1="218" x2="{225 + i * 185}" y2="218" '
+            f'stroke="#64748b" stroke-width="3"/>' for i in range(3)
+        )
+    elif layout == 1:
+        body = box(315, 175, 170, 100, keywords[0], palette[0], palette[1])
+        satellites = ((70, 120), (560, 120), (70, 290), (560, 290))
+        for i, (x, y) in enumerate(satellites, start=1):
+            body += box(x, y, 170, 76, keywords[i], palette[2], palette[3])
+            body += (
+                f'<line x1="400" y1="225" x2="{x + 85}" y2="{y + 38}" '
+                f'stroke="#94a3b8" stroke-width="2"/>'
+            )
+    elif layout == 2:
+        body = "".join(
+            box(50 + (i % 3) * 245, 145 + (i // 3) * 135, 200, 92, keywords[i],
+                palette[i % 2], palette[(i % 2) + 2])
+            for i in range(6)
+        )
+    else:
+        body = '<line x1="130" y1="140" x2="130" y2="385" stroke="#94a3b8" stroke-width="3"/>'
+        for i in range(5):
+            y = 130 + i * 55
+            body += f'<circle cx="130" cy="{y + 18}" r="8" fill="{palette[1]}"/>'
+            body += box(175, y, 500, 46, keywords[i], palette[i % 2], palette[(i % 2) + 2])
+
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" '
+        f'width="800" height="450" data-layout="L{layout}">'
+        '<rect x="0" y="0" width="800" height="450" fill="#f8fafc"/>'
+        f"{header}{body}</svg>"
+    )
 
 
 def _png_chunk(kind: bytes, payload: bytes) -> bytes:
@@ -856,10 +948,11 @@ SVG_SYSTEM_PROMPT = (
     "你是工程技术标书配图助手。只输出一个安全、自包含的 SVG 片段，不要输出 Markdown、"
     "解释或代码块标记。viewBox 使用 0 0 800 450，使用浅色背景、清晰线条和中文标签；"
     "禁止 script、外部图片、外部链接、事件属性、foreignObject 和 data URI。"
-    "这是技术示意图，不展示任何真实性凭证材料。"
+    "只绘制抽象工程结构、节点和流程。"
 )
 _EVIDENCE_REQUEST_RE = re.compile(
-    r"扫描件|截图|实拍|照片|公章|盖章|签字|签名|签署日期|证照|营业执照|资质证书|二维码|手写",
+    r"真实性凭证材料|真实公司名|真实性|凭证|证件|票据|证明|扫描件|截图|实拍|照片|"
+    r"加盖|公章|盖章|签字|签名|签署日期|签署|签章|证照|营业执照|资质证书|二维码|手写|水印",
     re.IGNORECASE,
 )
 
@@ -869,7 +962,7 @@ def _svg_safe_prompt(prompt: str) -> str:
 
     cleaned = _EVIDENCE_REQUEST_RE.sub("示意标注", str(prompt or ""))
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
-    return f"{cleaned[:2600]}\n这是工程技术示意图，不展示任何真实性凭证材料。"
+    return f"{cleaned[:2600]}\n这是工程技术示意图，只表达抽象结构、节点和流程。"
 
 
 def _chat_svg_client(db):
@@ -912,6 +1005,7 @@ def generate_svg_figure(
         )
     )
     safe_prompt = _svg_safe_prompt(full_prompt)
+    fallback_note = ""
     messages = [
         {"role": "system", "content": SVG_SYSTEM_PROMPT},
         {"role": "user", "content": f"{safe_prompt}\n请输出可直接渲染的 SVG 片段："},
@@ -931,7 +1025,18 @@ def generate_svg_figure(
             max_tokens=4000,
             temperature=0,
         )
-    svg = sanitize_svg(raw)
+    try:
+        svg = sanitize_svg(raw)
+        provider = "llm-svg"
+        source = "llm_svg"
+        model = str(getattr(endpoint, "model_name", "") or "chat-model")
+    except ImageError:
+        # 模型可能因策略过滤返回空片段；此时交付真实本地 SVG 示意图而不是灰色位图占位。
+        svg = sanitize_svg(local_schematic_svg(label, heading_text or heading, context))
+        provider = "local-schematic"
+        source = "local_schematic"
+        model = "local-schematic"
+        fallback_note = "模型未返回有效内容，已使用本地工程示意图"
     filename = f"{_slug(label) or 'figure'}-{secrets.token_hex(3)}.svg"
     path = image_dir(project.id) / filename
     try:
@@ -944,11 +1049,11 @@ def generate_svg_figure(
         label=label,
         prompt=full_prompt,
         status="ready",
-        provider="llm-svg",
-        model=str(getattr(endpoint, "model_name", "") or "chat-model"),
-        last_error="",
+        provider=provider,
+        model=model,
+        last_error=fallback_note,
         options={
-            "source": "llm_svg",
+            "source": source,
             "kind": "svg",
             "document_export": "placeholder",
             "prompts": {"system": SVG_SYSTEM_PROMPT, "user": full_prompt},
