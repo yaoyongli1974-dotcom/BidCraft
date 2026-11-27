@@ -166,13 +166,14 @@
 - `generate_image()`：保留 SVG 失败原因，并在最终占位图 `last_error` 中同时写明“SVG 生成失败：…”与位图模型状态，便于前端/审计定位。
 - 新增 `tests/test_v0332_image_svg_placeholder.py`：提示词改写、系统提示词无触发词、空返回重试与本地 SVG 兜底用例；交付物是真实可渲染 SVG，不伪造图片成功。
 
-## 14. 正文一键提交复核并通过
+## 14. 正文一键提交复核与简化流转
 
-- `web/src/pages/tabs/DraftTab.tsx`：新增 `submitAndConfirm()`，在项目管理员/本章复核人可见的草稿态操作栏增加主按钮“提交复核并通过”。
-- 操作逻辑：若正文有未保存修改，先调用既有 `saveChapter` 落盘；再依次调用既有 `reviewChapter(..., 'submit', '')` 与 `reviewChapter(..., 'confirm', '')`；成功后同步章节查询缓存、刷新大纲/项目数据并提示“已提交复核并通过”。
-- 安全边界：只在有写权限、复核权限、非只读、非繁忙、非冻结状态显示；服务端 `submit`/`confirm` 的权限、状态机与审计全部保留，前端不直接改状态。
-- 非管理员仍看到原有“提交复核”流程；管理员草稿态不再重复显示单独提交按钮。
-- 新增 `web/src/pages/tabs/DraftTab.oneClickReview.test.tsx`：覆盖干净正文一键 submit→confirm、脏正文先保存再复核两条路径。
+- `web/src/pages/tabs/DraftTab.tsx`：项目管理员/本章复核人看到主按钮“提交复核并通过”，普通编辑/项目经理看到主按钮“保存并提交复核”。
+- 管理员操作逻辑：若正文有未保存修改，先调用既有 `saveChapter` 落盘；再依次调用既有 `reviewChapter(..., 'submit', '')` 与 `reviewChapter(..., 'confirm', '')`；成功后同步章节查询缓存、刷新大纲/项目数据并提示“已提交复核并通过”。
+- 普通用户操作逻辑：若有未保存修改先保存，再调用既有 `reviewChapter(..., 'submit', '')`；确认仍由项目负责人完成，提示“已保存并提交复核”。不再要求用户先手动保存、再点提交两步。
+- 安全边界：只在有写权限、非只读、非繁忙、非冻结状态显示；服务端 `submit`/`confirm` 的权限、状态机与审计全部保留，前端不直接改状态，也不为非复核人提供 `confirm`。
+- 草稿态不再重复显示普通“提交复核”按钮；`待复核` 状态的撤回、负责人确认、锁定等非草稿动作保持原样。
+- 新增 `web/src/pages/tabs/DraftTab.oneClickReview.test.tsx`：覆盖管理员干净正文 submit→confirm、管理员脏正文先保存再复核、普通编辑一键保存并提交且不执行 confirm 三条路径。
 
 ## 15. 验证结果
 
@@ -181,8 +182,8 @@
 - 真实 PG 迁移：scratch DB `v0332_fact_provenance`（PostgreSQL 16.2 / 127.0.0.1:5433）运行 `tests/test_alembic.py tests/postgres/test_v032_migrations.py tests/postgres/test_v0313_migration_permissions.py` → `18 passed`。
 - 评分噪声回归：`tests/test_v0332_scoring_noise.py tests/test_scoring_coverage.py tests/test_extract.py tests/test_xlsx.py tests/test_batch3_generation_fixes.py` → `32 passed`；相关 11 文件回归 `94 passed`。
 - 材料/评分台账定向：`.venv/bin/python -m pytest -o addopts= -q tests/test_v0332_material_noise.py tests/test_v0332_scoring_noise.py tests/test_boq.py tests/test_extract.py tests/test_calibrate.py tests/test_calibrate_baseline.py` → `75 passed`；重复台账行补充修复后 `tests/test_v0332_material_noise.py tests/test_boq.py tests/test_api_boq.py` → `39 passed`。
-- Web：typecheck / lint / `npm test -- --run` → 67 files / 484 tests 全通过；`npm run build` 通过（Vite 8，1720 modules）。ErrorBoundary 的 “渲染炸了” 是预期测试输出。
-- 一键复核定向：`npx vitest run src/pages/tabs/DraftTab.oneClickReview.test.tsx` → 1 file / 2 tests passed。
+- Web：typecheck / lint / `npm test -- --run` → 67 files / 485 tests 全通过；`npm run build` 通过（Vite 8，1720 modules）。ErrorBoundary 的 “渲染炸了” 是预期测试输出。
+- 一键复核定向：`npx vitest run src/pages/tabs/DraftTab.oneClickReview.test.tsx` → 1 file / 3 tests passed。
 - SVG/标题层级定向：`tests/test_images.py tests/test_v0332_image_svg_placeholder.py tests/test_docx_validator.py tests/test_document_ir.py tests/test_docx_renderer.py tests/test_batch4_export_engine.py` → `59 passed`。两处旧 503 断言按占位图新语义精确更新（占位图真实落盘且可下载），未删除或弱化断言。
 - SVG 提示词安全化与本地 SVG 兜底定向：`tests/test_v0332_image_svg_placeholder.py tests/test_images.py` → `35 passed, 1 warning`。
 - 本地 SVG 多样性验证：4 个不同图名/章节/上下文生成的 SVG SHA256 与 `data-layout` 均不同（L3/L1/L3/L0），证明不再所有图共用同一张模板图。已生成的历史图片需要重新生成才能应用新布局。

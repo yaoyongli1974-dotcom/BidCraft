@@ -159,4 +159,29 @@ describe('DraftTab 一键提交复核并通过', () => {
     )
     expect(reviewChapter).toHaveBeenNthCalledWith(2, PROJECT_REF, 'n1', 'confirm', '')
   })
+
+  it('普通编辑一键保存并提交复核，不执行负责人确认', async () => {
+    workspace.project.my_role = 'editor'
+    render(
+      <MemoryRouter>
+        <DraftTab />
+      </MemoryRouter>,
+    )
+    fireEvent.click(await screen.findByRole('button', { name: '编辑' }))
+    const editor = await screen.findByRole('textbox', { name: '第一章 技术方案 正文' })
+    fireEvent.change(editor, { target: { value: '修改后的正文' } })
+    const button = await screen.findByRole('button', { name: /保存并提交复核/ })
+    await waitFor(() => expect(getChapter).toHaveBeenCalledWith(PROJECT_REF, 'n1'))
+    fireEvent.click(button)
+    await waitFor(() =>
+      expect(saveChapter).toHaveBeenCalledWith(PROJECT_REF, 'n1', '修改后的正文', 1),
+    )
+    await waitFor(() =>
+      expect(reviewChapter).toHaveBeenCalledWith(PROJECT_REF, 'n1', 'submit', ''),
+    )
+    expect(reviewChapter).not.toHaveBeenCalledWith(PROJECT_REF, 'n1', 'confirm', '')
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith('已保存并提交复核', '第一章 技术方案'),
+    )
+  })
 })

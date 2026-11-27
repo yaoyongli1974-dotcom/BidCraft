@@ -838,6 +838,45 @@ export function DraftTab() {
     }
   }
 
+  // 普通编辑/项目经理：一键保存并提交复核，确认仍由项目负责人完成，不跳过服务端门禁。
+  const saveAndSubmit = async () => {
+    if (!canWrite || reviewOwner || !selectedId || reviewBusy || saving) return
+    if (isChapterFrozen(chapterReview)) return
+    setReviewBusy(true)
+    try {
+      let current = chapterQuery.data
+      if (dirty) {
+        const saved = await saveChapter(
+          ref,
+          selectedId,
+          body,
+          typeof revision === 'number' ? revision : null,
+        )
+        applySavedChapter(saved)
+        current = saved
+      }
+      if (!(current?.body || '').trim()) {
+        toast.warning('正文为空', '请先生成或填写正文，再提交复核。')
+        return
+      }
+      const submitted = await reviewChapter(ref, selectedId, 'submit', '')
+      chapterQuery.setData(submitted)
+      setRevision(submitted.revision ?? 0)
+      setSavedBody(submitted.body || '')
+      setReviewNoteFor(null)
+      setReviewNote('')
+      await outlineQuery.refresh()
+      await reloadProject()
+      toast.success('已保存并提交复核', selectedChapter?.heading || '当前章节')
+    } catch (error) {
+      const conflictInfo = chapterConflict(error)
+      if (conflictInfo) setConflict(conflictInfo)
+      else handleError(error, '保存并提交复核失败')
+    } finally {
+      setReviewBusy(false)
+    }
+  }
+
   const runChapter = async () => {
     if (!canWrite || !selectedId || !selectedChapter || generatingChapter) return
     if (planGate.blocked) {
@@ -2098,28 +2137,28 @@ export function DraftTab() {
                       )}
                     </div>
                     <div className="review-bar-actions">
-                      {reviewOwner &&
-                        !reviewFrozen &&
-                        reviewStatus(chapterReview) === 'draft' && (
-                          <Button
-                            variant="primary"
-                            size="sm"
-                            loading={reviewBusy}
-                            disabled={!canWrite || reviewBusy || saving}
-                            title="依次执行提交复核与确认通过，保留服务端审计"
-                            onClick={() => void submitAndConfirm()}
-                          >
-                            提交复核并通过
-                          </Button>
-                        )}
+                      {!reviewFrozen && reviewStatus(chapterReview) === 'draft' && (
+                        <Button
+                          variant="primary"
+                          size="sm"
+                          loading={reviewBusy}
+                          disabled={!canWrite || reviewBusy || saving}
+                          title={
+                            reviewOwner
+                              ? '依次执行提交复核与确认通过，保留服务端审计'
+                              : '保存正文并提交复核，确认仍由项目负责人完成'
+                          }
+                          onClick={() =>
+                            void (reviewOwner ? submitAndConfirm() : saveAndSubmit())
+                          }
+                        >
+                          {reviewOwner ? '提交复核并通过' : '保存并提交复核'}
+                        </Button>
+                      )}
                       {steps
                         .filter(
                           (step) =>
-                            !(
-                              reviewOwner &&
-                              reviewStatus(chapterReview) === 'draft' &&
-                              step.action === 'submit'
-                            ),
+                            !(reviewStatus(chapterReview) === 'draft' && step.action === 'submit'),
                         )
                         .map((step) => (
                           <Button
