@@ -181,13 +181,17 @@ pg_test() {
     exit 2
   fi
   export BIDCRAFT_TEST_PG_URL="$(cat "$PG_URI_FILE")"
+  if [ "$#" -gt 0 ]; then
+    # 显式传入用例时只运行这些用例，避免把迁移往返与并发用例混在同一库同一轮。
+    .venv/bin/python -m pytest -o addopts="" -q "$@"
+    return
+  fi
   .venv/bin/python -m pytest -o addopts="" -q \
     tests/postgres \
     tests/test_postgres_integration.py \
     tests/test_v030_pg_isolation.py \
     tests/test_worker_fencing_atomicity.py \
-    tests/test_jobqueue_race_conditions.py \
-    "$@"
+    tests/test_jobqueue_race_conditions.py
 }
 
 model_on() {
