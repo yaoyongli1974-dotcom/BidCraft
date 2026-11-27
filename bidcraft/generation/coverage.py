@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .outline import normalize_scoring, similarity
+from .outline import is_scoring_noise, normalize_scoring, similarity
 
 #: 标题相似度命中阈值（与 _scoring_outline 的 0.25 口径一致，便于双向对称）。
 MATCH_THRESHOLD = 0.25
@@ -57,9 +57,14 @@ def _match_reasons(item: dict[str, Any], node: dict[str, Any]) -> list[str]:
         reasons.append("section_hint=标题")
     if category and (category in heading or category in intent):
         reasons.append("category 命中")
+    name = _norm(item.get("name"))
+    if name and (name in heading or name in intent):
+        reasons.append("评分项名称命中")
     score = similarity(str(item.get("name") or ""), str(node.get("heading") or ""))
     if score >= MATCH_THRESHOLD:
         reasons.append(f"标题相似 {score:.2f}")
+    elif name and intent and similarity(str(item.get("name") or ""), str(node.get("intent") or "")) >= MATCH_THRESHOLD:
+        reasons.append("评分项意图相似")
     return reasons
 
 
@@ -73,11 +78,17 @@ def _criteria_anchor(item: dict[str, Any]) -> str:
     text = str(item.get("criteria") or "").strip()
     if not text:
         return ""
+    noise = re.compile(r"小写|大写|报价金额|合计|总分|满分|^\d+(?:\.\d+)?\s*(?:J|日|天|分|个月|路|项|元)?$")
+    candidates = []
     for part in re.split(r"[，,；;。、：:\n（）()【】\[\]]", text):
         part = part.strip()
-        if len(part) >= 4:
-            return part[:60]
-    return text[:60]
+        if len(part) < 4 or noise.search(part):
+            continue
+        candidates.append(part)
+    if candidates:
+        chinese = [part for part in candidates if re.search(r"[\u4e00-\u9fa5]{4,}", part)]
+        return (chinese[0] if chinese else candidates[0])[:60]
+    return ""
 
 
 def _paragraph_hit(body: str, anchor: str) -> int | None:
@@ -126,7 +137,12 @@ def calculate_score_coverage(
     为 :func:`bidcraft.generation.outline.load_outline` 的输出列表。
     """
 
+    # 招标文件抽取可能残留金额/日期/单位碎片；即使已经入库，也不进入覆盖矩阵。
+    noise_count = sum(1 for item in scores if is_scoring_noise(item.get("name")))
+    scores = [item for item in scores if not is_scoring_noise(item.get("name"))]
     scores, validation_issues = normalize_scoring(scores)
+    if noise_count:
+        validation_issues.append(f"已过滤 {noise_count} 个非评分项碎片（金额/日期/单位等）")
     rows: list[dict[str, Any]] = []
     covered_score = 0.0
     weak_score = 0.0
@@ -147,6 +163,7 @@ def calculate_score_coverage(
             paragraph = _paragraph_hit(body, anchor)
             anchor_hit = bool(anchor) and paragraph is not None
             entry: dict[str, Any] = {
+                "id": node.get("id"),
                 "node_id": node.get("id"),
                 "heading": node.get("heading") or "",
                 "words": int(node.get("words") or 0),

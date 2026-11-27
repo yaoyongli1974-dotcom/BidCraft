@@ -139,6 +139,39 @@ pg_test() {
     "$@"
 }
 
+model_on() {
+  if [ ! -f "$ENV_FILE" ]; then
+    echo "缺少环境文件：$ENV_FILE；请先执行 init" >&2
+    exit 2
+  fi
+  local tmp
+  tmp="$(mktemp)"
+  grep -v -E '^BIDCRAFT_(OFFLINE|MODEL_BASE_URL|MODEL_NAME|MODEL_API_KEY)=' "$ENV_FILE" > "$tmp" || true
+  mv "$tmp" "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+  echo "[model-on] 已移除离线/假模型环境变量；服务将使用后台模型配置。"
+}
+
+model_off() {
+  if [ ! -f "$ENV_FILE" ]; then
+    echo "缺少环境文件：$ENV_FILE；请先执行 init" >&2
+    exit 2
+  fi
+  local tmp
+  tmp="$(mktemp)"
+  grep -v -E '^BIDCRAFT_(OFFLINE|MODEL_BASE_URL|MODEL_NAME|MODEL_API_KEY)=' "$ENV_FILE" > "$tmp" || true
+  {
+    cat "$tmp"
+    printf '%s\n' \
+      'BIDCRAFT_OFFLINE=1' \
+      'BIDCRAFT_MODEL_BASE_URL=http://127.0.0.1:9/v1' \
+      'BIDCRAFT_MODEL_NAME=local-test-model'
+  } > "$ENV_FILE"
+  rm -f "$tmp"
+  chmod 600 "$ENV_FILE"
+  echo "[model-off] 已恢复离线/假模型环境变量。"
+}
+
 serve_local() {
   source_env
   exec .venv/bin/bidcraft serve "$@"
@@ -153,6 +186,8 @@ case "${1:-}" in
   pg-start) pg_start ;;
   pg-stop) pg_stop ;;
   pg-test) shift; pg_test "$@" ;;
+  model-on) model_on ;;
+  model-off) model_off ;;
   serve) shift; serve_local "$@" ;;
   *)
     cat <<'EOF'
@@ -167,6 +202,8 @@ BidCraft 本地测试环境
   ./scripts/local_test_env.sh pg-start       # 启动隔离 PostgreSQL（可选）
   ./scripts/local_test_env.sh pg-test        # 运行真实 PostgreSQL 套件
   ./scripts/local_test_env.sh pg-stop        # 停止隔离 PostgreSQL
+  ./scripts/local_test_env.sh model-on       # 移除离线/假模型变量，使用后台模型配置
+  ./scripts/local_test_env.sh model-off      # 恢复离线/假模型变量（仅测试）
   ./scripts/local_test_env.sh serve          # 用测试环境启动本地服务
 
 可直接把额外参数传给 pytest：

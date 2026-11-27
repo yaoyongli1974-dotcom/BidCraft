@@ -47,9 +47,14 @@ const report: ScoringCoverageReport = {
 }
 
 describe('ScoreCoverage', () => {
-  it('空数据时给出导入提示而不是空白', () => {
+  it('空数据或只有无效评分项时给出重新提取提示', () => {
     render(<ScoreCoverage report={null} />)
-    expect(screen.getByText(/还没有带分值的评分项/)).toBeTruthy()
+    expect(screen.getByText(/没有可计算的有效评分项/)).toBeTruthy()
+  })
+
+  it('总分为 0 时不显示伪造的覆盖率', () => {
+    render(<ScoreCoverage report={{ ...report, total_items: 2, total_score: 0, rows: [] }} />)
+    expect(screen.getByText(/没有可计算的有效评分项/)).toBeTruthy()
   })
 
   it('渲染汇总指标与覆盖百分比', () => {

@@ -39,6 +39,7 @@ from .models import (
     SourceFile,
     utcnow,
 )
+from .parsing.clean import is_material_noise, normalize_material_key
 from .pipeline import add_source
 from .services import money
 
@@ -558,7 +559,12 @@ def align(
 ) -> list[dict[str, Any]]:
     """Align BOQ items with live ledger materials (recomputed on every request)."""
     ignored_keys = set(ignored or [])
-    assigned = _assign(items, materials)
+    # 已入库的招标文件提示行只在此处过滤展示，不删除业务数据；同名同规格
+    # 的多条真实材料必须保留，否则一对一对齐会丢失数量。
+    clean_materials = [
+        material for material in materials if not is_material_noise(material.name, material.spec)
+    ]
+    assigned = _assign(items, clean_materials)
     rows: list[dict[str, Any]] = []
     for index, item in enumerate(items):
         pair = assigned.get(index)
@@ -567,12 +573,23 @@ def align(
         else:
             material_index, score = pair
             rows.append(
-                _row(item, materials[material_index], score, ignored_keys, sheet, prices)
+                _row(item, clean_materials[material_index], score, ignored_keys, sheet, prices)
             )
     used = {material_index for material_index, _ in assigned.values()}
-    for index, material in enumerate(materials):
+    assigned_keys = {
+        normalize_material_key(clean_materials[index].name, clean_materials[index].spec)
+        for index in used
+    }
+    # 同一名称+规格的台账行已被清单占用后，不再展示剩余同键行为“台账有·清单无”；
+    # 完全未被占用的同键重复行也只展示一条。
+    shown_unused: set[str] = set()
+    for index, material in enumerate(clean_materials):
         if index in used:
             continue
+        key = normalize_material_key(material.name, material.spec)
+        if key in assigned_keys or key in shown_unused:
+            continue
+        shown_unused.add(key)
         rows.append(_ledger_only_row(material, ignored_keys))
     return rows
 

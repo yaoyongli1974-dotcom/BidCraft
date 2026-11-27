@@ -538,6 +538,8 @@ export interface ScoringCoverageRow {
   status: 'covered' | 'weak' | 'uncovered'
   status_label: string
   nodes: ScoringCoverageNode[]
+  anchors?: string[]
+  evidence?: { anchor: string; hit: boolean; paragraph: number | null }
 }
 
 export interface ScoringCoverageReport {
@@ -549,7 +551,7 @@ export interface ScoringCoverageReport {
   covered_ratio: number
   uncovered_count: number
   rows: ScoringCoverageRow[]
-  issues: string[]
+  issues?: string[]
 }
 
 export interface Requirement {

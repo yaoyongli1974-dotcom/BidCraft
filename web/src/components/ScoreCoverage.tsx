@@ -35,7 +35,7 @@ export function ScoreCoverage({ report, loading }: ScoreCoverageProps) {
     )
   }
 
-  if (!report || report.total_items === 0) {
+  if (!report || report.total_score <= 0) {
     return (
       <section className="panel score-coverage">
         <div className="config-head">
@@ -44,7 +44,7 @@ export function ScoreCoverage({ report, loading }: ScoreCoverageProps) {
             <h3>评分点覆盖矩阵</h3>
           </div>
         </div>
-        <p className="subtle">当前项目还没有带分值的评分项，导入招标文件评分办法后即可查看覆盖情况。</p>
+        <p className="subtle">当前项目没有可计算的有效评分项；请检查评分办法是否包含明确分值，或重新提取招标文件评分表。</p>
       </section>
     )
   }
@@ -89,9 +89,9 @@ export function ScoreCoverage({ report, loading }: ScoreCoverageProps) {
         <span style={{ width: `${percent(report.covered_score, report.total_score)}%` }} />
       </div>
 
-      {report.issues.length > 0 && (
+      {(report.issues?.length ?? 0) > 0 && (
         <div className="score-coverage-issues" role="status">
-          {report.issues.map((issue, index) => (
+          {(report.issues ?? []).map((issue, index) => (
             <div key={`${issue}-${index}`} className="score-coverage-issue">
               <AlertTriangle size={13} />
               <span>{issue}</span>

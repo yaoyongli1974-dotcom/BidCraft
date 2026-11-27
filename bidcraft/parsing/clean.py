@@ -1,11 +1,36 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import Counter
 
 _TOC_LEADER = re.compile(r"[.．。·•‥…]{3,}\s*\d{0,4}\s*$")
 _PAGE_ONLY = re.compile(r"^\s*(?:第\s*)?\d{1,4}\s*(?:页)?\s*$")
 _HEADER_NOISE = re.compile(r"^(?:招标文件|投标文件|技术标|商务标|第[一二三四五六七八九十\d]+[章节])\s*$")
+_MATERIAL_PLACEHOLDER_RE = re.compile(r"^(?:[—\-–/\\·.．。]+|n/?a|待定|无|略)$", re.IGNORECASE)
+_MATERIAL_HINT_RE = re.compile(r"按清单序号|逐项填列|详见本章|见本章|同上")
+
+
+def normalize_material_key(name: str, spec: str = "") -> str:
+    """材料名称+规格的稳定去重键（全角/空白/标点差异折叠）。"""
+
+    def folded(value: str) -> str:
+        text = unicodedata.normalize("NFKC", str(value or "")).lower()
+        return "".join(ch for ch in text if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
+
+    return f"{folded(name)}|{folded(spec)}"
+
+
+def is_material_noise(name: str, spec: str = "") -> bool:
+    """识别招标文件材料表中的提示行/占位符，不当成真实台账行。"""
+
+    value = str(name or "").strip()
+    if not value or _MATERIAL_PLACEHOLDER_RE.fullmatch(value):
+        return True
+    if _MATERIAL_HINT_RE.search(value):
+        return True
+    folded_name = normalize_material_key(value, "").split("|", 1)[0]
+    return len(folded_name) < 2
 
 
 def strip_noise(text: str) -> str:

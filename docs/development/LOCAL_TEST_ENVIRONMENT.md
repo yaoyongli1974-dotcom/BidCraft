@@ -63,7 +63,14 @@ chmod +x scripts/local_test_env.sh
 ./scripts/local_test_env.sh serve
 ```
 
-默认离线模型配置，仅用于页面/接口连通性冒烟，不代表真实模型能力。启动后可访问：
+默认离线模型配置（env 文件含 `BIDCRAFT_OFFLINE=1` 和不可达的假模型地址），仅用于页面/接口连通性冒烟。后台即使配置了模型，`resolve_chat_endpoint()` 在 offline 下也会直接返回 None，因此不会调用。要改用后台已配置的真实模型：
+
+```bash
+./scripts/local_test_env.sh model-on
+./scripts/local_test_env.sh serve
+```
+
+`model-on` 只移除 env 文件中的 offline/假模型变量，不改后台模型配置；`model-off` 可恢复测试离线口径。启动后可访问：
 
 - `/health/live`
 - `/health/ready`

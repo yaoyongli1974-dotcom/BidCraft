@@ -104,7 +104,7 @@ def test_validate_reports_uncovered_and_missing_scores():
         validate_scoring_coverage,
     )
 
-    report = calculate_score_coverage([_score("s1", "X", 10, hint="X")], [_node("n1", "Y")])
+    report = calculate_score_coverage([_score("s1", "评分项X", 10, hint="评分项X")], [_node("n1", "Y")])
     issues = validate_scoring_coverage(report)
     assert any("未找到" in issue for issue in issues)
 

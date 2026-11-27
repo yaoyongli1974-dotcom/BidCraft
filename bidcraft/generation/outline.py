@@ -35,6 +35,18 @@ def similarity(a: str, b: str) -> float:
     return len(left & right) / len(left | right)
 
 
+SCORE_NOISE_RE = re.compile(
+    r"小写|大写|金额小|报价金额|合计|总分|满分|^\d+(?:\.\d+)?\s*(?:J|日|天|分|个月|路|项|元)?$"
+)
+
+
+def is_scoring_noise(name: Any) -> bool:
+    """识别招标文件抽取常见碎片（金额/日期/单位残留），不把它当评分点。"""
+
+    value = str(name or "").strip()
+    return not value or len(value) < 2 or bool(SCORE_NOISE_RE.search(value))
+
+
 def _score_name_key(name: Any) -> str:
     """Normalize a scoring-item name so spacing/punctuation variants collapse."""
 

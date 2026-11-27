@@ -110,7 +110,7 @@ export function LoginPage() {
         </div>
 
         <div className="login-brand-copy">
-          <div className="eyebrow login-eyebrow">弱电投标文件工作台</div>
+          <div className="eyebrow login-eyebrow">AI 技术标编制工作台</div>
           <h1>
             把招标文件，
             <br />

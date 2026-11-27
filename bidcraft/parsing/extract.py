@@ -6,9 +6,17 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..constraint_check import _VALUE_RE
+from ..generation.outline import is_scoring_noise, normalize_scoring
 from ..rules.loader import FieldSpec, Package
 from ..schemas import MaterialItem, ParameterItem, RequirementItem, RiskItem, ScoringItemModel
-from .clean import detect_sections, is_heading, section_slices, strip_noise
+from .clean import (
+    detect_sections,
+    is_heading,
+    is_material_noise,
+    normalize_material_key,
+    section_slices,
+    strip_noise,
+)
 from .loader import Table, compact
 
 
@@ -271,14 +279,45 @@ def _find_col(header: list[str], words: list[str], exclude: list[str] | None = N
     return None
 
 
+_NUM_SCORE_RE = re.compile(r"^\d+(?:\.\d+)?\s*分?$")
+
+
 def _num(value: str) -> float | None:
     match = re.search(r"\d+(?:\.\d+)?", (value or "").replace(",", ""))
     return float(match.group(0)) if match else None
 
 
+def _score_text(value: str) -> str:
+    """评分单元格必须是明确分值，避免把清单金额/日期误当评分。"""
+
+    cleaned = re.sub(r"\s+", "", clean_value(str(value or "")))
+    return cleaned if _NUM_SCORE_RE.fullmatch(cleaned) else ""
+
+
+def _score_name(value: str) -> str:
+    name = clean_value(str(value or "")).strip()
+    if is_scoring_noise(name):
+        return ""
+    return name[:120]
+
+
+def _score_category(name: str) -> str:
+    if re.search(r"价格|报价|金额|费率", name):
+        return "价格"
+    if re.search(r"商务|资质|业绩|人员|合同|付款|承诺|管理|质保|售后", name):
+        return "商务"
+    if re.search(r"技术|方案|施工|实施|设计|参数|设备|系统|服务|运维|质量|点位", name):
+        return "技术"
+    return ""
+
+
+def _normalize_scoring_models(items: list[ScoringItemModel]) -> list[ScoringItemModel]:
+    rows, _ = normalize_scoring([item.model_dump() for item in items])
+    return [ScoringItemModel(**row) for row in rows[:80]]
+
+
 def extract_scoring(tables: list[Table], text: str) -> list[ScoringItemModel]:
     items: list[ScoringItemModel] = []
-    seen: set[str] = set()
 
     for table in tables:
         header = table.header()
@@ -289,30 +328,32 @@ def extract_scoring(tables: list[Table], text: str) -> list[ScoringItemModel]:
             continue
         for row in table.as_dicts():
             values = list(row.values())
-            name = values[name_col].strip() if name_col is not None and name_col < len(values) else ""
-            score_text = values[score_col].strip() if score_col is not None and score_col < len(values) else ""
-            if not name or name in seen:
+            name = _score_name(values[name_col] if name_col is not None and name_col < len(values) else "")
+            score_text = _score_text(values[score_col] if score_col is not None and score_col < len(values) else "")
+            if not name or not score_text:
                 continue
             if re.search(r"合计|总分|满分", name):
                 continue
             score = _num(score_text)
-            if score is None and name_col is None:
+            if score is None:
                 continue
+            category = _score_category(name)
             criteria = ""
             if criteria_col is not None and criteria_col < len(values):
-                criteria = values[criteria_col].strip()
-            seen.add(name)
+                criteria = clean_value(str(values[criteria_col] or ""))[:500]
             items.append(
                 ScoringItemModel(
-                    name=name[:120],
+                    name=name,
                     score=score,
-                    criteria=criteria[:500],
-                    source_quote=" | ".join(values[:8])[:300],
+                    criteria=criteria,
+                    category=category,
+                    section_hint="",
+                    source_quote=" | ".join(str(value or "") for value in values[:8])[:300],
                 )
             )
 
     if items:
-        return items[:80]
+        return _normalize_scoring_models(items)
 
     # Text fallback: "技术方案 30 分" / "1. 技术方案（30分）"
     pattern = re.compile(
@@ -325,23 +366,25 @@ def extract_scoring(tables: list[Table], text: str) -> list[ScoringItemModel]:
         match = pattern.search(stripped)
         if not match:
             continue
-        name = clean_value(match.group(1))
-        if not name or name in seen or len(name) < 2:
+        name = _score_name(match.group(1))
+        if not name:
             continue
-        seen.add(name)
         items.append(
             ScoringItemModel(
-                name=name[:120],
+                name=name,
                 score=float(match.group(2)),
-                criteria=stripped[:400],
+                criteria=clean_value(stripped)[:400],
+                category=_score_category(name),
+                section_hint="",
                 source_quote=stripped[:300],
             )
         )
-    return items[:80]
+    return _normalize_scoring_models(items)
 
 
 def extract_materials(tables: list[Table], text: str) -> list[MaterialItem]:
-    items: list[MaterialItem] = []
+    merged: dict[str, MaterialItem] = {}
+    order: list[str] = []
     for table in tables:
         header = table.header()
         name_col = _find_col(header, ["名称", "设备", "材料", "项目", "货物"], exclude=["规格", "型号"])
@@ -352,19 +395,36 @@ def extract_materials(tables: list[Table], text: str) -> list[MaterialItem]:
             continue
         for row in table.as_dicts():
             values = list(row.values())
-            name = values[name_col].strip() if name_col < len(values) else ""
+            name = clean_value(str(values[name_col] or "")) if name_col < len(values) else ""
+            spec = (
+                clean_value(str(values[spec_col] or ""))
+                if spec_col is not None and spec_col < len(values)
+                else ""
+            )
             if not name or re.search(r"^(?:合计|小计|总计|序号)$", name):
                 continue
-            items.append(
-                MaterialItem(
-                    name=name[:200],
-                    spec=(values[spec_col].strip() if spec_col is not None and spec_col < len(values) else "")[:200],
-                    unit=(values[unit_col].strip() if unit_col is not None and unit_col < len(values) else "")[:20],
-                    qty=_num(values[qty_col]) if qty_col is not None and qty_col < len(values) else None,
-                    source_quote=" | ".join(values[:8])[:300],
-                )
+            if is_material_noise(name, spec):
+                continue
+            key = normalize_material_key(name, spec)
+            qty = _num(str(values[qty_col] or "")) if qty_col is not None and qty_col < len(values) else None
+            if key in merged:
+                existing = merged[key]
+                if existing.qty is None or (qty is not None and qty > existing.qty):
+                    existing.qty = qty
+                continue
+            merged[key] = MaterialItem(
+                name=name[:200],
+                spec=spec[:200],
+                unit=(
+                    clean_value(str(values[unit_col] or ""))
+                    if unit_col is not None and unit_col < len(values)
+                    else ""
+                )[:20],
+                qty=qty,
+                source_quote=" | ".join(str(value or "") for value in values[:8])[:300],
             )
-    return items[:400]
+            order.append(key)
+    return [merged[key] for key in order][:400]
 
 
 def _detect_parameter_unit(value: str) -> str:

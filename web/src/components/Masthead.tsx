@@ -74,7 +74,7 @@ export function Masthead() {
             </Link>
           )}
           <span className="masthead-divider" aria-hidden />
-          <span className="masthead-tagline">弱电投标文件工作台</span>
+          <span className="masthead-tagline">AI 技术标编制工作台</span>
         </div>
 
         <div className="masthead-actions">

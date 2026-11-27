@@ -84,21 +84,59 @@
    - `bidcraft/api/routes/projects.py::approve_chapter_plan` 确认前调用 `invalidate_stale_plan` 并在 409 前提交判废状态；新增 API 用例。
    - `web/src/hooks/useChapterPlans.ts`：`loadChapterPlans` 改为 allSettled，单章失败不再清空全部；批量确认校验返回规划必须 `CONFIRMED`，否则计入失败；`ChapterPlanningPanel.tsx` 等待刷新后再提示，并明确“已失效章节请先批量生成”。
 
-## 6. 验证结果
+## 6. 评分台账重复/噪声项导致 0 覆盖
+
+用户反馈：招标文件提取的评分台账存在重复项与条款碎片（截图含 `24J`、`30日`、`小写：` 等），覆盖矩阵显示 0%。
+
+根因：表格抽取直接使用单元格原文，`24J`/金额/日期等非分值列也被当成评分项；去重只按原始字符串；覆盖矩阵虽然会按归一化名称去重，但不会过滤已经入库的噪声项。
+
+修复（测试先行，先红后绿）：
+
+- `bidcraft/generation/outline.py`：统一 `is_scoring_noise()` 与稳定名称归一；历史 NULL/重复项共用同一口径。
+- `bidcraft/parsing/extract.py`：评分表只接受明确分值单元格（`^\d+(?:\.\d+)?\s*分?$`），单元格先清洗，过滤 `小写/大写/报价金额/24J/30日/合计/总分/满分` 等碎片；表项与文本回退都做归一化去重；自动推导 `category`（技术/商务/价格），让覆盖匹配有依据。
+- `bidcraft/generation/coverage.py`：即使噪声已入库，覆盖矩阵读取时也会过滤并在 `validation_issues` 明确报告过滤数量；匹配增加“评分项名称命中/意图相似”；锚点优先选中文技术短语，不再误选金额碎片；节点同时返回 `id` 与 `node_id`。
+- `bidcraft/ledger.py` / `bidcraft/scoring.py`：台账入库与得分汇总复用 `normalize_scoring()`，避免列表页/覆盖矩阵/得分分析各算各的。
+- 前端 `ScoreCoverage.tsx`：总分 0 时不再显示“0% 覆盖”的伪结论，改为提示重新提取；`issues` 可缺省；`types.ts` 补齐 `anchors`/`evidence`。
+
+测试：`tests/test_v0332_scoring_noise.py`（噪声过滤、稳定去重、名称/意图匹配、已入库噪声过滤、台账落库去重）；同步更新 `tests/test_scoring_coverage.py` 里过短的合成名称；Web 新增总分为 0 的展示用例。
+
+## 7. 材料台账重复/提示行导致清单无法对齐
+
+用户截图显示材料台账出现“（按清单序号4至24逐项填列）”“—”等提示行，以及同规格重复行，造成大量“台账有·清单无”。
+
+根因：`extract_materials` 未过滤提示行/占位符，去重只按原始字符串；已入库噪声在 `boq.align` 中仍作为真实台账行参与对齐。
+
+修复：
+
+- `bidcraft/parsing/clean.py`：新增 `is_material_noise()` / `normalize_material_key()`，识别“按清单序号…逐项填列”等提示语、纯破折号占位符和过短碎片。
+- `bidcraft/parsing/extract.py::extract_materials`：过滤提示行，按全角/空白/标点折叠后的名称+规格稳定去重；重复行合并数量，不臆造新字段。
+- `bidcraft/ledger.py`：台账构建、入库、读取三处统一调用材料去重/过滤；已有业务行不直接删除，只在读取和对齐时排除噪声。
+- `bidcraft/boq.py::align`：读取时过滤已入库提示行；保留同名同规格的真实多行，避免破坏一对一对齐与数量核对。
+- 新增 `tests/test_v0332_material_noise.py`：覆盖抽取过滤/去重、稳定变体保留、对齐时忽略提示行且保留真实重复行。
+
+## 8. 本地模型调用与品牌口径
+
+- 用户反馈已配置模型但系统未调用。根因：本地测试 env 初始化时强制写入 `BIDCRAFT_OFFLINE=1` 与不可达假模型地址；`model_config.resolve_chat_endpoint()` 在 offline 时直接返回 None。
+- `scripts/local_test_env.sh` 新增 `model-on` / `model-off`：前者移除 offline/假模型变量，让服务读取后台已配置的 chat 模型；后者恢复测试离线口径。已在本地执行 `model-on`，验证 `resolve_chat_endpoint()` 返回 `source=database, model=deepseek-flash`。
+- 用户反馈顶部仍显示旧定位“弱电投标文件工作台”。已将 `AppShell`、`HelpContext`、`Masthead`、`LoginPage`、`RegisterPage` 统一改为“AI 技术标编制工作台”；保留“标书工坊”品牌名。新增 `Masthead.branding.test.tsx` 断言新文案且旧文案不存在。
+
+## 9. 验证结果
 
 - ruff：`ruff check bidcraft tests scripts` All checks passed。
 - 后端定向：事实治理 + Alembic + api_package + BOQ → `70 passed`；规划/审批/Worker/Phase1/Phase4 回归 → `91 passed`；来源口径留痕新增/相关用例 → `49 passed`；截图三项回归（编辑锁/稳定值刷新/确认前判废）→ `30 passed`。
 - 真实 PG 迁移：scratch DB `v0332_fact_provenance`（PostgreSQL 16.2 / 127.0.0.1:5433）运行 `tests/test_alembic.py tests/postgres/test_v032_migrations.py tests/postgres/test_v0313_migration_permissions.py` → `18 passed`。
-- Web：typecheck / lint / `npm test -- --run` → 63 files / 478 tests 全通过；`npm run build` 通过（Vite 8，1720 modules）。ErrorBoundary 的 “渲染炸了” 是预期测试输出。
-- 后端全量：`.venv/bin/python -m pytest -o addopts= -q` → `2396 passed, 1008 skipped, 1 warning in 977.22s`，零失败。
+- 评分噪声回归：`tests/test_v0332_scoring_noise.py tests/test_scoring_coverage.py tests/test_extract.py tests/test_xlsx.py tests/test_batch3_generation_fixes.py` → `32 passed`；相关 11 文件回归 `94 passed`。
+- 材料/评分台账定向：`.venv/bin/python -m pytest -o addopts= -q tests/test_v0332_material_noise.py tests/test_v0332_scoring_noise.py tests/test_boq.py tests/test_extract.py tests/test_calibrate.py tests/test_calibrate_baseline.py` → `75 passed`；重复台账行补充修复后 `tests/test_v0332_material_noise.py tests/test_boq.py tests/test_api_boq.py` → `39 passed`。
+- Web：typecheck / lint / `npm test -- --run` → 64 files / 480 tests 全通过；`npm run build` 通过（Vite 8，1720 modules）。ErrorBoundary 的 “渲染炸了” 是预期测试输出。
+- 后端全量：`.venv/bin/python -m pytest -o addopts= -q` → `2404 passed, 1008 skipped, 1 warning in 997.07s`，零失败。
 
-## 7. 已知边界
+## 8. 已知边界
 
 - 价格识别仅支持明确别名（精确/前缀匹配）；`含税单价` 等复合表头仍按未识别处理，避免误判。
 - 金额反推单价按 4 位小数舍入；总价仍由数量×单价重算，不直接采用工作簿合价。
 - 用户补充说明是人工留痕，不是招标文件证据；不会进入原文引文口径。
 - 未替换用户自建的 127.0.0.1:8000 服务；浏览器端最终人工确认请在该服务更新代码/重启后进行。
 
-## 8. 回滚
+## 9. 回滚
 
 逐项 revert：React 两个组件两个测试；批量规划相关前端文件与测试；BOQ 五个文件；事实来源类型六个后端/迁移文件与四个前端文件。迁移 0016 只需 downgrade 到 0015，删除两列，不触碰历史事实值。

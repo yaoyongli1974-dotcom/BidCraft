@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .generation.outline import normalize_scoring
 from .models import Project, ScoringItem
 
 BIDDER_MAX = 80
@@ -108,7 +109,7 @@ def analysis(db: Session, project: Project) -> dict[str, Any]:
     """汇总得分情况：总体得分率、分类强弱、失分清单。"""
 
     items = list_scores(db, project)
-    payloads = [score_payload(item) for item in items]
+    payloads, _ = normalize_scoring([score_payload(item) for item in items])
     total_max = round(sum(p["score"] or 0 for p in payloads), 2)
     total_actual = round(sum(p["actual_score"] or 0 for p in payloads), 2)
     filled = sum(1 for p in payloads if p["actual_score"] is not None)

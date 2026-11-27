@@ -9,6 +9,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from .audit import record_audit
+from .generation.outline import normalize_scoring
 from .models import (
     Fact,
     FactCitation,
@@ -22,6 +23,7 @@ from .models import (
     SourceFile,
     utcnow,
 )
+from .parsing.clean import is_material_noise, normalize_material_key
 from .parsing.extract import ExtractionResult
 from .rules.loader import Package
 from .schemas import (
@@ -58,6 +60,32 @@ class FactLedgerV032(FactLedger):
     """使用 :class:`FactItemV032` 的台账，其余字段与 C1 台账完全一致。"""
 
     facts: list[FactItemV032] = Field(default_factory=list)
+
+
+def _dedupe_scoring(items: list[ScoringItemModel]) -> list[ScoringItemModel]:
+    """台账入库前统一去重，避免与覆盖矩阵使用不同口径。"""
+
+    rows, _ = normalize_scoring([item.model_dump() for item in items])
+    return [ScoringItemModel(**row) for row in rows]
+
+
+def _dedupe_materials(items: list[MaterialItem]) -> list[MaterialItem]:
+    """过滤提示行/占位符并按稳定名称+规格去重，不修改原始业务行。"""
+
+    merged: dict[str, MaterialItem] = {}
+    order: list[str] = []
+    for item in items:
+        if is_material_noise(item.name, item.spec):
+            continue
+        key = normalize_material_key(item.name, item.spec)
+        if key in merged:
+            existing = merged[key]
+            if existing.qty is None or (item.qty is not None and item.qty > existing.qty):
+                existing.qty = item.qty
+            continue
+        merged[key] = item.model_copy(deep=True)
+        order.append(key)
+    return [merged[key] for key in order]
 
 
 def _compact(value: str | None) -> str:
@@ -148,9 +176,9 @@ def build_ledger(
         package=package.name,
         project=project,
         facts=facts,
-        materials=extracted.materials,
+        materials=_dedupe_materials(extracted.materials),
         parameters=extracted.parameters,
-        scoring=extracted.scoring,
+        scoring=_dedupe_scoring(extracted.scoring),
         requirements=extracted.requirements,
         risks=extracted.risks,
         template_sections=extracted.template_sections,
@@ -244,6 +272,7 @@ def save_ledger(
     db.execute(delete(Requirement).where(Requirement.project_id == project_id))
     db.execute(delete(Risk).where(Risk.project_id == project_id))
 
+    material_rows = _dedupe_materials(ledger.materials)
     db.add_all(
         [
             Material(
@@ -255,7 +284,7 @@ def save_ledger(
                 note=item.note,
                 source_quote=item.source_quote,
             )
-            for item in ledger.materials
+            for item in material_rows
         ]
     )
     db.add_all(
@@ -284,7 +313,7 @@ def save_ledger(
                 section_hint=item.section_hint,
                 source_quote=item.source_quote,
             )
-            for item in ledger.scoring
+            for item in _dedupe_scoring(ledger.scoring)
         ]
     )
     db.add_all(
@@ -365,17 +394,19 @@ def load_ledger(db: Session, project_id: str) -> FactLedgerV032:
             )
             for row in facts
         ],
-        materials=[
-            MaterialItem(
-                name=row.name,
-                spec=row.spec,
-                unit=row.unit,
-                qty=row.qty,
-                note=row.note,
-                source_quote=row.source_quote,
-            )
-            for row in materials
-        ],
+        materials=_dedupe_materials(
+            [
+                MaterialItem(
+                    name=row.name,
+                    spec=row.spec,
+                    unit=row.unit,
+                    qty=row.qty,
+                    note=row.note,
+                    source_quote=row.source_quote,
+                )
+                for row in materials
+            ]
+        ),
         parameters=[
             ParameterItem(
                 name=row.name,

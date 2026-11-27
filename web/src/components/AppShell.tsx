@@ -44,7 +44,7 @@ export function AppShell() {
         <Outlet />
       </div>
       <footer className="app-footer">
-        <span>BidCraft · 弱电投标文件工作台</span>
+        <span>BidCraft · AI 技术标编制工作台</span>
         <span className="app-footer-sep" aria-hidden>
           /
         </span>

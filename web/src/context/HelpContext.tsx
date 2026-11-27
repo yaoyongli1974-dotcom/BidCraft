@@ -173,7 +173,7 @@ export function HelpProvider({ children }: { children: ReactNode }) {
           </section>
 
           <div className={className('help-footer')}>
-            <span>BidCraft · 弱电投标文件工作台</span>
+            <span>BidCraft · AI 技术标编制工作台</span>
             <span className="mono">v{health?.version || '—'}</span>
           </div>
         </div>
