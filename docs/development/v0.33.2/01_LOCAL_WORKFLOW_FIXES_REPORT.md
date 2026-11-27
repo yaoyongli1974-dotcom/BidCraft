@@ -130,14 +130,25 @@
 - `web/src/pages/tabs/DraftTab.tsx`：auto 模式下全书生成前用 `missingPlanNodeIds()` 找出失效规划，先批量重新生成；失败则终止启动，成功后再提交全书任务。review / review_strict 模式仍由用户在「目录大纲」批量生成并确认，不自动确认。
 - 新增 `web/src/pages/tabs/DraftTab.autoRegenerate.test.tsx`，验证 auto 模式重建与生成调用顺序。
 
-## 10. 验证结果
+## 10. 清单对齐页缺少直接的提交入口
+
+用户反馈：商务标提示“先在清单对齐中提交并定稿报价版本”，但清单对齐页找不到提交/定稿按钮。
+
+根因：提交/审批按钮只在已经保存的草稿版本行上出现；刚导入清单、尚未保存版本时只看到“保存当前为版本”，缺少一步到位的入口。
+
+修复（frontend-only）：
+
+- `web/src/pages/tabs/BoqVersions.tsx`：`save()` 支持 `submitAfter`，新增“保存并提交审批”主按钮；先保存当前单价快照，再直接打开提交审批确认弹窗；不自动批准、不绕过审批链或导出门禁。
+- 新增 `web/src/pages/tabs/BoqVersions.submit.test.tsx`：验证按钮调用 `createBoqVersion` 并进入提交确认。
+
+## 11. 验证结果
 
 - ruff：`ruff check bidcraft tests scripts` All checks passed。
 - 后端定向：事实治理 + Alembic + api_package + BOQ → `70 passed`；规划/审批/Worker/Phase1/Phase4 回归 → `91 passed`；来源口径留痕新增/相关用例 → `49 passed`；截图三项回归（编辑锁/稳定值刷新/确认前判废）→ `30 passed`。
 - 真实 PG 迁移：scratch DB `v0332_fact_provenance`（PostgreSQL 16.2 / 127.0.0.1:5433）运行 `tests/test_alembic.py tests/postgres/test_v032_migrations.py tests/postgres/test_v0313_migration_permissions.py` → `18 passed`。
 - 评分噪声回归：`tests/test_v0332_scoring_noise.py tests/test_scoring_coverage.py tests/test_extract.py tests/test_xlsx.py tests/test_batch3_generation_fixes.py` → `32 passed`；相关 11 文件回归 `94 passed`。
 - 材料/评分台账定向：`.venv/bin/python -m pytest -o addopts= -q tests/test_v0332_material_noise.py tests/test_v0332_scoring_noise.py tests/test_boq.py tests/test_extract.py tests/test_calibrate.py tests/test_calibrate_baseline.py` → `75 passed`；重复台账行补充修复后 `tests/test_v0332_material_noise.py tests/test_boq.py tests/test_api_boq.py` → `39 passed`。
-- Web：typecheck / lint / `npm test -- --run` → 65 files / 481 tests 全通过；`npm run build` 通过（Vite 8，1720 modules）。ErrorBoundary 的 “渲染炸了” 是预期测试输出。
+- Web：typecheck / lint / `npm test -- --run` → 66 files / 482 tests 全通过；`npm run build` 通过（Vite 8，1720 modules）。ErrorBoundary 的 “渲染炸了” 是预期测试输出。
 - 后端全量：`.venv/bin/python -m pytest -o addopts= -q` → `2404 passed, 1008 skipped, 1 warning in 997.07s`，零失败。
 
 ## 11. 已知边界

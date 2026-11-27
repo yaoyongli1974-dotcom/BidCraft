@@ -1292,7 +1292,7 @@ export function QuoteVersionsPanel({
 
   // ------------------------------------------------------------ 保存 / 恢复 / 删除
 
-  const save = async () => {
+  const save = async (submitAfter = false) => {
     if (!canWrite || busy) return
     const trimmed = effectiveName.trim()
     if (!trimmed) {
@@ -1312,6 +1312,10 @@ export function QuoteVersionsPanel({
       setNote('')
       const scope = packageName ? `包件「${packageName}」` : '当前清单'
       toast.success('报价版本已保存', `${scope}已记录「${created.name}」的单价快照。`)
+      if (submitAfter) {
+        setApproval({ kind: 'submit', version: created })
+        setApprovalNote('')
+      }
     } catch (error) {
       toast.error('保存报价版本失败', messageOf(error))
     } finally {
@@ -1595,6 +1599,21 @@ export function QuoteVersionsPanel({
             onClick={() => void save()}
           >
             保存当前为版本
+          </Button>
+          <Button
+            size="sm"
+            variant="primary"
+            icon={<Send size={13} />}
+            loading={saving}
+            disabled={!canWrite || busy}
+            title={
+              !canWrite
+                ? '只读成员不能提交报价版本'
+                : '保存当前单价快照并立即进入提交审批确认'
+            }
+            onClick={() => void save(true)}
+          >
+            保存并提交审批
           </Button>
           <Button
             size="sm"
