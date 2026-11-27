@@ -1,6 +1,6 @@
 # BidCraft 本地测试环境（v0.33.1）
 
-本环境用于本地复现验收，所有状态隔离在 `/tmp/opencode/`，不修改生产目录、不使用真实客户数据、不连接生产数据库。
+本环境用于本地复现验收，所有状态隔离在 `~/.local/share/bidcraft-local-test/`，不修改生产目录、不使用真实客户数据、不连接生产数据库。该目录在重启后仍保留，避免 `/tmp` 清理导致测试数据与管理员密码丢失。
 
 ## 1. 一键准备
 
@@ -14,8 +14,9 @@ chmod +x scripts/local_test_env.sh
 
 - 若 `.venv` 不存在，用 `uv sync --frozen --extra dev --extra api --extra postgres` 创建；
 - 若 `web/node_modules` 不存在，执行 `npm ci`；
-- 创建隔离 HOME：`/tmp/opencode/bidcraft-local-test-home`；
-- 生成 `/tmp/opencode/bidcraft-local-test.env`（权限 `600`），包含随机管理员密码、离线模型占位配置；
+- 创建隔离 HOME：`~/.local/share/bidcraft-local-test/home`；
+- 生成 `~/.local/share/bidcraft-local-test/env`（权限 `600`），包含随机管理员密码、离线模型占位配置；
+- 若发现旧 `/tmp/opencode/bidcraft-local-test*.` 文件，会迁移到持久目录；
 - 不输出密码内容。
 
 ## 2. 运行测试
@@ -42,7 +43,7 @@ chmod +x scripts/local_test_env.sh
 
 ## 3. 可选：真实 PostgreSQL
 
-本机没有系统 `psql/docker`，但已安装 `pgserver` 运行器（`/tmp/opencode/pgvenv312`）。可启动隔离 PostgreSQL 16.2：
+本机没有系统 `psql/docker`。`pg-start` 会在 `~/.local/share/bidcraft-local-test/pgvenv` 中自动创建 Python 3.12 虚拟环境并安装 `pgserver`，然后启动隔离 PostgreSQL 16.2：
 
 ```bash
 ./scripts/local_test_env.sh pg-start
@@ -50,9 +51,9 @@ chmod +x scripts/local_test_env.sh
 ./scripts/local_test_env.sh pg-stop
 ```
 
-- PG 数据目录：`/tmp/opencode/bidcraft-local-pgdata`
+- PG 数据目录：`~/.local/share/bidcraft-local-test/pgdata`
 - 测试库：`bidcraft_local_test`
-- URI 文件：`/tmp/opencode/bidcraft-local-pg-uri.txt`（仅本地临时文件）
+- URI 文件：`~/.local/share/bidcraft-local-test/pg-uri.txt`（权限 `600`）
 - `pg-test` 运行 CI 对应的 PostgreSQL 套件，并设置 `BIDCRAFT_TEST_PG_URL`
 
 这是真实 PostgreSQL，但不是生产等价环境；生产 PgBouncer / 连接池 / 权限模型仍属于 NOT VERIFIED。
@@ -74,12 +75,12 @@ chmod +x scripts/local_test_env.sh
 
 - `/health/live`
 - `/health/ready`
-- 管理登录：用户名 `admin`，密码读取自 `/tmp/opencode/bidcraft-local-test.env`，不要在报告或聊天中回显。
+- 管理登录：用户名 `admin`，密码读取自 `~/.local/share/bidcraft-local-test/env`，不要在报告或聊天中回显。
 
 ## 5. 预期结果与跳过项
 
-- 后端基线：`2379 passed / 1008 skipped / 1 warning`（仅 Starlette/httpx deprecation）。
-- Web：`58 files / 454 tests`，typecheck/lint/build 通过；`ErrorBoundary.test.tsx` 的堆栈输出是预期日志。
+- 后端基线：`2426 passed / 1008 skipped / 1 warning`（仅 Starlette/httpx deprecation）。
+- Web：`67 files / 487 tests`，typecheck/lint/build 通过；`ErrorBoundary.test.tsx` 的堆栈输出是预期日志。
 - PostgreSQL：`1022 passed / 1 skipped`（通过 `pg-test`）。
 - 跳过项主要是：opt-in PostgreSQL、无 LibreOffice/pdfinfo 的 DOCX 渲染 golden、真实数据门禁。跳过不表示通过。
 
@@ -95,4 +96,4 @@ chmod +x scripts/local_test_env.sh
 
 ## 7. 清理
 
-本环境只写入 `/tmp/opencode/` 下临时目录。需要清理时，请手动删除对应目录与文件；脚本不提供破坏性清理命令，避免误删业务数据。
+本环境只写入 `~/.local/share/bidcraft-local-test/` 下的隔离目录。需要清理时，请手动删除该目录；脚本不提供破坏性清理命令，避免误删业务数据。

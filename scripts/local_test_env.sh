@@ -5,11 +5,19 @@ set -euo pipefail
 umask 077
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HOME_DIR="/tmp/opencode/bidcraft-local-test-home"
-ENV_FILE="/tmp/opencode/bidcraft-local-test.env"
-PG_DATA="/tmp/opencode/bidcraft-local-pgdata"
-PG_URI_FILE="/tmp/opencode/bidcraft-local-pg-uri.txt"
-PG_PY="/tmp/opencode/pgvenv312/bin/python"
+# 持久化到用户数据目录：/tmp 在重启后会清空，不能再作为测试数据默认位置。
+STATE_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/bidcraft-local-test"
+HOME_DIR="${STATE_DIR}/home"
+ENV_FILE="${STATE_DIR}/env"
+PG_DATA="${STATE_DIR}/pgdata"
+PG_URI_FILE="${STATE_DIR}/pg-uri.txt"
+PG_VENV="${STATE_DIR}/pgvenv"
+PG_PY="${PG_VENV}/bin/python"
+# 兼容旧版 /tmp 布局，仅在首次迁移时读取。
+LEGACY_HOME_DIR="/tmp/opencode/bidcraft-local-test-home"
+LEGACY_ENV_FILE="/tmp/opencode/bidcraft-local-test.env"
+LEGACY_PG_DATA="/tmp/opencode/bidcraft-local-pgdata"
+LEGACY_PG_URI_FILE="/tmp/opencode/bidcraft-local-pg-uri.txt"
 UV="${HOME}/.local/bin/uv"
 [ -x "$UV" ] || UV="uv"
 
@@ -38,7 +46,49 @@ source_env() {
   set -a; source "$ENV_FILE"; set +a
 }
 
+migrate_legacy_env() {
+  mkdir -p "$STATE_DIR"
+  chmod 700 "$STATE_DIR"
+  if [ ! -f "$ENV_FILE" ] && [ -f "$LEGACY_ENV_FILE" ]; then
+    cp "$LEGACY_ENV_FILE" "$ENV_FILE"
+    # 旧 env 里 BIDCRAFT_HOME 指向 /tmp；迁移后必须指向持久目录。
+    python3 - "$ENV_FILE" "$HOME_DIR" <<'PY'
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+home = sys.argv[2]
+lines = []
+for line in path.read_text(encoding="utf-8").splitlines():
+    if line.startswith("BIDCRAFT_HOME="):
+        line = f"BIDCRAFT_HOME={home}"
+    lines.append(line)
+path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+    chmod 600 "$ENV_FILE"
+    echo "[init] 已从 /tmp 旧位置迁移环境文件到：$ENV_FILE"
+  fi
+  if [ ! -d "$HOME_DIR" ] && [ -d "$LEGACY_HOME_DIR" ]; then
+    cp -a "$LEGACY_HOME_DIR" "$HOME_DIR"
+    echo "[init] 已从 /tmp 旧位置迁移测试数据到：$HOME_DIR"
+  fi
+  if [ ! -f "$PG_URI_FILE" ] && [ -f "$LEGACY_PG_URI_FILE" ]; then
+    cp "$LEGACY_PG_URI_FILE" "$PG_URI_FILE"
+    chmod 600 "$PG_URI_FILE"
+  fi
+}
+
+pg_setup() {
+  if [ -x "$PG_PY" ]; then
+    return 0
+  fi
+  echo "[pg-setup] 创建 PostgreSQL 运行器：$PG_VENV"
+  mkdir -p "$STATE_DIR"
+  "$UV" venv --python 3.12 "$PG_VENV"
+  "$UV" pip install --python "$PG_PY" pgserver
+}
+
 init_env() {
+  migrate_legacy_env
   need_backend
   need_web
   mkdir -p "$HOME_DIR"
@@ -90,6 +140,7 @@ web_checks() {
 }
 
 pg_start() {
+  pg_setup
   if [ ! -x "$PG_PY" ]; then
     echo "未找到本地 PostgreSQL 运行器：$PG_PY" >&2
     return 1
@@ -99,10 +150,9 @@ from pathlib import Path
 import pgserver
 pgdata = Path("${PG_DATA}")
 srv = pgserver.get_server(pgdata, cleanup_mode=None)
-try:
+exists = srv.psql("SELECT 1 FROM pg_database WHERE datname='bidcraft_local_test'") or ""
+if not any(line.strip() == "1" for line in str(exists).splitlines()):
     srv.psql("CREATE DATABASE bidcraft_local_test")
-except Exception:
-    pass
 uri = srv.get_uri("bidcraft_local_test")
 Path("${PG_URI_FILE}").write_text(uri)
 print("PG_READY", uri)
@@ -110,6 +160,7 @@ PY
 }
 
 pg_stop() {
+  pg_setup
   if [ ! -x "$PG_PY" ]; then
     echo "未找到本地 PostgreSQL 运行器：$PG_PY" >&2
     return 1
@@ -199,7 +250,7 @@ BidCraft 本地测试环境
   ./scripts/local_test_env.sh backend-quick  # 后端快速核心回归
   ./scripts/local_test_env.sh web            # 前端 typecheck/lint/test/build
   ./scripts/local_test_env.sh all            # init + 后端全量 + 前端全量
-  ./scripts/local_test_env.sh pg-start       # 启动隔离 PostgreSQL（可选）
+  ./scripts/local_test_env.sh pg-start       # 首次自动安装并启动隔离 PostgreSQL（可选）
   ./scripts/local_test_env.sh pg-test        # 运行真实 PostgreSQL 套件
   ./scripts/local_test_env.sh pg-stop        # 停止隔离 PostgreSQL
   ./scripts/local_test_env.sh model-on       # 移除离线/假模型变量，使用后台模型配置
