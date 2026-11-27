@@ -796,6 +796,48 @@ export function DraftTab() {
     void applyReview(action)
   }
 
+  // 一键提交复核并通过：仍走服务端原有的 submit/confirm 两次流转和审计，
+  // 不在前端直接把状态改成 confirmed，也不绕过章节规划或导出门禁。
+  const submitAndConfirm = async () => {
+    if (!canWrite || !reviewOwner || !selectedId || reviewBusy || saving) return
+    if (isChapterFrozen(chapterReview)) return
+    setReviewBusy(true)
+    try {
+      let current = chapterQuery.data
+      if (dirty) {
+        const saved = await saveChapter(
+          ref,
+          selectedId,
+          body,
+          typeof revision === 'number' ? revision : null,
+        )
+        applySavedChapter(saved)
+        current = saved
+      }
+      if (!(current?.body || '').trim()) {
+        toast.warning('正文为空', '请先生成或填写正文，再提交复核。')
+        return
+      }
+      const submitted = await reviewChapter(ref, selectedId, 'submit', '')
+      chapterQuery.setData(submitted)
+      const confirmed = await reviewChapter(ref, selectedId, 'confirm', '')
+      chapterQuery.setData(confirmed)
+      setRevision(confirmed.revision ?? 0)
+      setSavedBody(confirmed.body || '')
+      setReviewNoteFor(null)
+      setReviewNote('')
+      await outlineQuery.refresh()
+      await reloadProject()
+      toast.success('已提交复核并通过', selectedChapter?.heading || '当前章节')
+    } catch (error) {
+      const conflictInfo = chapterConflict(error)
+      if (conflictInfo) setConflict(conflictInfo)
+      else handleError(error, '一键提交复核并通过失败')
+    } finally {
+      setReviewBusy(false)
+    }
+  }
+
   const runChapter = async () => {
     if (!canWrite || !selectedId || !selectedChapter || generatingChapter) return
     if (planGate.blocked) {
@@ -2056,18 +2098,41 @@ export function DraftTab() {
                       )}
                     </div>
                     <div className="review-bar-actions">
-                      {steps.map((step) => (
-                        <Button
-                          key={step.action}
-                          variant={step.variant}
-                          size="sm"
-                          loading={reviewBusy}
-                          disabled={!canWrite || reviewBusy}
-                          onClick={() => startReview(step.action, step.needsNote)}
-                        >
-                          {step.label}
-                        </Button>
-                      ))}
+                      {reviewOwner &&
+                        !reviewFrozen &&
+                        reviewStatus(chapterReview) === 'draft' && (
+                          <Button
+                            variant="primary"
+                            size="sm"
+                            loading={reviewBusy}
+                            disabled={!canWrite || reviewBusy || saving}
+                            title="依次执行提交复核与确认通过，保留服务端审计"
+                            onClick={() => void submitAndConfirm()}
+                          >
+                            提交复核并通过
+                          </Button>
+                        )}
+                      {steps
+                        .filter(
+                          (step) =>
+                            !(
+                              reviewOwner &&
+                              reviewStatus(chapterReview) === 'draft' &&
+                              step.action === 'submit'
+                            ),
+                        )
+                        .map((step) => (
+                          <Button
+                            key={step.action}
+                            variant={step.variant}
+                            size="sm"
+                            loading={reviewBusy}
+                            disabled={!canWrite || reviewBusy}
+                            onClick={() => startReview(step.action, step.needsNote)}
+                          >
+                            {step.label}
+                          </Button>
+                        ))}
                     </div>
                   </div>
                 )}

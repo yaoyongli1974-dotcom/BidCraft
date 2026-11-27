@@ -166,27 +166,36 @@
 - `generate_image()`：保留 SVG 失败原因，并在最终占位图 `last_error` 中同时写明“SVG 生成失败：…”与位图模型状态，便于前端/审计定位。
 - 新增 `tests/test_v0332_image_svg_placeholder.py`：提示词改写、系统提示词无触发词、空返回重试与本地 SVG 兜底用例；交付物是真实可渲染 SVG，不伪造图片成功。
 
-## 13. 验证结果
+## 14. 正文一键提交复核并通过
+
+- `web/src/pages/tabs/DraftTab.tsx`：新增 `submitAndConfirm()`，在项目管理员/本章复核人可见的草稿态操作栏增加主按钮“提交复核并通过”。
+- 操作逻辑：若正文有未保存修改，先调用既有 `saveChapter` 落盘；再依次调用既有 `reviewChapter(..., 'submit', '')` 与 `reviewChapter(..., 'confirm', '')`；成功后同步章节查询缓存、刷新大纲/项目数据并提示“已提交复核并通过”。
+- 安全边界：只在有写权限、复核权限、非只读、非繁忙、非冻结状态显示；服务端 `submit`/`confirm` 的权限、状态机与审计全部保留，前端不直接改状态。
+- 非管理员仍看到原有“提交复核”流程；管理员草稿态不再重复显示单独提交按钮。
+- 新增 `web/src/pages/tabs/DraftTab.oneClickReview.test.tsx`：覆盖干净正文一键 submit→confirm、脏正文先保存再复核两条路径。
+
+## 15. 验证结果
 
 - ruff：`ruff check bidcraft tests scripts` All checks passed。
 - 后端定向：事实治理 + Alembic + api_package + BOQ → `70 passed`；规划/审批/Worker/Phase1/Phase4 回归 → `91 passed`；来源口径留痕新增/相关用例 → `49 passed`；截图三项回归（编辑锁/稳定值刷新/确认前判废）→ `30 passed`。
 - 真实 PG 迁移：scratch DB `v0332_fact_provenance`（PostgreSQL 16.2 / 127.0.0.1:5433）运行 `tests/test_alembic.py tests/postgres/test_v032_migrations.py tests/postgres/test_v0313_migration_permissions.py` → `18 passed`。
 - 评分噪声回归：`tests/test_v0332_scoring_noise.py tests/test_scoring_coverage.py tests/test_extract.py tests/test_xlsx.py tests/test_batch3_generation_fixes.py` → `32 passed`；相关 11 文件回归 `94 passed`。
 - 材料/评分台账定向：`.venv/bin/python -m pytest -o addopts= -q tests/test_v0332_material_noise.py tests/test_v0332_scoring_noise.py tests/test_boq.py tests/test_extract.py tests/test_calibrate.py tests/test_calibrate_baseline.py` → `75 passed`；重复台账行补充修复后 `tests/test_v0332_material_noise.py tests/test_boq.py tests/test_api_boq.py` → `39 passed`。
-- Web：typecheck / lint / `npm test -- --run` → 66 files / 482 tests 全通过；`npm run build` 通过（Vite 8，1720 modules）。ErrorBoundary 的 “渲染炸了” 是预期测试输出。
+- Web：typecheck / lint / `npm test -- --run` → 67 files / 484 tests 全通过；`npm run build` 通过（Vite 8，1720 modules）。ErrorBoundary 的 “渲染炸了” 是预期测试输出。
+- 一键复核定向：`npx vitest run src/pages/tabs/DraftTab.oneClickReview.test.tsx` → 1 file / 2 tests passed。
 - SVG/标题层级定向：`tests/test_images.py tests/test_v0332_image_svg_placeholder.py tests/test_docx_validator.py tests/test_document_ir.py tests/test_docx_renderer.py tests/test_batch4_export_engine.py` → `59 passed`。两处旧 503 断言按占位图新语义精确更新（占位图真实落盘且可下载），未删除或弱化断言。
 - SVG 提示词安全化与本地 SVG 兜底定向：`tests/test_v0332_image_svg_placeholder.py tests/test_images.py` → `35 passed, 1 warning`。
 - 本地 SVG 多样性验证：4 个不同图名/章节/上下文生成的 SVG SHA256 与 `data-layout` 均不同（L3/L1/L3/L0），证明不再所有图共用同一张模板图。已生成的历史图片需要重新生成才能应用新布局。
 - 本机真实模型复放：使用本地隔离环境的已配置 chat 模型直接调用 `generate_svg_figure(label='系统拓扑图', heading='技术方案', prompt='加盖投标人公章及签字，显示营业执照和资质证书')` → `SVG_OK local-schematic 系统拓扑图-5a9e37.svg 1243`，`last_error='模型未返回有效内容，已使用本地工程示意图'`；交付文件是真实 SVG 而非灰色 PNG。
 - 后端全量：`.venv/bin/python -m pytest -o addopts= -q` → `2421 passed, 1008 skipped, 1 warning in 1012.25s`，零失败。
 
-## 13. 已知边界
+## 16. 已知边界
 
 - 价格识别仅支持明确别名（精确/前缀匹配）；`含税单价` 等复合表头仍按未识别处理，避免误判。
 - 金额反推单价按 4 位小数舍入；总价仍由数量×单价重算，不直接采用工作簿合价。
 - 用户补充说明是人工留痕，不是招标文件证据；不会进入原文引文口径。
 - 未替换用户自建的 127.0.0.1:8000 服务；浏览器端最终人工确认请在该服务更新代码/重启后进行。
 
-## 14. 回滚
+## 17. 回滚
 
 逐项 revert：React 两个组件两个测试；批量规划相关前端文件与测试；BOQ 五个文件；事实来源类型六个后端/迁移文件与四个前端文件。迁移 0016 只需 downgrade 到 0015，删除两列，不触碰历史事实值。
