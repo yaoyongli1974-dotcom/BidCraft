@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# BidCraft 本地测试环境（隔离，不触碰生产数据）
+# 用法：./scripts/local_test_env.sh <命令> [pytest 额外参数]
+set -euo pipefail
+umask 077
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HOME_DIR="/tmp/opencode/bidcraft-local-test-home"
+ENV_FILE="/tmp/opencode/bidcraft-local-test.env"
+PG_DATA="/tmp/opencode/bidcraft-local-pgdata"
+PG_URI_FILE="/tmp/opencode/bidcraft-local-pg-uri.txt"
+PG_PY="/tmp/opencode/pgvenv312/bin/python"
+UV="${HOME}/.local/bin/uv"
+[ -x "$UV" ] || UV="uv"
+
+cd "$ROOT"
+
+need_backend() {
+  if [ ! -x .venv/bin/python ]; then
+    echo "[init] 创建 Python 虚拟环境..."
+    "$UV" sync --frozen --extra dev --extra api --extra postgres
+  fi
+}
+
+need_web() {
+  if [ ! -d web/node_modules ]; then
+    echo "[init] 安装前端依赖..."
+    (cd web && npm ci --no-audit --no-fund)
+  fi
+}
+
+source_env() {
+  if [ ! -f "$ENV_FILE" ]; then
+    echo "缺少环境文件：$ENV_FILE；请先执行 init" >&2
+    exit 2
+  fi
+  # shellcheck disable=SC1090
+  set -a; source "$ENV_FILE"; set +a
+}
+
+init_env() {
+  need_backend
+  need_web
+  mkdir -p "$HOME_DIR"
+  chmod 700 "$HOME_DIR"
+  if [ ! -f "$ENV_FILE" ]; then
+    local pass
+    pass="$($ROOT/.venv/bin/python - <<'PY'
+import secrets
+print(secrets.token_urlsafe(32))
+PY
+)"
+    cat > "$ENV_FILE" <<EOF
+BIDCRAFT_ENV=test
+BIDCRAFT_HOME=${HOME_DIR}
+BIDCRAFT_OFFLINE=1
+BIDCRAFT_MODEL_BASE_URL=http://127.0.0.1:9/v1
+BIDCRAFT_MODEL_NAME=local-test-model
+BIDCRAFT_ADMIN_PASSWORD=${pass}
+EOF
+    chmod 600 "$ENV_FILE"
+    echo "[init] 已创建隔离测试环境：$ENV_FILE（权限 600）"
+  else
+    echo "[init] 复用已有环境：$ENV_FILE"
+  fi
+  echo "[init] 后端：$(.venv/bin/python --version)"
+  echo "[init] 前端：$(cd web && node --version && npm --version)"
+  echo "[init] 真实招标件/qrels/专家评分未提供，对应测试按 DATA BLOCKED 处理"
+}
+
+backend() {
+  source_env
+  .venv/bin/python -m pytest -o addopts="" -q "$@"
+}
+
+backend_quick() {
+  source_env
+  .venv/bin/python -m pytest -o addopts="" -q \
+    tests/test_api_package.py \
+    tests/test_alembic.py \
+    tests/test_jobqueue.py \
+    tests/test_worker_reliability_matrix.py \
+    tests/test_v0331_vector_readiness.py \
+    tests/test_v0331_phase4_security.py \
+    "$@"
+}
+
+web_checks() {
+  (cd web && npm run typecheck && npm run lint && npm test -- --run && npm run build)
+}
+
+pg_start() {
+  if [ ! -x "$PG_PY" ]; then
+    echo "未找到本地 PostgreSQL 运行器：$PG_PY" >&2
+    return 1
+  fi
+  "$PG_PY" - <<PY
+from pathlib import Path
+import pgserver
+pgdata = Path("${PG_DATA}")
+srv = pgserver.get_server(pgdata, cleanup_mode=None)
+try:
+    srv.psql("CREATE DATABASE bidcraft_local_test")
+except Exception:
+    pass
+uri = srv.get_uri("bidcraft_local_test")
+Path("${PG_URI_FILE}").write_text(uri)
+print("PG_READY", uri)
+PY
+}
+
+pg_stop() {
+  if [ ! -x "$PG_PY" ]; then
+    echo "未找到本地 PostgreSQL 运行器：$PG_PY" >&2
+    return 1
+  fi
+  "$PG_PY" - <<PY
+from pathlib import Path
+import pgserver
+srv = pgserver.get_server(Path("${PG_DATA}"), cleanup_mode="stop")
+srv.cleanup()
+print("PG_STOPPED")
+PY
+}
+
+pg_test() {
+  source_env
+  if [ ! -f "$PG_URI_FILE" ]; then
+    echo "缺少 PG URI 文件：$PG_URI_FILE；请先执行 pg-start" >&2
+    exit 2
+  fi
+  export BIDCRAFT_TEST_PG_URL="$(cat "$PG_URI_FILE")"
+  .venv/bin/python -m pytest -o addopts="" -q \
+    tests/postgres \
+    tests/test_postgres_integration.py \
+    tests/test_v030_pg_isolation.py \
+    tests/test_worker_fencing_atomicity.py \
+    tests/test_jobqueue_race_conditions.py \
+    "$@"
+}
+
+serve_local() {
+  source_env
+  exec .venv/bin/bidcraft serve "$@"
+}
+
+case "${1:-}" in
+  init) init_env ;;
+  backend) shift; backend "$@" ;;
+  backend-quick) shift; backend_quick "$@" ;;
+  web) web_checks ;;
+  all) init_env; backend; web_checks ;;
+  pg-start) pg_start ;;
+  pg-stop) pg_stop ;;
+  pg-test) shift; pg_test "$@" ;;
+  serve) shift; serve_local "$@" ;;
+  *)
+    cat <<'EOF'
+BidCraft 本地测试环境
+
+用法：
+  ./scripts/local_test_env.sh init           # 创建/复用隔离环境与 .env（chmod 600）
+  ./scripts/local_test_env.sh backend        # 后端全量 pytest
+  ./scripts/local_test_env.sh backend-quick  # 后端快速核心回归
+  ./scripts/local_test_env.sh web            # 前端 typecheck/lint/test/build
+  ./scripts/local_test_env.sh all            # init + 后端全量 + 前端全量
+  ./scripts/local_test_env.sh pg-start       # 启动隔离 PostgreSQL（可选）
+  ./scripts/local_test_env.sh pg-test        # 运行真实 PostgreSQL 套件
+  ./scripts/local_test_env.sh pg-stop        # 停止隔离 PostgreSQL
+  ./scripts/local_test_env.sh serve          # 用测试环境启动本地服务
+
+可直接把额外参数传给 pytest：
+  ./scripts/local_test_env.sh backend tests/test_api_package.py -q
+EOF
+    ;;
+esac
