@@ -12,9 +12,15 @@ export interface ChapterPlanGate {
 }
 
 const CONFIRMED_STATUSES = new Set(['CONFIRMED', 'USED_FOR_GENERATION'])
+/** 只有这些状态可以走「确认」；REGENERATING 等中间态不能被批量确认。 */
+const PENDING_CONFIRM_STATUSES = new Set(['DRAFT', 'UPDATED', 'REVIEW_REQUIRED'])
 
 export function isConfirmedPlan(plan: ChapterPlan | null | undefined): boolean {
   return Boolean(plan && plan.status && CONFIRMED_STATUSES.has(plan.status))
+}
+
+export function isPendingConfirmPlan(plan: ChapterPlan | null | undefined): boolean {
+  return Boolean(plan && plan.status && PENDING_CONFIRM_STATUSES.has(plan.status))
 }
 
 /**

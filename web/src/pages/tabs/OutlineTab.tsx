@@ -38,7 +38,11 @@ import {
 } from '../../lib/format'
 import { ScoreCoverage } from '../../components/ScoreCoverage'
 import { ChapterPlanningPanel } from '../../components/ChapterPlanningPanel'
-import { useChapterPlans } from '../../hooks/useChapterPlans'
+import {
+  batchGeneratePlans,
+  missingPlanNodeIds,
+  useChapterPlans,
+} from '../../hooks/useChapterPlans'
 import { chapterPlanGate } from '../../lib/chapterPlan'
 import { useQuery, useSaveShortcut, useUnsavedGuard } from '../../lib/hooks'
 import { Badge } from '../../components/Badge'
@@ -111,6 +115,7 @@ export function OutlineTab() {
   const [generating, setGenerating] = useState(false)
   const [saving, setSaving] = useState(false)
   const [generatingId, setGeneratingId] = useState<string | null>(null)
+  const [batchPlansBusy, setBatchPlansBusy] = useState(false)
   const [invalidUids, setInvalidUids] = useState<Set<string>>(new Set())
   const initializedRef = useRef(false)
 
@@ -147,6 +152,10 @@ export function OutlineTab() {
     [chapters],
   )
   const chapterPlans = useChapterPlans(ref, planChapterIds)
+  const missingPlanIds = useMemo(
+    () => missingPlanNodeIds(chapters, chapterPlans.entries),
+    [chapters, chapterPlans.entries],
+  )
 
   useEffect(() => {
     setUnsaved(dirty)
@@ -258,6 +267,49 @@ export function OutlineTab() {
     } finally {
       setGenerating(false)
     }
+  }
+
+  /**
+   * 大纲已保存后的一键补齐：顺序复用单章生成 API，只处理缺失规划，
+   * 不自动确认、不改章节 review_status，也不触发正文生成。
+   */
+  const generateMissingPlans = async () => {
+    if (!canWrite || dirty || batchPlansBusy || generating || saving) return
+    if (missingPlanIds.length === 0) {
+      toast.info('没有需要生成的章节规划', '所有章节都已有规划。')
+      return
+    }
+    setBatchPlansBusy(true)
+    toast.info(
+      '一键生成缺失章节规划',
+      `共 ${missingPlanIds.length} 章，正在依次生成，不会自动确认。`,
+    )
+    try {
+      const outcome = await batchGeneratePlans(ref, missingPlanIds, chapterPlans.setPlan)
+      if (outcome.failed.length === 0) {
+        toast.success(
+          '缺失章节规划已生成',
+          `共 ${outcome.succeeded.length} 章；规划未自动确认，请复核后确认。`,
+        )
+      } else {
+        toast.warning(
+          '部分章节规划生成失败',
+          `成功 ${outcome.succeeded.length} 章，失败 ${outcome.failed.length} 章：${outcome.failed.map((item) => item.nodeId).join('、')}`,
+        )
+      }
+    } finally {
+      setBatchPlansBusy(false)
+      chapterPlans.refresh()
+      outlineQuery.refresh()
+      void Promise.resolve(reloadProject()).catch((error: unknown) =>
+        toast.error('刷新项目状态失败', messageOf(error)),
+      )
+    }
+  }
+
+  const handleBatchComplete = async () => {
+    outlineQuery.refresh()
+    await reloadProject()
   }
 
   const addChapter = () => {
@@ -530,6 +582,43 @@ export function OutlineTab() {
         </div>
       </section>
 
+      {planChapterIds.length > 0 && (
+        <div className="plan-state-line outline-plan-batch">
+          <span className="subtle">
+            章节规划：
+            {missingPlanIds.length > 0
+              ? `${missingPlanIds.length} 章缺失规划`
+              : '所有章节均已有规划'}
+          </span>
+          <Button
+            size="sm"
+            variant="secondary"
+            icon={<Wand2 size={14} />}
+            loading={batchPlansBusy}
+            disabled={
+              !canWrite ||
+              dirty ||
+              batchPlansBusy ||
+              generating ||
+              saving ||
+              missingPlanIds.length === 0
+            }
+            title={
+              !canWrite
+                ? '只读成员不能生成规划'
+                : dirty
+                  ? '请先保存大纲再生成章节规划'
+                  : missingPlanIds.length === 0
+                    ? '所有章节都已有规划'
+                    : undefined
+            }
+            onClick={() => void generateMissingPlans()}
+          >
+            一键生成缺失章节规划
+          </Button>
+        </div>
+      )}
+
       <ChapterPlanningPanel
         projectRef={ref}
         chapters={chapters}
@@ -542,6 +631,8 @@ export function OutlineTab() {
         error={chapterPlans.error}
         onRefresh={chapterPlans.refresh}
         onPlanChange={chapterPlans.setPlan}
+        outlineDirty={dirty}
+        onBatchComplete={handleBatchComplete}
       />
 
       <ScoreCoverage report={coverageQuery.data} loading={coverageQuery.loading} />

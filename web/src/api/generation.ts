@@ -1,4 +1,5 @@
 import { ApiError, asArray, jsonBody, notifyUnauthorized, readError, request } from '../lib/http'
+import type { ChapterPlanMode } from '../lib/chapterPlan'
 import { normalizeKnowledgeRefs, normalizeRetrievalTrace } from '../lib/retrievalTrace'
 import type {
   ChapterCitations,
@@ -7,7 +8,6 @@ import type {
   ChapterPlanConfirmInput,
   ChapterPlanGenerateInput,
   ChapterPlanListResponse,
-  ChapterPlanResponse,
   ChapterPlanUpdateInput,
   GenerationReport,
   Job,
@@ -201,11 +201,24 @@ export function normalizeChapterPlan(value: unknown): ChapterPlan | null {
   return Object.keys(plan).length > 0 ? (plan as ChapterPlan) : null
 }
 
-export function normalizeChapterPlanResponse(value: unknown): ChapterPlanResponse {
+/**
+ * GET /plan 的响应形状。mode 严格透传后端的 auto / review / review_strict，
+ * 不能把严格复核降级成 auto（否则正文门禁会被绕过）。
+ */
+export interface ChapterPlanResponseWithMode {
+  plan: ChapterPlan | null
+  mode: ChapterPlanMode
+}
+
+export function normalizeChapterPlanResponse(value: unknown): ChapterPlanResponseWithMode {
   const raw = asRecord(value)
+  const mode =
+    raw.mode === 'review_strict' || raw.mode === 'review' || raw.mode === 'auto'
+      ? raw.mode
+      : 'auto'
   return {
     plan: normalizeChapterPlan(value),
-    mode: raw.mode === 'review' ? 'review' : 'auto',
+    mode,
   }
 }
 
@@ -258,7 +271,10 @@ function planPath(ref: string, nodeId: string, suffix = ''): string {
   return `/projects/${encodeURIComponent(ref)}/chapters/${encodeURIComponent(nodeId)}/plan${suffix}`
 }
 
-export function getChapterPlan(ref: string, nodeId: string): Promise<ChapterPlanResponse> {
+export function getChapterPlan(
+  ref: string,
+  nodeId: string,
+): Promise<ChapterPlanResponseWithMode> {
   return request<unknown>(planPath(ref, nodeId)).then(normalizeChapterPlanResponse)
 }
 

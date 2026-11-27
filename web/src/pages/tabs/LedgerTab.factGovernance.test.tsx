@@ -125,6 +125,7 @@ describe('LedgerTab 事实治理', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() =>
       expect(updateFact).toHaveBeenCalledWith('p1', 'duration', '190 天', 'manual', {
+        provenance_kind: 'tender_extract',
         source_file_id: 'src-2',
         source_quote: '工期 190 日历天',
         source_page: 12,
@@ -134,6 +135,62 @@ describe('LedgerTab 事实治理', () => {
     expect(screen.getByText('招标文件.pdf')).toBeTruthy()
     expect(screen.getByText('ID src-2')).toBeTruthy()
     expect(screen.getByText(/190 日历天/)).toBeTruthy()
+  })
+
+  it('缺失项可按用户补充保存，无需伪造招标文件原文与页码', async () => {
+    vi.mocked(getLedger).mockResolvedValue({
+      facts: [
+        ledgerFact({
+          value: '',
+          provenance_kind: 'user_supplied',
+          supplier_note: '',
+          source_file_id: null,
+          source_quote: null,
+          source_page: null,
+        }),
+      ],
+      materials: [],
+      parameters: [],
+      scoring: [],
+      requirements: [],
+      risks: [],
+    })
+    vi.mocked(updateFact).mockResolvedValue({
+      key: 'duration',
+      value: '190 天',
+      status: 'manual',
+      provenance_kind: 'user_supplied',
+      supplier_note: '招标文件未给出工期',
+      stale_sections: [],
+    })
+    renderTab()
+    await screen.findByText('工期')
+    fireEvent.click(screen.getByRole('button', { name: /未填写/ }))
+    expect(screen.queryByLabelText('来源文件 ID：工期')).toBeNull()
+    expect((screen.getByLabelText('来源类型：工期') as HTMLSelectElement).value).toBe(
+      'user_supplied',
+    )
+
+    fireEvent.change(screen.getByLabelText('编辑工期取值'), { target: { value: '190 天' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    expect(updateFact).not.toHaveBeenCalled()
+    expect(
+      screen
+        .getAllByRole('alert')
+        .map((node) => node.textContent || '')
+        .join(' ')
+    ).toContain('来源说明')
+
+    fireEvent.change(screen.getByLabelText('补充说明：工期'), {
+      target: { value: '招标文件未给出工期' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() =>
+      expect(updateFact).toHaveBeenCalledWith('p1', 'duration', '190 天', 'manual', {
+        provenance_kind: 'user_supplied',
+        supplier_note: '招标文件未给出工期',
+      }),
+    )
   })
 
   it('只有服务端返回陈旧引用时才显示真实的待复核告警', async () => {

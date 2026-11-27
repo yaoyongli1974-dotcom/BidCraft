@@ -69,7 +69,9 @@ interface EditState {
   key: string
   value: string
   status: string
-  /** 来源证据：确认 / 手工录入必需，服务端在写库时校验。 */
+  /** 来源类型与证据：招标文件原文需 source_*，用户补充需 supplier_note。 */
+  provenance_kind: 'tender_extract' | 'user_supplied'
+  supplier_note: string
   source_file_id: string
   source_quote: string
   source_page: string
@@ -78,11 +80,23 @@ interface EditState {
 const EVIDENCE_REQUIRED_STATUSES = new Set(['confirmed', 'manual'])
 
 function evidenceFromEdit(edit: EditState): {
+  provenance_kind: 'tender_extract' | 'user_supplied'
+  supplier_note?: string
   source_file_id?: string
   source_quote?: string
   source_page?: number
 } {
-  const evidence: { source_file_id?: string; source_quote?: string; source_page?: number } = {}
+  const provenance = edit.provenance_kind === 'user_supplied' ? 'user_supplied' : 'tender_extract'
+  const evidence: {
+    provenance_kind: 'tender_extract' | 'user_supplied'
+    supplier_note?: string
+    source_file_id?: string
+    source_quote?: string
+    source_page?: number
+  } = { provenance_kind: provenance }
+  const note = edit.supplier_note.trim()
+  if (note) evidence.supplier_note = note
+  if (provenance === 'user_supplied') return evidence
   const fileId = edit.source_file_id.trim()
   const quote = edit.source_quote.trim()
   const rawPage = edit.source_page.trim()
@@ -302,6 +316,8 @@ export function LedgerTab() {
       key: fact.key,
       value: fact.value || '',
       status: 'manual',
+      provenance_kind: fact.provenance_kind === 'user_supplied' ? 'user_supplied' : 'tender_extract',
+      supplier_note: fact.supplier_note || '',
       source_file_id: fact.source_file_id || '',
       source_quote: fact.source_quote || fact.source?.quote || '',
       source_page: page === null || page === undefined ? '' : String(page),
@@ -314,18 +330,27 @@ export function LedgerTab() {
     const value = edit.value.trim()
     const status = value ? edit.status : 'missing'
     const evidence = evidenceFromEdit(edit)
-    if (
-      EVIDENCE_REQUIRED_STATUSES.has(status) &&
-      (!evidence.source_file_id ||
+    if (EVIDENCE_REQUIRED_STATUSES.has(status)) {
+      if (edit.provenance_kind === 'user_supplied') {
+        if (!edit.supplier_note.trim()) {
+          setRowError({
+            key: fact.key,
+            message: '用户补充说明必须填写来源说明；缺失项无需伪造招标文件原文与页码。',
+          })
+          return
+        }
+      } else if (
+        !evidence.source_file_id ||
         !evidence.source_quote ||
         !evidence.source_page ||
-        evidence.source_page <= 0)
-    ) {
-      setRowError({
-        key: fact.key,
-        message: '手工录入 / 已确认必须提供真实来源文件 ID、原文摘录与正整数页码。',
-      })
-      return
+        evidence.source_page <= 0
+      ) {
+        setRowError({
+          key: fact.key,
+          message: '按招标文件原文录入时，必须提供真实来源文件 ID、原文摘录与正整数页码。',
+        })
+        return
+      }
     }
     setSavingKey(fact.key)
     setRowError(null)
@@ -761,7 +786,10 @@ function FactRow({
   onCancelEdit: () => void
   onChange: (value: string) => void
   onChangeStatus: (status: string) => void
-  onChangeEvidence: (field: 'source_file_id' | 'source_quote' | 'source_page', value: string) => void
+  onChangeEvidence: (
+    field: 'provenance_kind' | 'supplier_note' | 'source_file_id' | 'source_quote' | 'source_page',
+    value: string,
+  ) => void
   onSave: () => void
 }) {
   const status = factStatus(fact.status)
@@ -840,39 +868,68 @@ function FactRow({
             </div>
             <div className="fact-evidence-fields">
               <label className="fact-evidence-field">
-                <span>源文件 ID</span>
-                <input
-                  className="input input--sm"
-                  aria-label={`来源文件 ID：${fact.label}`}
-                  placeholder="源文件 id（真实值）"
-                  value={edit.source_file_id}
-                  onChange={(event) => onChangeEvidence('source_file_id', event.target.value)}
-                />
+                <span>来源类型</span>
+                <select
+                  className="select select--sm"
+                  value={edit.provenance_kind}
+                  onChange={(event) => onChangeEvidence('provenance_kind', event.target.value)}
+                  aria-label={`来源类型：${fact.label}`}
+                >
+                  <option value="tender_extract">招标文件原文</option>
+                  <option value="user_supplied">用户补充说明</option>
+                </select>
               </label>
-              <label className="fact-evidence-field">
-                <span>原文摘录</span>
-                <input
-                  className="input input--sm"
-                  aria-label={`原文摘录：${fact.label}`}
-                  placeholder="招标文件原文"
-                  value={edit.source_quote}
-                  onChange={(event) => onChangeEvidence('source_quote', event.target.value)}
-                />
-              </label>
-              <label className="fact-evidence-field fact-evidence-field--page">
-                <span>页码</span>
-                <input
-                  className="input input--sm"
-                  aria-label={`来源页码：${fact.label}`}
-                  inputMode="numeric"
-                  placeholder="页码"
-                  value={edit.source_page}
-                  onChange={(event) => onChangeEvidence('source_page', event.target.value)}
-                />
-              </label>
+              {edit.provenance_kind === 'tender_extract' ? (
+                <>
+                  <label className="fact-evidence-field">
+                    <span>源文件 ID</span>
+                    <input
+                      className="input input--sm"
+                      aria-label={`来源文件 ID：${fact.label}`}
+                      placeholder="源文件 id（真实值）"
+                      value={edit.source_file_id}
+                      onChange={(event) => onChangeEvidence('source_file_id', event.target.value)}
+                    />
+                  </label>
+                  <label className="fact-evidence-field">
+                    <span>原文摘录</span>
+                    <input
+                      className="input input--sm"
+                      aria-label={`原文摘录：${fact.label}`}
+                      placeholder="招标文件原文"
+                      value={edit.source_quote}
+                      onChange={(event) => onChangeEvidence('source_quote', event.target.value)}
+                    />
+                  </label>
+                  <label className="fact-evidence-field fact-evidence-field--page">
+                    <span>页码</span>
+                    <input
+                      className="input input--sm"
+                      aria-label={`来源页码：${fact.label}`}
+                      inputMode="numeric"
+                      placeholder="页码"
+                      value={edit.source_page}
+                      onChange={(event) => onChangeEvidence('source_page', event.target.value)}
+                    />
+                  </label>
+                </>
+              ) : (
+                <label className="fact-evidence-field">
+                  <span>补充说明</span>
+                  <input
+                    className="input input--sm"
+                    aria-label={`补充说明：${fact.label}`}
+                    placeholder="说明该值来自何处（缺失项无需伪造原文）"
+                    value={edit.supplier_note}
+                    onChange={(event) => onChangeEvidence('supplier_note', event.target.value)}
+                  />
+                </label>
+              )}
             </div>
             <p className="fact-evidence-hint">
-              手工录入 / 已确认必须提供本项目的真实源文件 ID、原文摘录与页码；确认人与时间由服务端记录。
+              {edit.provenance_kind === 'user_supplied'
+                ? '招标文件缺失项请填写来源说明；系统不会写入来源文件 ID、原文摘录或页码。'
+                : '按招标文件原文录入时必须提供真实源文件 ID、原文摘录与页码；确认人与时间由服务端记录。'}
             </p>
             {error && (
               <div className="row-error" role="alert">
@@ -922,6 +979,11 @@ function FactRow({
         </Badge>
         {fact.status === 'conflict' && (
           <span className="fact-conflict">多处取值冲突，请人工裁决</span>
+        )}
+        {fact.provenance_kind === 'user_supplied' && (
+          <span className="subtle" title={fact.supplier_note || ''}>
+            用户补充{fact.supplier_note ? `：${fact.supplier_note.slice(0, 40)}` : ''}
+          </span>
         )}
       </div>
 

@@ -275,7 +275,7 @@ export function BoqTab() {
         const scope = currentPackage ? `（${currentPackage.name}）` : ''
         toast.success(
           '清单已导入',
-          `共解析 ${payload.summary.boq_rows} 条清单条目${scope}，已与共享台账逐行对齐。`,
+          `共解析 ${payload.summary.boq_rows} 条清单条目${scope}，识别到 ${payload.summary.priced} 条单价，已与共享台账逐行对齐。`,
         )
       }
     } catch (error) {
@@ -493,7 +493,7 @@ export function BoqTab() {
       <TabHeading
         eyebrow="清单对齐"
         title="工程量清单 · 双向对齐"
-        description="上传招标方工程量清单，与台账材料逐行对齐。差异可以更新台账、补录材料或忽略；单价可用企业定额补齐、按系数调价，最后导出清单响应表。"
+        description="上传招标方工程量清单，与台账材料逐行对齐。差异可以更新台账、补录材料或忽略；清单中的单价/合价会自动识别，也可手工录入、用定额补齐或按系数调价，最后导出清单响应表。"
         actions={
           snapshot && !showUpload ? (
             <>
@@ -756,7 +756,7 @@ export function BoqTab() {
               </section>
 
               <p className="ledger-footnote">
-                对齐在每次打开时按当前台账重新计算。更新台账只写入数量、单位与规格；忽略的行保留原状态且可恢复。报价仅按你录入的单价乘以清单数量计算，程序不会自动生成价格；已忽略行不计入报价合计。
+                对齐在每次打开时按当前台账重新计算。更新台账只写入数量、单位与规格；忽略的行保留原状态且可恢复。单价优先取清单中识别到的「单价/合价」列，未识别的可手工录入或用定额补齐；合价按单价乘以清单数量计算，已忽略行不计入报价合计。
               </p>
             </>
           )}
@@ -976,11 +976,13 @@ function UploadPanel({
           <span>规格型号</span>
           <span>单位</span>
           <span>数量</span>
+          <span>单价（可选）</span>
+          <span>合价（可选）</span>
           <span>序号（可选）</span>
           <span>备注（可选）</span>
         </div>
         <p className="boq-chip-hint">
-          数量支持「1,200」「12套」「约 3.5」等写法；无法解析的取值会在解析提示中说明。
+          数量支持「1,200」「12套」「约 3.5」等写法；单价识别「综合单价/投标单价/报价单价/单价」列，合价识别「合价/金额」列，只有合价时按数量反算单价。识别出的价格仍可在表格中手工覆盖；无法解析的取值会在解析提示中说明。
         </p>
       </div>
     </div>

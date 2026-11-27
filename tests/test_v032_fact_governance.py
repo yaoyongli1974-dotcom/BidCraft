@@ -22,7 +22,13 @@ from bidcraft.api import create_app  # noqa: E402
 from bidcraft.api.routes import projects as project_routes  # noqa: E402
 from bidcraft.db import session_scope  # noqa: E402
 from bidcraft.export_gate import ExportGateError, enforce_export_gate  # noqa: E402
-from bidcraft.ledger import FactItemV032, FactLedgerV032, save_ledger, update_fact  # noqa: E402
+from bidcraft.ledger import (  # noqa: E402
+    FactItemV032,
+    FactLedgerV032,
+    render_ledger,
+    save_ledger,
+    update_fact,
+)
 from bidcraft.models import (  # noqa: E402
     AuditLog,
     Fact,
@@ -490,3 +496,142 @@ def test_chapter_save_change_note_reaches_revision_and_audit(db):
     assert _audits(project_id, "chapter.save")[0].detail["change_note"] == (
         "按评标办法补充了质量措施"
     )
+
+
+def test_user_supplied_fact_skips_tender_evidence_but_records_actor_and_note(db):
+    """招标文件确实缺失时，编制人补充不伪造原文/页码，只记录补充理由与盖章。"""
+    project_id = _seed_project()
+    file_id = _seed_source(project_id)
+    _seed_fact(project_id, file_id)
+    with session_scope() as session:
+        row = update_fact(
+            session,
+            project_id,
+            {
+                "key": "tender.deadline",
+                "value": "190 天",
+                "status": "manual",
+                "provenance_kind": "user_supplied",
+                "supplier_note": "招标文件未给出工期，由编制人补充",
+            },
+            actor={"username": "owner", "display_name": "李工"},
+            now=NOW,
+        )
+        assert row.value == "190 天"
+        assert row.provenance_kind == "user_supplied"
+        assert row.supplier_note == "招标文件未给出工期，由编制人补充"
+        assert row.source_file_id is None
+        assert row.source_quote == ""
+        assert row.source_page == 0
+        assert row.confirmed_by == "李工"
+        assert row.confirmed_at == NOW
+    audit = _audits(project_id, "fact.update")[0]
+    assert audit.detail["provenance_kind"] == "user_supplied"
+    assert audit.detail["supplier_note"] == "招标文件未给出工期，由编制人补充"
+    assert audit.detail["source_file_id"] is None
+
+
+def test_user_supplied_requires_rationale(db):
+    project_id = _seed_project()
+    _seed_fact(project_id, "")
+    with session_scope() as session, pytest.raises(ValueError, match="补充说明"):
+        update_fact(
+            session,
+            project_id,
+            {
+                "key": "tender.deadline",
+                "value": "190 天",
+                "status": "manual",
+                "provenance_kind": "user_supplied",
+                "supplier_note": "",
+            },
+            actor={"username": "owner"},
+        )
+    assert _audits(project_id, "fact.update") == []
+
+
+def test_user_supplied_fact_fills_required_ledger_gate(db):
+    project_id = _seed_project()
+    _seed_fact(project_id, "", value="", status="missing")
+    with session_scope() as session:
+        fact = session.scalar(select(Fact).where(Fact.project_id == project_id))
+        fact.required = True
+        session.flush()
+        update_fact(
+            session,
+            project_id,
+            {
+                "key": "tender.deadline",
+                "value": "190 天",
+                "status": "manual",
+                "provenance_kind": "user_supplied",
+                "supplier_note": "招标文件未给出工期",
+            },
+            actor={"username": "owner"},
+        )
+        ledger = __import__("bidcraft.ledger", fromlist=["load_ledger"]).load_ledger(
+            session, project_id
+        )
+    from bidcraft.rules.engine import ledger_gate
+
+    assert ledger_gate(ledger) == []
+
+
+def test_patch_fact_user_supplied_without_tender_source(db):
+    ctx = _api_context()
+    project_id = ctx["project"]
+    _seed_fact(project_id, "")
+    denied = ctx["viewer"].patch(
+        f"/projects/{project_id}/facts/tender.deadline",
+        json={
+            "value": "190 天",
+            "status": "manual",
+            "provenance_kind": "user_supplied",
+            "supplier_note": "招标文件未给出工期",
+        },
+    )
+    assert denied.status_code == 403
+    patched = ctx["owner"].patch(
+        f"/projects/{project_id}/facts/tender.deadline",
+        json={
+            "value": "190 天",
+            "status": "manual",
+            "provenance_kind": "user_supplied",
+            "supplier_note": "招标文件未给出工期",
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    body = patched.json()
+    assert body["provenance_kind"] == "user_supplied"
+    assert body["supplier_note"] == "招标文件未给出工期"
+    assert body["source_file_id"] is None
+    assert body["source_quote"] == ""
+    assert body["source_page"] == 0
+
+
+def test_render_ledger_marks_user_supplied_without_tender_source(db):
+    """提示词里的用户补充不得伪装成招标文件原文。"""
+    ledger = FactLedgerV032(
+        facts=[
+            FactItemV032(
+                key="project.duration",
+                label="工期",
+                value="190 天",
+                status="manual",
+                required=True,
+                provenance_kind="user_supplied",
+                supplier_note="招标文件未给出工期，由业务负责人补充",
+            ),
+            FactItemV032(
+                key="tender.deadline",
+                label="投标截止时间",
+                value="2026-12-20 09:30",
+                status="confirmed",
+                required=True,
+            ),
+        ]
+    )
+    rendered = render_ledger(ledger)
+    assert "工期（project.duration）：190 天（来源：用户补充）" in rendered
+    assert "用户说明：招标文件未给出工期，由业务负责人补充" in rendered
+    assert "投标截止时间（tender.deadline）：2026-12-20 09:30（来源：招标文件原文）" in rendered

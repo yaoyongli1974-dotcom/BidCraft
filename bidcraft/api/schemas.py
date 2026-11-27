@@ -125,8 +125,11 @@ class RulePackageValidateRequest(BaseModel):
 
 
 class FactUpdate(BaseModel):
-    """人工修正事实；确认状态必须携带可核验的真实来源证据。
+    """人工修正事实。
 
+    默认 ``provenance_kind='tender_extract'`` 时确认状态必须携带可核验的真实来源
+    证据；招标文件确实缺失时可选择 ``user_supplied`` 并填写补充说明，不写
+    ``source_*``，由服务端盖章确认人/时间，不伪造招标原文。
     ``key`` 由路由路径注入（CLI 显式传入），其余字段保持旧客户端兼容。
     """
 
@@ -137,6 +140,8 @@ class FactUpdate(BaseModel):
     source_file_id: str | None = None
     source_quote: str = ""
     source_page: int = 0
+    provenance_kind: Literal["tender_extract", "user_supplied"] = "tender_extract"
+    supplier_note: str = ""
 
 
 class OutlineRequest(BaseModel):

@@ -2051,7 +2051,7 @@ export function DraftTab() {
 
                 {selectedChapter && (
                   <ChapterCollab
-                    ref={ref}
+                    projectRef={ref}
                     nodeId={selectedChapter.id}
                     heading={selectedChapter.heading}
                     canWrite={canWrite && !reviewFrozen}
@@ -2106,6 +2106,25 @@ export function DraftTab() {
                             : ''}
                         </dd>
                       </div>
+                      <div>
+                        <dt>来源口径</dt>
+                        <dd>
+                          {activeCitation.provenance_kind === 'user_supplied'
+                            ? `用户补充：${activeCitation.supplier_note || '未说明依据'}`
+                            : '招标文件原文'}
+                        </dd>
+                      </div>
+                      {activeCitation.confirmed_by || activeCitation.confirmed_at ? (
+                        <div>
+                          <dt>服务端确认</dt>
+                          <dd>
+                            {activeCitation.confirmed_by || '未知'}
+                            {activeCitation.confirmed_at
+                              ? ` · ${activeCitation.confirmed_at}`
+                              : ''}
+                          </dd>
+                        </div>
+                      ) : null}
                     </dl>
                     {activeCitation.stale ? (
                       <p className="trace-card-hint">

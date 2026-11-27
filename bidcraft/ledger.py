@@ -49,6 +49,9 @@ class FactItemV032(FactItem):
     source_file_name: str = ""
     source_quote: str = ""
     source_page: int = 0
+    # 历史行 NULL 按 tender_extract 解释；只在内存/HTTP 表示中补齐口径。
+    provenance_kind: str = "tender_extract"
+    supplier_note: str = ""
 
 
 class FactLedgerV032(FactLedger):
@@ -227,6 +230,8 @@ def save_ledger(
                 "source_file_id": item.source_file_id,
                 "source_quote": item.source_quote,
                 "source_page": item.source_page,
+                "provenance_kind": getattr(item, "provenance_kind", "tender_extract"),
+                "supplier_note": getattr(item, "supplier_note", ""),
             },
             actor=actor,
             now=now,
@@ -355,6 +360,8 @@ def load_ledger(db: Session, project_id: str) -> FactLedgerV032:
                 ),
                 source_quote=row.source_quote,
                 source_page=row.source_page,
+                provenance_kind=row.provenance_kind or "tender_extract",
+                supplier_note=row.supplier_note or "",
             )
             for row in facts
         ],
@@ -465,7 +472,14 @@ def render_ledger(ledger: FactLedger, *, max_chars: int = 16000) -> str:
     for item in ledger.facts:
         if item.value:
             unit = f" {item.unit}" if item.unit and item.unit not in item.value else ""
-            facts_lines.append(f"- {item.label}（{item.key}）：{item.value}{unit}")
+            kind = getattr(item, "provenance_kind", "") or "tender_extract"
+            source_tag = "用户补充" if kind == "user_supplied" else "招标文件原文"
+            line = f"- {item.label}（{item.key}）：{item.value}{unit}（来源：{source_tag}）"
+            if kind == "user_supplied":
+                note = str(getattr(item, "supplier_note", "") or "").strip()
+                if note:
+                    line += f"；用户说明：{note[:120]}"
+            facts_lines.append(line)
     sections.append(facts_lines)
 
     if ledger.scoring:
@@ -558,6 +572,21 @@ def render_ledger(ledger: FactLedger, *, max_chars: int = 16000) -> str:
     return assemble(kept)
 
 
+def _provenance(payload, row: Fact) -> tuple[str, str]:
+    """读取事实来源口径。历史 NULL 按招标文件原文解释，不回填、不伪造。"""
+
+    kind = str(
+        _payload_get(payload, "provenance_kind", row.provenance_kind or "tender_extract")
+        or "tender_extract"
+    ).strip()
+    if kind not in {"tender_extract", "user_supplied"}:
+        raise ValueError(f"事实来源类型非法: {kind}")
+    note = str(_payload_get(payload, "supplier_note", row.supplier_note or "") or "").strip()
+    if kind == "user_supplied" and not note:
+        raise ValueError("用户补充事实必须填写补充说明")
+    return kind, note
+
+
 def _verify_evidence(
     db: Session, project_id: str, payload, status: str, row: Fact
 ) -> tuple[str | None, str, int]:
@@ -616,8 +645,13 @@ def _invalidate_sections(
     sections = list(db.scalars(select(Section).where(Section.node_id.in_(node_ids))))
     for section in sections:
         section.review_status = "review"
+        section.review_requested_at = None
+        section.review_requested_by = None
         section.confirmed_at = None
         section.confirmed_by = None
+        section.locked_at = None
+        section.locked_by = None
+        section.review_note = f"事实来源口径变化：{reason}"
     record_audit(
         db,
         project_id,
@@ -668,10 +702,31 @@ def update_fact(
     ):
         raise ValueError("已确认事实不能被重解析覆盖；请使用人工确认或 force=True")
 
-    file_id, quote, page = _verify_evidence(db, project_id, payload, status, row)
+    old_provenance_kind = row.provenance_kind or "tender_extract"
+    old_supplier_note = row.supplier_note or ""
+    old_status = row.status or ""
+    provenance_kind, supplier_note = _provenance(payload, row)
+    provenance_changed = (
+        provenance_kind != old_provenance_kind or supplier_note != old_supplier_note
+    )
+    status_demoted = old_status in {"confirmed", "manual"} and status not in {"confirmed", "manual"}
+    if provenance_kind == "user_supplied":
+        # 招标文件确实缺失：用户补充不是招标原文，不能写入 source_* 证据。
+        file_id, quote, page = None, "", 0
+    else:
+        if (
+            status in {"confirmed", "manual"}
+            and (row.provenance_kind or "tender_extract") == "user_supplied"
+            and not any(
+                _payload_get(payload, field, "")
+                for field in ("source_file_id", "source_quote", "source_page")
+            )
+        ):
+            raise ValueError("改回招标文件原文必须提供真实的来源文件、引文与页码")
+        file_id, quote, page = _verify_evidence(db, project_id, payload, status, row)
     changed_value = new_value != (row.value or "")
     changed_unit = new_unit != (row.unit or "")
-    changed = changed_value or changed_unit
+    changed = changed_value or changed_unit or provenance_changed or status_demoted
     stamp_at = now or utcnow()
     actor_dict = _actor_dict(actor)
     actor_name = _actor_name(actor_dict)
@@ -687,13 +742,19 @@ def update_fact(
         {
             item.node_id
             for item in citation_rows
-            if changed_unit or (item.value or "") != new_value
+            if changed_unit or provenance_changed or status_demoted or (item.value or "") != new_value
         }
     )
 
     row.value = new_value
     row.unit = new_unit
     row.status = status
+    row.provenance_kind = provenance_kind
+    row.supplier_note = supplier_note
+    if provenance_kind == "user_supplied":
+        row.source_file_id = None
+        row.source_quote = ""
+        row.source_page = 0
     for field in ("label", "confidence", "required"):
         incoming = _payload_get(payload, field, None)
         if incoming is not None:
@@ -722,6 +783,12 @@ def update_fact(
             "forced": bool(force),
             "confirmed_by": row.confirmed_by,
             "source_file_id": file_id,
+            "provenance_kind": provenance_kind,
+            "old_provenance_kind": old_provenance_kind,
+            "provenance_changed": provenance_changed,
+            "supplier_note": supplier_note,
+            "old_supplier_note": old_supplier_note,
+            "status_demoted": status_demoted,
             "stale_citations": len(affected),
         },
         actor=actor_dict,
@@ -734,7 +801,15 @@ def update_fact(
             affected,
             actor=actor_dict,
             now=stamp_at,
-            reason="unit_changed" if changed_unit and not changed_value else "value_changed",
+            reason=(
+                "provenance_changed"
+                if provenance_changed
+                else "status_demoted"
+                if status_demoted
+                else "unit_changed"
+                if changed_unit and not changed_value
+                else "value_changed"
+            ),
         )
     return row
 

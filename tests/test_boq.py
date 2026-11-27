@@ -180,6 +180,75 @@ def test_parse_qty_variants():
     assert parse_qty("待定") == (None, False)
 
 
+def test_parser_extracts_unit_prices_and_amount_fallback(tmp_path):
+    path = tmp_path / "priced.xlsx"
+    _write_boq(
+        path,
+        {
+            "清单": [
+                ["序号", "材料名称", "规格型号", "单位", "数量", "单价（元）", "合价（元）"],
+                [1, "网络面板", "双口 Cat6A", "个", "10", "￥12.50", "125.00"],
+                [2, "配线架", "24 口", "个", "20", "1,234.56", "24,691.20"],
+                [3, "跳线", "3 米", "根", "5", "", "37.50"],
+                [4, "机柜", "42U", "台", "2", "待定", ""],
+            ]
+        },
+    )
+
+    parsed = parse_boq(path)
+
+    assert parsed.prices == {
+        "清单!2": 12.5,
+        "清单!3": 1234.56,
+        "清单!4": 7.5,
+    }
+    assert len(parsed.warnings) == 1
+    assert "单价无法识别" in parsed.warnings[0]
+    assert "待定" in parsed.warnings[0]
+
+
+def test_parser_price_header_requires_exact_or_prefix_match(tmp_path):
+    path = tmp_path / "boq.xlsx"
+    _write_boq(
+        path,
+        {
+            "清单": [
+                ["序号", "名称", "规格型号", "单位", "数量", "含税单价", "备注"],
+                [1, "面板", "双口", "个", "10", "12.5", ""],
+            ]
+        },
+    )
+
+    parsed = parse_boq(path)
+
+    # "含税单价" merely contains 单价; only exact/prefix aliases are recognized.
+    assert parsed.prices == {}
+
+
+def test_parser_prefers_priced_sheet_on_tie(tmp_path):
+    path = tmp_path / "boq.xlsx"
+    header = ["序号", "名称", "规格型号", "单位", "数量"]
+    rows = [
+        [1, "网络面板", "双口", "个", 10],
+        [2, "配线架", "24口", "个", 20],
+    ]
+    _write_boq(
+        path,
+        {
+            "无价": [header, *rows],
+            "有价": [
+                header + ["投标单价"],
+                *[row + [12.5] for row in rows],
+            ],
+        },
+    )
+
+    parsed = parse_boq(path)
+    assert parsed.sheet == "有价"
+    assert parsed.prices == {"有价!2": 12.5, "有价!3": 12.5}
+    assert parse_boq(path, sheet="无价").prices == {}
+
+
 # -------------------------------------------------------------------- matcher
 
 

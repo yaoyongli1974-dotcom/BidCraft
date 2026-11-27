@@ -14,7 +14,7 @@ from bidcraft.config import settings
 from bidcraft.db import get_engine, init_db, reset_engine_for_tests
 
 #: 当前 alembic head（新增 revision 时同步这里）。
-HEAD = "0015_fact_confirmation"
+HEAD = "0016_fact_provenance"
 
 
 def _version() -> list[str]:
@@ -597,4 +597,78 @@ def test_0015_fact_confirmation_is_reversible_and_idempotent(db):
     init_db()
     command.upgrade(cfg, "head")
     assert confirmation_columns <= columns()
+    assert _version() == [HEAD]
+
+
+def test_0016_fact_provenance_is_reversible_and_idempotent(db):
+    """0016 两列必须可降级再升级；历史 NULL 必须仍按招标文件原文解释。"""
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+
+    from bidcraft.db import session_scope
+    from bidcraft.migrations import __file__ as migrations_init
+    from bidcraft.models import Project
+
+    engine = get_engine()
+    provenance_columns = {"provenance_kind", "supplier_note"}
+
+    def columns() -> set[str]:
+        with engine.connect() as connection:
+            return {c["name"] for c in inspect(connection).get_columns("facts")}
+
+    assert provenance_columns <= columns()
+    # 无 server_default：历史行保持 NULL，不会被 DDL 伪造成用户补充说明。
+    with engine.connect() as connection:
+        ddl = {
+            row[1]: row[4]
+            for row in connection.execute(text("PRAGMA table_info(facts)")).fetchall()
+        }
+    assert ddl["provenance_kind"] is None
+    assert ddl["supplier_note"] is None
+
+    with session_scope() as session:
+        session.add(Project(id="migration-fact-provenance", name="迁移来源事实项目"))
+        session.flush()
+        session.execute(
+            text(
+                "INSERT INTO facts (id, project_id, key, label, value, unit, status, "
+                "confidence, required, source_file_id, source_page, source_quote, updated_at) "
+                "VALUES ('legacy-provenance-fact', 'migration-fact-provenance', 'legacy_prov', "
+                "'旧来源', '旧值', '', 'confirmed', 0.0, 0, NULL, 0, '', '2020-01-01 00:00:00')"
+            )
+        )
+    with engine.connect() as connection:
+        row = connection.execute(
+            text(
+                "SELECT provenance_kind, supplier_note FROM facts "
+                "WHERE key = 'legacy_prov'"
+            )
+        ).fetchone()
+    assert row == (None, None)
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(Path(migrations_init).parent))
+    cfg.set_main_option(
+        "sqlalchemy.url",
+        engine.url.render_as_string(hide_password=False).replace("%", "%%"),
+    )
+    command.downgrade(cfg, "0015_fact_confirmation")
+    assert not (provenance_columns & columns())
+    command.upgrade(cfg, "head")
+    assert provenance_columns <= columns()
+    with engine.connect() as connection:
+        row = connection.execute(
+            text(
+                "SELECT provenance_kind, supplier_note FROM facts "
+                "WHERE key = 'legacy_prov'"
+            )
+        ).fetchone()
+    assert row == (None, None)
+
+    # create_all 已建列后重复 init_db + upgrade 均不得报错。
+    init_db()
+    command.upgrade(cfg, "head")
+    assert provenance_columns <= columns()
     assert _version() == [HEAD]

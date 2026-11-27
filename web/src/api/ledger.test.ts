@@ -39,6 +39,8 @@ describe('ledger 事实证据归一化', () => {
       source_file_id: null,
       source_quote: '旧原文',
       source_page: 12,
+      provenance_kind: 'tender_extract',
+      supplier_note: null,
     })
 
     const fact = normalizeFact({
@@ -55,6 +57,23 @@ describe('ledger 事实证据归一化', () => {
     expect(fact!.source_page).toBe(0)
     expect(fact!.source?.file).toBe('招标文件.pdf')
     expect(fact!.confirmed_by).toBe('alice')
+  })
+
+  it('用户补充来源不伪造招标文件证据，且保留说明', () => {
+    const fact = normalizeFact({
+      key: 'f3',
+      value: '190 天',
+      status: 'manual',
+      provenance_kind: 'user_supplied',
+      supplier_note: '招标文件未给出工期',
+      source_file_id: 'should-not-be-kept',
+      source_page: 9,
+    })
+    expect(fact!.provenance_kind).toBe('user_supplied')
+    expect(fact!.supplier_note).toBe('招标文件未给出工期')
+    expect(normalizeFactUpdate({ key: 'f3', provenance_kind: 'user_supplied' })!.provenance_kind).toBe(
+      'user_supplied',
+    )
   })
 
   it('脏值不会变成事实：非对象 / 无 key 的条目被丢弃', () => {

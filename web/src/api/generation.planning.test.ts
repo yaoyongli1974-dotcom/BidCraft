@@ -6,6 +6,7 @@ import {
   getChapterPlan,
   listChapterPlanHistory,
   normalizeChapterPlan,
+  normalizeChapterPlanResponse,
   regenerateChapterPlan,
   updateChapterPlan,
 } from './generation'
@@ -63,6 +64,25 @@ describe('chapter planning client', () => {
     vi.mocked(request).mockResolvedValueOnce({ plan: null, mode: 'auto' })
     const empty = await getChapterPlan('p1', 'n1')
     expect(empty).toEqual({ plan: null, mode: 'auto' })
+  })
+
+  it('preserves review_strict from the backend instead of degrading it to auto', async () => {
+    expect(normalizeChapterPlanResponse({ plan: rawPlan, mode: 'review_strict' }).mode).toBe(
+      'review_strict',
+    )
+    expect(normalizeChapterPlanResponse({ plan: null, mode: 'review_strict' })).toEqual({
+      plan: null,
+      mode: 'review_strict',
+    })
+
+    vi.mocked(request).mockResolvedValueOnce({ plan: null, mode: 'review_strict' })
+    const result = await getChapterPlan('p1', 'n1')
+    expect(result.mode).toBe('review_strict')
+  })
+
+  it('falls back to auto only for missing or unknown modes', () => {
+    expect(normalizeChapterPlanResponse({ plan: null }).mode).toBe('auto')
+    expect(normalizeChapterPlanResponse({ plan: null, mode: 'legacy' }).mode).toBe('auto')
   })
 
   it('generateChapterPlan posts instruction and package id', async () => {

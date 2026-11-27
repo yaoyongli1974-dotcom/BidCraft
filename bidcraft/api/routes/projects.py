@@ -1450,6 +1450,8 @@ def set_fact(ref: str, key: str, payload: FactUpdate) -> dict[str, Any]:
             "required": row.required,
             "confirmed_by": row.confirmed_by,
             "confirmed_at": _iso(row.confirmed_at),
+            "provenance_kind": getattr(row, "provenance_kind", None) or "tender_extract",
+            "supplier_note": getattr(row, "supplier_note", "") or "",
             "source_file_id": row.source_file_id,
             "source_file_name": source.filename if source else "",
             "source_quote": row.source_quote,

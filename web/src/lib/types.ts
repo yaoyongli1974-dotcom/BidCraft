@@ -466,6 +466,9 @@ export interface FactEvidence {
   source_file_id?: string | null
   source_quote?: string | null
   source_page?: number | null
+  /** 招标文件原文必须带 source_*；用户补充只需 supplier_note。 */
+  provenance_kind?: 'tender_extract' | 'user_supplied' | string | null
+  supplier_note?: string | null
 }
 
 export interface Fact extends FactEvidence {
@@ -483,6 +486,9 @@ export interface Fact extends FactEvidence {
   /** 服务端盖章：谁在何时确认了这条事实。前端永不自行写入。 */
   confirmed_by?: string | null
   confirmed_at?: string | null
+  /** 来源类型：老数据按 tender_extract 解释；用户补充说明不写 source_*。 */
+  provenance_kind?: 'tender_extract' | 'user_supplied' | string | null
+  supplier_note?: string | null
 }
 
 export interface Material {
@@ -738,6 +744,11 @@ export interface FactCitation {
   occurrences: number
   stale: boolean
   status: string
+  /** 来源口径：招标文件原文 / 用户补充说明。 */
+  provenance_kind?: string
+  supplier_note?: string
+  confirmed_by?: string
+  confirmed_at?: string | null
   source_quote: string
   source_file_id?: string | null
   source_page: number
@@ -781,6 +792,8 @@ export interface FactUpdateResult extends FactEvidence {
   source_file_name?: string | null
   confirmed_by?: string | null
   confirmed_at?: string | null
+  provenance_kind?: 'tender_extract' | 'user_supplied' | string | null
+  supplier_note?: string | null
   /** 该字段被改写后，正文仍写着旧值的章节。仅服务端真实返回时才提示。 */
   stale_sections?: Array<{ node_id: string; heading: string; stale_value: string }>
 }

@@ -21,6 +21,10 @@ function nullableNumber(value: unknown): number | null {
   return null
 }
 
+function provenanceKind(value: unknown): 'tender_extract' | 'user_supplied' {
+  return value === 'user_supplied' ? 'user_supplied' : 'tender_extract'
+}
+
 /**
  * 读取一条事实的来源证据。新契约的 source_* 字段优先，缺字段时回退到旧契约
  * 的嵌套 source；null / undefined 一律归一成 null，绝不编造文件名或页码。
@@ -33,6 +37,8 @@ export function normalizeFactEvidence(value: unknown): FactEvidence {
     source_file_id: nullableText(raw.source_file_id),
     source_quote: nullableText(raw.source_quote) ?? nullableText(source.quote),
     source_page: nullableNumber(page),
+    provenance_kind: provenanceKind(raw.provenance_kind),
+    supplier_note: nullableText(raw.supplier_note),
   }
 }
 
@@ -98,6 +104,8 @@ export function normalizeFactUpdate(value: unknown): FactUpdateResult | null {
     source_file_name: nullableText(raw.source_file_name),
     confirmed_by: nullableText(raw.confirmed_by),
     confirmed_at: nullableText(raw.confirmed_at),
+    provenance_kind: provenanceKind(raw.provenance_kind),
+    supplier_note: nullableText(raw.supplier_note),
     stale_sections: stale,
   }
 }
@@ -109,6 +117,8 @@ const SERVER_STAMPED_FIELDS = [
   'source_file_name',
   'source_quote',
   'source_page',
+  'provenance_kind',
+  'supplier_note',
 ] as const
 
 /** 把 PATCH 响应合并回本地台账；旧后端未返回的字段保留原值。 */
@@ -145,7 +155,7 @@ export async function getLedger(ref: string): Promise<Ledger> {
 }
 
 /**
- * 改写事实。出站体只包含后端接受的 value / status / source_* 五个键；
+ * 改写事实。出站体只包含后端接受的 value / status / 来源字段；
  * 确认人与确认时间由服务端盖章，前端永不发送。
  */
 export async function updateFact(
@@ -156,6 +166,11 @@ export async function updateFact(
   evidence: FactEvidence = {},
 ): Promise<FactUpdateResult> {
   const body: Record<string, unknown> = { value, status }
+  const provenance = provenanceKind(evidence.provenance_kind)
+  body.provenance_kind = provenance
+  const note =
+    typeof evidence.supplier_note === 'string' ? evidence.supplier_note.trim() : ''
+  if (note) body.supplier_note = note
   const fileId =
     typeof evidence.source_file_id === 'string' ? evidence.source_file_id.trim() : ''
   const quote = typeof evidence.source_quote === 'string' ? evidence.source_quote.trim() : ''

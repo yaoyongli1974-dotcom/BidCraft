@@ -265,4 +265,120 @@ describe('OutlineTab chapter planning panel', () => {
     )
     expect(screen.getAllByText(/自动规划模式，章节规划未经人工确认/).length).toBeGreaterThan(0)
   })
+
+  it('batch generates only the missing plan and never auto-confirms it', async () => {
+    vi.mocked(getOutline).mockResolvedValue([
+      {
+        id: 'n1',
+        heading: '第一章 技术方案',
+        intent: '',
+        target_words: 1000,
+        words: 0,
+        has_body: false,
+      },
+      {
+        id: 'n2',
+        heading: '第二章 商务条款',
+        intent: '',
+        target_words: 1000,
+        words: 0,
+        has_body: false,
+      },
+    ])
+    vi.mocked(getChapterPlan).mockImplementation(async (_ref, nodeId) => ({
+      plan:
+        nodeId === 'n1'
+          ? null
+          : makePlan({ node_id: 'n2', status: 'CONFIRMED' }),
+      mode: 'auto',
+    }))
+
+    renderTab()
+    await waitForPlan()
+    fireEvent.click(panel().getByRole('button', { name: '批量生成缺失规划' }))
+
+    await waitFor(() => expect(generateChapterPlan).toHaveBeenCalledWith('p1', 'n1'))
+    expect(generateChapterPlan).toHaveBeenCalledTimes(1)
+    expect(confirmChapterPlan).not.toHaveBeenCalled()
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith('批量生成完成', expect.anything()),
+    )
+    await waitFor(() => expect(workspace.reloadProject).toHaveBeenCalled())
+  })
+
+  it('offers one-click missing plan generation without auto-confirming', async () => {
+    vi.mocked(getChapterPlan).mockResolvedValue({ plan: null, mode: 'auto' })
+    renderTab()
+    await waitForPlan()
+
+    fireEvent.click(screen.getByRole('button', { name: '一键生成缺失章节规划' }))
+
+    await waitFor(() => expect(generateChapterPlan).toHaveBeenCalledWith('p1', 'n1'))
+    expect(confirmChapterPlan).not.toHaveBeenCalled()
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith('缺失章节规划已生成', expect.anything()),
+    )
+  })
+
+  it('disables batch planning while the outline has unsaved changes', async () => {
+    renderTab()
+    await waitForPlan()
+    fireEvent.change(screen.getByLabelText('第 1 章标题'), {
+      target: { value: '改名后的章节' },
+    })
+    for (const name of ['一键生成缺失章节规划', '批量生成缺失规划', '确认全部待确认']) {
+      expect((screen.getByRole('button', { name }) as HTMLButtonElement).disabled).toBe(true)
+    }
+  })
+
+  it('batch confirms only pending plans using the shared note', async () => {
+    vi.mocked(getOutline).mockResolvedValue([
+      {
+        id: 'n1',
+        heading: '第一章 技术方案',
+        intent: '',
+        target_words: 1000,
+        words: 0,
+        has_body: false,
+      },
+      {
+        id: 'n2',
+        heading: '第二章 商务条款',
+        intent: '',
+        target_words: 1000,
+        words: 0,
+        has_body: false,
+      },
+    ])
+    vi.mocked(getChapterPlan).mockImplementation(async (_ref, nodeId) => ({
+      plan: makePlan({
+        node_id: nodeId,
+        status: nodeId === 'n1' ? 'DRAFT' : 'CONFIRMED',
+      }),
+      mode: 'review',
+    }))
+
+    renderTab()
+    await waitForPlan()
+    fireEvent.change(panel().getByLabelText('批量确认备注'), {
+      target: { value: '批量复核通过' },
+    })
+    fireEvent.click(panel().getByRole('button', { name: '确认全部待确认' }))
+
+    await waitFor(() =>
+      expect(confirmChapterPlan).toHaveBeenCalledWith('p1', 'n1', { note: '批量复核通过' }),
+    )
+    expect(confirmChapterPlan).toHaveBeenCalledTimes(1)
+    expect(generateChapterPlan).not.toHaveBeenCalled()
+  })
+
+  it('keeps review_strict mode from the plan response and blocks generation', async () => {
+    vi.mocked(getChapterPlan).mockResolvedValue({ plan: makePlan(), mode: 'review_strict' })
+    renderTab()
+    await waitForPlan()
+    expect(panel().getByText(/严格复核/)).toBeTruthy()
+    expect(
+      (screen.getByRole('button', { name: '生成本章' }) as HTMLButtonElement).disabled,
+    ).toBe(true)
+  })
 })

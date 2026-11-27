@@ -1,8 +1,17 @@
 import { useCallback, useMemo } from 'react'
-import { getChapterPlan } from '../api/generation'
+import {
+  confirmChapterPlan,
+  generateChapterPlan,
+  getChapterPlan,
+} from '../api/generation'
 import { useQuery } from '../lib/hooks'
-import type { ChapterPlanMode } from '../lib/chapterPlan'
-import type { ChapterPlan, ChapterPlanResponse } from '../lib/types'
+import {
+  isConfirmedPlan,
+  isPendingConfirmPlan,
+  type ChapterPlanMode,
+} from '../lib/chapterPlan'
+import { messageOf } from '../lib/http'
+import type { ChapterPlan } from '../lib/types'
 
 export interface ChapterPlanEntry {
   node_id: string
@@ -17,7 +26,7 @@ export async function loadChapterPlans(
 ): Promise<ChapterPlanEntry[]> {
   return Promise.all(
     nodeIds.map(async (nodeId) => {
-      const response: ChapterPlanResponse = await getChapterPlan(ref, nodeId)
+      const response = await getChapterPlan(ref, nodeId)
       return { node_id: nodeId, plan: response.plan, mode: response.mode }
     }),
   )
@@ -68,4 +77,109 @@ export function useChapterPlans(ref: string, nodeIds: string[]) {
     refresh: query.refresh,
     setPlan,
   }
+}
+
+// ------------------------------------------------------------ 批量操作（复用单章 API）
+
+interface ChapterLike {
+  id?: string
+}
+
+type PlanLookup = ReadonlyArray<Pick<ChapterPlanEntry, 'node_id' | 'plan'>>
+
+function planMap(entries: PlanLookup): Map<string, ChapterPlan | null> {
+  return new Map(entries.map((entry) => [entry.node_id, entry.plan]))
+}
+
+/**
+ * 批量生成的候选：真实章节 ID 且当前没有可用规划。
+ * 已确认 / 已用于生成的规划一律跳过，重新生成必须走单章的显式「重新生成」。
+ */
+export function missingPlanNodeIds(
+  chapters: ReadonlyArray<ChapterLike>,
+  entries: PlanLookup,
+): string[] {
+  const plans = planMap(entries)
+  return chapters
+    .filter((chapter) => {
+      if (!chapter.id) return false
+      const plan = plans.get(chapter.id)
+      return !plan && !isConfirmedPlan(plan)
+    })
+    .map((chapter) => chapter.id as string)
+}
+
+/** 批量确认只处理草稿 / 已更新 / 待复核，其他状态（含已确认）不动。 */
+export function pendingConfirmNodeIds(
+  chapters: ReadonlyArray<ChapterLike>,
+  entries: PlanLookup,
+): string[] {
+  const plans = planMap(entries)
+  return chapters
+    .filter((chapter) => Boolean(chapter.id) && isPendingConfirmPlan(plans.get(chapter.id ?? '')))
+    .map((chapter) => chapter.id as string)
+}
+
+export interface PlanBatchOutcome {
+  total: number
+  succeeded: string[]
+  failed: Array<{ nodeId: string; message: string }>
+}
+
+export type PlanBatchProgress = (done: number, total: number, nodeId: string) => void
+
+/** 顺序调用单章 API：单章失败只记录结果，不中断剩余章节。 */
+async function runPlanBatch(
+  nodeIds: string[],
+  task: (nodeId: string) => Promise<ChapterPlan>,
+  onPlanChange: (nodeId: string, plan: ChapterPlan) => void,
+  onProgress?: PlanBatchProgress,
+): Promise<PlanBatchOutcome> {
+  const outcome: PlanBatchOutcome = { total: nodeIds.length, succeeded: [], failed: [] }
+  for (let index = 0; index < nodeIds.length; index += 1) {
+    const nodeId = nodeIds[index]
+    onProgress?.(index, nodeIds.length, nodeId)
+    try {
+      const plan = await task(nodeId)
+      onPlanChange(nodeId, plan)
+      outcome.succeeded.push(nodeId)
+    } catch (error) {
+      outcome.failed.push({ nodeId, message: messageOf(error) })
+    }
+    onProgress?.(index + 1, nodeIds.length, nodeId)
+  }
+  return outcome
+}
+
+export function batchGeneratePlans(
+  ref: string,
+  nodeIds: string[],
+  onPlanChange: (nodeId: string, plan: ChapterPlan) => void,
+  onProgress?: PlanBatchProgress,
+): Promise<PlanBatchOutcome> {
+  return runPlanBatch(
+    nodeIds,
+    (nodeId) => generateChapterPlan(ref, nodeId),
+    onPlanChange,
+    onProgress,
+  )
+}
+
+export function batchConfirmPlans(
+  ref: string,
+  nodeIds: string[],
+  note: string,
+  onPlanChange: (nodeId: string, plan: ChapterPlan) => void,
+  onProgress?: PlanBatchProgress,
+): Promise<PlanBatchOutcome> {
+  const trimmed = note.trim()
+  return runPlanBatch(
+    nodeIds,
+    (nodeId) =>
+      trimmed
+        ? confirmChapterPlan(ref, nodeId, { note: trimmed })
+        : confirmChapterPlan(ref, nodeId),
+    onPlanChange,
+    onProgress,
+  )
 }

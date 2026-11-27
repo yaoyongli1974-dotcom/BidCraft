@@ -390,7 +390,7 @@ def test_plan_context_text_contains_strategy_and_real_ids(db):
 
 def test_prompt_version_is_exact_v3_for_advisory_sections(db):
     # 规划提示词新增历史调整/经验段属输出格式变化，版本必须可追溯。
-    assert PROMPT_VERSION == "chapter_plan_v3"
+    assert PROMPT_VERSION == "chapter_plan_v4"
 
 
 def test_plan_context_renders_adjustments_and_lessons_as_advisory(db):

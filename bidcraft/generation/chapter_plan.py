@@ -32,7 +32,8 @@ from ..models import (
 
 #: 提示词版本：规划格式变化时必须 bump，便于追溯 prompt ↔ 规划版本。
 #: v3：规划提示词新增「历史人工调整 / 未审核建议经验」两段显式 advisory。
-PROMPT_VERSION = "chapter_plan_v3"
+#: v4：事实引用携带 provenance_kind / supplier_note / 服务端确认人时间。
+PROMPT_VERSION = "chapter_plan_v4"
 
 # 状态机（大写值便于日志/审计阅读）。
 NOT_CREATED = "NOT_CREATED"
@@ -562,6 +563,10 @@ def build_plan_context(
                 "value": row.value or "",
                 "unit": row.unit or "",
                 "status": row.status or "",
+                "provenance_kind": row.provenance_kind or "tender_extract",
+                "supplier_note": row.supplier_note or "",
+                "confirmed_by": row.confirmed_by or "",
+                "confirmed_at": clock.iso_beijing(row.confirmed_at) if row.confirmed_at else "",
             }
             for row in fact_rows[:12]
         ],
@@ -617,6 +622,11 @@ def _deterministic_plan(context: dict[str, Any]) -> dict[str, list[Any] | str]:
             "key": item["key"],
             "label": item["label"],
             "value": item["value"],
+            "provenance_kind": item.get("provenance_kind", "tender_extract"),
+            "supplier_note": item.get("supplier_note", ""),
+            "confirmed_by": item.get("confirmed_by", ""),
+            "confirmed_at": item.get("confirmed_at", ""),
+            "status": item.get("status", ""),
         }
         for item in facts[:8]
     ]
@@ -880,18 +890,37 @@ def plan_dependency_staleness(db: Session, plan: ChapterPlan) -> list[str]:
             add("招标要求标记已变化，规划失效")
 
     for row in _list(plan.fact_refs):
-        if not isinstance(row, dict):
+        if isinstance(row, dict):
+            ident = _text(row.get("id"))
+            key_ref = _text(row.get("key"))
+        elif isinstance(row, str):
+            ident = row.strip() if _UUID_RE.fullmatch(row.strip()) else ""
+            key_ref = "" if ident else row.strip()
+            row = {"key": key_ref or ident}
+        else:
             continue
-        ident = _text(row.get("id"))
-        if not ident:
-            continue
-        item = db.get(Fact, ident)
+        item = db.get(Fact, ident) if ident else None
+        if item is None and key_ref:
+            item = db.scalar(
+                select(Fact).where(Fact.project_id == plan.project_id, Fact.key == key_ref)
+            )
         if item is None or item.project_id != plan.project_id:
-            add(f"事实台账 {ident} 已删除，规划失效")
+            add(f"事实台账 {ident or key_ref} 已删除，规划失效")
             continue
         for key, attr in (("key", "key"), ("label", "label"), ("value", "value"), ("unit", "unit")):
             if key in row and _text(row[key]) != _text(getattr(item, attr, "")):
                 add(f"事实「{_text(item.key) or ident}」的{key}已变化，规划失效")
+        live_kind = item.provenance_kind or "tender_extract"
+        if "provenance_kind" in row and _text(row["provenance_kind"]) != live_kind:
+            add(f"事实「{_text(item.key) or ident}」的来源口径已变化，规划失效")
+        if "supplier_note" in row and _text(row["supplier_note"]) != _text(item.supplier_note):
+            add(f"事实「{_text(item.key) or ident}」的补充说明已变化，规划失效")
+        if "confirmed_by" in row and _text(row["confirmed_by"]) != _text(item.confirmed_by):
+            add(f"事实「{_text(item.key) or ident}」的确认人已变化，规划失效")
+        if "confirmed_at" in row:
+            live_at = clock.iso_beijing(item.confirmed_at) if item.confirmed_at else ""
+            if _text(row["confirmed_at"]) != live_at:
+                add(f"事实「{_text(item.key) or ident}」的确认时间已变化，规划失效")
 
     for row in _list(plan.knowledge_refs):
         if not isinstance(row, dict):
@@ -1038,6 +1067,52 @@ def _retire(db: Session, plan: ChapterPlan | None) -> None:
         pass
 
 
+def _fact_refs_with_provenance(db: Session, project_id: str, rows: Any) -> list[Any]:
+    """把事实引用的来源口径写入规划 JSON，供正文与后续节点留痕。"""
+
+    enriched: list[Any] = []
+    for item in _list(rows):
+        fact: Fact | None = None
+        base: dict[str, Any] | None = None
+        if isinstance(item, dict):
+            base = dict(item)
+            ident = _text(base.get("id")) or _text(base.get("fact_id"))
+            key = _text(base.get("key"))
+            if ident:
+                fact = db.get(Fact, ident)
+            if fact is None and key:
+                fact = db.scalar(
+                    select(Fact).where(Fact.project_id == project_id, Fact.key == key)
+                )
+        elif isinstance(item, str):
+            ident = item.strip()
+            if _UUID_RE.fullmatch(ident):
+                fact = db.get(Fact, ident)
+            if fact is None:
+                fact = db.scalar(
+                    select(Fact).where(Fact.project_id == project_id, Fact.key == ident)
+                )
+            base = {"key": ident}
+        if fact is None or fact.project_id != project_id:
+            enriched.append(item)
+            continue
+        if base is None:
+            base = {}
+        base.setdefault("id", fact.id)
+        base.setdefault("key", fact.key or "")
+        base.update(
+            {
+                "provenance_kind": fact.provenance_kind or "tender_extract",
+                "supplier_note": fact.supplier_note or "",
+                "status": fact.status or "",
+                "confirmed_by": fact.confirmed_by or "",
+                "confirmed_at": clock.iso_beijing(fact.confirmed_at) if fact.confirmed_at else "",
+            }
+        )
+        enriched.append(base)
+    return enriched
+
+
 def _new_plan(
     db: Session,
     project_id: str,
@@ -1066,7 +1141,10 @@ def _new_plan(
         created_by=created_by,
     )
     for field in JSON_FIELDS:
-        setattr(row, field, _list(data.get(field)))
+        value = _list(data.get(field))
+        if field == "fact_refs":
+            value = _fact_refs_with_provenance(db, project_id, value)
+        setattr(row, field, value)
     db.add(row)
     db.flush()
     return row
@@ -1295,7 +1373,32 @@ def plan_context_text(
     section("计划图示", "planned_diagrams")
     section("禁止假设", "forbidden_assumptions")
     section("质量口径", "quality_criteria")
-    section("事实引用", "fact_refs", with_id=True)
+    # 事实引用必须带来源口径，用户补充说明不得被当作招标原文。
+    fact_rows = payload.get("fact_refs") or []
+    if fact_rows:
+        lines.append("事实引用：")
+        for row in fact_rows:
+            if not isinstance(row, dict):
+                lines.append(f"- {_text(row)[:300]}")
+                continue
+            ident = _text(row.get("id"))
+            body = " ".join(
+                _text(row.get(key))
+                for key in ("name", "text", "criteria", "key", "value", "label")
+                if _text(row.get(key))
+            )
+            kind = _text(row.get("provenance_kind")) or "tender_extract"
+            if kind == "user_supplied":
+                note = _text(row.get("supplier_note"))
+                body += "（来源：用户补充" + (f"：{note}" if note else "") + "）"
+            else:
+                body += "（来源：招标文件原文）"
+            who = _text(row.get("confirmed_by"))
+            when = _text(row.get("confirmed_at"))
+            if who or when:
+                body += f"（服务端确认：{who or '未知'} / {when or '未知'}）"
+            prefix = f"[ID:{ident}] " if ident else ""
+            lines.append(f"- {prefix}{body[:400]}")
     # 知识引用带原文 ID 与溯源链；正文只能引用这里列出的真实条目。
     knowledge_rows = payload.get("knowledge_refs") or []
     if knowledge_rows:

@@ -90,6 +90,20 @@ class Fact(Base):
     source_file_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     source_page: Mapped[int] = mapped_column(Integer, default=0)
     source_quote: Mapped[str] = mapped_column(Text, default="")
+    # 来源口径：tender_extract=招标文件原文；user_supplied=招标文件确实缺失时由
+    # 编制人补充。user_supplied 不写 source_*，绝不把用户补充伪装成招标原文。
+    # 历史行 NULL 一律按 tender_extract 解释，迁移不回填、不伪造来源。
+    provenance_kind: Mapped[str | None] = mapped_column(
+        String(24),
+        nullable=True,
+        comment="事实来源类型：tender_extract / user_supplied（历史 NULL 视为招标文件原文）",
+    )
+    supplier_note: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default="",
+        comment="编制人补充说明；仅 user_supplied 必填，历史 NULL 视为空说明",
+    )
     # 人工确认治理：只有 confirmed/manual 才由服务端盖章；重解析默认保留原确认，
     # 取值/单位被改写时清空这两个字段并让引用章节退回复核。
     confirmed_by: Mapped[str | None] = mapped_column(

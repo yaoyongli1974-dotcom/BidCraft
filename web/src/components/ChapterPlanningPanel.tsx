@@ -29,7 +29,15 @@ import { formatDate } from '../lib/format'
 import { messageOf } from '../lib/http'
 import { canReviewChapter } from '../lib/permissions'
 import type { ChapterPlan, Project } from '../lib/types'
-import type { ChapterPlanEntry } from '../hooks/useChapterPlans'
+import {
+  batchConfirmPlans,
+  batchGeneratePlans,
+  missingPlanNodeIds,
+  pendingConfirmNodeIds,
+  type ChapterPlanEntry,
+  type PlanBatchOutcome,
+  type PlanBatchProgress,
+} from '../hooks/useChapterPlans'
 
 interface ChapterOption {
   id?: string
@@ -49,9 +57,29 @@ interface ChapterPlanningPanelProps {
   error: string | null
   onRefresh: () => void
   onPlanChange: (nodeId: string, plan: ChapterPlan) => void
+  /** 大纲存在未保存修改时禁止批量操作，避免按旧的章节 ID 生成规划。 */
+  outlineDirty?: boolean
+  /** 批量结束后由页面刷新大纲与项目状态（章节规划本身由 onRefresh 刷新）。 */
+  onBatchComplete?: () => void | Promise<void>
 }
 
-type BusyAction = 'generate' | 'regenerate' | 'save' | 'confirm' | 'history' | null
+type BusyAction =
+  | 'generate'
+  | 'regenerate'
+  | 'save'
+  | 'confirm'
+  | 'history'
+  | 'batch-generate'
+  | 'batch-confirm'
+  | null
+
+interface BatchCopy {
+  start: string
+  done: string
+  partial: string
+  empty: string
+  emptyDetail: string
+}
 
 type EditableField = 'objective' | 'strategy' | 'measures' | 'quality_criteria'
 
@@ -107,6 +135,8 @@ export function ChapterPlanningPanel({
   error,
   onRefresh,
   onPlanChange,
+  outlineDirty = false,
+  onBatchComplete,
 }: ChapterPlanningPanelProps) {
   const toast = useToast()
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -116,6 +146,11 @@ export function ChapterPlanningPanel({
   const [draft, setDraft] = useState<Record<EditableField, string>>(() => draftFromPlan(null))
   const [history, setHistory] = useState<ChapterPlan[] | null>(null)
   const [busy, setBusy] = useState<BusyAction>(null)
+  const [batchProgress, setBatchProgress] = useState<{
+    done: number
+    total: number
+    label: string
+  } | null>(null)
 
   const chapterOptions = chapters.filter((chapter) => Boolean(chapter.id))
   const selectedChapter = chapterOptions.find((chapter) => chapter.id === selectedId)
@@ -124,6 +159,10 @@ export function ChapterPlanningPanel({
   const reviewAllowed = mutable && canReviewChapter(project)
   const confirmed = isConfirmedPlan(plan)
   const gate = chapterPlanGate(mode, plan, selectedChapter?.heading)
+  const missingIds = new Set(missingPlanNodeIds(chapters, entries))
+  const pendingIds = new Set(pendingConfirmNodeIds(chapters, entries))
+  const batchGenerateTargets = chapterOptions.filter((chapter) => chapter.id && missingIds.has(chapter.id))
+  const batchConfirmTargets = chapterOptions.filter((chapter) => chapter.id && pendingIds.has(chapter.id))
 
   useEffect(() => {
     if (!selectedId || !chapterOptions.some((chapter) => chapter.id === selectedId)) {
@@ -230,6 +269,100 @@ export function ChapterPlanningPanel({
       .finally(() => setBusy(null))
   }
 
+  /**
+   * 批量操作复用单章 API：逐章顺序执行、逐章回写、单章失败不中断；
+   * 生成与确认严格分开，生成后绝不自动确认。
+   */
+  const runBatch = async (
+    action: 'batch-generate' | 'batch-confirm',
+    targets: ChapterOption[],
+    copy: BatchCopy,
+    execute: (onProgress: PlanBatchProgress) => Promise<PlanBatchOutcome>,
+  ) => {
+    if (!mutable || outlineDirty || busy) return
+    if (action === 'batch-confirm' && !reviewAllowed) return
+    if (targets.length === 0) {
+      toast.info(copy.empty, copy.emptyDetail)
+      return
+    }
+    setBusy(action)
+    setBatchProgress({ done: 0, total: targets.length, label: '' })
+    try {
+      toast.info(copy.start, `共 ${targets.length} 章，正在依次处理，不会自动确认。`)
+      const outcome = await execute((done, total, nodeId) => {
+        const heading = targets.find((chapter) => chapter.id === nodeId)?.heading || nodeId
+        setBatchProgress({ done, total, label: heading })
+      })
+      const failedLabels = outcome.failed
+        .map(
+          (failure) =>
+            targets.find((chapter) => chapter.id === failure.nodeId)?.heading || failure.nodeId,
+        )
+        .join('、')
+      if (outcome.failed.length === 0) {
+        toast.success(
+          copy.done,
+          `成功 ${outcome.succeeded.length} 章；规划未自动确认，请复核后确认。`,
+        )
+      } else {
+        toast.warning(
+          copy.partial,
+          `成功 ${outcome.succeeded.length} 章，失败 ${outcome.failed.length} 章：${failedLabels}`,
+        )
+      }
+    } finally {
+      setBusy(null)
+      setBatchProgress(null)
+      onRefresh()
+      if (onBatchComplete) {
+        void Promise.resolve(onBatchComplete()).catch((failure) =>
+          toast.error('刷新项目状态失败', messageOf(failure)),
+        )
+      }
+    }
+  }
+
+  const batchGenerate = () =>
+    void runBatch(
+      'batch-generate',
+      batchGenerateTargets,
+      {
+        start: '批量生成缺失规划',
+        done: '批量生成完成',
+        partial: '批量生成部分完成',
+        empty: '没有需要生成的章节规划',
+        emptyDetail: '所有章节都已有规划，或还没有真实章节 ID。',
+      },
+      (onProgress) =>
+        batchGeneratePlans(
+          projectRef,
+          batchGenerateTargets.map((chapter) => chapter.id as string),
+          onPlanChange,
+          onProgress,
+        ),
+    )
+
+  const batchConfirm = () =>
+    void runBatch(
+      'batch-confirm',
+      batchConfirmTargets,
+      {
+        start: '批量确认待确认规划',
+        done: '批量确认完成',
+        partial: '批量确认部分完成',
+        empty: '没有待确认的章节规划',
+        emptyDetail: '只有草稿、已更新或待复核的规划可以批量确认。',
+      },
+      (onProgress) =>
+        batchConfirmPlans(
+          projectRef,
+          batchConfirmTargets.map((chapter) => chapter.id as string),
+          confirmNote,
+          onPlanChange,
+          onProgress,
+        ),
+    )
+
   const validationErrors = planItems(plan?.validation_errors)
 
   return (
@@ -267,6 +400,14 @@ export function ChapterPlanningPanel({
           onChange={(event) => setInstruction(event.target.value)}
           readOnly={!mutable}
         />
+        <input
+          className="input"
+          aria-label="批量确认备注"
+          placeholder="批量确认备注（可选）"
+          value={confirmNote}
+          onChange={(event) => setConfirmNote(event.target.value)}
+          readOnly={!reviewAllowed || outlineDirty}
+        />
         <div className="plan-toolbar-actions">
           <Button
             size="sm"
@@ -278,6 +419,42 @@ export function ChapterPlanningPanel({
             onClick={generate}
           >
             生成规划
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            icon={<Wand2 size={14} />}
+            loading={busy === 'batch-generate'}
+            disabled={!mutable || outlineDirty || Boolean(busy)}
+            title={
+              !mutable
+                ? '只读成员不能生成规划'
+                : outlineDirty
+                  ? '请先保存大纲再批量生成'
+                  : undefined
+            }
+            onClick={batchGenerate}
+          >
+            批量生成缺失规划
+          </Button>
+          <Button
+            size="sm"
+            variant={reviewAllowed ? 'primary' : 'secondary'}
+            icon={<Sparkles size={14} />}
+            loading={busy === 'batch-confirm'}
+            disabled={!reviewAllowed || outlineDirty || Boolean(busy)}
+            title={
+              !mutable
+                ? '只读成员不能确认规划'
+                : !reviewAllowed
+                  ? '仅项目负责人可以批量确认规划'
+                  : outlineDirty
+                    ? '请先保存大纲再批量确认'
+                    : undefined
+            }
+            onClick={batchConfirm}
+          >
+            确认全部待确认
           </Button>
           <Button
             size="sm"
@@ -329,6 +506,15 @@ export function ChapterPlanningPanel({
           </Button>
         </div>
       </div>
+
+      {batchProgress && (
+        <p className="plan-state-line" role="status" aria-live="polite">
+          <span className="subtle">
+            批量进度 {batchProgress.done}/{batchProgress.total}
+            {batchProgress.label ? ` · ${batchProgress.label}` : ''}
+          </span>
+        </p>
+      )}
 
       {error && (
         <div className="inline-gate" role="alert">
@@ -497,6 +683,7 @@ export function ChapterPlanningPanel({
 
       <p className="plan-footnote">
         规划用于约束正文编排；确认后可生成正文，修改规划后需重新确认。
+        批量生成只补齐缺失规划且不会自动确认；批量确认只处理草稿、已更新或待复核的规划。
       </p>
     </section>
   )

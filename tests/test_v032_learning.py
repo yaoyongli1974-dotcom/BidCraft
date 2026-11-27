@@ -352,7 +352,7 @@ def test_generate_document_appends_lessons_as_advisory_not_fact(db):
 
 
 def test_plan_context_accepts_exact_prompt_version_and_lessons(db):
-    assert PROMPT_VERSION == "chapter_plan_v3"
+    assert PROMPT_VERSION == "chapter_plan_v4"
     with session_scope() as sess:
         project = _project(sess, "learning-plan-context")
         node = _node(sess, project.id)

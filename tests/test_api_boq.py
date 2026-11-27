@@ -324,6 +324,50 @@ def test_boq_price_api_and_export(db, tmp_path):
     assert replaced.json()["summary"]["priced"] == 0
 
 
+def test_boq_upload_extracts_prices(db, tmp_path):
+    client = _client()
+    project_id = client.post(
+        "/projects", json={"name": "上传识别报价", "package": "weakcurrent-cabling"}
+    ).json()["id"]
+    path = tmp_path / "priced-upload.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "工程量清单"
+    sheet.append(["序号", "材料名称", "规格型号", "单位", "数量", "单价（元）", "合价（元）"])
+    sheet.append([1, "网络面板", "双口 Cat6A", "个", "10", "12.5", "125"])
+    sheet.append([2, "配线架", "24 口", "个", "20", "", "200"])
+    workbook.save(path)
+
+    uploaded = _upload(client, project_id, path)
+    assert uploaded.status_code == 200, uploaded.text
+    payload = uploaded.json()
+    summary = payload["summary"]
+    assert summary["priced"] == 2
+    assert summary["unpriced"] == 0
+    assert summary["total_amount"] == 325.0
+    assert _row(payload, 2)["price"] == {"unit_price": 12.5, "amount": 125.0}
+    assert _row(payload, 3)["price"] == {"unit_price": 10.0, "amount": 200.0}
+
+    # prices round-trip through GET without recomputation drift
+    fetched = client.get(f"/projects/{project_id}/boq").json()
+    assert fetched["summary"]["priced"] == 2
+    assert fetched["summary"]["unpriced"] == 0
+    assert fetched["summary"]["total_amount"] == 325.0
+    assert _row(fetched, 2)["price"] == {"unit_price": 12.5, "amount": 125.0}
+
+    # extracted prices stay user-overridable through the existing price endpoint
+    overridden = client.post(
+        f"/projects/{project_id}/boq/price",
+        json={"boq_row": 3, "unit_price": 8},
+    )
+    assert overridden.status_code == 200, overridden.text
+    payload = overridden.json()
+    assert _row(payload, 3)["price"] == {"unit_price": 8.0, "amount": 160.0}
+    assert payload["summary"]["priced"] == 2
+    assert payload["summary"]["unpriced"] == 0
+    assert payload["summary"]["total_amount"] == 285.0
+
+
 def test_boq_price_without_quantity_counts_as_missing(db, tmp_path):
     client = _client()
     project_id = client.post(

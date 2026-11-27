@@ -7,7 +7,7 @@ import {
   normalizeEvaluationSummaryItem,
   updateQualityFinding,
 } from './evaluation'
-import { generateChapterPlan, updateChapterPlan } from './generation'
+import { generateChapterPlan, getChapterPlan, updateChapterPlan } from './generation'
 import { updateFact } from './ledger'
 import { getProjectLessons, lessonQuery } from './learning'
 import { reviewEnterpriseKnowledgeAsset, resolveEnterpriseKnowledgeAssetDuplicate } from './enterprise'
@@ -47,8 +47,16 @@ const BACKEND_KEYS = {
   similarityHitReview: ['status', 'note'],
   kbDocIngest: ['source', 'content', 'kind', 'tags', 'valid_to'],
   qualityFindingUpdate: ['status', 'note'],
-  // FactUpdate：确认人 / 确认时间由服务端盖章，绝不下发。
-  factUpdate: ['value', 'status', 'source_file_id', 'source_quote', 'source_page'],
+  // FactUpdate：确认人 / 确认时间由服务端盖章，绝不下发；来源类型与说明允许客户端提交。
+  factUpdate: [
+    'value',
+    'status',
+    'provenance_kind',
+    'supplier_note',
+    'source_file_id',
+    'source_quote',
+    'source_page',
+  ],
   lessonQuery: ['node_id', 'limit'],
   commercialReview: ['action', 'note', 'require_complete'],
   chapterPlanGenerate: ['user_instruction', 'package_id', 'regenerate', 'note'],
@@ -221,6 +229,20 @@ describe('出站契约：UI payload 对齐后端枚举与字段', () => {
       'commercial review (default)',
     )
     expect(Object.prototype.hasOwnProperty.call(withoutComplete, 'require_complete')).toBe(false)
+  })
+
+  it('章节规划读取原样保留后端 review / review_strict 模式', async () => {
+    const fetchMock = mockFetch({ plan: null, mode: 'review_strict' })
+    const strict = await getChapterPlan('p1', 'n1')
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('/projects/p1/chapters/n1/plan')
+    expect(init?.method).toBeUndefined()
+    expect(strict.mode).toBe('review_strict')
+
+    mockFetch({ plan: null, mode: 'review' })
+    expect((await getChapterPlan('p1', 'n1')).mode).toBe('review')
+    mockFetch({ plan: null, mode: 'auto' })
+    expect((await getChapterPlan('p1', 'n1')).mode).toBe('auto')
   })
 
   it('章节规划生成只提交后端接受的输入字段', async () => {
@@ -427,6 +449,7 @@ describe('出站契约：UI payload 对齐后端枚举与字段', () => {
     expect(body).toEqual({
       value: '新值',
       status: 'manual',
+      provenance_kind: 'tender_extract',
       source_file_id: 'src-1',
       source_quote: '招标文件原文',
       source_page: 3,
@@ -440,7 +463,7 @@ describe('出站契约：UI payload 对齐后端枚举与字段', () => {
       BACKEND_KEYS.factUpdate,
       'fact update (minimal)',
     )
-    expect(minimal).toEqual({ value: '另一值', status: 'manual' })
+    expect(minimal).toEqual({ value: '另一值', status: 'manual', provenance_kind: 'tender_extract' })
   })
 
   it('建议经验查询只带 node_id / limit，且只回读服务端状态', async () => {

@@ -50,14 +50,15 @@ function remainingText(expiresAt: string | null | undefined, now: number): strin
  * 修订恢复需要填写原因；当前章节有未保存修改时禁止恢复，避免静默覆盖。
  */
 export function ChapterCollab({
-  ref,
+  projectRef,
   nodeId,
   heading,
   canWrite,
   dirty,
   onRestored,
 }: {
-  ref: string
+  /** 项目 ref；不能命名为 `ref`，React 会把字符串 ref 拦截并报错。 */
+  projectRef: string
   nodeId: string
   heading: string
   canWrite: boolean
@@ -66,8 +67,8 @@ export function ChapterCollab({
 }) {
   const { user } = useAuth()
   const toast = useToast()
-  const lockQuery = useQuery(`chapter-lock:${ref}:${nodeId}`, () =>
-    getChapterLock(ref, nodeId),
+  const lockQuery = useQuery(`chapter-lock:${projectRef}:${nodeId}`, () =>
+    getChapterLock(projectRef, nodeId),
   )
   const [busy, setBusy] = useState<'acquire' | 'renew' | 'release' | null>(null)
   const [lockError, setLockError] = useState<string | null>(null)
@@ -82,15 +83,15 @@ export function ChapterCollab({
   const lock = lockQuery.data || null
   const isMine = Boolean(user?.id && lock?.user_id && lock.user_id === user.id)
   const revisionsQuery = useQuery(
-    `revisions:${ref}:${nodeId}`,
-    () => listChapterRevisions(ref, nodeId),
+    `revisions:${projectRef}:${nodeId}`,
+    () => listChapterRevisions(projectRef, nodeId),
     { enabled: historyOpen },
   )
   const diffFrom = activeRevision ? Math.max(0, activeRevision.revision - 1) : 0
   const diffTo = activeRevision?.revision ?? 0
   const diffQuery = useQuery(
-    `revision-diff:${ref}:${nodeId}:${diffFrom}:${diffTo}`,
-    () => getChapterDiff(ref, nodeId, diffFrom, diffTo),
+    `revision-diff:${projectRef}:${nodeId}:${diffFrom}:${diffTo}`,
+    () => getChapterDiff(projectRef, nodeId, diffFrom, diffTo),
     { enabled: historyOpen && Boolean(activeRevision) },
   )
 
@@ -125,7 +126,7 @@ export function ChapterCollab({
     setBusy('acquire')
     setLockError(null)
     try {
-      const next = await acquireChapterLock(ref, nodeId)
+      const next = await acquireChapterLock(projectRef, nodeId)
       lockQuery.setData(next)
       toast.success('已获取编辑锁', '其他成员会看到你正在编辑本章。')
     } catch (error) {
@@ -142,7 +143,7 @@ export function ChapterCollab({
     setBusy('renew')
     setLockError(null)
     try {
-      const next = await renewChapterLock(ref, nodeId, lock.lock_token)
+      const next = await renewChapterLock(projectRef, nodeId, lock.lock_token)
       lockQuery.setData(next)
       toast.success('编辑锁已续期', remainingText(next.expires_at, Date.now()))
     } catch (error) {
@@ -159,7 +160,7 @@ export function ChapterCollab({
     setBusy('release')
     setLockError(null)
     try {
-      await releaseChapterLock(ref, nodeId)
+      await releaseChapterLock(projectRef, nodeId)
       lockQuery.setData(null)
       toast.success('已释放编辑锁', '其他成员现在可以编辑本章。')
     } catch (error) {
@@ -181,7 +182,7 @@ export function ChapterCollab({
     setRestoring(true)
     setActionError(null)
     try {
-      await restoreChapterRevision(ref, nodeId, {
+      await restoreChapterRevision(projectRef, nodeId, {
         revision: restoreTarget.revision,
         note: restoreNote.trim(),
       })
