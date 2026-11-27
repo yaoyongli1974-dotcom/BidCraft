@@ -153,7 +153,18 @@
 - 修复：`documents/document_ir.py` 与 `export/docx.py` 在“最小正文标题映射到 H2”的相对偏移基础上，再按相邻标题逐级钳制：首个正文标题最低 H2，后续标题最多比上一个标题深一级，真正缺失的中间层级会被补齐；合法逐级层级（H2→H3→H4）保持原级别。
 - 新增 DOCX validator / classic export 回归用例，覆盖纯 `###/####` 正文和 `#/###/####` 混用正文；测试夹具补足真实中间层级以保留既有深层标题断言，未删除或放宽断言。
 
-## 12. 验证结果
+## 12. 模型配图因证据类措辞返回空内容
+
+用户反馈生成的配图都是灰色占位图。诊断：已配置 chat 模型可以生成简单 SVG，但原始规划图名和招标上下文含“扫描件 / 公章 / 签字 / 签署日期”等证据类措辞，模型返回空内容；`generate_image` 吞掉 SVG 失败原因，只显示“未配置图片模型”，误导为模型未启用。
+
+修复：
+
+- `bidcraft/images.py` 新增 `_svg_safe_prompt()`：把证据类措辞改写为“示意标注”，系统/用户提示词都只声明“技术示意图，不展示任何真实性凭证材料”，不再复述触发词。
+- `generate_svg_figure()`：首次调用仍携带项目上下文；若模型返回空内容，自动用只含章节名/图名的简化提示词重试一次，避免长招标正文触发内容过滤。
+- `generate_image()`：保留 SVG 失败原因，并在最终占位图 `last_error` 中同时写明“SVG 生成失败：…”与位图模型状态，便于前端/审计定位。
+- 新增 `tests/test_v0332_image_svg_placeholder.py`：提示词改写与空返回重试用例；仍以真实 SVG 解析成功为准，不伪造图片成功。
+
+## 13. 验证结果
 
 - ruff：`ruff check bidcraft tests scripts` All checks passed。
 - 后端定向：事实治理 + Alembic + api_package + BOQ → `70 passed`；规划/审批/Worker/Phase1/Phase4 回归 → `91 passed`；来源口径留痕新增/相关用例 → `49 passed`；截图三项回归（编辑锁/稳定值刷新/确认前判废）→ `30 passed`。
@@ -162,7 +173,8 @@
 - 材料/评分台账定向：`.venv/bin/python -m pytest -o addopts= -q tests/test_v0332_material_noise.py tests/test_v0332_scoring_noise.py tests/test_boq.py tests/test_extract.py tests/test_calibrate.py tests/test_calibrate_baseline.py` → `75 passed`；重复台账行补充修复后 `tests/test_v0332_material_noise.py tests/test_boq.py tests/test_api_boq.py` → `39 passed`。
 - Web：typecheck / lint / `npm test -- --run` → 66 files / 482 tests 全通过；`npm run build` 通过（Vite 8，1720 modules）。ErrorBoundary 的 “渲染炸了” 是预期测试输出。
 - SVG/标题层级定向：`tests/test_images.py tests/test_v0332_image_svg_placeholder.py tests/test_docx_validator.py tests/test_document_ir.py tests/test_docx_renderer.py tests/test_batch4_export_engine.py` → `59 passed`。两处旧 503 断言按占位图新语义精确更新（占位图真实落盘且可下载），未删除或弱化断言。
-- 后端全量：`.venv/bin/python -m pytest -o addopts= -q` → `2415 passed, 1008 skipped, 1 warning in 942.50s`，零失败。
+- SVG 提示词安全化定向：`tests/test_v0332_image_svg_placeholder.py tests/test_images.py` → `31 passed, 1 warning`。
+- 后端全量：`.venv/bin/python -m pytest -o addopts= -q` → `2417 passed, 1008 skipped, 1 warning in 1235.12s`，零失败。
 
 ## 13. 已知边界
 

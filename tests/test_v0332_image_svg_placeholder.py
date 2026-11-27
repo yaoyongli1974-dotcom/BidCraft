@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from bidcraft import images
@@ -52,3 +54,47 @@ def test_generate_image_creates_placeholder_when_no_model_configured(db):
         from pathlib import Path
 
         assert Path(asset.file_path).read_bytes().startswith(images.PNG_SIGNATURE)
+
+
+def test_svg_safe_prompt_removes_evidence_like_requests():
+    prompt = images._svg_safe_prompt(
+        "请生成系统流程图，须显示单位公章、签字、签署日期和扫描件。"
+    )
+    assert "公章" not in prompt
+    assert "签字" not in prompt
+    assert "扫描件" not in prompt
+    assert "示意图" in prompt
+
+
+def test_svg_generation_retries_with_simple_schematic_prompt(db, monkeypatch):
+    with session_scope() as session:
+        project = Project(name="SVG 重试测试", status="intake")
+        session.add(project)
+        session.flush()
+        project_id = project.id
+
+    prompts: list[str] = []
+
+    class FakeClient:
+        def complete(self, messages, **kwargs):
+            prompts.append(messages[-1]["content"])
+            if len(prompts) == 1:
+                return ""
+            return '<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10"/></svg>'
+
+    endpoint = SimpleNamespace(model_name="fake-chat", model_configured=True)
+    monkeypatch.setattr(images, "_chat_svg_client", lambda db: (FakeClient(), endpoint))
+    monkeypatch.setattr(
+        images,
+        "_section_context",
+        lambda db, project_id, node_id, heading: ("章节", "公章 签字 扫描件"),
+    )
+
+    with session_scope() as session:
+        project = session.get(Project, project_id)
+        asset = images.generate_svg_figure(session, project, label="系统流程图")
+
+    assert asset.provider == "llm-svg"
+    assert len(prompts) == 2
+    assert "公章" not in prompts[1]
+    assert "示意图" in prompts[1]

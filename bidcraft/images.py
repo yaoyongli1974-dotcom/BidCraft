@@ -856,7 +856,20 @@ SVG_SYSTEM_PROMPT = (
     "你是工程技术标书配图助手。只输出一个安全、自包含的 SVG 片段，不要输出 Markdown、"
     "解释或代码块标记。viewBox 使用 0 0 800 450，使用浅色背景、清晰线条和中文标签；"
     "禁止 script、外部图片、外部链接、事件属性、foreignObject 和 data URI。"
+    "这是技术示意图，不展示任何真实性凭证材料。"
 )
+_EVIDENCE_REQUEST_RE = re.compile(
+    r"扫描件|截图|实拍|照片|公章|盖章|签字|签名|签署日期|证照|营业执照|资质证书|二维码|手写",
+    re.IGNORECASE,
+)
+
+
+def _svg_safe_prompt(prompt: str) -> str:
+    """把可能触发内容过滤的“证据类”请求改写为技术示意图口径。"""
+
+    cleaned = _EVIDENCE_REQUEST_RE.sub("示意标注", str(prompt or ""))
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+    return f"{cleaned[:2600]}\n这是工程技术示意图，不展示任何真实性凭证材料。"
 
 
 def _chat_svg_client(db):
@@ -898,17 +911,26 @@ def generate_svg_figure(
             user_prompt=prompt,
         )
     )
-    raw = client.complete(
-        [
-            {"role": "system", "content": SVG_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": f"{full_prompt}\n请输出可直接渲染的 SVG 片段：",
-            },
-        ],
-        max_tokens=4000,
-        temperature=0,
-    )
+    safe_prompt = _svg_safe_prompt(full_prompt)
+    messages = [
+        {"role": "system", "content": SVG_SYSTEM_PROMPT},
+        {"role": "user", "content": f"{safe_prompt}\n请输出可直接渲染的 SVG 片段："},
+    ]
+    raw = client.complete(messages, max_tokens=4000, temperature=0)
+    if not (raw or "").strip():
+        # 有些模型会因招标正文里的公章/签字等措辞触发内容过滤而返回空内容；
+        # 用只含图名和章节名的简化提示词重试一次，不重复携带长招标上下文。
+        simple = _svg_safe_prompt(
+            f"请生成「{heading_text or heading or label}」章节的技术示意图，图名：{label}。"
+        )
+        raw = client.complete(
+            [
+                {"role": "system", "content": SVG_SYSTEM_PROMPT},
+                {"role": "user", "content": f"{simple}\n请只输出 SVG 片段："},
+            ],
+            max_tokens=4000,
+            temperature=0,
+        )
     svg = sanitize_svg(raw)
     filename = f"{_slug(label) or 'figure'}-{secrets.token_hex(3)}.svg"
     path = image_dir(project.id) / filename
@@ -977,6 +999,7 @@ def generate_image(
     size: str = "",
 ) -> ImageAsset:
     """Prefer an LLM-produced SVG; fall back to the configured bitmap model."""
+    svg_error = ""
     try:
         return generate_svg_figure(
             db,
@@ -988,18 +1011,19 @@ def generate_image(
             prompt=prompt,
             style=style,
         )
-    except (ModelUnavailable, ImageError, ValueError, OSError):
-        pass
+    except (ModelUnavailable, ImageError, ValueError, OSError) as exc:
+        svg_error = str(exc)[:600]
 
     try:
         config = _image_config(db)
     except ImageConfigError as exc:
+        reason = f"SVG 生成失败：{svg_error}；位图模型未配置：{exc}" if svg_error else str(exc)
         return _placeholder_asset(
             db,
             project,
             label=(label or "").strip() or "配图",
             node_id=node_id,
-            reason=str(exc),
+            reason=reason,
         )
     label = (label or "").strip() or "配图"
     package_title = (package_title or "").strip() or _project_package_title(project)
