@@ -21,11 +21,14 @@ import struct
 import zlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from io import BytesIO
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
+from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape
 
 import httpx
+from PIL import Image, ImageDraw, ImageFont
 from sqlalchemy import select
 
 from . import model_config, netguard
@@ -433,6 +436,153 @@ def placeholder_png_path(project_id: str, label: str) -> Path:
     return path
 
 
+def _svg_color(value: str | None, default=(15, 23, 42)) -> tuple[int, int, int] | None:
+    text = (value or "").strip()
+    if not text or text in {"none", "transparent"}:
+        return None
+    if text.startswith("#"):
+        raw = text[1:]
+        if len(raw) == 3:
+            raw = "".join(ch * 2 for ch in raw)
+        if len(raw) >= 6:
+            try:
+                return tuple(int(raw[i : i + 2], 16) for i in (0, 2, 4))
+            except ValueError:
+                return default
+    named = {"black": (15, 23, 42), "white": (255, 255, 255), "red": (220, 38, 38),
+             "blue": (37, 99, 235), "green": (22, 163, 74)}
+    return named.get(text.lower(), default)
+
+
+def _svg_font(size: float):
+    paths = (
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    )
+    for path in paths:
+        if Path(path).is_file():
+            try:
+                return ImageFont.truetype(path, max(9, int(size)))
+            except OSError:
+                continue
+    return ImageFont.load_default()
+
+
+def _svg_dashed_line(draw, start, end, fill, width, dash=6, gap=4):
+    x1, y1 = start
+    x2, y2 = end
+    length = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+    if length == 0:
+        return
+    step = dash + gap
+    position = 0.0
+    while position < length:
+        stop = min(position + dash, length)
+        a = (x1 + (x2 - x1) * position / length, y1 + (y2 - y1) * position / length)
+        b = (x1 + (x2 - x1) * stop / length, y1 + (y2 - y1) * stop / length)
+        draw.line((a, b), fill=fill, width=width)
+        position += step
+
+
+def svg_to_png_bytes(svg: str) -> bytes:
+    """Rasterise a sanitised, self-contained SVG for DOCX/PDF embedding.
+
+    Only a safe drawing subset is supported (rect/line/circle/ellipse/polygon/
+    text), which covers locally generated schematics and keeps the operation
+    dependency-light. Unsupported elements are ignored rather than fetched.
+    """
+
+    root = ET.fromstring(svg)
+    view_box = [float(part) for part in re.split(r"[\s,]+", root.get("viewBox", "").strip()) if part]
+    width = int(float(root.get("width") or (view_box[2] if len(view_box) >= 4 else 800)))
+    height = int(float(root.get("height") or (view_box[3] if len(view_box) >= 4 else 450)))
+    width = max(1, min(width, 4000))
+    height = max(1, min(height, 4000))
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+
+    def attr(element, name, default="0"):
+        return element.get(name, default)
+
+    def num(element, name, default=0.0):
+        try:
+            return float(attr(element, name, str(default)))
+        except ValueError:
+            return float(default)
+
+    for element in root.iter():
+        tag = element.tag.split("}")[-1].lower()
+        if tag == "rect":
+            x, y = num(element, "x"), num(element, "y")
+            w, h = num(element, "width"), num(element, "height")
+            if w <= 0 or h <= 0:
+                continue
+            fill = _svg_color(element.get("fill"))
+            outline = _svg_color(element.get("stroke"))
+            try:
+                radius = max(0, int(num(element, "rx")))
+            except ValueError:
+                radius = 0
+            box = (x, y, x + w, y + h)
+            if radius:
+                draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline,
+                                       width=max(1, int(num(element, "stroke-width", 1))))
+            else:
+                draw.rectangle(box, fill=fill, outline=outline,
+                               width=max(1, int(num(element, "stroke-width", 1))))
+        elif tag == "line":
+            colour = _svg_color(element.get("stroke"))
+            if colour is None:
+                continue
+            start = (num(element, "x1"), num(element, "y1"))
+            end = (num(element, "x2"), num(element, "y2"))
+            stroke = max(1, int(num(element, "stroke-width", 1)))
+            if "dasharray" in element.get("stroke-dasharray", ""):
+                _svg_dashed_line(draw, start, end, colour, stroke)
+            else:
+                draw.line((start, end), fill=colour, width=stroke)
+        elif tag in {"circle", "ellipse"}:
+            if tag == "circle":
+                cx, cy, r = num(element, "cx"), num(element, "cy"), num(element, "r")
+                box = (cx - r, cy - r, cx + r, cy + r)
+            else:
+                box = (num(element, "cx"), num(element, "cy"),
+                       num(element, "cx") + num(element, "rx"),
+                       num(element, "cy") + num(element, "ry"))
+            draw.ellipse(box, fill=_svg_color(element.get("fill")),
+                         outline=_svg_color(element.get("stroke")),
+                         width=max(1, int(num(element, "stroke-width", 1))))
+        elif tag == "polygon":
+            points = []
+            for pair in re.split(r"\s+", element.get("points", "").strip()):
+                if "," in pair:
+                    px, py = pair.split(",", 1)
+                    points.append((float(px), float(py)))
+            if len(points) >= 3:
+                draw.polygon(points, fill=_svg_color(element.get("fill")),
+                             outline=_svg_color(element.get("stroke")))
+        elif tag == "text":
+            value = "".join(element.itertext()).strip()
+            if not value:
+                continue
+            font = _svg_font(num(element, "font-size", 16))
+            colour = _svg_color(element.get("fill")) or (15, 23, 42)
+            x, y = num(element, "x"), num(element, "y")
+            anchor = element.get("text-anchor", "start")
+            box = draw.textbbox((0, 0), value, font=font)
+            text_width = box[2] - box[0]
+            if anchor == "middle":
+                x -= text_width / 2
+            elif anchor == "end":
+                x -= text_width
+            draw.text((x, y - box[3]), value, fill=colour, font=font)
+
+    buffer = BytesIO()
+    image.save(buffer, format="PNG", optimize=True)
+    return buffer.getvalue()
+
+
 def url_resolver(project_id: str):
     """DOCX resolver for markdown image URLs created by the API/CLI."""
 
@@ -443,13 +593,18 @@ def url_resolver(project_id: str):
         if not match:
             return None
         filename = match.group(1)
-        if Path(filename).suffix.lower() == ".svg":
-            # DOCX/PDF need a bitmap; an SVG is deliberately exported as a
-            # visible placeholder rather than pretending it was rasterised.
-            return placeholder_png_path(project_id, Path(filename).stem)
         candidate = (root / filename).resolve()
         if not candidate.is_file() or root not in candidate.parents:
             return None
+        if candidate.suffix.lower() == ".svg":
+            # DOCX/PDF cannot embed SVG directly; rasterise the real figure
+            # instead of substituting a grey placeholder.
+            cache = candidate.with_suffix(".docx.png")
+            try:
+                cache.write_bytes(svg_to_png_bytes(candidate.read_text(encoding="utf-8")))
+                return cache
+            except (ImageError, OSError, ET.ParseError, ValueError):
+                return placeholder_png_path(project_id, candidate.stem)
         return candidate
 
     return resolve
@@ -965,6 +1120,50 @@ def _svg_safe_prompt(prompt: str) -> str:
     return f"{cleaned[:2600]}\n这是工程技术示意图，只表达抽象结构、节点和流程。"
 
 
+_SVG_NODE_SETS = {
+    "progress": ("启动", "计划", "实施", "联调", "验收"),
+    "architecture": ("感知层", "网络层", "平台层", "应用层"),
+    "topology": ("接入层", "汇聚层", "核心层", "业务终端"),
+    "default": ("需求确认", "方案设计", "设备部署", "系统联调", "验收交付"),
+}
+
+
+def _svg_prompt_nodes(heading: str = "", label: str = "") -> list[str]:
+    """Choose abstract engineering nodes without echoing raw tender text."""
+
+    text = f"{heading} {label}"
+    if any(token in text for token in ("进度", "计划", "流程", "横道", "网络图")):
+        return list(_SVG_NODE_SETS["progress"])
+    if any(token in text for token in ("架构", "层次", "分层")):
+        return list(_SVG_NODE_SETS["architecture"])
+    if any(token in text for token in ("拓扑", "网络", "传输", "点位", "布线")):
+        return list(_SVG_NODE_SETS["topology"])
+    return list(_SVG_NODE_SETS["default"])
+
+
+def _svg_model_prompt(
+    label: str, heading: str = "", context: str = "", user_prompt: str = ""
+) -> str:
+    """Build a short, structured model prompt that does not echo tender evidence text."""
+
+    safe_heading = _EVIDENCE_REQUEST_RE.sub(" ", str(heading or "技术")).strip()[:20] or "技术"
+    nodes = "、".join(_svg_prompt_nodes(heading, label))
+    return (
+        f"请绘制工程{safe_heading}示意图。节点：{nodes}。"
+        "用方框和箭头连接，中文标签，画面简洁，只输出 SVG。"
+    )
+
+
+def _svg_structure_prompt(heading: str = "", label: str = "") -> str:
+    """Alternative phrasing for a second retry when the model returns empty."""
+
+    nodes = "、".join(_svg_prompt_nodes(heading, label))
+    return (
+        f"请绘制工程结构示意图。节点：{nodes}。"
+        "用横向流程，五个方框，箭头连接，中文标签。"
+    )
+
+
 def _chat_svg_client(db):
     endpoint = model_config.resolve_chat_endpoint(db)
     if endpoint is None or not getattr(endpoint, "model_configured", False):
@@ -1004,23 +1203,30 @@ def generate_svg_figure(
             user_prompt=prompt,
         )
     )
-    safe_prompt = _svg_safe_prompt(full_prompt)
+    model_prompt = _svg_model_prompt(label, heading_text or heading, context, prompt)
     fallback_note = ""
     messages = [
         {"role": "system", "content": SVG_SYSTEM_PROMPT},
-        {"role": "user", "content": f"{safe_prompt}\n请输出可直接渲染的 SVG 片段："},
+        {"role": "user", "content": model_prompt},
     ]
     raw = client.complete(messages, max_tokens=4000, temperature=0)
     if not (raw or "").strip():
-        # 有些模型会因招标正文里的公章/签字等措辞触发内容过滤而返回空内容；
-        # 用只含图名和章节名的简化提示词重试一次，不重复携带长招标上下文。
-        simple = _svg_safe_prompt(
-            f"请生成「{heading_text or heading or label}」章节的技术示意图，图名：{label}。"
-        )
+        # 首次调用仍可能因残留上下文被过滤；重试只保留章节名与图名。
+        retry_prompt = _svg_model_prompt(label, heading_text or heading)
         raw = client.complete(
             [
                 {"role": "system", "content": SVG_SYSTEM_PROMPT},
-                {"role": "user", "content": f"{simple}\n请只输出 SVG 片段："},
+                {"role": "user", "content": retry_prompt},
+            ],
+            max_tokens=4000,
+            temperature=0,
+        )
+    if not (raw or "").strip():
+        # 第三次使用更短的横向流程描述；不同模型对“示意图/结构图”措辞敏感度不同。
+        raw = client.complete(
+            [
+                {"role": "system", "content": SVG_SYSTEM_PROMPT},
+                {"role": "user", "content": _svg_structure_prompt(heading_text or heading, label)},
             ],
             max_tokens=4000,
             temperature=0,
@@ -1056,7 +1262,11 @@ def generate_svg_figure(
             "source": source,
             "kind": "svg",
             "document_export": "placeholder",
-            "prompts": {"system": SVG_SYSTEM_PROMPT, "user": full_prompt},
+            "prompts": {
+                "system": SVG_SYSTEM_PROMPT,
+                "user": model_prompt,
+                "source_context": full_prompt,
+            },
         },
     )
     db.add(asset)

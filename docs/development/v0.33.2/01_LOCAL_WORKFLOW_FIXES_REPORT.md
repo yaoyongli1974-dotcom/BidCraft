@@ -160,8 +160,9 @@
 修复：
 
 - `bidcraft/images.py` 新增 `_svg_safe_prompt()`：把“证件 / 票据 / 凭证 / 真实性 / 加盖 / 公章 / 签字 / 营业执照 / 资质证书”等全部证据类措辞改写为“示意标注”，系统/用户提示词不再复述触发词。
+- 后续复放确认：即使清洗了证据词，直接复述招标图名/上下文仍会被服务端内容过滤返回空内容。因此新增 `_svg_model_prompt()`，不再把招标原文送进模型，而是按章节类型给出抽象工程节点（如“需求确认、方案设计、设备部署、系统联调、验收交付”），明确要求用方框和箭头连接、只输出 SVG。
 - `SVG_SYSTEM_PROMPT` 与 safety tail 改为“只绘制抽象工程结构、节点和流程”，删除“真实性凭证材料”等可能被内容过滤误判的措辞。
-- `generate_svg_figure()`：首次调用仍携带项目上下文；若模型返回空内容，自动用只含章节名/图名的简化提示词重试一次。若重试仍为空或返回无效 SVG，则调用 `local_schematic_svg()` 生成真实本地 SVG 工程示意图，并标记 `provider=local-schematic`，不再退化成灰色位图占位图。
+- `generate_svg_figure()` 最多三次调用：结构化节点提示词 → 仅章节/图名的简化提示词 → “工程结构示意图 + 横向流程”备选措辞；三次都为空或无效时才调用 `local_schematic_svg()` 生成差异化本地 SVG，并标记 `provider=local-schematic`，不再退化成灰色位图占位图。
 - `local_schematic_svg()` 按“图名 + 章节 + 章节上下文”选择 4 种布局与 4 套配色，并提取真实关键词作为节点文字；同一项目内不同图会生成不同布局、配色和标签，避免所有图看起来完全相同。
 - `generate_image()`：保留 SVG 失败原因，并在最终占位图 `last_error` 中同时写明“SVG 生成失败：…”与位图模型状态，便于前端/审计定位。
 - 新增 `tests/test_v0332_image_svg_placeholder.py`：提示词改写、系统提示词无触发词、空返回重试与本地 SVG 兜底用例；交付物是真实可渲染 SVG，不伪造图片成功。
@@ -176,7 +177,15 @@
 - 全书一键流转：`DraftTab` 顶部新增“全书一键提交复核并通过”（负责人）与“全书一键提交复核”（普通编辑）按钮；按章节顺序调用既有 `getChapter`/`reviewChapter`，负责人对草稿执行 submit+confirm、对待复核只执行 confirm，普通编辑只对草稿执行 submit；跳过已确认/锁定章节，当前章有未保存修改时禁用，避免丢失编辑内容。
 - 新增 `web/src/pages/tabs/DraftTab.oneClickReview.test.tsx`：覆盖管理员干净正文 submit→confirm、管理员脏正文先保存再复核、普通编辑一键保存并提交且不执行 confirm、负责人全书 submit+confirm、普通编辑全书仅 submit 五条路径。
 
-## 15. 验证结果
+## 15. DOCX 导出中 SVG 的真实栅格化
+
+- 用户反馈导出 DOCX 后图片仍是灰色空白。定位：SVG 配图已真实落盘，但 `images.url_resolver()` 对 `.svg` 直接返回 `placeholder_png_path()`，DOCX/PDF 路径嵌入的是 64×64 灰色 PNG，而不是配图内容。
+- `bidcraft/images.py` 新增 `svg_to_png_bytes()`：使用 Pillow 对已通过安全校验的 SVG 子集（rect/line/circle/ellipse/polygon/text）做本地栅格化，输出 800×450 PNG；中文优先使用 Noto CJK 字体，缺失时回退默认字体，不访问外部资源。
+- `url_resolver()` 遇到 `.svg` 时生成同目录 `<stem>.docx.png` 缓存并返回真实 PNG；栅格化失败才退回灰色占位图。
+- `pyproject.toml` / `uv.lock` 显式声明 `Pillow>=11`，因为 `images.py` 现在直接导入 Pillow，不再只依赖 API extra 的传递依赖。
+- 新增测试：SVG 栅格化为 800×450 真实 PNG、DOCX resolver 返回栅格化 PNG 而非灰色占位图。
+
+## 16. 验证结果
 
 - ruff：`ruff check bidcraft tests scripts` All checks passed。
 - 后端定向：事实治理 + Alembic + api_package + BOQ → `70 passed`；规划/审批/Worker/Phase1/Phase4 回归 → `91 passed`；来源口径留痕新增/相关用例 → `49 passed`；截图三项回归（编辑锁/稳定值刷新/确认前判废）→ `30 passed`。
@@ -186,18 +195,19 @@
 - Web：typecheck / lint / `npm test -- --run` → 67 files / 487 tests 全通过；`npm run build` 通过（Vite 8，1720 modules）。ErrorBoundary 的 “渲染炸了” 是预期测试输出。
 - 一键复核定向：`npx vitest run src/pages/tabs/DraftTab.oneClickReview.test.tsx` → 1 file / 5 tests passed。
 - SVG/标题层级定向：`tests/test_images.py tests/test_v0332_image_svg_placeholder.py tests/test_docx_validator.py tests/test_document_ir.py tests/test_docx_renderer.py tests/test_batch4_export_engine.py` → `59 passed`。两处旧 503 断言按占位图新语义精确更新（占位图真实落盘且可下载），未删除或弱化断言。
-- SVG 提示词安全化与本地 SVG 兜底定向：`tests/test_v0332_image_svg_placeholder.py tests/test_images.py` → `35 passed, 1 warning`。
+- SVG 提示词安全化、结构化节点提示词、三次重试、本地 SVG 兜底与 DOCX 栅格化定向：`tests/test_v0332_image_svg_placeholder.py tests/test_images.py` → `40 passed, 1 warning`。
 - 本地 SVG 多样性验证：4 个不同图名/章节/上下文生成的 SVG SHA256 与 `data-layout` 均不同（L3/L1/L3/L0），证明不再所有图共用同一张模板图。已生成的历史图片需要重新生成才能应用新布局。
-- 本机真实模型复放：使用本地隔离环境的已配置 chat 模型直接调用 `generate_svg_figure(label='系统拓扑图', heading='技术方案', prompt='加盖投标人公章及签字，显示营业执照和资质证书')` → `SVG_OK local-schematic 系统拓扑图-5a9e37.svg 1243`，`last_error='模型未返回有效内容，已使用本地工程示意图'`；交付文件是真实 SVG 而非灰色 PNG。
-- 后端全量：`.venv/bin/python -m pytest -o addopts= -q` → `2421 passed, 1008 skipped, 1 warning in 1012.25s`，零失败。
+- 本机真实模型复放（结构化提示词前）：`generate_svg_figure(label='系统拓扑图', heading='技术方案', prompt='加盖投标人公章及签字，显示营业执照和资质证书')` → `SVG_OK local-schematic 系统拓扑图-5a9e37.svg 1243`，`last_error='模型未返回有效内容，已使用本地工程示意图'`。
+- 本机真实模型复放（结构化提示词后）：`generate_svg_figure(label='前端设备选型配置表及制造商盖章的产品规格书首页扫描件', heading='技术方案', prompt='加盖公章，页面含截图、签字、资质证书')` → `SVG_OK llm-svg 前端设备选型配置表及制造商盖章的产品规格书首页扫描件-3db134.svg 2805`，`last_error=''`，证明模型真实返回了有效 SVG。
+- 后端全量：`.venv/bin/python -m pytest -o addopts= -q` → `2426 passed, 1008 skipped, 1 warning in 1027.59s`，零失败。
 
-## 16. 已知边界
+## 17. 已知边界
 
 - 价格识别仅支持明确别名（精确/前缀匹配）；`含税单价` 等复合表头仍按未识别处理，避免误判。
 - 金额反推单价按 4 位小数舍入；总价仍由数量×单价重算，不直接采用工作簿合价。
 - 用户补充说明是人工留痕，不是招标文件证据；不会进入原文引文口径。
 - 未替换用户自建的 127.0.0.1:8000 服务；浏览器端最终人工确认请在该服务更新代码/重启后进行。
 
-## 17. 回滚
+## 18. 回滚
 
 逐项 revert：React 两个组件两个测试；批量规划相关前端文件与测试；BOQ 五个文件；事实来源类型六个后端/迁移文件与四个前端文件。迁移 0016 只需 downgrade 到 0015，删除两列，不触碰历史事实值。
