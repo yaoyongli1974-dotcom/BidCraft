@@ -128,7 +128,7 @@ describe('DraftTab 一键提交复核并通过', () => {
         <DraftTab />
       </MemoryRouter>,
     )
-    const button = await screen.findByRole('button', { name: /提交复核并通过/ })
+    const button = await screen.findByRole('button', { name: '提交复核并通过' })
     await waitFor(() => expect(getChapter).toHaveBeenCalledWith(PROJECT_REF, 'n1'))
     await screen.findByText('已有正文内容')
     fireEvent.click(button)
@@ -149,7 +149,7 @@ describe('DraftTab 一键提交复核并通过', () => {
     fireEvent.click(await screen.findByRole('button', { name: '编辑' }))
     const editor = await screen.findByRole('textbox', { name: '第一章 技术方案 正文' })
     fireEvent.change(editor, { target: { value: '修改后的正文' } })
-    const button = await screen.findByRole('button', { name: /提交复核并通过/ })
+    const button = await screen.findByRole('button', { name: '提交复核并通过' })
     fireEvent.click(button)
     await waitFor(() =>
       expect(saveChapter).toHaveBeenCalledWith(PROJECT_REF, 'n1', '修改后的正文', 1),
@@ -182,6 +182,102 @@ describe('DraftTab 一键提交复核并通过', () => {
     expect(reviewChapter).not.toHaveBeenCalledWith(PROJECT_REF, 'n1', 'confirm', '')
     await waitFor(() =>
       expect(toast.success).toHaveBeenCalledWith('已保存并提交复核', '第一章 技术方案'),
+    )
+  })
+
+  it('负责人全书一键提交复核并通过，已待复核章节只确认', async () => {
+    vi.mocked(getOutline).mockResolvedValue([
+      {
+        id: 'n1',
+        heading: '第一章 技术方案',
+        intent: '',
+        target_words: 1000,
+        words: 20,
+        has_body: true,
+        status: 'draft',
+        review_status: 'draft',
+      },
+      {
+        id: 'n2',
+        heading: '第二章 实施方案',
+        intent: '',
+        target_words: 1000,
+        words: 20,
+        has_body: true,
+        status: 'review',
+        review_status: 'review',
+      },
+    ])
+    vi.mocked(getChapter).mockImplementation(async (_ref, nodeId) => ({
+      id: nodeId,
+      body: '已有正文内容',
+      revision: 1,
+      review_status: nodeId === 'n1' ? 'draft' : 'review',
+    }) as never)
+    render(
+      <MemoryRouter>
+        <DraftTab />
+      </MemoryRouter>,
+    )
+    const button = await screen.findByRole('button', { name: '全书一键提交复核并通过' })
+    await waitFor(() => expect(getChapter).toHaveBeenCalledWith(PROJECT_REF, 'n1'))
+    fireEvent.click(button)
+    await waitFor(() =>
+      expect(reviewChapter).toHaveBeenCalledWith(PROJECT_REF, 'n1', 'submit', ''),
+    )
+    expect(reviewChapter).toHaveBeenCalledWith(PROJECT_REF, 'n1', 'confirm', '')
+    expect(reviewChapter).toHaveBeenCalledWith(PROJECT_REF, 'n2', 'confirm', '')
+    expect(reviewChapter).not.toHaveBeenCalledWith(PROJECT_REF, 'n2', 'submit', '')
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith('全书已提交复核并通过', '已处理 2 章'),
+    )
+  })
+
+  it('普通编辑全书一键提交复核，不执行负责人确认', async () => {
+    workspace.project.my_role = 'editor'
+    vi.mocked(getOutline).mockResolvedValue([
+      {
+        id: 'n1',
+        heading: '第一章 技术方案',
+        intent: '',
+        target_words: 1000,
+        words: 20,
+        has_body: true,
+        status: 'draft',
+        review_status: 'draft',
+      },
+      {
+        id: 'n2',
+        heading: '第二章 实施方案',
+        intent: '',
+        target_words: 1000,
+        words: 20,
+        has_body: true,
+        status: 'draft',
+        review_status: 'draft',
+      },
+    ])
+    vi.mocked(getChapter).mockImplementation(async (_ref, nodeId) => ({
+      id: nodeId,
+      body: '已有正文内容',
+      revision: 1,
+      review_status: 'draft',
+    }) as never)
+    render(
+      <MemoryRouter>
+        <DraftTab />
+      </MemoryRouter>,
+    )
+    const button = await screen.findByRole('button', { name: '全书一键提交复核' })
+    await waitFor(() => expect(getChapter).toHaveBeenCalledWith(PROJECT_REF, 'n1'))
+    fireEvent.click(button)
+    await waitFor(() =>
+      expect(reviewChapter).toHaveBeenCalledWith(PROJECT_REF, 'n1', 'submit', ''),
+    )
+    expect(reviewChapter).toHaveBeenCalledWith(PROJECT_REF, 'n2', 'submit', '')
+    expect(reviewChapter).not.toHaveBeenCalledWith(PROJECT_REF, 'n1', 'confirm', '')
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith('全书已提交复核', '已处理 2 章'),
     )
   })
 })

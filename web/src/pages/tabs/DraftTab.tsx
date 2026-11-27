@@ -5,6 +5,7 @@ import {
   ArrowRight,
   Check,
   ChevronRight,
+  CheckCircle2,
   Clock3,
   Coins,
   Eye,
@@ -289,6 +290,7 @@ export function DraftTab() {
   const [resolvingConflict, setResolvingConflict] = useState(false)
   const [generatingChapter, setGeneratingChapter] = useState(false)
   const [reviewBusy, setReviewBusy] = useState(false)
+  const [bulkReviewBusy, setBulkReviewBusy] = useState(false)
   const [reviewNoteFor, setReviewNoteFor] = useState<ReviewAction | null>(null)
   const [reviewNote, setReviewNote] = useState('')
   const [job, setJob] = useState<Job | null>(null)
@@ -766,6 +768,15 @@ export function DraftTab() {
   const chapterReview = chapterQuery.data?.review_status || selectedChapter?.review_status
   const reviewFrozen = isChapterFrozen(chapterReview)
   const steps = reviewSteps(chapterReview, Boolean(reviewOwner))
+  const bulkReviewTargets = useMemo(
+    () =>
+      outline.filter((chapter) => {
+        const status = reviewStatus(chapter.review_status)
+        if (reviewOwner) return status === 'draft' || status === 'review'
+        return status === 'draft'
+      }),
+    [outline, reviewOwner],
+  )
 
   const applyReview = async (action: ReviewAction, note = '') => {
     if (!selectedId) return
@@ -874,6 +885,65 @@ export function DraftTab() {
       else handleError(error, '保存并提交复核失败')
     } finally {
       setReviewBusy(false)
+    }
+  }
+
+  // 全书一键流转：逐章走服务端原有 submit/confirm 状态机与审计，
+  // 不直接改前端状态；已确认/锁定章节跳过，空正文章节计入失败并继续。
+  const bulkReview = async () => {
+    if (!canWrite || reviewBusy || bulkReviewBusy || saving || dirty || jobActive) return
+    const targets = bulkReviewTargets
+    if (!targets.length) {
+      toast.info('没有待处理章节', '所有章节都已提交复核或已确认。')
+      return
+    }
+    setBulkReviewBusy(true)
+    let done = 0
+    let failed = 0
+    let firstError = ''
+    try {
+      for (const chapter of targets) {
+        try {
+          const detail = await getChapter(ref, chapter.id)
+          if (!(detail?.body || '').trim()) {
+            failed += 1
+            firstError ||= `${chapter.heading || '未命名章节'}正文为空`
+            continue
+          }
+          const status = reviewStatus(detail.review_status || chapter.review_status)
+          if (status === 'draft') {
+            await reviewChapter(ref, chapter.id, 'submit', '')
+          }
+          if (reviewOwner && status !== 'locked' && status !== 'confirmed') {
+            await reviewChapter(ref, chapter.id, 'confirm', '')
+          }
+          done += 1
+        } catch (error) {
+          failed += 1
+          firstError ||= error instanceof Error ? error.message : String(error)
+        }
+      }
+      await outlineQuery.refresh()
+      await reloadProject()
+      if (selectedId && done > 0) {
+        const fresh = await getChapter(ref, selectedId)
+        chapterQuery.setData(fresh)
+        setRevision(fresh.revision ?? 0)
+        setSavedBody(fresh.body || '')
+      }
+      if (failed > 0) {
+        toast.warning(
+          '全书复核未完成',
+          `已处理 ${done} 章，失败 ${failed} 章${firstError ? `：${firstError}` : ''}。`,
+        )
+      } else {
+        toast.success(
+          reviewOwner ? '全书已提交复核并通过' : '全书已提交复核',
+          `已处理 ${done} 章`,
+        )
+      }
+    } finally {
+      setBulkReviewBusy(false)
     }
   }
 
@@ -1736,6 +1806,34 @@ export function DraftTab() {
               title={dirty ? '先保存当前章节再刷新' : '重新读取服务器数据'}
             >
               刷新
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<CheckCircle2 size={14} />}
+              loading={bulkReviewBusy}
+              disabled={
+                !canWrite ||
+                !bulkReviewTargets.length ||
+                reviewBusy ||
+                saving ||
+                dirty ||
+                jobActive
+              }
+              onClick={() => void bulkReview()}
+              title={
+                !canWrite
+                  ? '只读成员不能提交复核'
+                  : dirty
+                    ? '先保存当前章节再执行全书复核'
+                    : !bulkReviewTargets.length
+                      ? '没有待提交复核的章节'
+                      : reviewOwner
+                        ? '逐章提交复核并由负责人确认'
+                        : '逐章提交复核，确认由负责人完成'
+              }
+            >
+              {reviewOwner ? '全书一键提交复核并通过' : '全书一键提交复核'}
             </Button>
             <Button
               variant="dark"
