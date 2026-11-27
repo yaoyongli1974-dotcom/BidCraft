@@ -289,6 +289,7 @@ def _add_body(
         figure_state = _figure_state(None)
     lines = (body or "").splitlines()
     index = 0
+    previous_level = 1  # 章节标题 H1
     while index < len(lines):
         line = lines[index].rstrip()
         stripped = line.strip()
@@ -308,15 +309,12 @@ def _add_body(
                 index += 1
             _add_table(document, _parse_table_block(block), kind="data")
             continue
-        # 章节标题本身是 Heading 1；正文按最小标题级别相对映射到 H2 起。
-        if stripped.startswith("#### "):
-            document.add_heading(stripped[5:].strip(), level=max(1, min(9, 4 + heading_offset)))
-        elif stripped.startswith("### "):
-            document.add_heading(stripped[4:].strip(), level=max(1, min(9, 3 + heading_offset)))
-        elif stripped.startswith("## "):
-            document.add_heading(stripped[3:].strip(), level=max(1, min(9, 2 + heading_offset)))
-        elif stripped.startswith("# "):
-            document.add_heading(stripped[2:].strip(), level=max(1, min(9, 1 + heading_offset)))
+        # 章节标题本身是 H1；正文标题相对映射后仍须逐级递进，不能跳级。
+        if match := re.match(r"^(#{1,6})\s+(.+)$", stripped):
+            raw_level = len(match.group(1)) + heading_offset
+            level = max(2, min(9, raw_level, previous_level + 1))
+            previous_level = level
+            document.add_heading(match.group(2).strip(), level=level)
         elif re.match(r"^[-*•]\s+", stripped):
             paragraph = document.add_paragraph(style="List Bullet")
             _add_placeholder_runs(paragraph, re.sub(r"^[-*•]\s+", "", stripped))

@@ -149,9 +149,9 @@
 
 用户随后反馈导出被完整性校验拦截：`标题层级跳级：H1 之后直接出现 H3`。
 
-- 根因：正文 Markdown 直接按原始 `###` 级别输出，章节标题为 H1 时跳级。
-- 修复：`documents/document_ir.py` 与 `export/docx.py` 按“正文最小标题级别映射到 H2”的相对偏移归一化，保留相对层级，不强制 +1，避免改变既有正确文档的级别。
-- 新增 DOCX validator / classic export 回归用例，确认 `###/####` 正文不再触发跳级。
+- 根因：正文 Markdown 直接按原始标题级别输出；章节标题为 H1 时，若正文含 `#`/`###` 混用或直接从 `###` 开始，就会出现 H1→H3 或后续 H2→H4 跳级。
+- 修复：`documents/document_ir.py` 与 `export/docx.py` 在“最小正文标题映射到 H2”的相对偏移基础上，再按相邻标题逐级钳制：首个正文标题最低 H2，后续标题最多比上一个标题深一级，真正缺失的中间层级会被补齐；合法逐级层级（H2→H3→H4）保持原级别。
+- 新增 DOCX validator / classic export 回归用例，覆盖纯 `###/####` 正文和 `#/###/####` 混用正文；测试夹具补足真实中间层级以保留既有深层标题断言，未删除或放宽断言。
 
 ## 12. 验证结果
 
@@ -162,7 +162,7 @@
 - 材料/评分台账定向：`.venv/bin/python -m pytest -o addopts= -q tests/test_v0332_material_noise.py tests/test_v0332_scoring_noise.py tests/test_boq.py tests/test_extract.py tests/test_calibrate.py tests/test_calibrate_baseline.py` → `75 passed`；重复台账行补充修复后 `tests/test_v0332_material_noise.py tests/test_boq.py tests/test_api_boq.py` → `39 passed`。
 - Web：typecheck / lint / `npm test -- --run` → 66 files / 482 tests 全通过；`npm run build` 通过（Vite 8，1720 modules）。ErrorBoundary 的 “渲染炸了” 是预期测试输出。
 - SVG/标题层级定向：`tests/test_images.py tests/test_v0332_image_svg_placeholder.py tests/test_docx_validator.py tests/test_document_ir.py tests/test_docx_renderer.py tests/test_batch4_export_engine.py` → `59 passed`。两处旧 503 断言按占位图新语义精确更新（占位图真实落盘且可下载），未删除或弱化断言。
-- 后端全量：`.venv/bin/python -m pytest -o addopts= -q` → `2413 passed, 1008 skipped, 1 warning in 951.52s`，零失败。
+- 后端全量：`.venv/bin/python -m pytest -o addopts= -q` → `2415 passed, 1008 skipped, 1 warning in 942.50s`，零失败。
 
 ## 13. 已知边界
 

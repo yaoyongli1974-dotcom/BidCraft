@@ -372,6 +372,7 @@ def from_markdown_sections(
         body = str(node.get("body") or "")
         section = DocumentSection(heading=str(node.get("heading") or "").strip())
         lines = body.splitlines()
+        previous_level = 1  # 章节标题永远是 H1
         index = 0
         while index < len(lines):
             line = lines[index].rstrip()
@@ -398,7 +399,10 @@ def from_markdown_sections(
 
             heading_match = _HEADING_MARKDOWN_PATTERN.match(stripped)
             if heading_match:
-                level = max(1, min(9, len(heading_match.group(1)) + heading_offset))
+                raw_level = len(heading_match.group(1)) + heading_offset
+                # 相对层级保留，但相邻标题不得跳级；正文标题始终低于章节 H1。
+                level = max(2, min(9, raw_level, previous_level + 1))
+                previous_level = level
                 section.paragraphs.append(
                     _paragraph_with_links(
                         heading_match.group(2).strip(),

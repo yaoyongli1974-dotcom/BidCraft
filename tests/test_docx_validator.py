@@ -74,6 +74,44 @@ def test_classic_export_body_headings_avoid_level_skip(tmp_path):
     assert "Heading 2" in [p.style.name for p in Document(output).paragraphs]
 
 
+def test_classic_export_mixed_headings_never_skip(tmp_path):
+    document = Document()
+    document.add_heading("第一章 总体方案", level=1)
+    nodes = [
+        {
+            "heading": "第一章 总体方案",
+            "body": "# 一级小节\n正文\n### 三级子标题\n#### 四级子标题",
+        }
+    ]
+    _add_body(
+        document,
+        nodes[0]["body"],
+        nodes[0]["heading"],
+        heading_offset=_body_heading_offset(nodes),
+    )
+    output = tmp_path / "classic-mixed-headings.docx"
+    document.save(output)
+    result = validate_docx_package(output)
+    assert "heading_skip" not in [issue["code"] for issue in result["issues"]]
+
+
+def test_mixed_body_heading_levels_never_skip(tmp_path):
+    """正文同时出现 # 与 ### 时，仍不能产生 H1→H3/H2→H4 跳级。"""
+
+    ir = from_markdown_sections(
+        [
+            {
+                "heading": "第一章 总体方案",
+                "body": "# 一级小节\n正文\n### 三级子标题\n#### 四级子标题",
+            }
+        ],
+        title="混合层级测试",
+    )
+    output = _render(ir, tmp_path / "mixed-headings.docx")
+    result = validate_docx_package(output)
+    assert "heading_skip" not in [issue["code"] for issue in result["issues"]]
+
+
 def test_validator_accepts_clean_document(tmp_path):
     ir = DocumentIR(
         sections=[
