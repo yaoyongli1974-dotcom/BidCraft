@@ -28,7 +28,11 @@ import { generateChapter, getChapter, getChapterCitations, getOutline, getProjec
 import { applyImagePlan, createImage, deleteImage, getImagePlan, getImagePolicy, listImages, regenerateImage, updateImagePolicy, uploadImage } from '../../api/images'
 import { ApiError, chapterConflict, messageOf } from '../../lib/http'
 import { watchJob } from '../../hooks/watchJob'
-import { useChapterPlans } from '../../hooks/useChapterPlans'
+import {
+  batchRegeneratePlans,
+  missingPlanNodeIds,
+  useChapterPlans,
+} from '../../hooks/useChapterPlans'
 import { chapterPlanGate, isConfirmedPlan } from '../../lib/chapterPlan'
 import { canReviewChapter } from '../../lib/permissions'
 import type {
@@ -364,7 +368,11 @@ export function DraftTab() {
       ? planChapterIds.filter((id) => !isConfirmedPlan(chapterPlans.plans.get(id))).length
       : 0
   const fullPlanBlocked = unconfirmedPlanCount > 0
-  const fullPlanReason = `还有 ${unconfirmedPlanCount} 章的章节规划未确认。请在「目录大纲」的章节规划面板逐章确认后再生成全书正文。`
+  const fullPlanReason = `还有 ${unconfirmedPlanCount} 章的章节规划未确认。请在「目录大纲」的章节规划面板批量生成并确认后再生成全书正文。`
+  // auto 模式不要求人工确认，但依赖已变化的规划必须先显式重新生成，
+  // 否则后端门禁会拒绝整本生成；review 模式始终由用户手动处理。
+  const stalePlanIds =
+    chapterPlans.mode === 'auto' ? missingPlanNodeIds(outline, chapterPlans.entries) : []
   const dirty = Boolean(selectedId) && loadedId === selectedId && body !== savedBody
   const stats = projectStats(project)
   const missingRequired = stats.missing_required || (project.missing_required?.length || 0)
@@ -1394,6 +1402,21 @@ export function DraftTab() {
         tone: anyBody ? 'danger' : 'primary',
       })
       if (!accepted) return
+    }
+    if (stalePlanIds.length) {
+      toast.info('正在重建失效章节规划', `${stalePlanIds.length} 章的规划依赖已变化，将重新生成后再启动全书。`)
+      const outcome = await batchRegeneratePlans(
+        ref,
+        stalePlanIds,
+        (nodeId, plan) => chapterPlans.setPlan(nodeId, plan),
+      )
+      if (outcome.failed.length) {
+        toast.error(
+          '失效章节规划重建失败',
+          `${outcome.failed.length} 章未成功重建，请到「目录大纲」逐章重新生成后再试。`,
+        )
+        return
+      }
     }
     setStartingJob(true)
     setStreamFallback(false)

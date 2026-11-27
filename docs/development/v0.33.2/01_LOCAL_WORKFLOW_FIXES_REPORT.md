@@ -120,23 +120,33 @@
 - `scripts/local_test_env.sh` 新增 `model-on` / `model-off`：前者移除 offline/假模型变量，让服务读取后台已配置的 chat 模型；后者恢复测试离线口径。已在本地执行 `model-on`，验证 `resolve_chat_endpoint()` 返回 `source=database, model=deepseek-flash`。
 - 用户反馈顶部仍显示旧定位“弱电投标文件工作台”。已将 `AppShell`、`HelpContext`、`Masthead`、`LoginPage`、`RegisterPage` 统一改为“AI 技术标编制工作台”；保留“标书工坊”品牌名。新增 `Masthead.branding.test.tsx` 断言新文案且旧文案不存在。
 
-## 9. 验证结果
+## 9. auto 模式全书生成遇到失效规划
+
+用户反馈全书生成失败，报“章节规划依赖已变化”。原因：评分噪声清理后旧规划引用的评分项被删除，后端正确判废；auto 模式不要求人工确认，但前端没有在启动生成前重建失效规划。
+
+修复（frontend-only）：
+
+- `web/src/hooks/useChapterPlans.ts`：新增 `batchRegeneratePlans()`，复用单章 `regenerateChapterPlan` 顺序重建。
+- `web/src/pages/tabs/DraftTab.tsx`：auto 模式下全书生成前用 `missingPlanNodeIds()` 找出失效规划，先批量重新生成；失败则终止启动，成功后再提交全书任务。review / review_strict 模式仍由用户在「目录大纲」批量生成并确认，不自动确认。
+- 新增 `web/src/pages/tabs/DraftTab.autoRegenerate.test.tsx`，验证 auto 模式重建与生成调用顺序。
+
+## 10. 验证结果
 
 - ruff：`ruff check bidcraft tests scripts` All checks passed。
 - 后端定向：事实治理 + Alembic + api_package + BOQ → `70 passed`；规划/审批/Worker/Phase1/Phase4 回归 → `91 passed`；来源口径留痕新增/相关用例 → `49 passed`；截图三项回归（编辑锁/稳定值刷新/确认前判废）→ `30 passed`。
 - 真实 PG 迁移：scratch DB `v0332_fact_provenance`（PostgreSQL 16.2 / 127.0.0.1:5433）运行 `tests/test_alembic.py tests/postgres/test_v032_migrations.py tests/postgres/test_v0313_migration_permissions.py` → `18 passed`。
 - 评分噪声回归：`tests/test_v0332_scoring_noise.py tests/test_scoring_coverage.py tests/test_extract.py tests/test_xlsx.py tests/test_batch3_generation_fixes.py` → `32 passed`；相关 11 文件回归 `94 passed`。
 - 材料/评分台账定向：`.venv/bin/python -m pytest -o addopts= -q tests/test_v0332_material_noise.py tests/test_v0332_scoring_noise.py tests/test_boq.py tests/test_extract.py tests/test_calibrate.py tests/test_calibrate_baseline.py` → `75 passed`；重复台账行补充修复后 `tests/test_v0332_material_noise.py tests/test_boq.py tests/test_api_boq.py` → `39 passed`。
-- Web：typecheck / lint / `npm test -- --run` → 64 files / 480 tests 全通过；`npm run build` 通过（Vite 8，1720 modules）。ErrorBoundary 的 “渲染炸了” 是预期测试输出。
+- Web：typecheck / lint / `npm test -- --run` → 65 files / 481 tests 全通过；`npm run build` 通过（Vite 8，1720 modules）。ErrorBoundary 的 “渲染炸了” 是预期测试输出。
 - 后端全量：`.venv/bin/python -m pytest -o addopts= -q` → `2404 passed, 1008 skipped, 1 warning in 997.07s`，零失败。
 
-## 8. 已知边界
+## 11. 已知边界
 
 - 价格识别仅支持明确别名（精确/前缀匹配）；`含税单价` 等复合表头仍按未识别处理，避免误判。
 - 金额反推单价按 4 位小数舍入；总价仍由数量×单价重算，不直接采用工作簿合价。
 - 用户补充说明是人工留痕，不是招标文件证据；不会进入原文引文口径。
 - 未替换用户自建的 127.0.0.1:8000 服务；浏览器端最终人工确认请在该服务更新代码/重启后进行。
 
-## 9. 回滚
+## 12. 回滚
 
 逐项 revert：React 两个组件两个测试；批量规划相关前端文件与测试；BOQ 五个文件；事实来源类型六个后端/迁移文件与四个前端文件。迁移 0016 只需 downgrade 到 0015，删除两列，不触碰历史事实值。

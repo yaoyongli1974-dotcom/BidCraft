@@ -3,6 +3,7 @@ import {
   confirmChapterPlan,
   generateChapterPlan,
   getChapterPlan,
+  regenerateChapterPlan,
 } from '../api/generation'
 import { useQuery } from '../lib/hooks'
 import {
@@ -173,6 +174,21 @@ export function batchGeneratePlans(
   return runPlanBatch(
     nodeIds,
     (nodeId) => generateChapterPlan(ref, nodeId),
+    onPlanChange,
+    onProgress,
+  )
+}
+
+/** 全书生成前的失效规划补齐：显式调用单章「重新生成」，不沿用旧规划。 */
+export function batchRegeneratePlans(
+  ref: string,
+  nodeIds: string[],
+  onPlanChange: (nodeId: string, plan: ChapterPlan) => void,
+  onProgress?: PlanBatchProgress,
+): Promise<PlanBatchOutcome> {
+  return runPlanBatch(
+    nodeIds,
+    (nodeId) => regenerateChapterPlan(ref, nodeId),
     onPlanChange,
     onProgress,
   )
