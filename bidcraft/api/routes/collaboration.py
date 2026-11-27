@@ -61,6 +61,18 @@ def _conflict(message: str) -> HTTPException:
 # --------------------------------------------------------------------------- #
 # 章节编辑锁
 # --------------------------------------------------------------------------- #
+@router.get("/projects/{ref}/chapters/{node_id}/lock")
+def get_lock(ref: str, node_id: str) -> dict:
+    """读取当前编辑锁；无锁返回 404，前端据此显示“未锁定”。"""
+    with session_scope() as db:
+        project, _role = _project(db, ref)
+        node = _node(db, project.id, node_id)
+        lock = check_section_lock(db, node.id)
+        if lock is None:
+            raise HTTPException(status_code=404, detail="章节未锁定")
+        return lock
+
+
 @router.post("/projects/{ref}/chapters/{node_id}/lock")
 def acquire_lock(
     ref: str,

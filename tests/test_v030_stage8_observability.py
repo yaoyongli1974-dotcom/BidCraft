@@ -229,7 +229,7 @@ def test_global_metrics_ten_keys_include_queue_health(db):
 
 
 def test_health_routes_and_total_route_count():
-    """公开探针路由 + v0.32 章节规划/知识资产/检索预览/Agent 工具/经验摘要/质量导出与摘要 + v0.33.0 RC-08 经验撤销路由后，路由总数为 275。"""
+    """公开探针路由 + v0.32 章节规划/知识资产/检索预览/Agent 工具/经验摘要/质量导出与摘要 + v0.33.0 RC-08 经验撤销路由 + v0.33.2 编辑锁 GET 后，路由总数为 276。"""
     from bidcraft.api.routes import (
         account,
         admin,
@@ -261,7 +261,7 @@ def test_health_routes_and_total_route_count():
         enterprise, evaluation, health, jobs, legal, my, packages, projects, similarity,
         orchestration, collaboration,
     ]
-    assert sum(len(mod.router.routes) for mod in modules) == 275
+    assert sum(len(mod.router.routes) for mod in modules) == 276
 
 
 def test_serve_passes_json_access_log_config_with_request_id_filter(db, monkeypatch):

@@ -88,6 +88,22 @@ def _lock_url(team) -> str:
     return f"/projects/{team['project_id']}/chapters/{team['node_id']}/lock"
 
 
+def test_get_lock_returns_json_not_spa_html(team):
+    """前端挂载查询锁状态必须拿到 JSON，不能被 SPA catch-all 返回 index.html。"""
+    missing = team["editor"].get(_lock_url(team))
+    assert missing.status_code == 404
+    assert missing.headers["content-type"].startswith("application/json")
+
+    acquired = team["editor"].post(_lock_url(team), params={"ttl_seconds": 120})
+    assert acquired.status_code == 200, acquired.text
+
+    current = team["editor"].get(_lock_url(team))
+    assert current.status_code == 200, current.text
+    assert current.headers["content-type"].startswith("application/json")
+    assert current.json()["node_id"] == team["node_id"]
+    assert current.json()["lock_token"] == acquired.json()["lock_token"]
+
+
 def test_only_one_editor_holds_a_lock(team):
     first = team["editor"].post(_lock_url(team), params={"ttl_seconds": 120})
     assert first.status_code == 200, first.text

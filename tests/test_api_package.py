@@ -51,7 +51,7 @@ def test_domain_routers_are_importable_and_populated():
     # 质量只读路由（evaluation.py：报告 Markdown 导出、单/跨项目质量摘要），
     # v0.33.0 RC-08 新增 1 条 owner-only 撤销路由（projects.py：
     # PATCH /projects/{ref}/lessons/{lesson_id}）。
-    assert sum(len(mod.router.routes) for mod in modules) == 275
+    assert sum(len(mod.router.routes) for mod in modules) == 276
 
 
 def test_route_modules_do_not_import_api_module_through_package():

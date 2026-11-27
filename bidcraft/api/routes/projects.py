@@ -1742,6 +1742,11 @@ def approve_chapter_plan(
         plan = load_active_plan(db, project.id, node.id)
         if plan is None:
             raise _http_error(409, "该章节没有可确认的规划")
+        # 确认前同样做依赖校验：避免确认成功到正文生成阶段才因失效被 409。
+        stale = invalidate_stale_plan(db, plan)
+        if stale:
+            db.commit()
+            raise _http_error(409, "章节规划依赖已变化，请重新生成并确认：" + "；".join(stale[:3]))
         username = str((current_user() or {}).get("username") or "")
         confirm_chapter_plan(db, plan, username, payload.note, str((current_user() or {}).get("id") or ""))
         result = chapter_plan_payload(plan)

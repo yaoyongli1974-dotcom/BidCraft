@@ -167,6 +167,51 @@ def test_plan_dependency_staleness_detects_live_value_changes(db):
         assert "知识" in joined
 
 
+def test_ledger_reparse_reids_do_not_invalidate_plan(db):
+    """台账重解析重建评分项/要求（UUID 变化、名称正文不变）不应判废规划。"""
+    with session_scope() as session:
+        project = _new_project(session, "台账重解析项目")
+        ids = _seed(session, project.id)
+        node = session.get(OutlineNode, ids["node"])
+        plan = generate_chapter_plan(
+            session, project, node, created_by="tester",
+            knowledge_provider=lambda _q: _retrieval_context(ids),
+        )
+        confirm_chapter_plan(session, plan, "reviewer")
+        assert plan_dependency_staleness(session, plan) == []
+
+        session.delete(session.get(ScoringItem, ids["score"]))
+        session.delete(session.get(Requirement, ids["requirement"]))
+        session.flush()
+        new_score = ScoringItem(
+            project_id=project.id, name="技术方案", score=40.0,
+            criteria="方案完整、响应招标要求",
+        )
+        new_req = Requirement(
+            project_id=project.id, kind="substantive", text="★提供营业执照", mandatory=True,
+        )
+        session.add_all([new_score, new_req])
+        session.flush()
+
+        assert plan_dependency_staleness(session, plan) == []
+        score_ids = {
+            row.get("id") for row in plan.score_points
+            if isinstance(row, dict)
+        }
+        requirement_ids = {
+            row.get("id") for row in plan.requirements
+            if isinstance(row, dict)
+        }
+        assert new_score.id in score_ids and ids["score"] not in score_ids
+        assert new_req.id in requirement_ids and ids["requirement"] not in requirement_ids
+        assert all("已剔除" not in err for err in (plan.validation_errors or []))
+
+        # 值真的变化仍必须判废，防止把稳定值刷新变成宽松放行。
+        session.get(ScoringItem, new_score.id).name = "另一个评分项"
+        session.flush()
+        assert any("评分项" in reason for reason in plan_dependency_staleness(session, plan))
+
+
 def test_load_active_plan_does_not_fall_back_to_older_confirmed(db):
     with session_scope() as session:
         project = _new_project(session, "不回退旧版项目")
@@ -207,6 +252,28 @@ def test_stale_confirmed_plan_blocks_chapter_generation(monkeypatch):
     assert "依赖" in blocked.json()["detail"]
     with session_scope() as session:
         assert session.get(ChapterPlan, plan.id).status == REJECTED
+
+
+@pytest.mark.usefixtures("db")
+def test_confirm_rejects_stale_plan_before_generation():
+    """失效规划应在确认时就被拒绝，不能确认成功到生成阶段才 409。"""
+    username = "v0330-stale-confirm"
+    client = _register(username)
+    ref = _project(client, "依赖失效确认项目")
+    with session_scope() as session:
+        ids = _seed(session, ref)
+        node = session.get(OutlineNode, ids["node"])
+        plan = generate_chapter_plan(session, session.get(Project, ref), node, created_by=username)
+        plan_id = plan.id
+    with session_scope() as session:
+        session.get(Fact, ids["fact"]).value = "变化后的项目名"
+        session.flush()
+
+    response = client.post(f"/projects/{ref}/chapters/{ids['node']}/plan/confirm", json={})
+    assert response.status_code == 409, response.text
+    assert "依赖" in response.json()["detail"]
+    with session_scope() as session:
+        assert session.get(ChapterPlan, plan_id).status == REJECTED
 
 
 @pytest.mark.usefixtures("db")

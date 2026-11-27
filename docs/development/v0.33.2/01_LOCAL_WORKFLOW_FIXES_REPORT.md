@@ -69,21 +69,36 @@
 - `web/src/pages/tabs/DraftTab.tsx`：`projectRef={ref}`。
 - 新增 `ChapterCollab.test.tsx`、`DraftTab.refFix.test.tsx`；先复现“Function components cannot have string refs”，修复后通过。
 
-## 5. 验证结果
+## 5. 截图补充：运行期三项问题
+
+用户在本地环境截图反馈三项运行期问题，全部按“真实复现 → 测试先行 → 最小修复”处理，未放宽任何门禁：
+
+1. **编辑锁请求返回 HTML**：`GET /projects/{ref}/chapters/{node_id}/lock` 只有 POST/PUT/DELETE，请求落到 SPA catch-all 返回 `index.html`，前端 `response.json()` 报 `Unexpected token '<'`。
+   - `bidcraft/api/routes/collaboration.py` 新增 GET lock，复用 `check_section_lock`，无锁返回 404；`web/src/api/collaboration.ts` 已把 404 转为 `null`，无需改前端。
+   - 路由总数 275→276，`tests/test_api_package.py`、`tests/test_v030_stage8_observability.py` 同步；`tests/test_section_locks.py` 新增 JSON/HTML 回归。
+2. **全书生成误判规划依赖失效**：台账重解析会删除并重建评分项/要求，UUID 变化但名称/正文稳定；旧规划被误报“评分项已删除”。
+   - `bidcraft/generation/chapter_plan.py` 新增 `_refresh_stable_refs`：仅在同项目内按精确稳定值（评分项名称、要求正文、事实 key）找到唯一真实行时刷新 ID；值真的变化或匹配歧义仍判废。
+   - `validate_chapter_plan` 与 `plan_dependency_staleness` 均先刷新；`_fact_refs_with_provenance` 按 key 命中时覆盖旧 ID。
+   - `tests/test_v0330_chapter_plan_consistency.py` 新增重建 UUID 场景与负向“值真变仍判废”。
+3. **批量确认后仍有章节未确认**：`REJECTED` 规划在 `load_active_plan` 中表现为无有效规划，且旧流程确认时不判废，导致到生成阶段才 409。
+   - `bidcraft/api/routes/projects.py::approve_chapter_plan` 确认前调用 `invalidate_stale_plan` 并在 409 前提交判废状态；新增 API 用例。
+   - `web/src/hooks/useChapterPlans.ts`：`loadChapterPlans` 改为 allSettled，单章失败不再清空全部；批量确认校验返回规划必须 `CONFIRMED`，否则计入失败；`ChapterPlanningPanel.tsx` 等待刷新后再提示，并明确“已失效章节请先批量生成”。
+
+## 6. 验证结果
 
 - ruff：`ruff check bidcraft tests scripts` All checks passed。
-- 后端定向：事实治理 + Alembic + api_package + BOQ → `70 passed`；规划/审批/Worker/Phase1/Phase4 回归 → `91 passed`；来源口径留痕新增/相关用例 → `49 passed`。
+- 后端定向：事实治理 + Alembic + api_package + BOQ → `70 passed`；规划/审批/Worker/Phase1/Phase4 回归 → `91 passed`；来源口径留痕新增/相关用例 → `49 passed`；截图三项回归（编辑锁/稳定值刷新/确认前判废）→ `30 passed`。
 - 真实 PG 迁移：scratch DB `v0332_fact_provenance`（PostgreSQL 16.2 / 127.0.0.1:5433）运行 `tests/test_alembic.py tests/postgres/test_v032_migrations.py tests/postgres/test_v0313_migration_permissions.py` → `18 passed`。
-- Web：typecheck / lint / `npm test -- --run` → 62 files / 475 tests 全通过；`npm run build` 通过（Vite 8，1720 modules）。ErrorBoundary 的 “渲染炸了” 是预期测试输出。
-- 后端全量：`.venv/bin/python -m pytest -o addopts= -q` → `2393 passed, 1008 skipped, 1 warning in 957.49s`，零失败。
+- Web：typecheck / lint / `npm test -- --run` → 63 files / 478 tests 全通过；`npm run build` 通过（Vite 8，1720 modules）。ErrorBoundary 的 “渲染炸了” 是预期测试输出。
+- 后端全量：`.venv/bin/python -m pytest -o addopts= -q` → `2396 passed, 1008 skipped, 1 warning in 977.22s`，零失败。
 
-## 6. 已知边界
+## 7. 已知边界
 
 - 价格识别仅支持明确别名（精确/前缀匹配）；`含税单价` 等复合表头仍按未识别处理，避免误判。
 - 金额反推单价按 4 位小数舍入；总价仍由数量×单价重算，不直接采用工作簿合价。
 - 用户补充说明是人工留痕，不是招标文件证据；不会进入原文引文口径。
 - 未替换用户自建的 127.0.0.1:8000 服务；浏览器端最终人工确认请在该服务更新代码/重启后进行。
 
-## 7. 回滚
+## 8. 回滚
 
 逐项 revert：React 两个组件两个测试；批量规划相关前端文件与测试；BOQ 五个文件；事实来源类型六个后端/迁移文件与四个前端文件。迁移 0016 只需 downgrade 到 0015，删除两列，不触碰历史事实值。

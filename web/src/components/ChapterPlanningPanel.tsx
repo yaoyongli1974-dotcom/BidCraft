@@ -299,10 +299,17 @@ export function ChapterPlanningPanel({
             targets.find((chapter) => chapter.id === failure.nodeId)?.heading || failure.nodeId,
         )
         .join('、')
+      // 等待服务端状态回读后再提示，避免“完成”提示与真正生效状态不一致。
+      await Promise.resolve(onRefresh())
+      if (onBatchComplete) {
+        await Promise.resolve(onBatchComplete())
+      }
       if (outcome.failed.length === 0) {
         toast.success(
           copy.done,
-          `成功 ${outcome.succeeded.length} 章；规划未自动确认，请复核后确认。`,
+          action === 'batch-generate'
+            ? `成功 ${outcome.succeeded.length} 章；规划未自动确认，请复核后确认。`
+            : `成功 ${outcome.succeeded.length} 章，规划均已确认。`,
         )
       } else {
         toast.warning(
@@ -313,12 +320,6 @@ export function ChapterPlanningPanel({
     } finally {
       setBusy(null)
       setBatchProgress(null)
-      onRefresh()
-      if (onBatchComplete) {
-        void Promise.resolve(onBatchComplete()).catch((failure) =>
-          toast.error('刷新项目状态失败', messageOf(failure)),
-        )
-      }
     }
   }
 
@@ -331,7 +332,7 @@ export function ChapterPlanningPanel({
         done: '批量生成完成',
         partial: '批量生成部分完成',
         empty: '没有需要生成的章节规划',
-        emptyDetail: '所有章节都已有规划，或还没有真实章节 ID。',
+        emptyDetail: '所有章节都已有有效规划，或还没有真实章节 ID；已失效规划会按缺失处理。',
       },
       (onProgress) =>
         batchGeneratePlans(
@@ -351,7 +352,7 @@ export function ChapterPlanningPanel({
         done: '批量确认完成',
         partial: '批量确认部分完成',
         empty: '没有待确认的章节规划',
-        emptyDetail: '只有草稿、已更新或待复核的规划可以批量确认。',
+        emptyDetail: '只有草稿、已更新或待复核的规划可以批量确认；已失效章节请先批量生成。',
       },
       (onProgress) =>
         batchConfirmPlans(

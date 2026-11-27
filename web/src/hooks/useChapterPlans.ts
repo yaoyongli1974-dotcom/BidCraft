@@ -24,12 +24,20 @@ export async function loadChapterPlans(
   ref: string,
   nodeIds: string[],
 ): Promise<ChapterPlanEntry[]> {
-  return Promise.all(
+  const results = await Promise.allSettled(
     nodeIds.map(async (nodeId) => {
       const response = await getChapterPlan(ref, nodeId)
       return { node_id: nodeId, plan: response.plan, mode: response.mode }
     }),
   )
+  const entries = results
+    .filter((result): result is PromiseFulfilledResult<ChapterPlanEntry> => result.status === 'fulfilled')
+    .map((result) => result.value)
+  if (entries.length === 0 && results.length > 0) {
+    const firstFailure = results.find((result) => result.status === 'rejected')
+    throw firstFailure?.status === 'rejected' ? firstFailure.reason : new Error('章节规划查询全部失败')
+  }
+  return entries
 }
 
 /**
@@ -134,6 +142,7 @@ async function runPlanBatch(
   task: (nodeId: string) => Promise<ChapterPlan>,
   onPlanChange: (nodeId: string, plan: ChapterPlan) => void,
   onProgress?: PlanBatchProgress,
+  isSuccess: (plan: ChapterPlan) => boolean = () => true,
 ): Promise<PlanBatchOutcome> {
   const outcome: PlanBatchOutcome = { total: nodeIds.length, succeeded: [], failed: [] }
   for (let index = 0; index < nodeIds.length; index += 1) {
@@ -142,7 +151,11 @@ async function runPlanBatch(
     try {
       const plan = await task(nodeId)
       onPlanChange(nodeId, plan)
-      outcome.succeeded.push(nodeId)
+      if (isSuccess(plan)) {
+        outcome.succeeded.push(nodeId)
+      } else {
+        outcome.failed.push({ nodeId, message: '确认后规划尚未确认' })
+      }
     } catch (error) {
       outcome.failed.push({ nodeId, message: messageOf(error) })
     }
@@ -181,5 +194,6 @@ export function batchConfirmPlans(
         : confirmChapterPlan(ref, nodeId),
     onPlanChange,
     onProgress,
+    isConfirmedPlan,
   )
 }

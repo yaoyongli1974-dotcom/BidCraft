@@ -826,6 +826,83 @@ def _add_error(plan: ChapterPlan, message: str) -> None:
         plan.validation_errors = current
 
 
+def _unique_live_row(
+    db: Session,
+    model: type,
+    project_id: str,
+    field: str,
+    value: Any,
+):
+    """按稳定值查找唯一真实行；重复或缺失时返回 None，绝不臆造 ID。"""
+    text = _text(value)
+    if not text:
+        return None
+    rows = list(
+        db.scalars(
+            select(model).where(
+                model.project_id == project_id, getattr(model, field) == text
+            )
+        )
+    )
+    return rows[0] if len(rows) == 1 else None
+
+
+def _refresh_stable_refs(db: Session, plan: ChapterPlan) -> bool:
+    """台账重解析后按稳定值刷新规划中的真实 ID。
+
+    ``save_ledger`` 会删除并重建评分项/要求，UUID 变化但名称/正文不变。这里只在
+    同项目内精确匹配到唯一真实行时才替换旧 ID；值真变化或匹配歧义仍交由判废逻辑
+    处理，不降低反编造门槛。返回是否发生了刷新。
+    """
+
+    changed = False
+
+    def resolve(model: type, field: str, rows: list[Any], label: str) -> list[Any]:
+        nonlocal changed
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            ident = _text(row.get("id")) or _text(row.get(f"{label}_id"))
+            current = db.get(model, ident) if ident else None
+            if current is not None and current.project_id == plan.project_id:
+                continue
+            live = _unique_live_row(db, model, plan.project_id, field, row.get(field))
+            if live is None:
+                continue
+            row["id"] = live.id
+            changed = True
+        return rows
+
+    scores = resolve(ScoringItem, "name", _list(plan.score_points), "score")
+    requirements = resolve(Requirement, "text", _list(plan.requirements), "requirement")
+    facts = _list(plan.fact_refs)
+    for row in facts:
+        if not isinstance(row, dict):
+            continue
+        ident = _text(row.get("id"))
+        key = _text(row.get("key"))
+        current = db.get(Fact, ident) if ident else None
+        if current is not None and current.project_id == plan.project_id:
+            continue
+        live = None
+        if key:
+            live = db.scalar(
+                select(Fact).where(Fact.project_id == plan.project_id, Fact.key == key)
+            )
+        elif ident:
+            live = _unique_live_row(db, Fact, plan.project_id, "key", ident)
+        if live is None:
+            continue
+        row["id"] = live.id
+        changed = True
+
+    if changed:
+        plan.score_points = scores
+        plan.requirements = requirements
+        plan.fact_refs = facts
+    return changed
+
+
 def plan_dependency_staleness(db: Session, plan: ChapterPlan) -> list[str]:
     """比较规划引用的真实行与当前值，返回中文依赖变化列表。
 
@@ -836,6 +913,7 @@ def plan_dependency_staleness(db: Session, plan: ChapterPlan) -> list[str]:
     """
 
     reasons: list[str] = []
+    _refresh_stable_refs(db, plan)
 
     def add(message: str) -> None:
         if message not in reasons and len(reasons) < 20:
@@ -981,6 +1059,7 @@ def validate_chapter_plan(
             plan.status = REJECTED
         return _list(plan.validation_errors)
     valid = valid_ids or _project_valid_ids(db, project_id, user_id, package_id)
+    _refresh_stable_refs(db, plan)
     for field in ID_REF_FIELDS:
         valid_ids = valid[{
             "score_points": "scoring_ids",
@@ -1074,6 +1153,7 @@ def _fact_refs_with_provenance(db: Session, project_id: str, rows: Any) -> list[
     for item in _list(rows):
         fact: Fact | None = None
         base: dict[str, Any] | None = None
+        resolved_by_key = False
         if isinstance(item, dict):
             base = dict(item)
             ident = _text(base.get("id")) or _text(base.get("fact_id"))
@@ -1084,6 +1164,7 @@ def _fact_refs_with_provenance(db: Session, project_id: str, rows: Any) -> list[
                 fact = db.scalar(
                     select(Fact).where(Fact.project_id == project_id, Fact.key == key)
                 )
+                resolved_by_key = fact is not None
         elif isinstance(item, str):
             ident = item.strip()
             if _UUID_RE.fullmatch(ident):
@@ -1098,7 +1179,10 @@ def _fact_refs_with_provenance(db: Session, project_id: str, rows: Any) -> list[
             continue
         if base is None:
             base = {}
-        base.setdefault("id", fact.id)
+        if resolved_by_key:
+            base["id"] = fact.id
+        else:
+            base.setdefault("id", fact.id)
         base.setdefault("key", fact.key or "")
         base.update(
             {
