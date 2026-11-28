@@ -2,6 +2,17 @@
 
 按版本倒序。对外口径以 `docs/release-notes/` 下对应文件为准；本文件是仓库内的简明索引。
 
+## v0.33.2 (2026-11-28)
+
+本地工作流实战收口，对外说明见 [docs/release-notes/v0.33.2.md](docs/release-notes/v0.33.2.md)。
+
+- 章节规划批量生成/确认、auto 模式失效规划重建、评分项 UUID 重建不再误判废。
+- 新增迁移 0016：事实来源类型与用户补充依据；招标原文仍强制真实来源证据，来源变化向下游留痕并判废旧规划。
+- 含报价清单识别单价/合价并落库；正文页新增单章与全书一键复核流转；新增章节编辑锁 GET 路由。
+- 评分/材料台账噪声过滤与去重；SVG 结构化提示词、真实栅格化 DOCX 配图与标题层级钳制；Bandit 精确收口。
+- 本地测试环境持久化、pg-start 自动安装、pg-test 参数隔离、model-on/model-off 与品牌口径更新。
+- 本地全量回归 2426 passed / 1008 skipped / 1 warning；Web 67 files / 487 tests；最终代码 CI Run 46041126406 9/9 success。
+
 ## v0.33.1 (2026-11-26)
 
 基于最新 main 的专项审查、质量修复、实战验证与产品升级收口，对外说明见 [docs/release-notes/v0.33.1.md](docs/release-notes/v0.33.1.md)。
