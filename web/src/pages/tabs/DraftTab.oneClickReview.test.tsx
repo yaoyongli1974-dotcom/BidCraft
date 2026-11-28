@@ -146,6 +146,7 @@ describe('DraftTab 一键提交复核并通过', () => {
         <DraftTab />
       </MemoryRouter>,
     )
+    await waitFor(() => expect(getChapter).toHaveBeenCalledWith(PROJECT_REF, 'n1'))
     fireEvent.click(await screen.findByRole('button', { name: '编辑' }))
     const editor = await screen.findByRole('textbox', { name: '第一章 技术方案 正文' })
     fireEvent.change(editor, { target: { value: '修改后的正文' } })
@@ -167,6 +168,7 @@ describe('DraftTab 一键提交复核并通过', () => {
         <DraftTab />
       </MemoryRouter>,
     )
+    await waitFor(() => expect(getChapter).toHaveBeenCalledWith(PROJECT_REF, 'n1'))
     fireEvent.click(await screen.findByRole('button', { name: '编辑' }))
     const editor = await screen.findByRole('textbox', { name: '第一章 技术方案 正文' })
     fireEvent.change(editor, { target: { value: '修改后的正文' } })

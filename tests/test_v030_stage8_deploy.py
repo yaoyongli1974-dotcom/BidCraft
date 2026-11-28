@@ -106,6 +106,12 @@ def test_ci_python_tests_builds_web_for_readiness_smoke():
     assert "npm run build" in scripts, "python-tests 缺少 Web 构建，/health/ready 冒烟会失败"
 
 
+def test_ci_pg_junit_assertion_handles_dotted_classname():
+    scripts = _step_scripts(_ci_jobs()["postgres"])
+    assert "endswith('test_v0340_db_concurrency')" in scripts
+    assert "endswith('test_v0340_db_concurrency.py')" not in scripts
+
+
 def test_ci_has_alembic_preflight_without_touching_runtime():
     jobs = _ci_jobs()
     python_lint = jobs["python-lint"]

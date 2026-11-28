@@ -620,7 +620,11 @@ jobs:
               (case.get('file') or case.get('classname') or '')
               for case in root.iter('testcase')
           }
-          assert any(name.endswith('test_v0340_db_concurrency.py') for name in source_files), (
+          normalized = {
+              name.replace('.py', '').replace('/', '.').replace('\\', '.')
+              for name in source_files
+          }
+          assert any(name.endswith('test_v0340_db_concurrency') for name in normalized), (
               "v0.34.0 DB 并发用例未进入 JUnit 报告"
           )
           print(f"PG integration OK: {tests} tests, 0 skipped")
