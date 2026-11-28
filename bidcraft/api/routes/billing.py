@@ -37,6 +37,13 @@ from ..shared import (  # noqa: F401
 
 router = APIRouter()
 
+#: 微信支付回调 body 上限（1 MiB）。超限直接 413，不进入签名校验/解密/DB。
+MAX_NOTIFY_BODY_BYTES = 1024 * 1024
+
+
+def _notify_fail(message: str, status: int = 400) -> JSONResponse:
+    return JSONResponse(status_code=status, content={"code": "FAIL", "message": message})
+
 
 @router.get("/billing/summary")
 def billing_summary() -> dict[str, Any]:
@@ -121,6 +128,9 @@ def mock_pay(order_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="未开启支付模拟")
     with session_scope() as db:
         order = require_own_order(db, order_id)
+        # 临时打开模拟支付时，绝不能零成本支付真实渠道订单。
+        if order.provider != "mock":
+            raise HTTPException(status_code=404, detail="订单不存在")
         billing.mark_paid(db, order, transaction_id=f"MOCK-{order.out_trade_no}", provider="mock")
         user = billing_user(db)
         return {
@@ -170,51 +180,75 @@ def redeem(payload: RedeemRequest) -> dict[str, Any]:
 @router.post("/billing/wechat/notify")
 async def wechat_notify(request: Request):
     body = await request.body()
+    if len(body) > MAX_NOTIFY_BODY_BYTES:
+        return _notify_fail("回调数据超过 1 MiB", 413)
     try:
         data = wechatpay.parse_notification(dict(request.headers), body)
     except wechatpay.PaymentError as exc:
-        return JSONResponse(
-            status_code=400, content={"code": "FAIL", "message": str(exc)}
-        )
+        return _notify_fail(str(exc))
+
+    # parse_notification 已做强校验；这里再校验一次归一化结果，防止直接
+    # monkeypatch/未来新增解析实现时跳过关键字段。
+    if not isinstance(data, dict):
+        return _notify_fail("回调数据格式无效")
+    out_trade_no = data.get("out_trade_no")
+    if not isinstance(out_trade_no, str) or not out_trade_no.strip():
+        return _notify_fail("回调订单号无效")
+    trade_state = data.get("trade_state")
+    if not isinstance(trade_state, str) or trade_state not in wechatpay.KNOWN_TRADE_STATES:
+        return _notify_fail("回调交易状态无效")
+    amount = data.get("amount")
+    if type(amount) is not int or amount <= 0:
+        return _notify_fail("回调金额无效")
+    if data.get("currency") != "CNY":
+        return _notify_fail("回调币种不支持")
+    for field in ("mchid", "appid"):
+        if not isinstance(data.get(field), str) or not data[field].strip():
+            return _notify_fail(f"回调 {field} 无效")
+    event_type = data.get("event_type")
+    if not isinstance(event_type, str) or not event_type.startswith("TRANSACTION."):
+        return _notify_fail("回调事件类型无效")
+    transaction_id = data.get("transaction_id") or ""
+    if not isinstance(transaction_id, str):
+        return _notify_fail("回调交易号无效")
+    if trade_state == "SUCCESS" and not transaction_id.strip():
+        return _notify_fail("回调交易号无效")
+
     with session_scope() as db:
         order = db.scalar(
-            select(RechargeOrder).where(
-                RechargeOrder.out_trade_no == data["out_trade_no"]
-            )
+            select(RechargeOrder).where(RechargeOrder.out_trade_no == out_trade_no)
         )
         if order is None:
-            return JSONResponse(
-                status_code=404, content={"code": "FAIL", "message": "订单不存在"}
-            )
-        raw_amount = data.get("amount")
-        amount = raw_amount.get("total") if isinstance(raw_amount, dict) else raw_amount
-        if amount is not None and int(amount) != order.amount_cents:
-            return JSONResponse(
-                status_code=400, content={"code": "FAIL", "message": "金额不一致"}
-            )
-        if data.get("trade_state") == "SUCCESS":
-            paid = billing.mark_paid(
+            return _notify_fail("订单不存在", 404)
+        if order.provider != "wechat":
+            return _notify_fail("订单渠道不匹配")
+        if amount != order.amount_cents:
+            return _notify_fail("金额不一致")
+        # 非 SUCCESS 状态只确认收到，绝不入账；closed/payerror 也不能让回调 500。
+        if trade_state != "SUCCESS":
+            return {"code": "SUCCESS", "message": "成功"}
+        paid = billing.mark_paid(
+            db,
+            order,
+            transaction_id=transaction_id,
+            provider="wechat",
+        )
+        # mark_paid 对已支付订单幂等返回 False：重复回调不再写重复审计行。
+        if paid:
+            audit(
                 db,
-                order,
-                transaction_id=data.get("transaction_id", ""),
-                provider="wechat",
+                None,
+                "billing.payment.notify",
+                {
+                    "order_id": order.id,
+                    "out_trade_no": order.out_trade_no,
+                    "amount_cents": order.amount_cents,
+                    "transaction_id": transaction_id,
+                    "provider": "wechat",
+                },
             )
-            # mark_paid 对已支付订单幂等返回 False：重复回调不再写重复审计行。
-            if paid:
-                audit(
-                    db,
-                    None,
-                    "billing.payment.notify",
-                    {
-                        "order_id": order.id,
-                        "out_trade_no": order.out_trade_no,
-                        "amount_cents": order.amount_cents,
-                        "transaction_id": data.get("transaction_id", ""),
-                        "provider": "wechat",
-                    },
-                )
-            else:
-                logger.info("微信支付重复通知，忽略审计：%s", order.out_trade_no)
+        else:
+            logger.info("微信支付重复通知，忽略审计：%s", order.out_trade_no)
     return {"code": "SUCCESS", "message": "成功"}
 
 

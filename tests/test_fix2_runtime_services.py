@@ -89,9 +89,14 @@ def test_duplicate_wechat_notify_writes_single_audit(db, monkeypatch):
 
     payload = {
         "out_trade_no": "FIX2-NOTIFY-1",
-        "amount": {"total": 8800},
-        "trade_state": "SUCCESS",
         "transaction_id": "TX-FIX2-1",
+        "trade_state": "SUCCESS",
+        "amount": 8800,
+        "currency": "CNY",
+        "mchid": "1900000001",
+        "appid": "wx-test-appid",
+        "event_type": "TRANSACTION.SUCCESS",
+        "raw": {},
     }
     monkeypatch.setattr(wechatpay, "parse_notification", lambda headers, body: payload)
 
@@ -99,7 +104,7 @@ def test_duplicate_wechat_notify_writes_single_audit(db, monkeypatch):
     monkeypatch.setattr(
         wechatpay,
         "parse_notification",
-        lambda headers, body: {**payload, "amount": {"total": 1}},
+        lambda headers, body: {**payload, "amount": 1},
     )
     assert client.post("/billing/wechat/notify", json={}).status_code == 400
     monkeypatch.setattr(wechatpay, "parse_notification", lambda headers, body: payload)

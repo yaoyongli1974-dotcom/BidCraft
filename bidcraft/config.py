@@ -4,6 +4,7 @@ import base64
 import contextvars
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -87,6 +88,90 @@ DEFAULT_LOGIN_IP_LIMIT = 60
 DEFAULT_LOGIN_GLOBAL_LIMIT = 1000
 DEFAULT_SENSITIVE_IP_LIMIT = 30
 DEFAULT_SENSITIVE_GLOBAL_LIMIT = 300
+
+#: 资金/限流相关的整数配置。布尔值（bool 是 int 子类）、NaN/inf、负数一律拒绝。
+_BILLING_INT_FIELDS = (
+    "signup_credits",
+    "chapter_cost",
+    "rate_limit_window_seconds",
+    "rate_limit_login_ip",
+    "rate_limit_login_global",
+    "rate_limit_sensitive_ip",
+    "rate_limit_sensitive_global",
+)
+
+
+def _config_value(config, name: str):
+    """同时支持 Settings 实例与纯 dict，便于纯函数测试。"""
+
+    if isinstance(config, dict):
+        return config.get(name)
+    return getattr(config, name, None)
+
+
+def validate_billing_config(
+    config=None, *, vouchers=None, raise_on_error: bool = False
+) -> list[str]:
+    """纯校验资金/限流数值与套餐（voucher）ID，不修改入参、不发请求、不记日志。
+
+    返回错误列表；``raise_on_error=True`` 时改为抛 ``ValueError``。NaN/inf、负数、
+    布尔伪装成整数，以及重复的套餐/抵扣券 ID 都是配置错误：它们会让充值、扣费或
+    限流出现静默的越权/放大。默认配置必须返回空列表。
+    """
+
+    if config is None:
+        config = globals().get("settings")
+    errors: list[str] = []
+    for name in _BILLING_INT_FIELDS:
+        value = _config_value(config, name)
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            errors.append(f"{name} 不能使用布尔值")
+            continue
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                errors.append(f"{name} 必须是有限整数")
+                continue
+            value = int(value)
+        elif not isinstance(value, int):
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                errors.append(f"{name} 必须是整数")
+                continue
+        if value < 0:
+            errors.append(f"{name} 不能为负数")
+
+    sources = []
+    if vouchers is not None:
+        sources.append(vouchers)
+    for key in ("vouchers", "packages", "vip_packages"):
+        rows = _config_value(config, key)
+        if rows is not None:
+            sources.append(rows)
+    for rows in sources:
+        if isinstance(rows, dict):
+            rows = list(rows.keys())
+        seen: set[str] = set()
+        duplicates: set[str] = set()
+        for row in rows:
+            identifier = row.get("id") if isinstance(row, dict) else row
+            if identifier is None or isinstance(identifier, bool):
+                continue
+            key = str(identifier).strip()
+            if not key:
+                continue
+            if key in seen:
+                duplicates.add(key)
+            seen.add(key)
+        for key in sorted(duplicates):
+            errors.append(f"重复的 voucher/package ID（duplicate id）：{key}")
+
+    if errors and raise_on_error:
+        raise ValueError("配置校验失败：" + "；".join(errors))
+    return errors
+
 
 #: 运行环境。仅影响配置校验强度与日志提示，不改变业务行为。
 #: - dev/test：缺失可选参数只记 warning，不阻断启动（测试与本地开发）
@@ -289,6 +374,10 @@ class Settings:
     wechat_pay_platform_cert: str = field(
         default_factory=lambda: os.getenv("BIDCRAFT_WECHAT_PAY_PLATFORM_CERT", "")
     )
+    # 微信支付平台证书序列号；回调头 wechatpay-serial 必须与此一致。
+    wechat_pay_platform_serial_no: str = field(
+        default_factory=lambda: os.getenv("BIDCRAFT_WECHAT_PAY_PLATFORM_SERIAL_NO", "")
+    )
     wechat_pay_apiv3_key: str = field(
         default_factory=lambda: os.getenv("BIDCRAFT_WECHAT_PAY_APIV3_KEY", "")
     )
@@ -417,6 +506,8 @@ class Settings:
     )
 
     def __post_init__(self) -> None:
+        # 先校验原始输入：负数/NaN/inf/bool 不能被后面的 clamp 静默洗白。
+        validate_billing_config(self, raise_on_error=True)
         self.home = Path(self.home).expanduser().resolve()
         self.ocr_dpi = max(72, min(600, self.ocr_dpi))
         self.ocr_max_pages = max(0, self.ocr_max_pages)
@@ -539,6 +630,7 @@ class Settings:
 
         errors: list[str] = []
         warnings: list[str] = []
+        errors.extend(validate_billing_config(self, raise_on_error=False))
         if self.env not in ENVIRONMENTS:
             warnings.append(f"BIDCRAFT_ENV={self.env!r} 无效，已按 {DEFAULT_ENV} 处理")
         if self.env == "prod":
