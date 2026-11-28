@@ -55,7 +55,7 @@ describe('AdminHealthTab', () => {
   it('后端返回 global_metrics 时按真实后端键渲染全局指标区块', async () => {
     vi.mocked(getAdminHealth).mockResolvedValue({
       ...health,
-      // 六个既有键 + 四个新健康键；状态值也用后端真实口径。
+      // 当前 /admin/health 的 10 键契约（6 个计数/分布 + 4 个队列健康键）。
       global_metrics: {
         projects_by_status: { intake: 3, drafting: 4, analyzed: 2, parsing: 1, ready: 2 },
         jobs_by_status: { queued: 5, running: 3, done: 20 },
@@ -81,23 +81,26 @@ describe('AdminHealthTab', () => {
     // 状态值复用规范标签：项目取 projectStatus()，任务取 JOB_STATUS。
     expect(screen.getByText('待导入 3 · 撰写中 4 · 已解析 2 · 解析中 1 · 可交付 2')).toBeTruthy()
     expect(screen.getByText('排队中 5 · 运行中 3 · 已完成 20')).toBeTruthy()
-    // 四个新健康键按中文标签渲染，布尔值显示为 是/否。
-    expect(screen.getByText('工作进程是否运行')).toBeTruthy()
+    // workers_running 是「当前进程是否启动内置 worker 池」，不是生产故障开关。
+    expect(screen.getByText('内置工作进程已启动')).toBeTruthy()
     expect(screen.getByText('排队任务数')).toBeTruthy()
     expect(screen.getByText('最老排队任务年龄（秒）')).toBeTruthy()
     expect(screen.getByText('陈旧运行中任务数')).toBeTruthy()
-    expect(metricCell('工作进程是否运行').textContent).toContain('是')
+    expect(metricCell('内置工作进程已启动').textContent).toContain('已启动')
     expect(metricCell('排队任务数').textContent).toContain('5')
     expect(metricCell('最老排队任务年龄（秒）').textContent).toContain('12')
     expect(metricCell('陈旧运行中任务数').textContent).toContain('0')
-    // 健康状态下不出现告警标记。
+    // 当前后端契约的 10 个键全部渲染；健康状态下不出现任何告警标记。
+    const rows = document.querySelectorAll('.admin-global-metrics tbody tr')
+    expect(rows).toHaveLength(10)
     expect(screen.queryByText('工作进程未运行')).toBeNull()
     expect(screen.queryByText('存在陈旧运行中任务')).toBeNull()
+    expect(document.querySelector('.admin-global-metrics .badge--warn')).toBeNull()
     // 原有单进程快照仍在。
     expect(screen.getByText('0.27.0')).toBeTruthy()
   })
 
-  it('工作进程未运行且存在陈旧任务时显示告警', async () => {
+  it('内置 worker 未启动只作说明，陈旧运行中任务才显示告警', async () => {
     vi.mocked(getAdminHealth).mockResolvedValue({
       ...health,
       global_metrics: {
@@ -111,18 +114,35 @@ describe('AdminHealthTab', () => {
     })
     render(<AdminHealthTab />)
     expect(await screen.findByText('全局指标（数据库聚合）')).toBeTruthy()
-    // 工作进程停摆：显示 否 并给出告警。
-    expect(metricCell('工作进程是否运行').textContent).toContain('否')
-    expect(screen.getByText('工作进程未运行')).toBeTruthy()
+    // API-only 部署的 workers_running=false 只显示说明，不是「生产故障」。
+    expect(metricCell('内置工作进程已启动').textContent).toContain('未启动')
+    expect(screen.getByText('未启动内置工作进程（可为 API-only 部署）')).toBeTruthy()
+    expect(metricCell('内置工作进程已启动').querySelector('.badge--info')).toBeTruthy()
+    expect(metricCell('内置工作进程已启动').querySelector('.badge--warn')).toBeNull()
+    expect(screen.queryByText('工作进程未运行')).toBeNull()
     // 陈旧任务 > 0：数值与告警同时出现。
     expect(metricCell('陈旧运行中任务数').textContent).toContain('2')
     expect(screen.getByText('存在陈旧运行中任务')).toBeTruthy()
     // 正常数值不应误报，仍按既有格式渲染。
     expect(metricCell('排队任务数').textContent).toContain('3')
     expect(metricCell('最老排队任务年龄（秒）').textContent).toContain('1,800')
-    expect(metricCell('工作进程是否运行').querySelector('.badge--warn')).toBeTruthy()
     expect(metricCell('陈旧运行中任务数').querySelector('.badge--warn')).toBeTruthy()
     expect(metricCell('排队任务数').querySelector('.badge--warn')).toBeNull()
+  })
+
+  it('仅 workers_running=false 且队列健康时不出现任何告警', async () => {
+    vi.mocked(getAdminHealth).mockResolvedValue({
+      ...health,
+      global_metrics: {
+        workers_running: false, queued_jobs: 0, oldest_queued_age_seconds: 0,
+        stale_running_jobs: 0,
+      },
+    })
+    render(<AdminHealthTab />)
+    expect(await screen.findByText('全局指标（数据库聚合）')).toBeTruthy()
+    expect(metricCell('内置工作进程已启动').textContent).toContain('未启动')
+    expect(screen.getByText('未启动内置工作进程（可为 API-only 部署）')).toBeTruthy()
+    expect(document.querySelector('.admin-global-metrics .badge--warn')).toBeNull()
   })
 
   it('没有 global_metrics 时不展示全局指标区块', async () => {

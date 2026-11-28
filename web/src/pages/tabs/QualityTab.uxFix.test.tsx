@@ -11,7 +11,7 @@ import {
   runEvaluationAsync,
   updateQualityFinding,
 } from '../../api/evaluation'
-import { watchJob, type WatchJobOptions } from '../../hooks/watchJob'
+import { watchJob, type WatchJobHandle, type WatchJobOptions } from '../../hooks/watchJob'
 import type { Job, QualityFinding, QualityReport } from '../../lib/types'
 import { clearQueryCache } from '../../lib/queryCache'
 
@@ -80,7 +80,7 @@ describe('QualityTab 交互修复', () => {
     vi.mocked(getEvaluationReportDetail).mockResolvedValue(report())
     vi.mocked(runEvaluation).mockResolvedValue(report({ report_version: 2 }))
     vi.mocked(runEvaluationAsync).mockResolvedValue({ job_id: 'job-1' })
-    vi.mocked(watchJob).mockReturnValue(vi.fn())
+    vi.mocked(watchJob).mockReturnValue(vi.fn() as unknown as WatchJobHandle)
     vi.mocked(updateQualityFinding).mockImplementation(async (_ref, _id, input) =>
       finding({ status: input.status, resolution_note: input.note }),
     )

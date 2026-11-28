@@ -101,10 +101,7 @@ def my_doc_file(doc_id: str) -> FileResponse:
     with session_scope() as db:
         user = billing_user(db)
         row = user_docs.get_doc(db, user.id, doc_id)
-        root = user_docs.user_dir(user.id).resolve()
-        path = Path(row.stored_path).resolve()
-        if root not in path.parents or not path.is_file():
-            raise LookupError(f"文件不存在：{row.filename}")
+        path = user_docs.verify_stored_file(db, row)
         return FileResponse(path, media_type=row.mime or None, filename=row.filename)
 
 

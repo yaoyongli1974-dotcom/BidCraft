@@ -9,14 +9,16 @@ without any cross-user visibility.
 
 from __future__ import annotations
 
+import hashlib
 import mimetypes
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from .config import settings
 from .models import KnowledgeBase, UserDoc
+from .pipeline import stage_file, validate_declared_type
 
 USER_DOCS_SUFFIXES = frozenset({".pdf", ".docx", ".txt", ".md", ".xlsx", ".xlsm"})
 MAX_USER_DOC_BYTES = 50 * 1024 * 1024
@@ -119,10 +121,12 @@ def save_upload(db, user, filename: str | None, content: bytes) -> UserDoc:
     if len(data) > MAX_USER_DOC_BYTES:
         raise ValueError("文档不能超过 50MB")
 
+    validate_declared_type(data, suffix)
+
     root = user_dir(uid)
     root.mkdir(parents=True, exist_ok=True)
     target = _unique_path(root, name)
-    target.write_bytes(data)
+    digest = stage_file(db, target, data)
 
     kb = personal_kb(db, uid)
     mime = mimetypes.guess_type(name)[0] or ""
@@ -137,7 +141,55 @@ def save_upload(db, user, filename: str | None, content: bytes) -> UserDoc:
     )
     db.add(row)
     db.flush()
+    # checksum 由 0018 迁移添加到 user_docs；模型尚未声明该列，用显式 SQL 写入，
+    # 与行在同一事务内提交，避免文件与元数据不一致。
+    db.execute(
+        text("UPDATE user_docs SET checksum = :digest WHERE id = :id"),
+        {"digest": digest, "id": row.id},
+    )
     return row
+
+
+def stored_checksum(db, doc_id: str) -> str:
+    """返回已记录的 sha256；空串表示历史文件未记录（读取端跳过校验）。"""
+
+    value = db.execute(
+        text("SELECT checksum FROM user_docs WHERE id = :id"), {"id": doc_id}
+    ).scalar()
+    return str(value or "")
+
+
+def verify_stored_file(db, row: UserDoc) -> Path:
+    """解析并校验一个用户文档：越界路径、缺文件、哈希不符一律 404。"""
+
+    root = user_dir(row.user_id).resolve()
+    try:
+        path = Path(row.stored_path).resolve()
+    except OSError:
+        raise LookupError(f"文件不存在：{row.filename}") from None
+    if root not in path.parents or not path.is_file():
+        raise LookupError(f"文件不存在：{row.filename}")
+    expected = stored_checksum(db, row.id)
+    if expected and hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+        raise LookupError(f"文件校验失败：{row.filename}")
+    return path
+
+
+def delete_user_files(user_id: str) -> int:
+    """Remove every file under one user's upload directory (metadata handled by caller)."""
+
+    root = user_dir(user_id)
+    if not root.is_dir():
+        return 0
+    removed = 0
+    for path in root.iterdir():
+        if path.is_file() or path.is_symlink():
+            try:
+                path.unlink(missing_ok=True)
+                removed += 1
+            except OSError:
+                pass
+    return removed
 
 
 def list_docs(db, user_id: str) -> list[UserDoc]:

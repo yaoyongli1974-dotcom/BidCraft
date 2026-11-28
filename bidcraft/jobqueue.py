@@ -61,6 +61,9 @@ def log_job_failure(log: logging.Logger) -> None:
 _BACKPRESSURE_LOCK_KEY = 0x42494352514C4F43  # "BICRQLC"
 # 未结扣费的 TTL 由 settings.pending_charge_ttl_seconds 配置（BIDCRAFT_PENDING_CHARGE_TTL，
 # 默认 1800 秒）；启动恢复、reaper 周期扫描与 CLI 对账共用同一策略。
+# 终态任务的退款失败重试预算：reaper/reconcile 每轮最多重试这么多次，超过后
+# 留给人工对账，避免永久循环重试同一条损坏账本。
+MAX_REFUND_RETRIES = 3
 
 # Fencing token: every claim gets a fresh token.  A worker may only write job
 # state while it still holds that token (a reaper reclaim changes it), so a
@@ -1066,6 +1069,22 @@ def assert_generation_lease(db, project_id: str, token: str) -> None:
         raise JobAborted("项目生成租约已失效")
 
 
+def generation_lease_is_live(project_id: str, token: str) -> bool:
+    """Check a generation lease in a FRESH session.
+
+    The synchronous API routes hold one long generation session; SQLite/PG
+    snapshots taken before a competing abort can still show the old lease row.
+    Opening a short session here makes the pre-chapter checkpoint observe the
+    same committed state the heartbeat thread sees.
+    """
+
+    if not project_id or not token:
+        return False
+    with session_scope() as db:
+        row = db.get(GenerationLease, project_id)
+        return row is not None and row.token == token and row.expires_at >= utc_now()
+
+
 def release_expired_generation_leases() -> int:
     """Reaper cleanup for leases whose owner never released them."""
 
@@ -1331,6 +1350,97 @@ def _queued_job_reserves_charge(
     return (utc_now() - created).total_seconds() < grace
 
 
+def _claim_job_refund_statement(job_id: str):
+    """Single conditional UPDATE claiming the JOB-level refund ledger."""
+
+    return (
+        update(Job)
+        .where(Job.id == job_id, Job.refund_claimed.is_(False))
+        .values(refund_claimed=True)
+    )
+
+
+def _claim_job_refund(db, job_id: str) -> bool:
+    """Claim the single owner flag for one job's charge refund.
+
+    Both ledgers (job failure and marker settlement) call this BEFORE touching
+    the marker row or the user balance, making the global lock order
+    ``job -> marker -> user`` on PostgreSQL.  A missing Job row has no ledger to
+    own, so it is a no-op claim (legacy markers stay refundable).
+    """
+
+    if not job_id:
+        return True
+    if db.get(Job, job_id) is None:
+        return True
+    result = db.execute(
+        _claim_job_refund_statement(job_id),
+        execution_options={"synchronize_session": False},
+    )
+    return bool(result.rowcount)
+
+
+def _release_job_refund_statement(job_id: str):
+    """Release an unspent claim so the retry path can try again later."""
+
+    return (
+        update(Job)
+        .where(Job.id == job_id, Job.refund_claimed.is_(True))
+        .values(refund_claimed=False)
+    )
+
+
+def _release_job_refund(db, job_id: str) -> None:
+    if job_id:
+        db.execute(
+            _release_job_refund_statement(job_id),
+            execution_options={"synchronize_session": False},
+        )
+
+
+def _lock_marker_statement(marker_id: str):
+    """No-op UPDATE that takes the marker row lock without changing its state."""
+
+    return (
+        update(PendingCharge)
+        .where(PendingCharge.id == marker_id, PendingCharge.status == "pending")
+        .values(status=PendingCharge.status)
+    )
+
+
+def _lock_marker(db, marker_id: str) -> bool:
+    """Hold the marker row between the job claim and the credit write.
+
+    On PostgreSQL this locks the row until commit; on SQLite the single-writer
+    transaction gives the same serialization.  A marker already claimed by a
+    competing settlement is not lockable here.
+    """
+
+    if not marker_id:
+        return True
+    result = db.execute(
+        _lock_marker_statement(marker_id),
+        execution_options={"synchronize_session": False},
+    )
+    return bool(result.rowcount)
+
+
+def _record_job_refund_claimed(db, job_id: str, *, source: str) -> None:
+    """Record which ledger paid, after the claim has already been won."""
+
+    if not job_id:
+        return
+    row = db.get(Job, job_id)
+    if row is None:
+        return
+    payload = dict(row.payload or {})
+    payload["refunded"] = True
+    payload["refund_source"] = source
+    row.refund_claimed = True
+    row.payload = payload
+    db.flush()
+
+
 def mark_job_refund_settled(db, job_id: str, *, source: str) -> bool:
     """Claim the JOB-level refund ledger once a marker has paid the refund.
 
@@ -1340,25 +1450,9 @@ def mark_job_refund_settled(db, job_id: str, *, source: str) -> bool:
     the single owner flag; the payload records which ledger actually paid.
     """
 
-    if not job_id:
+    if not job_id or not _claim_job_refund(db, job_id):
         return False
-    claimed = db.execute(
-        update(Job)
-        .where(Job.id == job_id, Job.refund_claimed.is_(False))
-        .values(refund_claimed=True),
-        execution_options={"synchronize_session": False},
-    )
-    if not claimed.rowcount:
-        return False
-    row = db.get(Job, job_id)
-    if row is None:
-        return False
-    row.refund_claimed = True
-    payload = dict(row.payload or {})
-    payload["refunded"] = True
-    payload["refund_source"] = source
-    row.payload = payload
-    db.flush()
+    _record_job_refund_claimed(db, job_id, source=source)
     return True
 
 
@@ -1420,36 +1514,27 @@ def refund_charged_job(db, job: Job, written: int | None = None) -> int:
     if refund > 0 and payee is None:
         return 0
 
-    claimed = db.execute(
-        update(Job)
-        # PostgreSQL stores this as BOOLEAN: comparing with the Python int 0
-        # would render ``refund_claimed = 0`` and fail with "boolean = integer".
-        # .is_(False) is portable on both SQLite and PostgreSQL.
-        .where(Job.id == job.id, Job.refund_claimed.is_(False))
-        .values(refund_claimed=True),
-        execution_options={"synchronize_session": False},
-    )
-    if not claimed.rowcount:
+    # Single owner claim FIRST, then the charge marker, then the user balance.
+    # Taking these row locks in the same order as marker settlement is what
+    # prevents a cross-ledger deadlock on PostgreSQL; the claim also guarantees
+    # exactly one refund even if both paths race.
+    if not _claim_job_refund(db, job.id):
         return 0
     job.refund_claimed = True
-
-    if refund > 0:
-        try:
+    marker_id = str(payload.get("pending_charge_id") or "")
+    _lock_marker(db, marker_id)
+    try:
+        if refund > 0:
             billing.refund_chapters(
                 db, payee, refund, project_id=job.project_id or "", origin=f"job:{job.id}"
             )
-        except Exception:
-            # A failed ledger write must leave the claim retryable; otherwise a
-            # transient DB error would permanently strand the refund.
-            db.execute(
-                update(Job)
-                .where(Job.id == job.id)
-                .values(refund_claimed=False),
-                execution_options={"synchronize_session": False},
-            )
-            job.refund_claimed = False
-            db.flush()
-            raise
+    except Exception:
+        # A failed ledger write must leave the claim retryable; otherwise a
+        # transient DB error would permanently strand the refund.
+        _release_job_refund(db, job.id)
+        job.refund_claimed = False
+        db.flush()
+        raise
     payload["refunded"] = True
     payload["refunded_credits"] = refund
     payload["refund_source"] = "job"
@@ -1478,6 +1563,70 @@ def _marker_payee(db, marker: PendingCharge, user: User | None = None) -> User |
     return account
 
 
+def _settle_marker_refund(
+    db,
+    marker: PendingCharge,
+    *,
+    user: User | None,
+    project_id: str,
+    chapters: int,
+    written: int,
+) -> int:
+    """Claim job -> marker -> user, then refund and close both ledgers.
+
+    Both marker entry points (direct settle and TTL reconcile) and the job
+    failure path now acquire the same rows in the same order.  The JOB-level
+    claim is the single owner of the charge: losing it means another ledger is
+    already paying (or about to pay), so the marker is deliberately left alone.
+    """
+
+    job_id = _marker_job_id(marker)
+    if job_id and not _claim_job_refund(db, job_id):
+        return 0
+    refund = _refund_for(marker, written)
+    payee = _marker_payee(db, marker, user)
+    if refund > 0 and payee is None:
+        # No payable account (e.g. deleted sub-account): leave it pending for a
+        # later retry instead of clearing the marker with a zero refund.
+        if job_id:
+            _release_job_refund(db, job_id)
+        return 0
+    claimed = db.execute(
+        update(PendingCharge)
+        .where(PendingCharge.id == marker.id, PendingCharge.status == "pending")
+        .values(status="processing", updated_at=utc_now())
+    )
+    if not claimed.rowcount:
+        if job_id:
+            _release_job_refund(db, job_id)
+        return 0
+    try:
+        if refund > 0:
+            billing.refund_chapters(
+                db, payee, refund, project_id=str(project_id or ""),
+                origin=f"marker:{marker.id}",
+            )
+    except Exception:
+        # Release both claims so a later reconcile/settle can retry safely.
+        db.execute(
+            update(PendingCharge)
+            .where(PendingCharge.id == marker.id)
+            .values(status="pending", updated_at=utc_now())
+        )
+        marker.status = "pending"
+        if job_id:
+            _release_job_refund(db, job_id)
+        db.flush()
+        raise
+    marker.status = "refunded" if refund > 0 else "cleared"
+    marker.refunded_credits = refund
+    marker.updated_at = utc_now()
+    # The payment is durable in this transaction; record which ledger paid.
+    _record_job_refund_claimed(db, job_id, source="marker")
+    db.flush()
+    return refund
+
+
 def settle_pending_charge(
     db,
     marker_id: str,
@@ -1501,43 +1650,14 @@ def settle_pending_charge(
         return 0
     if str(getattr(marker, "note", "") or "").startswith("job:"):
         written = _marker_written(db, marker)
-    refund = _refund_for(marker, written)
-    payee = _marker_payee(db, marker, user)
-    if refund > 0 and payee is None:
-        # No payable account (e.g. deleted sub-account): leave it pending for a
-        # later retry instead of clearing the marker with a zero refund.
-        return 0
-    # Claim first; the refund and the status change share this transaction.
-    claimed = db.execute(
-        update(PendingCharge)
-        .where(PendingCharge.id == marker_id, PendingCharge.status == "pending")
-        .values(status="processing", updated_at=utc_now())
+    return _settle_marker_refund(
+        db,
+        marker,
+        user=user,
+        project_id=project_id,
+        chapters=chapters,
+        written=written,
     )
-    if not claimed.rowcount:
-        return 0
-    if refund > 0:
-        try:
-            billing.refund_chapters(
-                db, payee, refund, project_id=str(project_id or ""), origin=f"marker:{marker.id}"
-            )
-        except Exception:
-            # Release the marker claim so a later reconcile/settle can retry.
-            db.execute(
-                update(PendingCharge)
-                .where(PendingCharge.id == marker_id)
-                .values(status="pending", updated_at=utc_now())
-            )
-            marker.status = "pending"
-            db.flush()
-            raise
-    marker.status = "refunded" if refund > 0 else "cleared"
-    marker.refunded_credits = refund
-    marker.updated_at = utc_now()
-    # Close the job-level ledger too: a late worker failure or reaper callback
-    # must see refund_claimed and never issue a second refund.
-    mark_job_refund_settled(db, _marker_job_id(marker), source="marker")
-    db.flush()
-    return refund
 
 
 def _project_has_live_job(db, project_id: str | None) -> bool:
@@ -1564,6 +1684,59 @@ def _project_has_live_job(db, project_id: str | None) -> bool:
             )
         )
     )
+
+
+def retry_failed_refunds(db, *, max_retries: int = MAX_REFUND_RETRIES) -> int:
+    """Bounded automatic retry of terminal jobs with an unclaimed charge refund.
+
+    A worker/reaper can die between the conditional ``failed`` transition and a
+    successful ledger write; ``refund_charged_job`` deliberately releases its
+    claim when the ledger write raises, so the charge stays recoverable.  The
+    periodic reconcile pass (used by the reaper and by startup recovery) calls
+    this helper.  Each attempt is a savepoint: a broken ledger cannot poison the
+    caller's transaction, and the attempt counter is persisted in
+    ``Job.payload['refund_retries']`` — no schema change, no duplicate credit.
+    Returns the number of successful retries.
+    """
+
+    rows = list(
+        db.scalars(
+            select(Job).where(
+                Job.status == "failed",
+                Job.refund_claimed.is_(False),
+                Job.kind == "generate",
+            )
+        )
+    )
+    retried = 0
+    for row in rows:
+        payload = dict(row.payload or {})
+        if not payload.get("charged") or not payload.get("chapters") or payload.get("refunded"):
+            continue
+        attempts = int(payload.get("refund_retries") or 0)
+        if attempts >= max_retries:
+            continue
+        try:
+            with db.begin_nested():
+                paid = refund_charged_job(db, row)
+        except Exception:  # noqa: BLE001 - one bad ledger must not stop the sweep
+            logger.exception("失败任务退款重试失败 job=%s", row.id)
+            db.expire(row)
+            fresh = db.get(Job, row.id)
+            if fresh is not None:
+                retry_payload = dict(fresh.payload or {})
+                retry_payload["refund_retries"] = attempts + 1
+                db.execute(
+                    update(Job)
+                    .where(Job.id == row.id, Job.refund_claimed.is_(False))
+                    .values(payload=retry_payload),
+                    execution_options={"synchronize_session": False},
+                )
+                db.expire(fresh)
+            continue
+        if paid:
+            retried += 1
+    return retried
 
 
 def reconcile_pending_charges(
@@ -1634,26 +1807,24 @@ def reconcile_pending_charges(
         if refund > 0 and payee is None:
             # No payable account — refuse to clear with a zero refund.
             continue
-        # Claim first; the refund and the status change share this transaction.
-        claimed = db.execute(
-            update(PendingCharge)
-            .where(PendingCharge.id == marker.id, PendingCharge.status == "pending")
-            .values(status="processing", updated_at=utc_now())
+        _settle_marker_refund(
+            db,
+            marker,
+            user=None,
+            project_id=marker.project_id,
+            chapters=int(marker.chapters or 1),
+            written=written,
         )
-        if not claimed.rowcount:
-            continue
-        if refund > 0:
-            billing.refund_chapters(
-                db, payee, refund, project_id=marker.project_id,
-                origin=f"marker:{marker.id}",
-            )
-        marker.status = "cleared" if refund == 0 else "refunded"
-        marker.refunded_credits = refund
-        marker.updated_at = utc_now()
-        # A stale marker may outlive a job-level refund; record the same owner
-        # flag so the job ledger is skipped even though the marker paid here.
-        mark_job_refund_settled(db, _marker_job_id(marker), source="marker")
-        settled += 1
+        # 对账计数是「已结算 marker 数」，不是退款点数：全部章节已写完时
+        # refund=0 但 marker 仍从 pending 变为 cleared，必须计入一次结算。
+        if marker.status in {"refunded", "cleared"}:
+            settled += 1
+    db.flush()
+    # Failed terminal jobs whose ledger claim was released after a transient
+    # billing error are retried here: reaper calls this pass periodically and
+    # startup recovery calls it once.  The bounded counter lives in Job.payload
+    # so no schema change is needed.
+    retry_failed_refunds(db)
     db.flush()
     return settled
 

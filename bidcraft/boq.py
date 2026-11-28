@@ -14,6 +14,7 @@ or from the project's material ledger.
 from __future__ import annotations
 
 import difflib
+import json
 import logging
 import math
 import re
@@ -22,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, select, update
 from sqlalchemy.orm import Session
 
 from . import auth, clock
@@ -1478,6 +1479,54 @@ def submit_version(
     return version_payload(version, project=project)
 
 
+#: 审批链是 JSON 读-改-写，条件 UPDATE 抢占失败时最多重读这么多次。
+APPROVAL_CLAIM_ATTEMPTS = 8
+
+
+def json_column_stamp(db: Session, column, row_id: str) -> str | None:
+    """Raw stored JSON text, used as an optimistic-concurrency stamp.
+
+    Reading the column as text (rather than re-serializing a Python object)
+    works identically on SQLite TEXT and PostgreSQL JSON, and survives any
+    serializer formatting the original writer used.
+    """
+
+    model = column.parent.class_
+    return db.execute(
+        select(cast(column, String)).where(model.id == row_id)
+    ).scalar()
+
+
+def claim_json_revision(
+    db: Session,
+    model,
+    row_id: str,
+    column,
+    *,
+    expected_stamp: str | None,
+    from_status: str,
+    **values: Any,
+) -> bool:
+    """Conditionally replace a JSON column only if nobody changed it meanwhile.
+
+    The ``WHERE`` includes the exact stored JSON text captured by
+    :func:`json_column_stamp` and the expected lifecycle status.  On PostgreSQL
+    a losing UPDATE waits for the winner's commit and then matches zero rows;
+    on SQLite the single-writer transaction gives the same serialization.  No
+    Python global lock and no schema change are involved.
+    """
+
+    statement = update(model).where(model.id == row_id, model.status == from_status)
+    if expected_stamp is None:
+        statement = statement.where(column.is_(None))
+    else:
+        statement = statement.where(cast(column, String) == expected_stamp)
+    result = db.execute(
+        statement.values(**values), execution_options={"synchronize_session": False}
+    )
+    return bool(result.rowcount)
+
+
 def review_version(
     db: Session,
     project: Project,
@@ -1501,89 +1550,125 @@ def review_version(
     """
     if decision not in QUOTE_REVIEW_DECISIONS:
         raise ValueError("decision 只能是 approve 或 reject")
-    version = get_version(db, project.id, version_id)
-    if version is None:
-        raise LookupError("版本不存在")
-    chain = normalize_chain((project.meta or {}).get("approval_chain"))
-    approvals = list(version.approvals or [])
-    summary = dict(version.summary or {})
-    total_amount = summary.get("total_amount")
-    package_id = version.package_id
-    currency = version_currency(version, project)
-    applicable = applicable_stages(chain, total_amount, package_id, currency, summary)
-    done = completed_stages(chain, approvals, total_amount, package_id, currency, summary)
-    # Authorization precedes the state check so an unauthorized caller gets 403
-    # even on a draft (matching the old route-level owner gate), while an
-    # authorized reviewer still sees the 409 state-machine conflict.
-    if not chain:
-        if role != "owner" and not is_super:
-            raise BoqForbiddenError("仅项目负责人可审批报价")
-    else:
-        # ``stage`` keeps the original chain index (audit/timeline); ``done``
-        # is the applicable-level ordinal used in user-facing level numbers.
-        if done < len(applicable):
-            stage, current = applicable[done]
+    # 调用方可能在进入审批前刚把 version.status 改成 submitted（尚未 flush）。
+    # 下面的重试循环会 expire identity map 并重新 SELECT，若不先 flush，
+    # 该未持久化状态会被丢弃，导致合法待审版本被误判为 draft。
+    db.flush()
+    for _attempt in range(APPROVAL_CLAIM_ATTEMPTS):
+        # Expire the identity-mapped row so each retry evaluates the CURRENT
+        # approval chain; a stale ORM snapshot must never authorize a second
+        # signature or overwrite a colleague's record.
+        mapped = db.get(BoqQuoteVersion, version_id)
+        if mapped is not None:
+            db.expire(mapped)
+        version = get_version(db, project.id, version_id)
+        if version is None:
+            raise LookupError("版本不存在")
+        stamp = json_column_stamp(db, BoqQuoteVersion.approvals, version_id)
+        # Decode the approval trail FROM THE SAME SNAPSHOT as the claim stamp.
+        # Reading it from the ORM object instead would leave a TOCTOU window
+        # between the two SELECTs and could overwrite a concurrent approval.
+        approvals = list(json.loads(stamp) if stamp else [])
+        chain = normalize_chain((project.meta or {}).get("approval_chain"))
+        summary = dict(version.summary or {})
+        total_amount = summary.get("total_amount")
+        package_id = version.package_id
+        currency = version_currency(version, project)
+        applicable = applicable_stages(chain, total_amount, package_id, currency, summary)
+        done = completed_stages(chain, approvals, total_amount, package_id, currency, summary)
+        # Authorization precedes the state check so an unauthorized caller gets 403
+        # even on a draft (matching the old route-level owner gate), while an
+        # authorized reviewer still sees the 409 state-machine conflict.
+        if not chain:
+            if role != "owner" and not is_super:
+                raise BoqForbiddenError("仅项目负责人可审批报价")
         else:
-            stage, current = len(chain), {"approvers": [], "mode": "all"}
-        approver_ids = {str(p.get("id") or "") for p in current["approvers"]}
-        if not is_super:
-            if actor_id not in approver_ids:
-                raise BoqForbiddenError(f"当前需第 {done + 1} 级审批人审批，您不是该级审批人")
-            if current["mode"] == "all" and any(
-                r.get("decision") == "approve"
-                and r.get("stage") == stage
-                and str(r.get("user_id") or "") == actor_id
-                for r in approvals
-            ):
-                raise BoqForbiddenError(f"您已完成本级审批（第 {done + 1} 级）")
-    if (version.status or "draft") != "submitted":
-        raise BoqConflictError("仅待审版本可审批")
-    now = utcnow()
-    if chain:
-        approvals.append(
-            {
-                "stage": stage,
-                "user_id": actor_id,
-                "name": _clean_actor(actor),
-                "decision": decision,
-                "note": _clean_note(note),
-                "at": clock.iso_utc(now),
-            }
-        )
-        version.approvals = approvals
+            # ``stage`` keeps the original chain index (audit/timeline); ``done``
+            # is the applicable-level ordinal used in user-facing level numbers.
+            if done < len(applicable):
+                stage, current = applicable[done]
+            else:
+                stage, current = len(chain), {"approvers": [], "mode": "all"}
+            approver_ids = {str(p.get("id") or "") for p in current["approvers"]}
+            if not is_super:
+                if actor_id not in approver_ids:
+                    raise BoqForbiddenError(f"当前需第 {done + 1} 级审批人审批，您不是该级审批人")
+                if current["mode"] == "all" and any(
+                    r.get("decision") == "approve"
+                    and r.get("stage") == stage
+                    and str(r.get("user_id") or "") == actor_id
+                    for r in approvals
+                ):
+                    raise BoqForbiddenError(f"您已完成本级审批（第 {done + 1} 级）")
+        if (version.status or "draft") != "submitted":
+            raise BoqConflictError("仅待审版本可审批")
+        now = utcnow()
+        record = {
+            "stage": stage if chain else 0,
+            "user_id": actor_id,
+            "name": _clean_actor(actor),
+            "decision": decision,
+            "note": _clean_note(note),
+            "at": clock.iso_utc(now),
+        }
+        new_approvals = [*approvals, record] if chain else list(approvals)
         final_approve = (
             decision == "approve"
-            and completed_stages(
-                chain, approvals, total_amount, package_id, currency, summary
+            and (
+                completed_stages(
+                    chain, new_approvals, total_amount, package_id, currency, summary
+                )
+                >= len(applicable)
+                if chain
+                else True
             )
-            >= len(applicable)
         )
-    else:
-        final_approve = decision == "approve"
-    if decision == "approve" and not final_approve:
-        # Intermediate level: stays submitted, review_* untouched until the
-        # last level signs off.
+        values: dict[str, Any] = {"approvals": new_approvals}
+        if decision == "approve" and not final_approve:
+            # Intermediate level: stays submitted, review_* untouched.
+            if claim_json_revision(
+                db,
+                BoqQuoteVersion,
+                version_id,
+                BoqQuoteVersion.approvals,
+                expected_stamp=stamp,
+                from_status="submitted",
+                **values,
+            ):
+                db.expire(version)
+                return version_payload(get_version(db, project.id, version_id), project=project)
+            continue
+        values.update(
+            status="approved" if decision == "approve" else "rejected",
+            review_note=_clean_note(note),
+            reviewed_by=_clean_actor(actor),
+            reviewed_at=now,
+        )
+        if not claim_json_revision(
+            db,
+            BoqQuoteVersion,
+            version_id,
+            BoqQuoteVersion.approvals,
+            expected_stamp=stamp,
+            from_status="submitted",
+            **values,
+        ):
+            continue
+        db.expire(version)
+        if decision == "approve":
+            # One approved version per package: retire the previous winner to
+            # draft without touching its review trail (audit keeps history).
+            others = db.scalars(
+                _version_statement(project.id, version.package_id).where(
+                    BoqQuoteVersion.status == "approved",
+                    BoqQuoteVersion.id != version.id,
+                )
+            )
+            for other in others:
+                other.status = "draft"
         db.flush()
-        return version_payload(version, project=project)
-    if decision == "approve":
-        # One approved version per package: retire the previous winner to draft
-        # without touching its review trail (audit keeps the history).
-        others = db.scalars(
-            _version_statement(project.id, version.package_id).where(
-                BoqQuoteVersion.status == "approved",
-                BoqQuoteVersion.id != version.id,
-            )
-        )
-        for other in others:
-            other.status = "draft"
-        version.status = "approved"
-    else:
-        version.status = "rejected"
-    version.review_note = _clean_note(note)
-    version.reviewed_by = _clean_actor(actor)
-    version.reviewed_at = now
-    db.flush()
-    return version_payload(version, project=project)
+        return version_payload(get_version(db, project.id, version_id), project=project)
+    raise BoqConflictError("审批并发冲突，请重试")
 
 
 def unapprove_version(

@@ -41,6 +41,13 @@ import { Button } from '../components/Button'
 import { EmptyState, ErrorState, Skeleton } from '../components/Feedback'
 import { TabHeading } from '../components/Workbench'
 
+/** 后端 /billing/orders 的终态；进入这些状态后不应再轮询支付结果。 */
+const TERMINAL_ORDER_STATUSES = new Set(['paid', 'closed', 'expired', 'failed'])
+
+function isTerminalOrder(status: string | undefined): boolean {
+  return status !== undefined && TERMINAL_ORDER_STATUSES.has(status)
+}
+
 export function BillingPage() {
   useDocumentTitle('账户与充值')
   const { user, canWrite, updateUser, syncUser } = useAuth()
@@ -57,6 +64,11 @@ export function BillingPage() {
   const [redeemError, setRedeemError] = useState<string | null>(null)
   const pollErrors = useRef(0)
   const settledOrder = useRef<string | null>(null)
+  // 同步守卫：React state 在下一次渲染前不会更新，同一事件循环内的双击
+  // 必须靠 ref 拦截，否则会创建两笔订单 / 重复模拟支付。
+  const submittingRef = useRef(false)
+  const payingRef = useRef(false)
+  const redeemingRef = useRef(false)
   const readOnly = !canWrite
   const isSub = Boolean(data?.summary?.is_sub)
 
@@ -69,12 +81,19 @@ export function BillingPage() {
   useEffect(() => {
     if (!activeOrder || activeOrder.status !== 'pending' || data?.wechat_pay_mock) return
     let cancelled = false
+    let timer: number | undefined
     pollErrors.current = 0
     const tick = async () => {
       try {
         const latest = await getBillingOrder(activeOrder.id)
         if (cancelled) return
         pollErrors.current = 0
+        if (isTerminalOrder(latest.status)) {
+          // 终态在 effect cleanup 生效之前也可能到达；先就地停表，
+          // 防止同一 tick 的 in-flight 请求之后再触发额外轮询。
+          if (timer) window.clearInterval(timer)
+          timer = undefined
+        }
         setActiveOrder(latest)
         if (latest.status === 'paid' && settledOrder.current !== latest.id) {
           settledOrder.current = latest.id
@@ -100,10 +119,11 @@ export function BillingPage() {
       }
     }
     void tick()
-    const timer = window.setInterval(() => void tick(), 2000)
+    timer = window.setInterval(() => void tick(), 2000)
     return () => {
       cancelled = true
-      window.clearInterval(timer)
+      if (timer) window.clearInterval(timer)
+      timer = undefined
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeOrder?.id, activeOrder?.status, data?.wechat_pay_mock])
@@ -131,7 +151,8 @@ export function BillingPage() {
   const orders = data.orders || []
 
   const startOrder = async (packageId: string) => {
-    if (purchaseDisabled) return
+    if (purchaseDisabled || submittingRef.current) return
+    submittingRef.current = true
     setBusyPackage(packageId)
     setOrderError(null)
     setOrderIsVip(false)
@@ -149,12 +170,14 @@ export function BillingPage() {
       setOrderError(message)
       toast.error('创建充值订单失败', message)
     } finally {
+      submittingRef.current = false
       setBusyPackage(null)
     }
   }
 
   const startVipOrder = async (packageId: string) => {
-    if (purchaseDisabled || isSub) return
+    if (purchaseDisabled || isSub || submittingRef.current) return
+    submittingRef.current = true
     setBusyPackage(packageId)
     setOrderError(null)
     setOrderIsVip(true)
@@ -172,12 +195,14 @@ export function BillingPage() {
       setOrderError(message)
       toast.error('创建 VIP 订单失败', message)
     } finally {
+      submittingRef.current = false
       setBusyPackage(null)
     }
   }
 
   const mockPay = async () => {
-    if (!activeOrder || readOnly) return
+    if (!activeOrder || readOnly || payingRef.current) return
+    payingRef.current = true
     setPaying(true)
     setOrderError(null)
     try {
@@ -194,12 +219,14 @@ export function BillingPage() {
       setOrderError(message)
       toast.error('模拟支付失败', message)
     } finally {
+      payingRef.current = false
       setPaying(false)
     }
   }
 
   const redeem = async () => {
-    if (readOnly || redeemBusy || !redeemCode.trim()) return
+    if (readOnly || redeemBusy || redeemingRef.current || !redeemCode.trim()) return
+    redeemingRef.current = true
     setRedeemBusy(true)
     setRedeemError(null)
     const before = balance
@@ -224,6 +251,7 @@ export function BillingPage() {
       setRedeemError(message)
       toast.error('兑换失败', message)
     } finally {
+      redeemingRef.current = false
       setRedeemBusy(false)
     }
   }

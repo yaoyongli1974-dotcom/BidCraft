@@ -1,4 +1,4 @@
-# BidCraft 数据库备份与恢复手册（v0.31.0）
+# BidCraft 数据库备份与恢复手册（v0.34.0）
 
 适用：自托管实例（SQLite 默认 / PostgreSQL 可选）。所有命令在开发机或受控运维终端执行；**不得对生产库做破坏性验证**。
 
@@ -58,13 +58,17 @@ docker exec bidcraft bidcraft backup-prune 10
 
 1. 停服并确认没有写入连接。
 2. 解压 `dump.sql`；在临时库做试导入：`createdb bidcraft_restore_test && psql -d bidcraft_restore_test -f dump.sql`。
-3. 核对表数量/行数与 `manifest.json`，跑 Alembic `bidcraft db upgrade` 在临时库验证迁移链（不碰生产库）。
+3. 核对表数量/行数与 `manifest.json`，在**同后端**的临时库验证迁移链（不碰生产库）：`BIDCRAFT_HOME=<临时目录> BIDCRAFT_DB_URL=<临时库 URL> bidcraft doctor`（`doctor` 会调用 `init_db()` 执行 Alembic 升级）。SQLite 临时库示例 `sqlite:///<临时目录>/verify.db`；PostgreSQL 则使用第 2 步导入的 `postgresql+psycopg://user:pass@host:5432/bidcraft_restore_test`，不要用 SQLite 冒充 PG 验证。
 4. 正式恢复：`pg_restore`/`psql` 导入目标库；放回 `secret.key` 与数据目录。
 5. 启动后按 4.1 第 5～6 步冒烟并记录。
 
 ## 5. 迁移与版本
 
-- Alembic 单 head 以仓库 `bidcraft/migrations/versions/` 为准（v0.31.0：随阶段推进可能新增 `0012_generation_lease`，不得修改历史 0001～0011）。
+- Alembic head **动态计算**，不按版本号硬编码：`bidcraft/migrations/versions/` 中所有 `revision` 减去所有 `down_revision` 必须恰好剩一个 head。CI 的 `python-lint` job 已用 AST 扫描执行该断言；本地可用下面的命令读取当前 head：
+  ```bash
+  uv run python -c "from alembic.config import Config; from alembic.script import ScriptDirectory; cfg = Config(); cfg.set_main_option('script_location', 'bidcraft/migrations'); print(ScriptDirectory.from_config(cfg).get_heads())"
+  ```
+  历史迁移只增不改；每个新版本以仓库当前 head 为准，旧手册中写死的 head/revision 号不得当作依据。
 - 升级前：`bidcraft backup` → `bidcraft backup-verify` → 在临时库跑升级 → 确认成功后再在生产库执行。
 - 回滚：仓库迁移均提供 `downgrade`，但 SQLite 下部分历史迁移依赖 `inspect(bind)`，离线 SQL 模式不适用；回滚同样先备份。
 - 容器镜像内置 `postgresql-client`，`/health/live` 用于 liveness，`/health/ready` 用于 readiness（依赖 DB/模型/web_dist）。

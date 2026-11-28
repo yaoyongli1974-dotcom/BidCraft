@@ -8,8 +8,9 @@
  *   自动切到轮询（调用方把 streamFallback 置 true 后重新调用本函数即可）。
  * - `stream: false`：只轮询。用于进度粒度粗、不需要 token 级预览的任务
  *   （配图批次、知识库重建等）。
- * - 终态（done/failed）只回调一次，由内部 doneHandled 守卫，SSE 与轮询同时
- *   到达也不会重复触发副作用。
+ * - 终态与后端契约一致（`bidcraft/jobs.py` 的 TERMINAL_STATUSES：
+ *   done/failed/cancelled）：停止轮询/关闭 SSE，只结算一次。`onTerminal`
+ *   收到完整终态快照；`cancelled` 不是成功，交给 `onFailed` 让页面收尾。
  */
 import { getJob } from '../api/generation'
 import { messageOf } from '../lib/http'
@@ -41,10 +42,12 @@ export interface WatchJobOptions {
   onUpdate?: (data: Job | JobEventPayload) => void
   /** SSE 领域事件（chapter_start / delta / chapter 等），供页面做专属展示。 */
   onEvent?: (kind: string, data: JobEventPayload) => void
-  /** 任务成功完成，保证只回调一次。 */
+  /** 任务成功完成（status=done），保证只回调一次。 */
   onDone?: (job: Job) => void
-  /** 任务失败，保证只回调一次。 */
+  /** 任务失败或未完成终态（status=failed/cancelled），保证只回调一次。 */
   onFailed?: (job: Job) => void
+  /** 任一终态（done/failed/cancelled）的完整快照，保证只回调一次。 */
+  onTerminal?: (job: Job) => void
   /** SSE 断线时调用；页面据此切到轮询模式。 */
   onSseFallback?: () => void
   /** 轮询连续失败达到上限时调用（`message` 已格式化）。 */
@@ -56,22 +59,32 @@ export interface WatchJobOptions {
 const SSE_EVENTS = [
   'snapshot', 'queued', 'status',
   'chapter_start', 'delta', 'chapter',
-  'done', 'failed',
+  'done', 'failed', 'cancelled',
 ] as const
+
+/** 与后端 `bidcraft/jobs.py::TERMINAL_STATUSES` 保持一致的状态集合。 */
+const TERMINAL_STATUSES = new Set(['done', 'failed', 'cancelled'])
 
 export function jobEventUrl(jobId: string): string {
   return `/jobs/${encodeURIComponent(jobId)}/events`
 }
 
 function isTerminal(status: string | undefined): boolean {
-  return status === 'done' || status === 'failed'
+  return status !== undefined && TERMINAL_STATUSES.has(status)
 }
 
 function asJob(data: JobEventPayload, fallbackId: string): Job {
   return { ...(data as Job), id: data.id || fallbackId }
 }
 
-export function watchJob(jobId: string, options: WatchJobOptions): () => void {
+/** 停止函数同时可读取最后一次终态快照，供尚未注册 onTerminal 的调用方使用。 */
+export interface WatchJobHandle {
+  (): void
+  /** 可选，仅为兼容把 vi.fn() 当作 stop 使用的既有测试；生产返回值总是提供。 */
+  terminalSnapshot?(): Job | null
+}
+
+export function watchJob(jobId: string, options: WatchJobOptions): WatchJobHandle {
   const {
     stream = false,
     pollInterval = 1600,
@@ -80,6 +93,7 @@ export function watchJob(jobId: string, options: WatchJobOptions): () => void {
     onEvent,
     onDone,
     onFailed,
+    onTerminal,
     onSseFallback,
     onPollError,
     onPollTick,
@@ -90,14 +104,21 @@ export function watchJob(jobId: string, options: WatchJobOptions): () => void {
   let source: EventSource | null = null
   let timer: number | undefined
   let errors = 0
+  let terminal: Job | null = null
 
   const settle = (data: JobEventPayload) => {
-    if (handled) return
+    if (handled || cancelled) return
     handled = true
     source?.close()
-    if (timer) window.clearInterval(timer)
+    if (timer) {
+      window.clearInterval(timer)
+      timer = undefined
+    }
     const job = asJob(data, jobId)
-    if (job.status === 'failed') {
+    terminal = job
+    onTerminal?.(job)
+    if (job.status === 'failed' || job.status === 'cancelled') {
+      // 取消不是成功：不能落到 onDone，否则页面会显示「已完成」。
       onFailed?.(job)
     } else {
       onDone?.(job)
@@ -149,7 +170,10 @@ export function watchJob(jobId: string, options: WatchJobOptions): () => void {
         if (kind === 'snapshot' || kind === 'queued' || kind === 'status') {
           onUpdate?.(data)
         }
-        if (kind === 'done' || kind === 'failed') settle(data)
+        if (kind === 'done' || kind === 'failed' || kind === 'cancelled') {
+          // 领域事件名本身就是终态；帧里可能没带 status，以事件名兜底。
+          settle({ ...data, status: data.status || kind })
+        }
       })
     }
     source.onerror = () => {
@@ -161,9 +185,14 @@ export function watchJob(jobId: string, options: WatchJobOptions): () => void {
     startPolling()
   }
 
-  return () => {
+  const stop: WatchJobHandle = () => {
     cancelled = true
     source?.close()
-    if (timer) window.clearInterval(timer)
+    if (timer) {
+      window.clearInterval(timer)
+      timer = undefined
+    }
   }
+  stop.terminalSnapshot = () => terminal
+  return stop
 }

@@ -223,6 +223,26 @@ def _release_generation_lease(project_id: str, token: str) -> None:
         logging.getLogger(__name__).exception("生成租约释放失败: %s", project_id)
 
 
+def _sync_generation_guard(project_id: str, token: str, abort: threading.Event):
+    """Pre-chapter checkpoint for synchronous generation routes.
+
+    The async worker re-checks the Job claim and the GenerationLease before
+    every chapter.  Sync routes have no Job row, so they must at least verify
+    the lease (in a fresh session, to defeat long-session snapshots) and the
+    heartbeat/shutdown signal before the writer touches a Section.
+    """
+
+    def check(info: dict, chapter_db) -> bool:
+        if abort.is_set() or jobqueue.is_shutdown_requested():
+            raise jobqueue.JobAborted("生成任务已中止")
+        if not jobqueue.generation_lease_is_live(project_id, token):
+            abort.set()
+            raise jobqueue.JobAborted("项目生成租约已失效")
+        return True
+
+    return check
+
+
 def _planning_mode(project: Project) -> str:
     """项目级章节规划模式：默认 review（确认后才可写正文）。"""
 
@@ -2147,6 +2167,9 @@ def generate_chapter(ref: str, node_id: str) -> dict[str, Any]:
                 plan_provider=lambda nid: (
                     frozen_plan if nid == node_id_value and frozen_plan is not None else None
                 ),
+                before_chapter=_sync_generation_guard(
+                    project_id, lease_token, heartbeat_abort
+                ),
             )
         # 心跳线程发现租约失效后只置事件；生成会话可能已写出部分章节，按已写
         # 章节数结算而不是全额退款，避免把已完成的工作白送。
@@ -2280,6 +2303,9 @@ def write(ref: str) -> dict[str, Any]:
                     _knowledge_provider, gen_db, user.id, project_id, package_id
                 ),
                 plan_provider=lambda nid: frozen_plans.get(nid),
+                before_chapter=_sync_generation_guard(
+                    project_id, lease_token, heartbeat_abort
+                ),
             )
         if heartbeat_abort.is_set():
             raise RuntimeError("项目生成租约已失效，生成中止")

@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from typing import Any
 
@@ -1243,9 +1244,11 @@ def submit_commercial(
 
 
 def _review_context(
-    doc: CommercialDoc, project: Project
+    doc: CommercialDoc, project: Project, *, validation_override: dict | None = None
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[tuple[int, dict[str, Any]]], int]:
-    validation = dict(doc.validation or {})
+    validation = dict(
+        validation_override if validation_override is not None else (doc.validation or {})
+    )
     chain = boq.normalize_chain((project.meta or {}).get("approval_chain"))
     approvals = list(validation.get("approvals") or [])
     quote = validation.get("quote") or {}
@@ -1282,90 +1285,126 @@ def review_commercial(
     """
     if decision not in REVIEW_DECISIONS:
         raise ValueError("decision 只能是 approve 或 reject")
-    doc = get_commercial(db, project, doc_id)
-    if doc is None:
-        raise LookupError("商务标不存在")
-    chain, approvals, applicable, done = _review_context(doc, project)
-    if not chain:
-        if role != "owner" and not is_super:
-            raise CommercialForbiddenError("仅项目负责人可审批商务标")
-    else:
-        if done < len(applicable):
-            stage, current = applicable[done]
-        else:
-            stage, current = len(chain), {"approvers": [], "mode": "all"}
-        approver_ids = {str(person.get("id") or "") for person in current["approvers"]}
-        if not (is_super or role == "owner") and actor_id not in approver_ids:
-            raise CommercialForbiddenError(
-                f"当前需第 {done + 1} 级审批人审批，您不是该级审批人"
-            )
-        if current["mode"] == "all" and any(
-            record.get("decision") == "approve"
-            and record.get("stage") == stage
-            and str(record.get("user_id") or "") == actor_id
-            for record in approvals
-        ):
-            raise CommercialForbiddenError(f"您已完成本级审批（第 {done + 1} 级）")
-    if (doc.status or "draft") != "submitted":
-        raise CommercialConflictError("仅待审商务标可审批")
-    now = utcnow()
-    validation = dict(doc.validation or {})
-    if chain:
-        approvals.append(
-            {
-                "stage": stage,
-                "user_id": actor_id,
-                "name": _actor_name(actor if isinstance(actor, dict) else None),
-                "decision": decision,
-                "note": _clean_note(note),
-                "at": clock.iso_utc(now),
-            }
+    for _attempt in range(boq.APPROVAL_CLAIM_ATTEMPTS):
+        mapped = db.get(CommercialDoc, doc_id)
+        if mapped is not None:
+            db.expire(mapped)
+        doc = get_commercial(db, project, doc_id)
+        if doc is None:
+            raise LookupError("商务标不存在")
+        stamp = boq.json_column_stamp(db, CommercialDoc.validation, doc_id)
+        # Same snapshot as the conditional claim: decoding the raw stored JSON
+        # avoids a stale ORM copy overwriting a concurrent approver's record.
+        validation_snapshot = json.loads(stamp) if stamp else {}
+        chain, approvals, applicable, done = _review_context(
+            doc, project, validation_override=validation_snapshot
         )
-        validation["approvals"] = approvals
+        if not chain:
+            if role != "owner" and not is_super:
+                raise CommercialForbiddenError("仅项目负责人可审批商务标")
+        else:
+            if done < len(applicable):
+                stage, current = applicable[done]
+            else:
+                stage, current = len(chain), {"approvers": [], "mode": "all"}
+            approver_ids = {str(person.get("id") or "") for person in current["approvers"]}
+            if not (is_super or role == "owner") and actor_id not in approver_ids:
+                raise CommercialForbiddenError(
+                    f"当前需第 {done + 1} 级审批人审批，您不是该级审批人"
+                )
+            if current["mode"] == "all" and any(
+                record.get("decision") == "approve"
+                and record.get("stage") == stage
+                and str(record.get("user_id") or "") == actor_id
+                for record in approvals
+            ):
+                raise CommercialForbiddenError(f"您已完成本级审批（第 {done + 1} 级）")
+        if (doc.status or "draft") != "submitted":
+            raise CommercialConflictError("仅待审商务标可审批")
+        now = utcnow()
+        validation = dict(validation_snapshot)
+        new_approvals = list(approvals)
+        if chain:
+            new_approvals.append(
+                {
+                    "stage": stage,
+                    "user_id": actor_id,
+                    "name": _actor_name(actor if isinstance(actor, dict) else None),
+                    "decision": decision,
+                    "note": _clean_note(note),
+                    "at": clock.iso_utc(now),
+                }
+            )
+        validation["approvals"] = new_approvals
         quote = validation.get("quote") or {}
-        final_approve = decision == "approve" and boq.completed_stages(
-            chain,
-            approvals,
-            _number(quote.get("total_amount")),
-            doc.package_id,
-            _text(quote.get("currency")),
-            summary=quote,
-        ) >= len(applicable)
-    else:
-        final_approve = decision == "approve"
-    if decision == "approve" and not final_approve:
-        doc.validation = validation
-        db.flush()
+        final_approve = decision == "approve" and (
+            boq.completed_stages(
+                chain,
+                new_approvals,
+                _number(quote.get("total_amount")),
+                doc.package_id,
+                _text(quote.get("currency")),
+                summary=quote,
+            )
+            >= len(applicable)
+            if chain
+            else True
+        )
+        values: dict[str, Any] = {"validation": validation}
+        if decision == "approve" and not final_approve:
+            if boq.claim_json_revision(
+                db,
+                CommercialDoc,
+                doc_id,
+                CommercialDoc.validation,
+                expected_stamp=stamp,
+                from_status="submitted",
+                **values,
+            ):
+                db.expire(doc)
+                record_audit(
+                    db,
+                    project.id,
+                    "commercial.approve",
+                    {"doc_id": doc_id, "stage": stage, "final": False, "note": _clean_note(note)},
+                    actor=_audit_actor(actor),
+                )
+                return _doc_payload(get_commercial(db, project, doc_id))
+            continue
+        validation["review"] = {
+            "decision": decision,
+            "note": _clean_note(note),
+            "by": _actor_name(actor if isinstance(actor, dict) else None),
+            "at": clock.iso_utc(now),
+        }
+        values["validation"] = validation
+        values["status"] = "approved" if decision == "approve" else "rejected"
+        if not boq.claim_json_revision(
+            db,
+            CommercialDoc,
+            doc_id,
+            CommercialDoc.validation,
+            expected_stamp=stamp,
+            from_status="submitted",
+            **values,
+        ):
+            continue
+        db.expire(doc)
+        fresh = get_commercial(db, project, doc_id)
         record_audit(
             db,
             project.id,
-            "commercial.approve",
-            {"doc_id": doc.id, "stage": stage, "final": False, "note": _clean_note(note)},
+            "commercial.approve" if decision == "approve" else "commercial.reject",
+            {
+                "doc_id": doc_id,
+                "status": fresh.status if fresh is not None else values["status"],
+                "note": _clean_note(note),
+                "stage": stage if chain else 0,
+            },
             actor=_audit_actor(actor),
         )
-        return _doc_payload(doc)
-    validation["review"] = {
-        "decision": decision,
-        "note": _clean_note(note),
-        "by": _actor_name(actor if isinstance(actor, dict) else None),
-        "at": clock.iso_utc(now),
-    }
-    doc.validation = validation
-    doc.status = "approved" if decision == "approve" else "rejected"
-    db.flush()
-    record_audit(
-        db,
-        project.id,
-        "commercial.approve" if decision == "approve" else "commercial.reject",
-        {
-            "doc_id": doc.id,
-            "status": doc.status,
-            "note": _clean_note(note),
-            "stage": stage if chain else 0,
-        },
-        actor=_audit_actor(actor),
-    )
-    return _doc_payload(doc)
+        return _doc_payload(fresh)
+    raise CommercialConflictError("审批并发冲突，请重试")
 
 
 def unapprove_commercial(

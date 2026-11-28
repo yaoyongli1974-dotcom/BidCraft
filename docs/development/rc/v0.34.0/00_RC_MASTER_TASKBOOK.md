@@ -39,7 +39,13 @@
 - 阶段 0：已提交 `69eb538`。
 - P0 支付安全、资金原子性、任务退款/租约恢复：实现完成，定向验证通过；合并全量回归 `2535 passed, 1008 skipped, 2 warnings in 988.14s`，0 failures。
 - 全量回归第 2 个 warning 为 `tests/test_kb_reindex_job.py` 退出后遗留 worker 线程读取已被重置的测试库（no such table: jobs），属于测试环境线程生命周期噪音，已记录为后续 P1 运维/稳定性清理项，未掩盖任何失败。
-- P1：尚未开始，严格在 P0 全绿并提交后推进。
+- P1：代码与测试已实现，正在做最终全量回归与真实 PostgreSQL 复验。
+- P1 本地真实 PostgreSQL（pgserver 16.2）：`1078 passed, 1 skipped, 1 warning in 675.10s`。
+- P1 三项首轮红灯已修复：`boq.review_version` 在重试前 flush 未提交状态；`reconcile_pending_charges` 结算计数不再把「0 退款但已 cleared」漏计；PG 并发测试种子账户先充值再扣费；旧 CI 镜像标签断言按 v0340-check 更新并禁止旧标签回退。
+- 最终全量后端回归：`2580 passed, 1050 skipped, 2 warnings in 1064.39s`，0 failures。
+- 本地真实 PostgreSQL：`1078 passed, 1 skipped, 1 warning`。
+- 远程 CI：待推送最终 SHA 后取证；合并 main / tag / Release 前必须 9/9 success。
+- 当前 RC 结论：CONDITIONAL PASS / CONDITIONAL GO。P0 全部 PASS；P1 本地 PASS；生产等价 PG、Docker 运行时、远程 CI、真实模型/真实招标文件样本 NOT VERIFIED。
 
 ## 5. 结论口径
 
@@ -57,3 +63,30 @@
 - `NO-GO`
 
 任何未运行、无真实环境或数据阻塞的项目必须明确标记，不得写为 PASS。
+
+## 6. 最终验收清单
+
+| 项 | 交付/结果 | 状态 |
+|---|---|---|
+| 代码基线 | 分支 `fix/v0.34.0-commercial-reliability`，基线 `f333c27`，未回滚/未强推/未 clean | PASS |
+| 支付回调安全 | 新鲜度、序列号、签名类型、事件/算法、mchid/appid、金额/币种/交易号强校验；1 MiB 限制 | PASS |
+| 资金原子性 | `mark_paid` / `redeem` 条件抢占，交易号唯一索引迁移 0017 | PASS |
+| 任务退款/租约 | 先 transition 后退款；requeue 清 token；worker 重取租约 | PASS |
+| DB 并发 | 统一锁顺序、条件审批快照、有界退款补偿、PG 并发测试 | PASS（SQLite + 本地 PG） |
+| 文件完整性 | 临时文件 + 提交后替换；magic byte + sha256 迁移 0018；孤儿文件清理 | PASS |
+| 权限/审计 | 关键配置、计费、兑换、管理员点数与密码重置补齐审计；web_ready 修正 | PASS |
+| 备份/运维 | pg_dump 一致性、manifest 哈希、恢复演练 opt-in、文档更新 | PASS（本地） |
+| 前端终态 | watchJob / BillingPage 终态闭环与防重复提交 | PASS |
+| CI | 9 job、强门禁、PG 并发文件显式收集、/health/ready 冒烟 | 本地 PASS / 远程 NOT VERIFIED |
+| 迁移 | 0017、0018 幂等可逆；0001–0016 零 diff | PASS（本地） |
+| API/前端兼容 | 路由数与业务语义不变；前端契约测试通过 | PASS |
+| 后端全量 | 2580 passed / 1050 skipped / 2 warnings / 0 failures | PASS |
+| Web | 68 files / 499 tests，typecheck / lint / build | PASS |
+| PG 真实验证 | 本地 pgserver 16.2 全套件 1078 passed | PASS（本地） |
+| 生产等价环境 | 生产 PG/PgBouncer、Docker 运行时、生产恢复演练 | NOT VERIFIED |
+| 数据阻塞项 | 真实招标文件、专家评分、真实模型质量 | NOT VERIFIED |
+| 最终发布决策 | 合并 main / tag / Release 需单独授权 | CONDITIONAL GO |
+
+未解决问题：远程 CI 未取证；一次未复现的前端单用例抖动；kb_reindex worker 线程退出后读取已重置测试库的警告（测试生命周期噪音）。
+
+回滚：按阶段反向 revert；迁移 0017、0018 自带 reversible downgrade；生产禁止未经批准直接 downgrade。

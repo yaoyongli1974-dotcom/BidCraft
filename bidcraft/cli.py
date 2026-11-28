@@ -1182,6 +1182,17 @@ def reset_password(
             raise typer.Exit(1)
         user.password_hash = hash_password(password)
         revoke_user_sessions(db, user.id)
+        # 本地离线操作没有请求上下文，record_audit 会记为 system；口令不入审计。
+        from .audit import record_audit
+        from .context import current_user
+
+        record_audit(
+            db,
+            None,
+            "admin.user.password_reset",
+            {"user_id": user.id, "username": user.username},
+            actor=current_user(),
+        )
         console.print(f"[green]已重置 {user.username} 的密码，所有会话已失效。[/green]")
 
 
@@ -1364,6 +1375,7 @@ def backup(
                 result = subprocess.run(
                     [
                         "pg_dump", "--no-owner", "--no-privileges",
+                        "--single-transaction",
                         "-d", libpq_uri, "-f", str(dump),
                     ],
                     env=env, capture_output=True, text=True, check=False,
@@ -1403,6 +1415,10 @@ def backup(
                 "db_backend": settings.db_backend,
                 "db_file": db_entry,
                 "db_bytes": db_bytes,
+                # 数据库与密钥指纹：verify 必须据此 fail-closed，任何一项不一致
+                # 都说明备份被替换/损坏，不能只靠"zip 能打开"就报备份完整。
+                "db_sha256": _sha256_file(snapshot),
+                "secret_key_sha256": _sha256_file(secret_path) if includes_secret else "",
                 "includes_secret_key": includes_secret,
                 "bidcraft_home": str(settings.home),
                 "data_dirs": data_dirs,

@@ -13,7 +13,7 @@ import {
   updateQualityFinding,
 } from '../../api/evaluation'
 import { downloadBlob } from '../../api/generation'
-import { watchJob, type WatchJobOptions } from '../../hooks/watchJob'
+import { watchJob, type WatchJobHandle, type WatchJobOptions } from '../../hooks/watchJob'
 import type { Job, QualityFinding, QualityReport } from '../../lib/types'
 import { clearQueryCache } from '../../lib/queryCache'
 
@@ -83,7 +83,7 @@ describe('QualityTab 证据与明细', () => {
     })
     vi.mocked(runEvaluation).mockResolvedValue(report())
     vi.mocked(runEvaluationAsync).mockResolvedValue({ job_id: 'job-1' })
-    vi.mocked(watchJob).mockReturnValue(vi.fn())
+    vi.mocked(watchJob).mockReturnValue(vi.fn() as unknown as WatchJobHandle)
     vi.mocked(updateQualityFinding).mockResolvedValue(finding())
   })
 

@@ -55,7 +55,9 @@ const GLOBAL_METRIC_LABELS: Record<string, string> = {
   quotes: '报价版本数',
   documents: '商务文档数',
   templates: '模板数量',
-  workers_running: '工作进程是否运行',
+  // 后端 workers_running() 只反映「本进程是否启动内置 worker 池」。
+  // API-only / 多实例外部 worker 部署下 false 属正常，不能标成生产故障。
+  workers_running: '内置工作进程已启动',
   queued_jobs: '排队任务数',
   oldest_queued_age_seconds: '最老排队任务年龄（秒）',
   stale_running_jobs: '陈旧运行中任务数',
@@ -120,7 +122,10 @@ function metricStatusLabel(metricKey: string, key: string): string {
 function metricValue(value: unknown, metricKey = ''): string {
   if (typeof value === 'number' && Number.isFinite(value)) return formatNumber(value)
   if (typeof value === 'string') return value
-  if (typeof value === 'boolean') return value ? '是' : '否'
+  if (typeof value === 'boolean') {
+    if (metricKey === 'workers_running') return value ? '已启动' : '未启动'
+    return value ? '是' : '否'
+  }
   if (value === null || value === undefined) return '—'
   if (typeof value === 'object') {
     const entries = Object.entries(value as Record<string, unknown>)
@@ -132,11 +137,23 @@ function metricValue(value: unknown, metricKey = ''): string {
   return JSON.stringify(value)
 }
 
-/** 新增健康键的异常文案：工作进程停摆 / 存在陈旧运行任务时提示管理员。 */
-function globalMetricWarning(key: string, value: unknown): string | null {
-  if (key === 'workers_running' && value === false) return '工作进程未运行'
+interface MetricNotice {
+  text: string
+  tone: 'info' | 'warn'
+}
+
+/**
+ * 当前 /admin/health 的 10 键契约中需要额外说明的两项：
+ * - workers_running=false 仅表示本进程没有内置 worker 池（API-only 部署为正常形态），
+ *   因此用 info 说明而不是 warn 告警；真正的队列风险看 queued_jobs/stale_running_jobs。
+ * - stale_running_jobs>0 才是需要管理员介入的告警。
+ */
+function globalMetricNotice(key: string, value: unknown): MetricNotice | null {
+  if (key === 'workers_running' && value === false) {
+    return { text: '未启动内置工作进程（可为 API-only 部署）', tone: 'info' }
+  }
   if (key === 'stale_running_jobs' && typeof value === 'number' && value > 0) {
-    return '存在陈旧运行中任务'
+    return { text: '存在陈旧运行中任务', tone: 'warn' }
   }
   return null
 }
@@ -321,16 +338,16 @@ export function AdminHealthTab() {
             </thead>
             <tbody>
               {Object.entries(globalMetrics).map(([key, value]) => {
-                const warning = globalMetricWarning(key, value)
+                const notice = globalMetricNotice(key, value)
                 return (
                   <tr key={key}>
                     <td>{globalMetricLabel(key)}</td>
                     <td className="mono">
                       {metricValue(value, key)}
-                      {warning && (
+                      {notice && (
                         <>
                           {' '}
-                          <Badge tone="warn" subtle>{warning}</Badge>
+                          <Badge tone={notice.tone} subtle>{notice.text}</Badge>
                         </>
                       )}
                     </td>
@@ -341,7 +358,8 @@ export function AdminHealthTab() {
           </table>
           <div className="admin-footnote">
             由后端对数据库做全库聚合，与上方单进程快照口径不同；老后端未返回该字段时不显示本区块。
-            工作进程未运行或存在陈旧运行中任务时，数值旁会显示告警标记。
+            内置工作进程未启动仅说明本进程未启动 worker 池（API-only 部署可为正常）；
+            只有陈旧运行中任务 &gt; 0 才显示告警标记。
           </div>
         </section>
       )}

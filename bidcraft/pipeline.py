@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
+import uuid
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.orm import Session
 
 from . import clock, provenance, substantive, terms, textqa
@@ -18,6 +20,167 @@ from .rules import store as package_store
 from .rules.engine import run_checks
 from .rules.loader import load_package
 from .schemas import CheckResult
+
+# 上传内容白名单：只接受这些 magic bytes；其它（可执行文件、脚本、压缩包、
+# 主动 Web 内容等）一律拒绝，避免「改扩展名绕过校验」。
+_UNSAFE_PREFIXES = (
+    b"mz",           # DOS/PE 可执行文件
+    b"\x7felf",      # ELF
+    b"#!",           # shebang 脚本
+    b"<?",           # PHP / XML 处理指令
+    b"<script",
+    b"<!doctype",
+    b"<html",
+    b"\x1f\x8b",     # gzip
+    b"rar!",
+    b"7z\xbc\xaf",
+    b"\xfd7zx",      # xz
+    b"\x00asm",      # wasm
+    b"\xca\xfe\xba\xbe",  # Java class
+)
+_CONTENT_KINDS = {
+    ".pdf": "pdf",
+    ".docx": "zip",
+    ".xlsx": "zip",
+    ".xlsm": "zip",
+    ".txt": "text",
+    ".md": "text",
+    ".png": "png",
+    ".jpg": "jpeg",
+    ".jpeg": "jpeg",
+    ".webp": "webp",
+}
+
+
+def _is_plain_text(data: bytes) -> bool:
+    """UTF-8 文本（允许 BOM 与常见空白控制字符），不含 NUL 或其它控制字符。"""
+
+    if b"\x00" in data:
+        return False
+    if any(byte < 0x20 and byte not in (8, 9, 10, 12, 13) for byte in data):
+        return False
+    try:
+        data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def sniff_content(data: bytes) -> str:
+    """仅凭 magic bytes 判定内容类型；无法识别或危险时返回 ``unsafe``。"""
+
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    if data.startswith(b"%PDF-"):
+        return "pdf"
+    if data.startswith(b"PK\x03\x04"):
+        return "zip"
+    head = data[:8].lower()
+    if any(head.startswith(prefix) for prefix in _UNSAFE_PREFIXES):
+        return "unsafe"
+    return "text" if _is_plain_text(data) else "unsafe"
+
+
+def validate_declared_type(
+    data: bytes, suffix: str, *, allow_text_fallback: bool = False
+) -> str:
+    """校验扩展名声明的类型与真实 magic bytes 一致。
+
+    ``allow_text_fallback`` 仅供资质证据的历史纯文本占位文件使用；文档上传
+    不允许该兜底，避免把脚本文本伪装成 PDF/Office 文档。
+    """
+
+    suffix = str(suffix or "").lower()
+    expected = _CONTENT_KINDS.get(suffix)
+    if expected is None:
+        raise ValueError("不支持的文件类型")
+    actual = sniff_content(data)
+    if actual == "unsafe":
+        raise ValueError("文件内容魔数（magic bytes）不安全，疑似伪装文件，已拒绝")
+    if actual != expected and not (allow_text_fallback and actual == "text"):
+        raise ValueError("文件内容 magic bytes 与扩展名不匹配，疑似伪装文件")
+    return actual
+
+
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _pending_ops(db: Session) -> dict[str, list]:
+    """每个 Session 只注册一组提交/回滚钩子，避免监听器随上传次数累积。"""
+
+    pending: dict[str, list] | None = db.info.get("_v0340_pending_ops")
+    if pending is not None:
+        return pending
+    pending: dict[str, list] = {"stage": [], "unlink": [], "paths": {}}
+    db.info["_v0340_pending_ops"] = pending
+
+    def _commit(session):  # noqa: ANN001 - SQLAlchemy 事件签名
+        for staging, target in list(pending["stage"]):
+            try:
+                os.replace(staging, target)
+            except OSError:
+                # 跨文件系统等极端情况下退化为复制；绝不静默丢失已校验内容。
+                try:
+                    shutil.copy2(staging, target)
+                except OSError:  # pragma: no cover - 需文件系统故障才能触发
+                    pass
+                finally:
+                    staging.unlink(missing_ok=True)
+        for path in list(pending["unlink"]):
+            path.unlink(missing_ok=True)
+        pending["stage"].clear()
+        pending["unlink"].clear()
+        pending["paths"].clear()
+
+    def _rollback(session):  # noqa: ANN001 - SQLAlchemy 事件签名
+        for staging, _target in list(pending["stage"]):
+            staging.unlink(missing_ok=True)
+        # 待删除的文件在回滚后仍保持原样，不做任何破坏性操作。
+        pending["stage"].clear()
+        pending["unlink"].clear()
+        pending["paths"].clear()
+
+    event.listen(db, "after_commit", _commit)
+    event.listen(db, "after_rollback", _rollback)
+    return pending
+
+
+def stage_file(db: Session, target: Path, data: bytes) -> str:
+    """把已校验的字节写入目标目录的暂存文件，绑定到当前事务。
+
+    暂存文件在 ``after_commit`` 才原子替换到正式路径；任何 HTTPException、
+    数据库异常或 commit 失败都会触发 ``after_rollback`` 清理暂存文件，
+    因此失败请求不会留下孤儿文件。
+    """
+
+    digest = sha256_bytes(data)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target = Path(target)
+    # 暂存名保留原扩展名：同一事务内的解析按扩展名分派 loader。
+    staging = target.parent / f".{target.stem}.{uuid.uuid4().hex}{target.suffix}"
+    try:
+        staging.write_bytes(data)
+    except BaseException:
+        staging.unlink(missing_ok=True)
+        raise
+    pending = _pending_ops(db)
+    pending["stage"].append((staging, Path(target)))
+    # 同一事务内的解析必须读到已校验的字节，而不是尚未 replace 的最终路径。
+    pending["paths"][str(target)] = staging
+    return digest
+
+
+def defer_unlink(db: Session, path: Path) -> None:
+    """把文件删除推迟到事务提交后；回滚时文件保持原样。"""
+
+    _pending_ops(db)["unlink"].append(Path(path))
 
 
 def create_project(db: Session, name: str, package: str = "weakcurrent-cabling") -> Project:
@@ -65,24 +228,20 @@ def add_source(db: Session, project: Project, file_path: str | Path, role: str =
         while target.exists():
             target = target_dir / f"{stem}-{index}{suffix}"
             index += 1
-    try:
-        shutil.copy2(path, target)
-        digest = hashlib.sha256(target.read_bytes()).hexdigest()
-        source = SourceFile(
-            project_id=project.id,
-            role=role,
-            filename=path.name,
-            stored_path=str(target),
-            size=target.stat().st_size,
-            mime=path.suffix.lower(),
-            checksum=digest,
-            parse_state="pending",
-        )
-        db.add(source)
-        db.flush()
-    except BaseException:
-        target.unlink(missing_ok=True)
-        raise
+    data = path.read_bytes()
+    digest = stage_file(db, target, data)
+    source = SourceFile(
+        project_id=project.id,
+        role=role,
+        filename=path.name,
+        stored_path=str(target),
+        size=len(data),
+        mime=path.suffix.lower(),
+        checksum=digest,
+        parse_state="pending",
+    )
+    db.add(source)
+    db.flush()
     return source
 
 
@@ -105,8 +264,16 @@ def read_parse_inputs(db: Session, project_id: str) -> tuple[str, list[dict[str,
     )
     if not sources:
         raise ValueError("项目没有招标文件，请先导入 PDF/DOCX/TXT")
+    pending = db.info.get("_v0340_pending_ops") or {}
+    staged_paths: dict[str, Path] = pending.get("paths") or {}
     return project.package, [
-        {"id": source.id, "filename": source.filename, "stored_path": source.stored_path}
+        {
+            "id": source.id,
+            "filename": source.filename,
+            # 同一事务内刚上传、尚未 commit 的文件走暂存路径；
+            # 老事务/重解析走库里已落盘的正式路径。
+            "stored_path": str(staged_paths.get(source.stored_path, source.stored_path)),
+        }
         for source in sources
     ]
 

@@ -1282,7 +1282,8 @@ export interface AdminHealth {
  * 均为可选以兼容尚未上线它们的后端。
  */
 export interface AdminGlobalMetrics {
-  /** 工作进程是否运行；false 表示后台任务无人消费，前端显示告警。 */
+  /** 本进程是否启动内置 worker 池（bidcraft.jobqueue.workers_running）；
+   *  false 表示 API-only 部署或外部 worker 模式，不等同于生产故障。 */
   workers_running?: boolean
   /** 当前排队中的任务数。 */
   queued_jobs?: number

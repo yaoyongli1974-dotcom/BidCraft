@@ -170,7 +170,12 @@ def _detach_enterprise_memberships(db, user: User) -> dict[str, int]:
       正在使用的共享资产一起带走。
     """
 
-    removed = {"enterprise_members": 0, "enterprises": 0, "assets_transferred": 0}
+    removed = {
+        "enterprise_members": 0,
+        "enterprises": 0,
+        "assets_transferred": 0,
+        "evidence_files_moved": 0,
+    }
     rows = list(
         db.scalars(
             select(EnterpriseMember).where(EnterpriseMember.user_id == user.id)
@@ -211,6 +216,9 @@ def _detach_enterprise_memberships(db, user: User) -> dict[str, int]:
             removed["enterprises"] += 1
     db.flush()
     # 注销者的共享资产交给仍存在的企业 owner，保留成员正在使用的证据。
+    # 证据文件随 owner 搬家，evidence[*].path 同步改写，避免继承后 404。
+    from . import qualifications as qualifications_module
+
     for model in (Qualification, Personnel):
         for row in db.scalars(
             select(model).where(
@@ -219,9 +227,44 @@ def _detach_enterprise_memberships(db, user: User) -> dict[str, int]:
         ):
             enterprise = db.get(Enterprise, row.enterprise_id)
             if enterprise is not None and enterprise.owner_id != user.id:
+                if isinstance(row, Qualification):
+                    # 必须在改写 owner_id 之前搬文件：helper 以当前 owner 目录
+                    # 作为「旧目录」判定来源，否则会误判为外部文件而跳过。
+                    removed["evidence_files_moved"] += (
+                        qualifications_module.transfer_evidence_to_owner(
+                            row, enterprise.owner_id
+                        )
+                    )
                 row.owner_id = enterprise.owner_id
                 removed["assets_transferred"] += 1
     db.flush()
+    return removed
+
+
+def prepare_user_deletion(db, user: User) -> dict[str, int]:
+    """删除用户行之前的文件与共享资产清理，注销与管理端删除共用。
+
+    顺序固定：个人文档文件 → 企业归属移交（含证据文件搬家）→ 私有资质证据
+    清理 → 发票文件。文件清理失败不掩盖业务错误，但要尽量完成其余项。
+    """
+    from . import qualifications as qualifications_module
+    from . import user_docs
+
+    removed: dict[str, int] = {
+        "user_docs": user_docs.delete_user_files(user.id),
+        "evidence_files": 0,
+    }
+    removed.update(_detach_enterprise_memberships(db, user))
+    for row in db.scalars(
+        select(Qualification).where(Qualification.owner_id == user.id)
+    ).all():
+        removed["evidence_files"] += qualifications_module.purge_evidence(row)
+    try:
+        from .invoices import delete_user_files
+
+        delete_user_files(user.id)
+    except Exception:  # noqa: BLE001, S110 - 清理失败不影响账号删除
+        pass
     return removed
 
 
@@ -238,22 +281,8 @@ def delete_account(db, user: User) -> dict[str, int]:
     if subs:
         raise ComplianceError("请先删除或移交名下子账号，再注销主账号")
 
-    # 用户文档的文件本体要先落盘删除；行本身由 delete_user_rows 统一清理。
-    for row in db.scalars(select(UserDoc).where(UserDoc.user_id == user.id)).all():
-        try:
-            Path(row.stored_path).unlink(missing_ok=True)
-        except OSError:
-            pass
-
-    enterprise_removed = _detach_enterprise_memberships(db, user)
-    removed = delete_user_rows(db, user.id)
-    removed.update(enterprise_removed)
-    try:
-        from .invoices import delete_user_files
-
-        delete_user_files(user.id)
-    except Exception:  # noqa: BLE001, S110 - 清理失败不影响账号删除
-        pass
+    removed = prepare_user_deletion(db, user)
+    removed.update(delete_user_rows(db, user.id))
     db.delete(user)
     db.flush()
     return removed
@@ -608,6 +637,9 @@ def statement_csv(db, user_id: str, *, start: str = "", end: str = "") -> str:
 
     buffer = io.StringIO()
     writer = csv.writer(buffer)
+    # 流水与订单的列语义不同，分成两个带表头的区块，避免把「金额（分）」
+    # 塞进「数量」、把「点数」塞进「余额」。首行保持历史流水表头不变，
+    # 老用户/旧脚本解析第一段不受影响。
     writer.writerow(["类型", "时间（北京时间）", "条目", "数量", "余额", "备注"])
     for tx in db.scalars(
         select(CreditTransaction)
@@ -619,6 +651,19 @@ def statement_csv(db, user_id: str, *, start: str = "", end: str = "") -> str:
         writer.writerow(
             ["流水", clock.format_local(tx.created_at), tx.kind, tx.amount, tx.balance_after, tx.note or ""]
         )
+    writer.writerow([])
+    writer.writerow(
+        [
+            "类型",
+            "时间（北京时间）",
+            "订单号",
+            "金额（分）",
+            "点数",
+            "状态",
+            "交易号",
+            "支付渠道",
+        ]
+    )
     for order in db.scalars(
         select(RechargeOrder)
         .where(RechargeOrder.user_id == user_id)
@@ -631,9 +676,11 @@ def statement_csv(db, user_id: str, *, start: str = "", end: str = "") -> str:
                 "订单",
                 clock.format_local(order.created_at),
                 order.out_trade_no,
-                order.amount_cents / 100,
-                order.credits,
+                int(order.amount_cents or 0),
+                int(order.credits or 0),
                 order.status,
+                order.transaction_id or "",
+                order.provider or "",
             ]
         )
     return buffer.getvalue()
@@ -670,6 +717,29 @@ def _verify_manifest_files(bundle: zipfile.ZipFile, manifest: dict[str, Any]) ->
     return {"checked": len(entries), "missing": [], "hash_mismatch": []}
 
 
+def _verify_backup_identity(bundle: zipfile.ZipFile, manifest: dict[str, Any]) -> None:
+    """核对清单里的数据库/密钥指纹；不一致必须 fail-closed。
+
+    旧备份没有这些键时跳过（保持向后兼容）；一旦记录过哈希，包内文件缺失或
+    内容变化都要报错，不能把"结构看起来完整"误判为可恢复。
+    """
+
+    checks = (
+        ("db_sha256", str(manifest.get("db_file") or "bidcraft.db"), "数据库"),
+        ("secret_key_sha256", "secret.key", "secret.key"),
+    )
+    names = set(bundle.namelist())
+    for key, name, label in checks:
+        expected = str(manifest.get(key) or "").strip().lower()
+        if not expected:
+            continue
+        if name not in names:
+            raise ComplianceError(f"备份缺少清单记录的{label}：{name}")
+        actual = hashlib.sha256(bundle.read(name)).hexdigest()
+        if actual != expected:
+            raise ComplianceError(f"备份{label}哈希不一致：{name}")
+
+
 def verify_backup(path: str | Path) -> dict[str, Any]:
     """校验备份可恢复：SQLite 跑 integrity_check，PostgreSQL 解析 pg_dump SQL。
 
@@ -698,6 +768,8 @@ def verify_backup(path: str | Path) -> dict[str, Any]:
                     raise ComplianceError("备份清单 manifest.json 无法解析") from exc
                 if isinstance(loaded, dict):
                     manifest = loaded
+            if manifest:
+                _verify_backup_identity(bundle, manifest)
             data_report = _verify_manifest_files(bundle, manifest) if manifest else None
             if "dump.sql" in names:
                 sql_text = bundle.read("dump.sql").decode("utf-8", errors="replace")

@@ -99,6 +99,7 @@ from ..shared import (  # noqa: F401
     quota_price,
     quote,
     re,
+    record_audit,
     require_super,
     rule_package_record,
     select,
@@ -121,6 +122,12 @@ from ..shared import (  # noqa: F401
 )
 
 router = APIRouter()
+
+
+def _admin_audit(db, action: str, detail: dict | None = None):
+    """管理端审计：身份显式取自请求上下文，绝不传入口令/密钥值。"""
+
+    return record_audit(db, None, action, detail, actor=current_user())
 
 
 @router.get("/admin/models")
@@ -165,6 +172,11 @@ def create_model(payload: ModelCreate, request: Request) -> dict[str, Any]:
         )
         db.add(row)
         db.flush()
+        _admin_audit(
+            db,
+            "model.create",
+            {"model_id": row.id, "name": row.name, "kind": row.kind, "provider": row.provider},
+        )
         return model_config.model_payload(row)
 
 
@@ -178,6 +190,13 @@ def update_model(model_id: str, payload: ModelUpdate, request: Request) -> dict[
         data = payload.model_dump(exclude_unset=True)
         clear_key = data.pop("clear_api_key", False)
         api_key = data.pop("api_key", None)
+        before = {
+            key: getattr(row, key, None)
+            for key in (
+                "name", "kind", "provider", "base_url", "model", "temperature",
+                "max_tokens", "options", "enabled", "is_default",
+            )
+        }
         if "kind" in data or "provider" in data:
             validate_kind(data.get("kind", row.kind), data.get("provider", row.provider))
         if (
@@ -200,6 +219,21 @@ def update_model(model_id: str, payload: ModelUpdate, request: Request) -> dict[
             unset_default_model(db, row.kind)
             row.is_default = True
         db.flush()
+        changed = sorted(
+            key for key, value in before.items() if getattr(row, key, None) != value
+        )
+        detail: dict[str, Any] = {
+            "model_id": row.id,
+            "name": row.name,
+            "fields": changed,
+        }
+        if clear_key:
+            detail["api_key_cleared"] = True
+        elif api_key:
+            detail["api_key_updated"] = True
+        if "is_default" in changed:
+            detail["is_default"] = bool(row.is_default)
+        _admin_audit(db, "model.update", detail)
         return model_config.model_payload(row)
 
 
@@ -211,6 +245,7 @@ def delete_model(model_id: str, request: Request) -> dict[str, Any]:
         if row is None:
             raise HTTPException(status_code=404, detail="模型不存在")
         db.delete(row)
+        _admin_audit(db, "model.delete", {"model_id": row.id, "name": row.name})
         return {"deleted": True, "id": model_id}
 
 
@@ -1008,10 +1043,21 @@ def admin_billing(request: Request, limit: int = 50) -> dict[str, Any]:
 def save_admin_billing(payload: BillingSettingsPayload, request: Request) -> dict[str, Any]:
     require_super(request)
     with session_scope() as db:
+        before = billing.billing_settings(db)
         try:
             saved = billing.save_billing_settings(db, payload.model_dump(exclude_unset=True))
         except billing.BillingError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # 只记字段级前后值与套餐数量，绝不把套餐配置当成日志正文。
+        detail: dict[str, Any] = {}
+        for key in ("signup_credits", "chapter_cost", "vip_discount", "sub_account_limit"):
+            if saved.get(key) != before.get(key):
+                detail[key] = {"from": before.get(key), "to": saved.get(key)}
+        for key in ("packages", "vip_packages"):
+            if saved.get(key) != before.get(key):
+                detail[key] = {"count": len(saved.get(key) or [])}
+        detail["fields"] = sorted(key for key in detail if key != "fields")
+        _admin_audit(db, "billing.settings", detail)
         return {"settings": saved, "stats": billing.admin_stats(db)}
 
 
@@ -1030,6 +1076,17 @@ def generate_codes(payload: RedeemGenerate, request: Request) -> dict[str, Any]:
             )
         except billing.BillingError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # 兑换码本身是可消费凭证，不写审计；只留批次与数量供对账。
+        _admin_audit(
+            db,
+            "billing.redeem",
+            {
+                "count": payload.count,
+                "credits": payload.credits,
+                "amount_cents": payload.amount_cents,
+                "days": payload.days,
+            },
+        )
         return {"codes": codes}
 
 
@@ -1054,6 +1111,11 @@ def adjust_credits(user_id: str, payload: CreditAdjust, request: Request) -> dic
             )
         except billing.InsufficientCredits as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _admin_audit(
+            db,
+            "billing.credit_adjust",
+            {"user_id": user.id, "username": user.username, "amount": payload.amount},
+        )
         return {
             "user": auth.user_payload(user),
             "transactions": billing.transactions(db, user.id),
@@ -1229,6 +1291,9 @@ def delete_user(user_id: str, request: Request) -> dict[str, Any]:
             "admin.user.delete",
             {"user_id": row.id, "username": row.username, "role": row.role},
         )
+        # 与账户注销共用同一套文件/共享资产清理：证据随 owner 搬家或删除，
+        # 避免继承人是新 owner 但文件还在被删用户目录里。
+        compliance.prepare_user_deletion(db, row)
         # 与账户注销共用同一套关联清理：PostgreSQL 强制外键时漏表会直接失败。
         delete_user_rows(db, row.id)
         db.delete(row)
@@ -1678,7 +1743,7 @@ def admin_health(request: Request) -> dict[str, Any]:
         "home": str(settings.home),
         "db_size_bytes": db_size,
         "disk_free_bytes": disk_free,
-        "web_ready": (Path(__file__).resolve().parent.parent / "web_dist" / "index.html").is_file(),
+        "web_ready": (Path(__file__).resolve().parents[2] / "web_dist" / "index.html").is_file(),
         "offline": settings.offline,
         "docs_enabled": settings.docs_enabled,
         "health_public": settings.health_public,

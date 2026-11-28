@@ -15,7 +15,7 @@ from bidcraft.config import settings
 from bidcraft.db import get_engine, init_db, reset_engine_for_tests
 
 #: 当前 alembic head（新增 revision 时同步这里）。
-HEAD = "0017_transaction_id_unique"
+HEAD = "0018_file_checksums"
 
 
 def _version() -> list[str]:
@@ -767,4 +767,67 @@ def test_0016_fact_provenance_is_reversible_and_idempotent(db):
     init_db()
     command.upgrade(cfg, "head")
     assert provenance_columns <= columns()
+    assert _version() == [HEAD]
+
+
+def test_0018_file_checksums_is_reversible_and_idempotent(db):
+    """0018 的 checksum 列必须可降级移除、再升级恢复；历史行保持空串（未知）。"""
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+
+    from bidcraft.db import session_scope
+    from bidcraft.migrations import __file__ as migrations_init
+    from bidcraft.models import User, UserDoc
+
+    engine = get_engine()
+
+    def columns() -> set[str]:
+        with engine.connect() as connection:
+            return {column["name"] for column in inspect(connection).get_columns("user_docs")}
+
+    assert "checksum" in columns()
+    with engine.connect() as connection:
+        ddl = {
+            row[1]: row[4]
+            for row in connection.execute(text("PRAGMA table_info(user_docs)")).fetchall()
+        }
+    assert ddl["checksum"] == "''"
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(Path(migrations_init).parent))
+    cfg.set_main_option(
+        "sqlalchemy.url",
+        engine.url.render_as_string(hide_password=False).replace("%", "%%"),
+    )
+    command.downgrade(cfg, "0017_transaction_id_unique")
+    assert "checksum" not in columns()
+
+    # 旧库阶段插入的文档行：升级后 checksum 为空串，读取端按「历史未记录」处理。
+    with session_scope() as session:
+        session.add(User(id="migration-doc-user", username="migration-doc-user", password_hash="x"))
+        session.flush()
+        session.add(
+            UserDoc(
+                id="legacy-doc",
+                user_id="migration-doc-user",
+                filename="legacy.txt",
+                stored_path="/tmp/legacy.txt",
+                size=0,
+                mime="text/plain",
+                status="ready",
+            )
+        )
+
+    command.upgrade(cfg, "head")
+    assert "checksum" in columns()
+    with sqlite3.connect(engine.url.database) as conn:
+        assert conn.execute(
+            "SELECT checksum FROM user_docs WHERE id = 'legacy-doc'"
+        ).fetchone() == ("",)
+
+    init_db()
+    command.upgrade(cfg, "head")
+    assert "checksum" in columns()
     assert _version() == [HEAD]

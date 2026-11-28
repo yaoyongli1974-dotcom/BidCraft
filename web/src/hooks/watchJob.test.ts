@@ -109,4 +109,79 @@ describe('watchJob', () => {
     await vi.advanceTimersByTimeAsync(300)
     expect(onUpdate.mock.calls.length).toBe(calls)
   })
+
+  // 后端契约：bidcraft/jobs.py TERMINAL_STATUSES = {done, failed, cancelled}。
+  // 这里只 mock getJob 的返回值；不声称后端已正确产生这些状态。
+  it('poll-only 收到 cancelled 终态后停止轮询并暴露完整终态快照', async () => {
+    const snapshot = job('cancelled', { message: '用户取消', error: 'cancelled by user' })
+    getJobMock.mockResolvedValue(snapshot)
+    const onUpdate = vi.fn()
+    const onTerminal = vi.fn()
+    const onDone = vi.fn()
+    const onFailed = vi.fn()
+    const stop = watchJob('j1', {
+      onUpdate, onTerminal, onDone, onFailed, pollInterval: 100,
+    })
+
+    await vi.advanceTimersByTimeAsync(0)
+    expect(getJobMock).toHaveBeenCalledTimes(1)
+    expect(onUpdate).toHaveBeenCalledWith(snapshot)
+    expect(onTerminal).toHaveBeenCalledTimes(1)
+    expect(onTerminal).toHaveBeenCalledWith(snapshot)
+    // 取消不是成功完成：不能触发 onDone；用 onFailed 让页面停止等待。
+    expect(onDone).not.toHaveBeenCalled()
+    expect(onFailed).toHaveBeenCalledWith(snapshot)
+    expect(stop.terminalSnapshot?.()).toEqual(snapshot)
+
+    await vi.advanceTimersByTimeAsync(600)
+    expect(getJobMock).toHaveBeenCalledTimes(1)
+    expect(onTerminal).toHaveBeenCalledTimes(1)
+    stop()
+  })
+
+  it.each(['done', 'failed'])('poll-only 的 %s 终态只结算一次并保留快照', async (status) => {
+    const snapshot = job(status, { result: { written: 3 }, error: status === 'failed' ? '模型不可用' : '' })
+    getJobMock.mockResolvedValue(snapshot)
+    const onTerminal = vi.fn()
+    const onDone = vi.fn()
+    const onFailed = vi.fn()
+    const stop = watchJob('j1', { onTerminal, onDone, onFailed, pollInterval: 100 })
+
+    await vi.advanceTimersByTimeAsync(0)
+    expect(onTerminal).toHaveBeenCalledTimes(1)
+    expect(onTerminal).toHaveBeenCalledWith(snapshot)
+    if (status === 'done') {
+      expect(onDone).toHaveBeenCalledWith(snapshot)
+      expect(onFailed).not.toHaveBeenCalled()
+    } else {
+      expect(onFailed).toHaveBeenCalledWith(snapshot)
+      expect(onDone).not.toHaveBeenCalled()
+    }
+    expect(stop.terminalSnapshot?.()).toEqual(snapshot)
+
+    await vi.advanceTimersByTimeAsync(600)
+    expect(getJobMock).toHaveBeenCalledTimes(1)
+    expect(onTerminal).toHaveBeenCalledTimes(1)
+    stop()
+  })
+
+  it('stream 模式收到 cancelled 事件后关闭连接且不启动轮询', async () => {
+    const onTerminal = vi.fn()
+    const onDone = vi.fn()
+    const onFailed = vi.fn()
+    const stop = watchJob('j1', { stream: true, onTerminal, onDone, onFailed })
+    const source = FakeEventSource.instances[0]
+
+    source.emit('cancelled', { id: 'j1', status: 'cancelled', message: '已取消' })
+    expect(onTerminal).toHaveBeenCalledTimes(1)
+    expect(onTerminal).toHaveBeenCalledWith(expect.objectContaining({ status: 'cancelled' }))
+    expect(onDone).not.toHaveBeenCalled()
+    expect(onFailed).toHaveBeenCalledTimes(1)
+    expect(source.closed).toBe(true)
+    expect(stop.terminalSnapshot?.()?.status).toBe('cancelled')
+
+    await vi.advanceTimersByTimeAsync(400)
+    expect(getJobMock).not.toHaveBeenCalled()
+    stop()
+  })
 })

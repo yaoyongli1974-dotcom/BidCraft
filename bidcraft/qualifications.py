@@ -8,7 +8,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import mimetypes
+import shutil
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -17,6 +19,7 @@ from sqlalchemy import or_, select
 from . import clock
 from .config import settings
 from .models import Qualification, utcnow
+from .pipeline import defer_unlink, stage_file, validate_declared_type
 
 KINDS = ("license", "safety", "person", "performance", "credit", "other")
 KIND_LABELS = {
@@ -508,15 +511,17 @@ def add_evidence(db, row: Qualification, filename: str | None, content: bytes) -
         raise ValueError("证据文件不能为空")
     if len(data) > MAX_EVIDENCE_BYTES:
         raise ValueError("证据文件不能超过 10MB")
+    validate_declared_type(data, suffix, allow_text_fallback=True)
 
     root = evidence_dir(row.owner_id)
     target = _unique_path(root, name)
-    target.write_bytes(data)
+    digest = stage_file(db, target, data)
     entry = {
         "filename": target.name,
         "path": str(target),
         "size": len(data),
         "mime": mimetypes.guess_type(name)[0] or "",
+        "sha256": digest,
         "uploaded_at": _iso(utcnow()),
     }
     row.evidence = list(row.evidence or []) + [entry]
@@ -539,6 +544,17 @@ def evidence_path(db, row: Qualification, filename: str) -> Path:
     target = (root / name).resolve()
     if root not in target.parents or not target.is_file():
         raise LookupError("证据文件不存在")
+    entry = next(
+        (
+            item
+            for item in (row.evidence or [])
+            if isinstance(item, dict) and str(item.get("filename")) == name
+        ),
+        None,
+    )
+    expected = str((entry or {}).get("sha256") or "")
+    if expected and hashlib.sha256(target.read_bytes()).hexdigest() != expected:
+        raise LookupError("证据文件校验失败")
     return target
 
 
@@ -558,10 +574,7 @@ def delete_evidence(db, row: Qualification, filename: str) -> str:
     target = (root / name).resolve()
     if root not in target.parents:
         raise LookupError("证据文件不存在")
-    try:
-        target.unlink(missing_ok=True)
-    except OSError:
-        pass
+    defer_unlink(db, target)
     row.evidence = [
         entry
         for entry in items
@@ -569,6 +582,50 @@ def delete_evidence(db, row: Qualification, filename: str) -> str:
     ]
     db.flush()
     return name
+
+
+def transfer_evidence_to_owner(row: Qualification, new_owner_id: str) -> int:
+    """共享资质易主时把证据文件移到新 owner 目录并改写存储路径。
+
+    只处理仍位于旧 owner 目录下的文件；缺失或被外部移动的文件保留元数据，
+    由后续证据校验暴露，绝不伪造"文件已迁移"。返回实际搬家的文件数。
+    """
+
+    old_root = evidence_dir(row.owner_id).resolve()
+    new_root = evidence_dir(new_owner_id).resolve()
+    moved = 0
+    entries: list[dict] = []
+    for entry in row.evidence or []:
+        if not isinstance(entry, dict):
+            continue
+        raw = str(entry.get("path") or "")
+        name = Path(str(entry.get("filename") or Path(raw).name)).name
+        try:
+            source = Path(raw).resolve()
+        except OSError:
+            entries.append(entry)
+            continue
+        if not raw or old_root not in source.parents or not source.is_file():
+            entries.append(entry)
+            continue
+        target = _unique_path(new_root, name)
+        shutil.move(str(source), str(target))
+        updated = dict(entry)
+        updated["filename"] = target.name
+        updated["path"] = str(target)
+        entries.append(updated)
+        moved += 1
+    row.evidence = entries
+    return moved
+
+
+def purge_evidence(row: Qualification) -> int:
+    """删除该资质的全部证据文件并清空元数据（行本体由调用方删除）。"""
+
+    count = len(row.evidence or [])
+    _remove_evidence(row)
+    row.evidence = []
+    return count
 
 
 def _remove_evidence(row: Qualification) -> None:
