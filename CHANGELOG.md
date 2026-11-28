@@ -2,6 +2,18 @@
 
 按版本倒序。对外口径以 `docs/release-notes/` 下对应文件为准；本文件是仓库内的简明索引。
 
+## v0.34.0 (2026-11-28)
+
+商业化安全、账务一致性与生产可靠性专项收口，对外说明见 [docs/release-notes/v0.34.0.md](docs/release-notes/v0.34.0.md)。
+
+- 微信支付回调强校验、1 MiB 限流、非 SUCCESS 安全 ACK、mock-pay 防误用。
+- `mark_paid` / `redeem` 条件 UPDATE 原子抢占；迁移 0017 交易号部分唯一索引。
+- 任务失败先抢状态再退款、requeue 租约恢复、退款加锁顺序统一与有界补偿。
+- 审批链并发条件快照、同步生成逐章围栏。
+- 上传原子落盘、magic byte + sha256（迁移 0018）、证据移交/注销清理、资金与配置审计补齐。
+- 备份一致性哈希、前端终态轮询闭环、CI 新增 PG 并发与 readiness 门禁。
+- 验证结果以发版说明与 `docs/development/rc/v0.34.0/` 最终验收报告为准。
+
 ## v0.33.2 (2026-11-28)
 
 本地工作流实战收口，对外说明见 [docs/release-notes/v0.33.2.md](docs/release-notes/v0.33.2.md)。

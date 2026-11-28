@@ -6,10 +6,10 @@
 ## 1. 镜像
 
 ```bash
-docker build -t bidcraft:0.33.2 .          # 构建机
-docker save bidcraft:0.33.2 | gzip -1 > bidcraft-0.33.2.tar.gz
+docker build -t bidcraft:0.34.0 .          # 构建机
+docker save bidcraft:0.34.0 | gzip -1 > bidcraft-0.34.0.tar.gz
 # 传到服务器后：
-docker load -i bidcraft-0.33.2.tar.gz
+docker load -i bidcraft-0.34.0.tar.gz
 ```
 
 ## 2. 数据目录与配置
@@ -234,7 +234,7 @@ curl -s -o /dev/null -w '%{http_code}\n' https://bid.xalcy.cn/docs   # 404
 curl -I http://bid.xalcy.cn/ | head -3     # 301 → https
 ```
 
-## 8. 升级到最新版本（示例：→ 0.33.2）
+## 8. 升级到最新版本（示例：→ 0.34.0）
 
 线上 0.4.8 缺少审批条件分支、VIP/子账号/优先级队列、模板库等本轮能力。步骤：
 
@@ -243,13 +243,13 @@ cd /opt/bidcraft
 docker compose -f compose/docker-compose.yml down          # 可选，改镜像后 up 即可
 # 方式 A：服务器上构建
 git clone https://github.com/yaoyongli1974-dotcom/BidCraft.git src && cd src
-git fetch origin --tags && git checkout v0.33.2      # 或 origin/main
-docker build -t bidcraft:0.33.2 .
+git fetch origin --tags && git checkout v0.34.0      # 或 origin/main
+docker build -t bidcraft:0.34.0 .
 # 方式 B：本地构建后导出/导入
-# docker save bidcraft:0.33.2 | gzip > bidcraft-0.33.2.tar.gz   （本地）
-# docker load < bidcraft-0.33.2.tar.gz                          （服务器）
+# docker save bidcraft:0.34.0 | gzip > bidcraft-0.34.0.tar.gz   （本地）
+# docker load < bidcraft-0.34.0.tar.gz                          （服务器）
 
-sed -i 's/image: bidcraft:.*/image: bidcraft:0.33.2/' /opt/bidcraft/compose/docker-compose.yml
+sed -i 's/image: bidcraft:.*/image: bidcraft:0.34.0/' /opt/bidcraft/compose/docker-compose.yml
 
 # 必做前置：升级会在启动时执行 Alembic 迁移，先做一致性备份并校验，失败则停止升级。
 docker exec bidcraft bidcraft backup
@@ -264,7 +264,7 @@ curl -s http://127.0.0.1:8000/health/live # 存活（容器健康检查用）
 curl -s http://127.0.0.1:8000/health/ready # 就绪（模型未配置时可能非 200）
 curl -s http://127.0.0.1:8000/health     # 遗留端点，最小字段（不显示版本）
 # 超管确认版本：带 Cookie 访问 /admin/health，见「5. 运维」
-docker exec bidcraft python -c "import bidcraft;print(bidcraft.__version__)"   # 0.33.2
+docker exec bidcraft python -c "import bidcraft;print(bidcraft.__version__)"   # 0.34.0
 ```
 
 升级后 `/opt/bidcraft/data` 不变，数据库增量列由启动时迁移自动补齐。**启动迁移前必须先
