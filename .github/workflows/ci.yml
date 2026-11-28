@@ -325,7 +325,7 @@ jobs:
 
       - name: Upload pytest report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pytest-junit
           path: /tmp/pytest-results.xml
@@ -632,7 +632,7 @@ jobs:
 
       - name: Upload PostgreSQL report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: postgres-junit
           path: /tmp/pg-results.xml
@@ -743,7 +743,7 @@ jobs:
 
       - name: Upload DOCX report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: docx-junit
           path: /tmp/docx-results.xml
