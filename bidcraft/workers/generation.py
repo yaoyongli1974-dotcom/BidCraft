@@ -26,6 +26,7 @@ from ..generation.writer import generate_document
 from ..jobqueue import (
     JobAborted,
     _chapter_done_steps,
+    acquire_generation_lease,
     assert_generation_lease,
     commit_fenced_result,
     current_claim_token,
@@ -218,6 +219,23 @@ def _run_generation_job(job_id: str, project_id: str, force: bool) -> None:
             owner_id = str((job.payload or {}).get("user_id") or project.owner_id or "")
             marker_id = str((job.payload or {}).get("pending_charge_id") or "")
             lease_token = str((job.payload or {}).get("generation_lease_token") or "")
+            if not lease_token:
+                # Requeued/startup-recovered jobs arrive with the old token
+                # cleared.  Acquire a fresh project lease and persist it BEFORE
+                # starting the heartbeat or committing chapters, so every fence
+                # (job claim + generation lease) sees the same new owner.
+                lease_token = (
+                    acquire_generation_lease(
+                        db, project_id, job_id=job_id, owner_id=owner_id
+                    )
+                    or ""
+                )
+                if not lease_token:
+                    raise JobAborted("项目生成租约被其他任务占用")
+                payload = dict(job.payload or {})
+                payload["generation_lease_token"] = lease_token
+                job.payload = payload
+                db.flush()
             ledger = load_ledger(db, project_id)
             problems = ledger_gate(ledger)
             if problems:

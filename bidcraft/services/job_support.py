@@ -29,10 +29,13 @@ logger = logging.getLogger("bidcraft.api")
 def _fail_job(db: Session, job: Job, message: str, error: str | None = None) -> bool:
     """Mark a job failed and publish the matching SSE event.
 
-    A charged ``generate`` job is refunded in this same transaction, before the
-    failed event is published.  The refund helper is idempotent (claim ledger in
-    the DB), so the reaper, startup recovery and a retrying worker can all call
-    this without ever refunding twice.  Uncharged job kinds are a no-op.
+    The failed transition is claimed first (the same DB conditional UPDATE as
+    the reaper's ``_set_failed``); only that winner refunds in a savepoint and
+    publishes the failed event.  A terminal row with an unclaimed refund is the
+    one exception: it may settle the ledger, but emits no duplicate event.  The
+    refund helper is idempotent (claim ledger in the DB), so the reaper, startup
+    recovery and a retrying worker can all call this without refunding twice.
+    Uncharged job kinds are a no-op.
     """
 
     from .. import jobqueue
@@ -45,20 +48,12 @@ def _fail_job(db: Session, job: Job, message: str, error: str | None = None) -> 
     lease_token = str((job.payload or {}).get("generation_lease_token") or "")
     refunded = 0
     refund_error: str | None = None
-    try:
-        # Savepoint keeps the caller's transaction usable if the refund fails
-        # mid-write, so failure bookkeeping still commits in that case.
-        with db.begin_nested():
-            refunded = int(jobqueue.refund_charged_job(db, job) or 0)
-    except Exception as exc:  # noqa: BLE001 - 退款失败不能阻断失败落库与事件
-        refund_error = str(exc) or exc.__class__.__name__
-        logger.exception("失败任务计费退还失败 job=%s", job.id)
-
+    fresh: Job | None = None
     if not was_terminal:
-        # 与 Reaper 的 _set_failed 使用同一条数据库条件状态转换：只有真正抢到
-        # running/queued → failed 的一方才写终态并发事件，避免两个并发失败路径
-        # 各写一条 failed 事件。clear_claim 同时把 token/租约清空，hung worker
-        # 的 fenced_job() 将不再能覆盖这条终态。
+        # 先抢占状态，再触碰账务：与 Reaper 的 _set_failed 使用同一条数据库条件
+        # 状态转换，只有抢到 queued/running → failed 的一方才写终态和退款。输家
+        # 立刻返回 False，绝不发 failed 事件、绝不调用退款。clear_claim 同时清空
+        # token/租约，hung worker 的 fenced_job() 不能再覆盖这条终态。
         fresh = jobqueue.transition_job(
             db,
             job.id,
@@ -70,9 +65,20 @@ def _fail_job(db: Session, job: Job, message: str, error: str | None = None) -> 
             clear_claim=True,
         )
         if fresh is None:
-            # We lost the transition to another failure path.  The caller must
-            # treat the job as still owned/blocking, never enqueue a duplicate.
             return False
+    # 终态但退款尚未领取时（例如旧 worker 死在转换与退款之间），只补领退款；
+    # 没有新的状态转换赢家，因此不能再发 failed / refund_failed 事件。
+    refund_target = fresh if fresh is not None else job
+    try:
+        # Savepoint keeps the caller's transaction usable if the refund fails
+        # mid-write, so failure bookkeeping still commits in that case.
+        with db.begin_nested():
+            refunded = int(jobqueue.refund_charged_job(db, refund_target) or 0)
+    except Exception as exc:  # noqa: BLE001 - 退款失败不能阻断失败落库与事件
+        refund_error = str(exc) or exc.__class__.__name__
+        logger.exception("失败任务计费退还失败 job=%s", job.id)
+
+    if fresh is not None:
         event_detail: dict[str, Any] = {**jobs.job_payload(fresh), "error": detail}
         if refunded:
             event_detail["refunded_credits"] = refunded

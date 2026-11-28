@@ -734,6 +734,51 @@ def transition_job(
     return db.get(Job, job_id)
 
 
+def clear_job_generation_lease_token(
+    db, job_id: str, *, token: str | None = None
+) -> bool:
+    """Drop a stale generation lease token when a job is reset to ``queued``.
+
+    A requeued job must enter the next attempt with an empty token so its worker
+    reacquires a fresh ``GenerationLease``; otherwise the heartbeat would renew
+    a lease owned by the dead attempt and abort immediately.  The payload is
+    re-read (identity-map entry expired) and replaced with a **copied** dict in
+    one conditional UPDATE — never mutated in place — so an unrelated payload
+    write cannot be silently overwritten.  The matching stale lease is released
+    in the same transaction; release is token-scoped and therefore safe when a
+    new owner already took over.
+
+    ``token`` optionally guards the conditional UPDATE with the Job claim token
+    (the caller's fence).  Returns ``True`` only when a token was actually
+    cleared.
+    """
+
+    mapped = db.get(Job, job_id)
+    if mapped is not None:
+        db.expire(mapped)
+    row = db.get(Job, job_id)
+    if row is None or row.status != "queued":
+        return False
+    payload = dict(row.payload or {})
+    stale_token = str(payload.get("generation_lease_token") or "")
+    if not stale_token:
+        return False
+    payload.pop("generation_lease_token", None)
+    statement = update(Job).where(Job.id == job_id, Job.status == "queued")
+    if token is not None:
+        statement = statement.where(Job.claim_token == token)
+    result = db.execute(
+        statement.values(payload=payload),
+        execution_options={"synchronize_session": False},
+    )
+    if not result.rowcount:
+        return False
+    if row.project_id:
+        release_generation_lease(db, str(row.project_id), stale_token)
+    db.expire(row)
+    return True
+
+
 def _set_failed(
     db,
     job: Job,
@@ -817,6 +862,9 @@ def _requeue(
     )
     if fresh is None:
         return "lost"
+    # 恢复后的 worker 必须重新领取项目生成租约；陈旧的 token 会让它的心跳
+    # 立刻判为 lost → abort → 重试耗尽。清除与状态回退在同一事务完成。
+    clear_job_generation_lease_token(db, fresh.id)
     jobs.publish_event(fresh.id, "queued", jobs.job_payload(fresh), db=db)
     return "requeued"
 
@@ -1132,6 +1180,14 @@ def pending_charge_heartbeat(
         if abort is not None:
             abort.set()
 
+    # 心跳线程的第一个脉冲要等一个周期；排队任务恢复后可能正好落在 TTL 边界，
+    # 先同步刷新一次，避免对账把已经开始的新 attempt 当成崩溃残留提前退款。
+    if marker_id:
+        try:
+            touch_pending_charge(marker_id)
+        except Exception:  # noqa: BLE001 - 首次续期失败由后台线程重试
+            logger.debug("扣费标记首次刷新失败: %s", marker_id, exc_info=True)
+
     def _pulse() -> None:
         failures = 0
         while not stop.wait(period):
@@ -1250,6 +1306,29 @@ def _marker_job_id(marker: PendingCharge) -> str:
     if not note.startswith("job:"):
         return ""
     return note[4:].split("|", 1)[0].strip()
+
+
+def _queued_job_reserves_charge(
+    db, marker: PendingCharge, *, ttl_seconds: int
+) -> bool:
+    """A job still waiting in the queue keeps its charge from being refunded.
+
+    A requeued job has no running heartbeat: settling its marker just because
+    ``updated_at`` went stale would refund credits while the job is about to be
+    executed for free.  The protection is bounded by the job's own age (twice
+    the reconcile TTL and twice the generation-lease TTL, at least one minute),
+    so a truly abandoned queued row is still settled eventually.
+    """
+
+    job_id = _marker_job_id(marker)
+    if not job_id:
+        return False
+    job = db.get(Job, job_id)
+    if job is None or job.status != "queued":
+        return False
+    grace = max(2 * int(ttl_seconds), 2 * _generation_lease_ttl_seconds(), 60)
+    created = job.created_at or utc_now()
+    return (utc_now() - created).total_seconds() < grace
 
 
 def mark_job_refund_settled(db, job_id: str, *, source: str) -> bool:
@@ -1541,6 +1620,10 @@ def reconcile_pending_charges(
     )
     settled = 0
     for marker in rows:
+        # A job that is still queued has not abandoned its charge; its marker
+        # only goes stale because no heartbeat runs while it waits for a worker.
+        if _queued_job_reserves_charge(db, marker, ttl_seconds=ttl):
+            continue
         # Prefer this charge's Job ledger; fall back to the project-wide delta
         # only for legacy markers created before async generation was tracked.
         written = min(
