@@ -44,8 +44,8 @@
 - P1 三项首轮红灯已修复：`boq.review_version` 在重试前 flush 未提交状态；`reconcile_pending_charges` 结算计数不再把「0 退款但已 cleared」漏计；PG 并发测试种子账户先充值再扣费；旧 CI 镜像标签断言按 v0340-check 更新并禁止旧标签回退。
 - 最终全量后端回归：`2582 passed, 1050 skipped, 2 warnings in 1069.30s`，0 failures。
 - 本地真实 PostgreSQL：`1078 passed, 1 skipped, 1 warning`。
-- 远程 CI：待推送最终 SHA 后取证；合并 main / tag / Release 前必须 9/9 success。
-- 当前 RC 结论：CONDITIONAL PASS / CONDITIONAL GO。P0 全部 PASS；P1 本地 PASS；生产等价 PG、Docker 运行时、远程 CI、真实模型/真实招标文件样本 NOT VERIFIED。
+- 远程 CI：最终代码 SHA `0698dfd279d5b5a0b4961d57d57d55f160293c82`，run `46123816243`，9/9 jobs success（python lint/pytest、web、postgres real integration、docx render、docker image/compose、dependency audit、bandit、secret scan）。
+- 当前 RC 结论：CONDITIONAL PASS / CONDITIONAL GO。P0 全部 PASS；P1 本地 PASS；远程 CI 9/9 PASS；生产等价 PG、Docker 运行时、真实模型/真实招标文件样本 NOT VERIFIED。
 
 ## 5. 结论口径
 
@@ -77,7 +77,7 @@
 | 权限/审计 | 关键配置、计费、兑换、管理员点数与密码重置补齐审计；web_ready 修正 | PASS |
 | 备份/运维 | pg_dump 一致性、manifest 哈希、恢复演练 opt-in、文档更新 | PASS（本地） |
 | 前端终态 | watchJob / BillingPage 终态闭环与防重复提交 | PASS |
-| CI | 9 job、强门禁、PG 并发文件显式收集、/health/ready 冒烟 | 本地 PASS / 远程 NOT VERIFIED |
+| CI | 9 job、强门禁、PG 并发文件显式收集、/health/ready 冒烟 | PASS（本地 + 远程 run 46123816243 9/9） |
 | 迁移 | 0017、0018 幂等可逆；0001–0016 零 diff | PASS（本地） |
 | API/前端兼容 | 路由数与业务语义不变；前端契约测试通过 | PASS |
 | 后端全量 | 2582 passed / 1050 skipped / 2 warnings / 0 failures | PASS |
@@ -87,8 +87,8 @@
 | 数据阻塞项 | 真实招标文件、专家评分、真实模型质量 | NOT VERIFIED |
 | 最终发布决策 | 合并 main / tag / Release 需单独授权 | CONDITIONAL GO |
 
-远程 CI 首轮 run `46118559049` 在 2 个 job 失败：python pytest 缺少 web_dist 构建产物；runner 自带 pg_dump 18 不支持 `--single-transaction`。已分别通过 `python-tests` job 增加 Node 22 + npm ci/build、以及 `bidcraft/cli.py::_pg_dump_supports()` 版本探测修复，并新增 2 个静态/单元测试防止回退；新 SHA 的 CI 复验结果待回填。
+远程 CI 首轮 run `46118559049` 在 2 个 job 失败：python pytest 缺少 web_dist 构建产物；runner 自带 pg_dump 18 不支持 `--single-transaction`。已分别通过 `python-tests` job 增加 Node 22 + npm ci/build、以及 `bidcraft/cli.py::_pg_dump_supports()` 版本探测修复，并新增 2 个静态/单元测试防止回退。第二轮 run `46122775578` 剩余 PG JUnit classname 断言误报与 DraftTab 异步加载抖动，也已修复。最终 run `46123816243` 对 SHA `0698dfd` 9/9 jobs success。
 
-未解决问题：新 SHA 远程 CI 尚未取证；一次未复现的前端单用例抖动；kb_reindex worker 线程退出后读取已重置测试库的警告（测试生命周期噪音）。
+未解决问题：生产等价 PG/PgBouncer、Docker 运行时与生产恢复演练仍 NOT VERIFIED；真实模型/真实招标文件样本仍 NOT VERIFIED；kb_reindex worker 线程退出后读取已重置测试库的警告（测试生命周期噪音）。
 
 回滚：按阶段反向 revert；迁移 0017、0018 自带 reversible downgrade；生产禁止未经批准直接 downgrade。

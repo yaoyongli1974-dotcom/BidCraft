@@ -113,4 +113,4 @@ rm docs/development/rc/v0.34.0/11_CI_REPORT.md
 1. `postgres`：JUnit 用例来源断言用 `endswith('test_v0340_db_concurrency.py')` 匹配 `file`/`classname`；JUnit 的 classname 是点分模块名（无 `.py`），导致「用例未进入报告」误报。已把来源名统一规范化为点分模块后匹配 `test_v0340_db_concurrency`，并新增 `tests/test_v030_stage8_deploy.py::test_ci_pg_junit_assertion_handles_dotted_classname` 静态防回退；门禁仍要求文件实际产生用例。
 2. `web`：`DraftTab.oneClickReview.test.tsx` 的「普通编辑」用例在章节异步加载完成前点击「编辑」，偶发找不到 textbox。已在两个编辑态用例点击前显式等待 `getChapter(ref, 'n1')`（断言不变）；本地连续 5 次运行该文件均 5/5 通过，全 Web 套件 68 files / 499 tests 通过，build 通过。
 
-最终全量后端与第三轮远程 CI 结果待回填。
+第三轮 CI run `46123816243` 对最终代码 SHA `0698dfd279d5b5a0b4961d57d57d55f160293c82` 完成，`conclusion=success`，9/9 jobs 全部 success：python lint/static、python pytest/regression、web、postgres real integration、docx CJK render/fidelity、docker production image/compose、dependency audit、bandit SAST、secret scanning。最终本地全量后端为 `2582 passed, 1050 skipped, 2 warnings in 1069.30s`，0 failures。

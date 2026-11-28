@@ -104,4 +104,4 @@ rm web/src/pages/BillingPage.test.tsx docs/development/rc/v0.34.0/10_TEST_REPORT
 
 ## 7. 结论
 
-本地前端生命周期验证 **PASS**；远程 CI / 生产环境 **NOT VERIFIED**。建议 **CONDITIONAL GO**：需先完成远程 CI 9/9、PG 真实并发与版本号 bump 后再发版。
+本地前端生命周期验证 **PASS**；远程 CI 最终 run `46123816243` 对 SHA `0698dfd` **9/9 success**；生产环境 **NOT VERIFIED**。建议 **CONDITIONAL GO**：远程 CI 与 PG 真实并发、版本号 bump 已完成，生产等价环境仍需单独验收。
