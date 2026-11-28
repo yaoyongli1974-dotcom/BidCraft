@@ -1295,6 +1295,25 @@ def _print_backups(directory: Path) -> None:
     console.print(table)
 
 
+def _pg_dump_supports(flag: str) -> bool:
+    """探测本机 pg_dump 是否支持某个选项。
+
+    不同 PostgreSQL 客户端版本的 pg_dump 选项集可能不同（例如 PG18 不再接受
+    ``--single-transaction``）。备份只在客户端明确支持时附加该选项，避免版本
+    漂移导致生产备份整体失败；不改变备份内容或恢复语义。
+    """
+
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["pg_dump", "--help"], capture_output=True, text=True, check=False
+        )
+    except OSError:
+        return False
+    return flag in (result.stdout or "") or flag in (result.stderr or "")
+
+
 @app.command()
 def backup(
     output: Path | None = typer.Option(
@@ -1372,12 +1391,12 @@ def backup(
                 env = os.environ.copy()
                 if url.password:
                     env["PGPASSWORD"] = url.password
+                dump_args = ["pg_dump", "--no-owner", "--no-privileges"]
+                if _pg_dump_supports("--single-transaction"):
+                    dump_args.append("--single-transaction")
+                dump_args += ["-d", libpq_uri, "-f", str(dump)]
                 result = subprocess.run(
-                    [
-                        "pg_dump", "--no-owner", "--no-privileges",
-                        "--single-transaction",
-                        "-d", libpq_uri, "-f", str(dump),
-                    ],
+                    dump_args,
                     env=env, capture_output=True, text=True, check=False,
                 )
                 if result.returncode != 0:

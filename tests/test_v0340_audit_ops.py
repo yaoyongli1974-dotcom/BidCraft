@@ -251,6 +251,10 @@ def test_pg_dump_backup_uses_single_transaction(db, monkeypatch):
     captured: dict = {}
 
     def _fake_run(cmd, **kwargs):
+        if cmd[1:2] == ["--help"]:
+            return SimpleNamespace(
+                returncode=0, stdout="--single-transaction\n", stderr=""
+            )
         captured["cmd"] = cmd
         dump = Path(cmd[cmd.index("-f") + 1])
         dump.write_text("-- fake dump\nCREATE TABLE projects (id text);\n", encoding="utf-8")

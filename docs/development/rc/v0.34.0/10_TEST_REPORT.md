@@ -75,7 +75,7 @@ cd web && npx vitest run src/hooks/watchJob.test.ts \
 
 ```bash
 .venv/bin/python -m pytest -o addopts= -q
-# 2580 passed, 1050 skipped, 2 warnings in 1064.39s, 0 failures
+# 2582 passed, 1050 skipped, 2 warnings in 1069.30s, 0 failures
 ```
 
 输出：`/tmp/opencode/v0340_p1_fix_full.out`。两个 warning 分别为 Starlette/httpx TestClient 弃用提示和测试中故意制造重复 `manifest.json` 的 zip 写入提示；均未掩盖失败。

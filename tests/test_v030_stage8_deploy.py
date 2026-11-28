@@ -99,6 +99,13 @@ def test_ci_has_docker_image_job_with_image_assertions():
     assert "env_file" in scripts, "compose 静态断言应覆盖 env_file"
 
 
+def test_ci_python_tests_builds_web_for_readiness_smoke():
+    jobs = _ci_jobs()
+    scripts = _step_scripts(jobs["python-tests"])
+    assert "npm ci --no-audit --no-fund" in scripts, "python-tests 未安装 Web 依赖"
+    assert "npm run build" in scripts, "python-tests 缺少 Web 构建，/health/ready 冒烟会失败"
+
+
 def test_ci_has_alembic_preflight_without_touching_runtime():
     jobs = _ci_jobs()
     python_lint = jobs["python-lint"]

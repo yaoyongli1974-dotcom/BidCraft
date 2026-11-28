@@ -42,7 +42,7 @@
 - P1：代码与测试已实现，正在做最终全量回归与真实 PostgreSQL 复验。
 - P1 本地真实 PostgreSQL（pgserver 16.2）：`1078 passed, 1 skipped, 1 warning in 675.10s`。
 - P1 三项首轮红灯已修复：`boq.review_version` 在重试前 flush 未提交状态；`reconcile_pending_charges` 结算计数不再把「0 退款但已 cleared」漏计；PG 并发测试种子账户先充值再扣费；旧 CI 镜像标签断言按 v0340-check 更新并禁止旧标签回退。
-- 最终全量后端回归：`2580 passed, 1050 skipped, 2 warnings in 1064.39s`，0 failures。
+- 最终全量后端回归：`2582 passed, 1050 skipped, 2 warnings in 1069.30s`，0 failures。
 - 本地真实 PostgreSQL：`1078 passed, 1 skipped, 1 warning`。
 - 远程 CI：待推送最终 SHA 后取证；合并 main / tag / Release 前必须 9/9 success。
 - 当前 RC 结论：CONDITIONAL PASS / CONDITIONAL GO。P0 全部 PASS；P1 本地 PASS；生产等价 PG、Docker 运行时、远程 CI、真实模型/真实招标文件样本 NOT VERIFIED。
@@ -80,13 +80,15 @@
 | CI | 9 job、强门禁、PG 并发文件显式收集、/health/ready 冒烟 | 本地 PASS / 远程 NOT VERIFIED |
 | 迁移 | 0017、0018 幂等可逆；0001–0016 零 diff | PASS（本地） |
 | API/前端兼容 | 路由数与业务语义不变；前端契约测试通过 | PASS |
-| 后端全量 | 2580 passed / 1050 skipped / 2 warnings / 0 failures | PASS |
+| 后端全量 | 2582 passed / 1050 skipped / 2 warnings / 0 failures | PASS |
 | Web | 68 files / 499 tests，typecheck / lint / build | PASS |
 | PG 真实验证 | 本地 pgserver 16.2 全套件 1078 passed | PASS（本地） |
 | 生产等价环境 | 生产 PG/PgBouncer、Docker 运行时、生产恢复演练 | NOT VERIFIED |
 | 数据阻塞项 | 真实招标文件、专家评分、真实模型质量 | NOT VERIFIED |
 | 最终发布决策 | 合并 main / tag / Release 需单独授权 | CONDITIONAL GO |
 
-未解决问题：远程 CI 未取证；一次未复现的前端单用例抖动；kb_reindex worker 线程退出后读取已重置测试库的警告（测试生命周期噪音）。
+远程 CI 首轮 run `46118559049` 在 2 个 job 失败：python pytest 缺少 web_dist 构建产物；runner 自带 pg_dump 18 不支持 `--single-transaction`。已分别通过 `python-tests` job 增加 Node 22 + npm ci/build、以及 `bidcraft/cli.py::_pg_dump_supports()` 版本探测修复，并新增 2 个静态/单元测试防止回退；新 SHA 的 CI 复验结果待回填。
+
+未解决问题：新 SHA 远程 CI 尚未取证；一次未复现的前端单用例抖动；kb_reindex worker 线程退出后读取已重置测试库的警告（测试生命周期噪音）。
 
 回滚：按阶段反向 revert；迁移 0017、0018 自带 reversible downgrade；生产禁止未经批准直接 downgrade。

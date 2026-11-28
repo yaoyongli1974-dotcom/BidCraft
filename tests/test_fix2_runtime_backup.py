@@ -55,6 +55,25 @@ def _rewrite_zip(source, target, *, skip=(), replace=None):
             out.writestr(item.filename, data)
 
 
+def test_pg_dump_single_transaction_flag_is_version_aware(monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+
+    from bidcraft import cli
+
+    def fake_run(*args, **kwargs):
+        return SimpleNamespace(returncode=0, stdout="--single-transaction supported", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert cli._pg_dump_supports("--single-transaction") is True
+
+    def fake_run_unsupported(*args, **kwargs):
+        return SimpleNamespace(returncode=0, stdout="pg_dump options", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run_unsupported)
+    assert cli._pg_dump_supports("--single-transaction") is False
+
+
 def test_backup_includes_data_dirs_and_verifies(db, monkeypatch, tmp_path):
     archive, files = _make_backup(monkeypatch, tmp_path)
     with zipfile.ZipFile(archive) as bundle:

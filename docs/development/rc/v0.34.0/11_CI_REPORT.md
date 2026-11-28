@@ -99,3 +99,12 @@ rm docs/development/rc/v0.34.0/11_CI_REPORT.md
 ## 7. 结论
 
 本地 CI 配置校验 **PASS**（YAML、9 job、门禁负向重放）；远程 CI、PG 真实集成、Docker 就绪冒烟与恢复演练 **NOT VERIFIED**。建议 **CONDITIONAL GO**：待版本号 bump、并行任务文件提交、远程 CI 9/9 通过后再发版。
+
+## 8. 远程 CI 首轮失败与修复（待新 SHA 复验）
+
+发布候选 SHA `401945a` 的远程 CI run `46118559049` 完成但失败，失败 job 为：
+
+1. `python (pytest + regression)`：`tests/test_v0340_audit_ops.py::test_admin_health_web_ready_and_health_ready_smoke` 返回 `503 依赖检查失败：Web 客户端未构建`。原因是本地已有 `bidcraft/web_dist/index.html`，而 CI 的 python 测试 job 未构建 Web 前端。修复是在 `python-tests` job 的 pytest 步骤前增加 Node 22 setup、`npm ci --no-audit --no-fund` 与 `npm run build`，并新增静态测试 `tests/test_v030_stage8_deploy.py::test_ci_python_tests_builds_web_for_readiness_smoke` 防止回退。
+2. `postgres (real integration)`：`tests/test_postgres_integration.py::test_backup_command_uses_pg_dump` 因 CI runner 上的 `/usr/lib/postgresql/18/bin/pg_dump` 不接受 `--single-transaction` 失败（service 仍是 `postgres:16-alpine`，客户端由 runner apt 安装）。修复是 `bidcraft/cli.py::_pg_dump_supports()` 先探测本机 `pg_dump --help`，仅当客户端明确支持时才附加该选项；新增 `tests/test_fix2_runtime_backup.py::test_pg_dump_single_transaction_flag_is_version_aware` 覆盖支持/不支持两条分支。该修复只处理客户端选项兼容性，不降低任何 CI 门禁、不跳过测试、不改变备份内容。
+
+修复后本地验证：`ruff check bidcraft tests scripts` 通过；上述 3 个定向用例通过。首次回填全量后端时 `tests/test_v0340_audit_ops.py::test_pg_dump_backup_uses_single_transaction` 因旧 fake `subprocess.run` 同时拦截 `--help` 探测导致未收到能力声明而失败；已把 fake 更新为对 `--help` 返回包含 `--single-transaction` 的输出、对真实 dump 调用继续捕获参数（断言不变）。定向 `tests/test_v0340_audit_ops.py tests/test_fix2_runtime_backup.py tests/test_v030_stage8_deploy.py` 现为 `14 passed, 1 skipped`。最终全量后端与远程 CI 结果待回填。
