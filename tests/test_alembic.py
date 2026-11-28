@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
 from sqlalchemy import inspect, text
 
 from bidcraft.config import settings
 from bidcraft.db import get_engine, init_db, reset_engine_for_tests
 
 #: 当前 alembic head（新增 revision 时同步这里）。
-HEAD = "0016_fact_provenance"
+HEAD = "0017_transaction_id_unique"
 
 
 def _version() -> list[str]:
@@ -597,6 +598,101 @@ def test_0015_fact_confirmation_is_reversible_and_idempotent(db):
     init_db()
     command.upgrade(cfg, "head")
     assert confirmation_columns <= columns()
+    assert _version() == [HEAD]
+
+
+def test_0017_transaction_id_index_is_partial_reversible_and_idempotent(db):
+    """非空交易号唯一索引：重复非空交易号被拒，空串可共存，降级可干净移除。"""
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy.exc import IntegrityError
+
+    from bidcraft.db import session_scope
+    from bidcraft.migrations import __file__ as migrations_init
+    from bidcraft.models import RechargeOrder, User
+
+    index_name = "uq_recharge_orders_transaction_id_nonempty"
+    engine = get_engine()
+
+    def indexes() -> set[str]:
+        with engine.connect() as connection:
+            return {
+                item["name"]
+                for item in inspect(connection).get_indexes("recharge_orders")
+                if item.get("name")
+            }
+
+    assert index_name in indexes()
+    with sqlite3.connect(engine.url.database) as conn:
+        ddl = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?", (index_name,)
+        ).fetchone()[0]
+    assert "UNIQUE INDEX" in ddl.upper()
+    assert "WHERE transaction_id != ''" in ddl
+
+    with session_scope() as session:
+        session.add(User(id="migration-tx-user", username="migration-tx-user", password_hash="x"))
+        session.flush()
+        user_id = "migration-tx-user"
+    with session_scope() as session:
+        session.add(
+            RechargeOrder(
+                user_id=user_id,
+                out_trade_no="MIG-TX-1",
+                amount_cents=100,
+                credits=1,
+                status="paid",
+                provider="wechat",
+                transaction_id="MIG-DUP",
+            )
+        )
+    insert_order = text(
+        "INSERT INTO recharge_orders (id, user_id, out_trade_no, amount_cents, credits, "
+        "status, provider, package_id, code_url, transaction_id, meta, created_at, updated_at) "
+        "VALUES (:id, :user_id, :trade_no, 100, 1, :status, 'wechat', '', '', :txn, '{}', "
+        "'2020-01-01 00:00:00', '2020-01-01 00:00:00')"
+    )
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(
+            insert_order,
+            {
+                "id": "mig-tx-2",
+                "user_id": user_id,
+                "trade_no": "MIG-TX-2",
+                "status": "paid",
+                "txn": "MIG-DUP",
+            },
+        )
+    with engine.begin() as connection:
+        for number in ("MIG-EMPTY-1", "MIG-EMPTY-2"):
+            connection.execute(
+                insert_order,
+                {
+                    "id": f"mig-{number}",
+                    "user_id": user_id,
+                    "trade_no": number,
+                    "status": "pending",
+                    "txn": "",
+                },
+            )
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(Path(migrations_init).parent))
+    cfg.set_main_option(
+        "sqlalchemy.url",
+        engine.url.render_as_string(hide_password=False).replace("%", "%%"),
+    )
+    command.downgrade(cfg, "0016_fact_provenance")
+    assert index_name not in indexes()
+    command.upgrade(cfg, "head")
+    assert index_name in indexes()
+
+    # create_all 已建索引后重复 init_db + upgrade 不得报错。
+    init_db()
+    command.upgrade(cfg, "head")
+    assert index_name in indexes()
     assert _version() == [HEAD]
 
 

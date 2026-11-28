@@ -16,6 +16,7 @@ from sqlalchemy import (
     UniqueConstraint,
     event,
     select,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -943,6 +944,18 @@ class CreditTransaction(Base):
 
 class RechargeOrder(Base):
     __tablename__ = "recharge_orders"
+    # 非空交易号全局唯一：空串表示尚未回写支付交易号，允许多个待支付订单共存；
+    # 一旦微信支付回写真实 transaction_id，数据库层禁止两个订单复用同一交易号。
+    __table_args__ = (
+        Index(
+            "uq_recharge_orders_transaction_id_nonempty",
+            "transaction_id",
+            unique=True,
+            sqlite_where=text("transaction_id != ''"),
+            postgresql_where=text("transaction_id != ''"),
+            info={"comment": "非空交易号唯一：空串代表未支付订单，不参与唯一约束"},
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)

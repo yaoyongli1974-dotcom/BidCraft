@@ -12,10 +12,10 @@ import secrets
 import string
 from datetime import timedelta
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 
 from . import clock
-from .config import settings
+from .config import settings, validate_billing_config
 from .models import AppSetting, CreditTransaction, RechargeOrder, RedeemCode, User, utcnow
 
 DEFAULT_PACKAGES = [
@@ -122,6 +122,11 @@ def save_billing_settings(db, payload: dict) -> dict:
     except (TypeError, ValueError) as exc:
         raise BillingError("子账号上限无效") from exc
     sub_limit = min(20, max(0, sub_limit))
+    duplicates = validate_billing_config(
+        {"packages": normalized, "vip_packages": vip_normalized}, raise_on_error=False
+    )
+    if duplicates:
+        raise BillingError("套餐 ID 不能重复：" + "；".join(duplicates))
     signup = max(0, int(payload.get("signup_credits", current["signup_credits"])))
     cost = max(0, int(payload.get("chapter_cost", current["chapter_cost"])))
     value = {
@@ -392,15 +397,38 @@ def create_vip_order(db, user_id: str, package: dict, provider: str = "wechat") 
 
 
 def mark_paid(db, order: RechargeOrder, *, transaction_id: str = "", provider: str = "") -> bool:
-    if order.status == "paid":
-        return False
-    if order.status != "pending":
+    """原子抢占订单：只有条件 UPDATE 成功的那一方才允许入账。
+
+    先读后写会让两个并发 SUCCESS 回调各自看到 pending 并各入账一次；这里用
+    ``UPDATE ... WHERE id=? AND status='pending'`` 的 rowcount 作为唯一裁决。
+    抢占失败时以库内真实状态区分「同交易号重复通知」（幂等 False）与错配/非法
+    状态（BillingError）。审计由路由负责，本函数不写审计。
+    """
+    txn = str(transaction_id or "")[:80]
+    supplied_provider = str(provider or "")
+    order_provider = str(order.provider or "")
+    if supplied_provider and order_provider and supplied_provider != order_provider:
+        raise BillingError("支付渠道与订单不符")
+
+    values = {"status": "paid", "paid_at": utcnow(), "transaction_id": txn}
+    if supplied_provider:
+        values["provider"] = supplied_provider
+    result = db.execute(
+        update(RechargeOrder)
+        .where(RechargeOrder.id == order.id, RechargeOrder.status == "pending")
+        .values(**values)
+    )
+    if result.rowcount == 0:
+        # 竞争失败/已支付：刷新内存对象，按库内最终状态判定幂等还是拒绝。
+        db.expire(order, ["status", "transaction_id", "provider"])
+        current_status = str(order.status or "")
+        current_txn = str(order.transaction_id or "")
+        if current_status == "paid" and (not txn or current_txn == txn):
+            return False
+        if current_status == "paid":
+            raise BillingError("订单交易号与支付通知不一致")
         raise BillingError("订单状态不可支付")
-    order.status = "paid"
-    order.paid_at = utcnow()
-    order.transaction_id = transaction_id[:80]
-    if provider:
-        order.provider = provider
+    db.expire(order, ["status", "transaction_id", "provider", "paid_at"])
     meta = order.meta if isinstance(order.meta, dict) else {}
     if meta.get("kind") == "vip":
         days = max(0, int(meta.get("days", 0)))
@@ -475,25 +503,39 @@ def generate_redeem_codes(
 
 
 def redeem(db, user: User, code: str) -> int:
+    """条件 UPDATE 抢占兑换码，只有抢到的线程/会话才允许加点数。"""
     normalized = (code or "").strip().upper()
-    row = db.scalar(select(RedeemCode).where(RedeemCode.code == normalized))
-    if row is None:
+    if not normalized:
         raise BillingError("兑换码不存在")
-    if row.status != "unused":
-        raise BillingError("兑换码已使用或已停用")
-    if row.expires_at is not None and row.expires_at <= utcnow():
+    now = utcnow()
+    result = db.execute(
+        update(RedeemCode)
+        .where(
+            RedeemCode.code == normalized,
+            RedeemCode.status == "unused",
+            or_(RedeemCode.expires_at.is_(None), RedeemCode.expires_at > now),
+        )
+        .values(status="used", used_by=user.id, used_at=now)
+    )
+    if result.rowcount == 0:
+        # 抢占失败：区分不存在、已使用/停用与过期，绝不进入加钱路径。
+        row = db.scalar(select(RedeemCode).where(RedeemCode.code == normalized))
+        if row is None:
+            raise BillingError("兑换码不存在")
+        if row.status != "unused":
+            raise BillingError("兑换码已使用或已停用")
         raise BillingError("兑换码已过期")
-    row.status = "used"
-    row.used_by = user.id
-    row.used_at = utcnow()
+    claimed_id, credits = db.execute(
+        select(RedeemCode.id, RedeemCode.credits).where(RedeemCode.code == normalized)
+    ).one()
     return add_credits(
         db,
         user.id,
-        row.credits,
+        int(credits),
         kind="redeem",
         note="兑换码充值",
         ref_type="redeem",
-        ref_id=row.id,
+        ref_id=str(claimed_id),
     )
 
 
@@ -521,11 +563,39 @@ def admin_stats(db) -> dict:
     external = db.scalar(
         select(func.count()).select_from(User).where(User.is_external.is_(True))
     ) or 0
-    revenue = db.scalar(
-        select(func.coalesce(func.sum(RechargeOrder.amount_cents), 0)).where(
-            RechargeOrder.status == "paid"
+    # 营收只认真实渠道（wechat）的已支付订单；mock/admin 入账的点数不形成收入。
+    paid = db.scalars(
+        select(RechargeOrder).where(
+            RechargeOrder.status == "paid", RechargeOrder.provider == "wechat"
         )
-    ) or 0
+    ).all()
+    gross: dict[str, int] = {}
+    unit_cents: dict[str, float] = {}
+    for order in paid:
+        amount = int(order.amount_cents or 0)
+        credits = int(order.credits or 0)
+        gross[order.id] = amount
+        # 流水里的 amount 始终是点数；按订单单价折回分。VIP 订单 credits=0，
+        # 其退款流水直接按记录的分值处理。
+        unit_cents[order.id] = amount / credits if credits > 0 else 1.0
+    refunds: dict[str, int] = {order_id: 0 for order_id in gross}
+    if gross:
+        rows = db.execute(
+            select(CreditTransaction.ref_id, CreditTransaction.amount).where(
+                CreditTransaction.kind == "refund",
+                CreditTransaction.ref_type.in_(("order", "recharge_order")),
+                CreditTransaction.ref_id.in_(list(gross)),
+            )
+        ).all()
+        for ref_id, amount in rows:
+            order_id = str(ref_id or "")
+            if order_id in refunds:
+                refunds[order_id] += int(abs(int(amount or 0)) * unit_cents[order_id])
+    # 单笔订单的退款不超过其收入，避免历史流水单位不明时把营收算成负数。
+    revenue = sum(
+        max(0, amount - min(refunds[order_id], amount))
+        for order_id, amount in gross.items()
+    )
     outstanding = db.scalar(select(func.coalesce(func.sum(User.credits), 0))) or 0
     return {
         "users": users,

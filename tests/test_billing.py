@@ -106,7 +106,9 @@ def test_billing_order_redeem_and_admin_adjust(db, monkeypatch):
 
     billing = admin.get("/admin/billing").json()
     assert billing["stats"]["external_users"] == 1
-    assert billing["stats"]["revenue_cents"] == 990
+    # 模拟支付只入账点数，不形成真实收入；营收仅统计 provider='wechat' 的订单。
+    assert billing["orders"][0]["provider"] == "mock"
+    assert billing["stats"]["revenue_cents"] == 0
     assert len(billing["orders"]) == 1
 
 
